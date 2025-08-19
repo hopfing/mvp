@@ -98,6 +98,7 @@ def main():
                 league=league,
                 game_date=date_str
             )
+            extractor.run()
 
 
 if __name__ == "__main__":

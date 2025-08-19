@@ -106,3 +106,41 @@ class ActionNetworkExtractor(ActionNetworkJob):
         expires = auth_cookie["expires"]
 
         return token, expires
+
+    @property
+    def league_endpoints(self):
+        """
+        Generate URLs for the league endpoints.
+        :return: Dictionary with URLs for each endpoint.
+        """
+        league_endpoints = []
+        expected_endpoints = self.league_config.get('endpoints')
+        if not expected_endpoints:
+            return []
+
+        for endpoint in expected_endpoints:
+            url = (
+                f"{self.BASE_URL}{self.ENDPOINTS[endpoint]}{self.league}"
+                f"?bookIds={",".join(self.SPORTSBOOKS)}"
+                f"&date={self.game_date_compact}"
+                f"&periods={",".join(self.league_config["periods"])}"
+            )
+            endpoint_cfg = {
+                "name": endpoint,
+                "path": self.ENDPOINTS[endpoint],
+                "url": url
+            }
+            league_endpoints.append(endpoint_cfg)
+
+        return league_endpoints
+
+    def run(self):
+
+        files_saved = 0
+
+        if len(self.league_endpoints) == 0:
+            logger.warning(
+                "No API endpoints configured for %s",
+                self.league.upper()
+            )
+            return files_saved
