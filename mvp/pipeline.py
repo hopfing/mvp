@@ -4,6 +4,7 @@ import logging
 from zoneinfo import ZoneInfo
 
 from config import LEAGUE_MONTHS
+from mvp.action_network.extractor import ActionNetworkExtractor
 
 logging.basicConfig(
     level=logging.INFO,
@@ -93,6 +94,10 @@ def main():
         for league in leagues:
             logger.info("Running ActionNetwork extractor for league: %s",
                         league.upper())
+            extractor = ActionNetworkExtractor(
+                league=league,
+                game_date=date_str
+            )
 
 
 if __name__ == "__main__":

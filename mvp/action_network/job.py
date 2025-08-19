@@ -9,3 +9,7 @@ class ActionNetworkJob(BaseJob):
 
     def __init__(self, league, game_date):
         super().__init__(league=league, game_date=game_date)
+
+    @property
+    def source(self) -> str:
+        return 'action_network'

@@ -1,7 +1,11 @@
-from abc import ABC
+from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import Optional
 from zoneinfo import ZoneInfo
+
+import yaml
+
+from config import SECRETS
 
 
 class BaseJob(ABC):
@@ -30,3 +34,32 @@ class BaseJob(ABC):
     @property
     def game_date_compact(self):
         return self.game_date.strftime("%Y%m%d")
+
+    @property
+    @abstractmethod
+    def source(self) -> str:
+        """Return data source name for ETL pipelines"""
+        pass
+
+    @property
+    def _all_secrets(self):
+        with open(SECRETS, 'r') as f:
+            secrets = yaml.safe_load(f)
+
+        return secrets
+
+    @property
+    def secrets(self):
+        return self._all_secrets[self.source]
+
+    def update_secrets(self, new_secrets: dict):
+
+        secrets = self._all_secrets
+
+        for key, value in new_secrets.items():
+            secrets[self.source][key] = value
+
+        tmp = SECRETS.with_suffix(SECRETS.suffix + ".tmp")
+        with open(tmp, "w") as f:
+            yaml.safe_dump(secrets, f, default_flow_style=False)
+        tmp.replace(SECRETS)
