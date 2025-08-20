@@ -121,12 +121,16 @@ class ActionNetworkExtractor(ActionNetworkJob):
         Generate URLs for the league endpoints.
         :return: Dictionary with URLs for each endpoint.
         """
-        endpoints = ["scoreboard", *self.league_config.get("endpoints", [])]
-        periods = ["event", *self.league_config.get("periods", [])]
+        endpoints = [
+            *self.GLOBAL_ENDPOINTS, *self.league_config.get("endpoints", [])
+        ]
+        periods = [
+            *self.GLOBAL_PERIODS, *self.league_config.get("periods", [])
+        ]
 
         return [
             {
-                "name": endpoint,
+                "name": endpoint.value,
                 "path": self.ENDPOINTS[endpoint],
                 "url": (
                     f"{self.BASE_URL}{self.ENDPOINTS[endpoint]}{self.league}"

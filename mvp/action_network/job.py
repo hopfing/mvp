@@ -1,4 +1,14 @@
+from enum import StrEnum
+
 from mvp.base_job import BaseJob
+
+
+class Endpoint(StrEnum):
+    SCOREBOARD = "scoreboard"
+    PRO_REPORT = "pro_report"
+    PROJECTIONS = "projections"
+    PUBLIC = "public"
+    PICKS = "picks"
 
 
 class ActionNetworkJob(BaseJob):
@@ -20,25 +30,63 @@ class ActionNetworkJob(BaseJob):
     }
 
     ENDPOINTS = {
-        "scoreboard": "v2/scoreboard/",
-        "pro_report": "v2/scoreboard/proreport/",
-        "projections": "v2/scoreboard/gameprojections/",
-        "public": "v2/scoreboard/publicbetting/",
-        "picks": "v2/scoreboard/picks/"
+        Endpoint.SCOREBOARD: "v2/scoreboard/",
+        Endpoint.PRO_REPORT: "v2/scoreboard/proreport/",
+        Endpoint.PROJECTIONS: "v2/scoreboard/gameprojections/",
+        Endpoint.PUBLIC: "v2/scoreboard/publicbetting/",
+        Endpoint.PICKS: "v2/scoreboard/picks/"
     }
+
+    GLOBAL_ENDPOINTS: tuple[Endpoint, ...] = (
+        Endpoint.SCOREBOARD, Endpoint.PUBLIC
+    )
+    GLOBAL_PERIODS:   tuple[str, ...] = ("event",)
+
+    _HALVES: tuple[str, ...] = ("firsthalf", "secondhalf")
+    _QUARTERS: tuple[str, ...] = (
+        "firstquarter", "secondquarter", "thirdquarter", "fourthquarter"
+    )
 
     LEAGUES = {
         "atp": {
-            "periods": ["event",],
-            "endpoints": ["public",],
-            "records_key": "competitions"
         },
         "mlb": {
-            "periods": ["event", "firstinning", "firstfiveinnings"],
+            "periods": ["firstinning", "firstfiveinnings"],
             "endpoints": [
-                "pro_report", "projections", "public", "picks",
+                Endpoint.PRO_REPORT, Endpoint.PROJECTIONS, Endpoint.PICKS,
             ]
         },
+        "nba": {
+            "periods": [*_HALVES, *_QUARTERS],
+            "endpoints": [
+                 Endpoint.PRO_REPORT, Endpoint.PROJECTIONS, Endpoint.PICKS,
+            ]
+        },
+        "ncaab": {
+            "periods": [*_HALVES],
+            "endpoints": [
+                 Endpoint.PRO_REPORT, Endpoint.PROJECTIONS, Endpoint.PICKS,
+            ]
+        },
+        "ncaaw": {
+            "periods": [*_HALVES, *_QUARTERS],
+            "endpoints": [
+                 Endpoint.PRO_REPORT, Endpoint.PROJECTIONS, Endpoint.PICKS,
+            ]
+        },
+        "nhl": {
+            "periods": ["firstperiod", "secondperiod", "thirdperiod"],
+            "endpoints": [
+                Endpoint.PRO_REPORT, Endpoint.PROJECTIONS, Endpoint.PICKS,
+            ]
+        },
+        "soccer": {
+            "periods": [*_HALVES],
+            "endpoints": [Endpoint.PICKS]
+        },
+        "wta": {
+
+        }
     }
 
     def __init__(self, league, game_date):
