@@ -3,7 +3,7 @@ from datetime import date, datetime, timedelta
 import logging
 from zoneinfo import ZoneInfo
 
-from config import LEAGUE_MONTHS
+from config import LEAGUE_MONTHS, PROJECT_ROOT
 from mvp.action_network.extractor import ActionNetworkExtractor
 
 logging.basicConfig(
@@ -33,6 +33,11 @@ def expected_leagues(month: int) -> list[str]:
             leagues.append(league)
 
     return leagues
+
+
+def pretty_paths(paths) -> str:
+    lines = (p.relative_to(PROJECT_ROOT).as_posix() for p in paths)
+    return "\n    - " + "\n    - ".join(lines)
 
 
 def parse_args():
@@ -98,7 +103,11 @@ def main():
                 league=league,
                 game_date=date_str
             )
-            extractor.run()
+            raw_files = extractor.run()
+            logger.info(
+                "%s file(s) retrieved for %s: %s",
+                len(raw_files), extractor.league.upper(), pretty_paths(raw_files)
+            )
 
 
 if __name__ == "__main__":

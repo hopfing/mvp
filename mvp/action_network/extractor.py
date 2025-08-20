@@ -122,25 +122,23 @@ class ActionNetworkExtractor(ActionNetworkJob):
         :return: Dictionary with URLs for each endpoint.
         """
         league_endpoints = []
-        expected_endpoints = self.league_config.get('endpoints')
-        if not expected_endpoints:
-            return []
 
-        for endpoint in expected_endpoints:
-            url = (
-                f"{self.BASE_URL}{self.ENDPOINTS[endpoint]}{self.league}"
-                f"?bookIds={",".join(self.SPORTSBOOKS)}"
-                f"&date={self.game_date_compact}"
-                f"&periods={",".join(self.league_config["periods"])}"
-            )
-            endpoint_cfg = {
+        endpoints = ["scoreboard", *self.league_config.get("endpoints", [])]
+        periods = ["event", *self.league_config.get("periods", [])]
+
+        return [
+            {
                 "name": endpoint,
                 "path": self.ENDPOINTS[endpoint],
-                "url": url
+                "url": (
+                    f"{self.BASE_URL}{self.ENDPOINTS[endpoint]}{self.league}"
+                    f"?bookIds={','.join(self.SPORTSBOOKS)}"
+                    f"&date={self.game_date_compact}"
+                    f"&periods={','.join(periods)}"
+                ),
             }
-            league_endpoints.append(endpoint_cfg)
-
-        return league_endpoints
+            for endpoint in endpoints
+        ]
 
     def run(self):
 
@@ -154,6 +152,10 @@ class ActionNetworkExtractor(ActionNetworkJob):
             return files_saved
 
         for endpoint in self.league_endpoints:
+            logger.info(
+                "Fetching data from %s %s endpoint.",
+                self.league.upper(), endpoint["name"]
+            )
             data = self._fetch_content(
                 url=endpoint["url"],
                 headers=self.headers
@@ -164,6 +166,10 @@ class ActionNetworkExtractor(ActionNetworkJob):
                 file_type="json",
             )
             self.save_json(data, file_path)
+            logger.info(
+                "%s %s data saved to %s",
+                self.league.upper(), endpoint["name"], file_path
+            )
             files_saved.append(file_path)
 
         return files_saved

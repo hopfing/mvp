@@ -30,13 +30,13 @@ class ActionNetworkJob(BaseJob):
     LEAGUES = {
         "atp": {
             "periods": ["event",],
-            "endpoints": ["scoreboard", "public",],
+            "endpoints": ["public",],
             "records_key": "competitions"
         },
         "mlb": {
             "periods": ["event", "firstinning", "firstfiveinnings"],
             "endpoints": [
-                "scoreboard", "pro_report", "projections", "public", "picks",
+                "pro_report", "projections", "public", "picks",
             ]
         },
     }
