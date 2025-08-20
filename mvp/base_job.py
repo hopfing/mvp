@@ -1,11 +1,12 @@
 from abc import ABC, abstractmethod
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo
 
 import yaml
 
-from config import SECRETS
+from config import PROJECT_ROOT, SECRETS
 
 
 class BaseJob(ABC):
@@ -63,3 +64,30 @@ class BaseJob(ABC):
         with open(tmp, "w") as f:
             yaml.safe_dump(secrets, f, default_flow_style=False)
         tmp.replace(SECRETS)
+
+    @property
+    def _daily_dir(self) -> Path:
+        """
+        Directory path for storing data files.
+        Format: {league}/{year}/{month}/{day}
+        """
+        return (Path(self.league) / str(self.game_date.year)
+                / f"{self.game_date.month:02d}" / f"{self.game_date.day:02d}")
+
+    @property
+    def raw_dir(self):
+        """
+        Directory path for storing raw data files.
+        Format: data/raw/{league}/{year}/{month}/{day}
+        """
+        return (Path(PROJECT_ROOT) / "data" / "raw" / self.source /
+                self._daily_dir)
+
+    def build_file_path(
+            self,
+            dir_path: Path,
+            file_name: str,
+            ext: str
+    ) -> Path:
+        """Centralized filename builder"""
+        return dir_path / f"{file_name}_{self.game_date_compact}.{ext}"
