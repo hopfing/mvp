@@ -1,9 +1,11 @@
 from abc import ABC, abstractmethod
 from datetime import datetime
+import json
 from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo
 
+import requests
 import yaml
 
 from config import PROJECT_ROOT, SECRETS
@@ -87,7 +89,37 @@ class BaseJob(ABC):
             self,
             dir_path: Path,
             file_name: str,
-            ext: str
+            file_type: str
     ) -> Path:
         """Centralized filename builder"""
-        return dir_path / f"{file_name}_{self.game_date_compact}.{ext}"
+        return dir_path / f"{file_name}_{self.game_date_compact}.{file_type}"
+
+    def _fetch_content(self, url, headers: Optional[dict] = None):
+
+        base_headers = {
+            'Accept': 'application/json',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                          'AppleWebKit/537.36 (KHTML, like Gecko) '
+                          'Chrome/138.0.0.0 Safari/537.36',
+            'Accept-Encoding': 'gzip, deflate',
+        }
+
+        if headers is None:
+            headers = base_headers
+        else:
+            headers = {**base_headers, **headers}
+
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
+
+        return response.json()
+
+    def save_json(
+            self,
+            data,
+            path: Path
+    ):
+        """Save JSON data to given file path, creating directory if needed."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)

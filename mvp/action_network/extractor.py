@@ -24,6 +24,14 @@ class ActionNetworkExtractor(ActionNetworkJob):
         super().__init__(game_date=game_date, league=league)
         self.api_token = self._get_auth_token()
 
+    @property
+    def headers(self):
+        return {
+            'Origin': 'https://www.actionnetwork.com',
+            'Referer': 'https://www.actionnetwork.com/mlb/odds',
+            'Authorization': self.api_token
+        }
+
     def _get_auth_token(self):
         """
         Attempt to load API authorization from secrets file, refreshing if
@@ -136,7 +144,7 @@ class ActionNetworkExtractor(ActionNetworkJob):
 
     def run(self):
 
-        files_saved = 0
+        files_saved = []
 
         if len(self.league_endpoints) == 0:
             logger.warning(
@@ -144,3 +152,18 @@ class ActionNetworkExtractor(ActionNetworkJob):
                 self.league.upper()
             )
             return files_saved
+
+        for endpoint in self.league_endpoints:
+            data = self._fetch_content(
+                url=endpoint["url"],
+                headers=self.headers
+            )
+            file_path = self.build_file_path(
+                dir_path=self.raw_dir,
+                file_name=endpoint["name"],
+                file_type="json",
+            )
+            self.save_json(data, file_path)
+            files_saved.append(file_path)
+
+        return files_saved
