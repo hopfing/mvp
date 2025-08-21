@@ -18,8 +18,8 @@ logger = logging.getLogger(__name__)
 
 class ActionNetworkExtractor(ActionNetworkJob):
     """
-        Class used to send requests to ActionNetwork API and store output JSON.
-        """
+    Class used to send requests to ActionNetwork API and store output JSON.
+    """
     BASE_URL = "https://api.actionnetwork.com/web/"
 
     def __init__(self, league, game_date):
