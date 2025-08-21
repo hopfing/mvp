@@ -181,7 +181,7 @@ class ActionNetworkExtractor(ActionNetworkJob):
             )
             endpoint_meta = {
                 "endpoint": endpoint["name"],
-                "path": file_path.as_posix(),
+                "uri": file_path.as_posix(),
                 "url": endpoint["url"],
                 "retrieved_at": datetime.now(ZoneInfo("America/Chicago"))
             }

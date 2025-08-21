@@ -106,7 +106,7 @@ def main():
             )
             raw_manifest = extractor.run()
             raw_files = [
-                Path(item["path"]) for item in raw_manifest.get("items", [])
+                Path(item["uri"]) for item in raw_manifest.get("items", [])
             ]
             logger.info(
                 "%s file(s) retrieved for %s: %s",
