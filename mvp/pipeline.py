@@ -1,6 +1,7 @@
 import argparse
 from datetime import date, datetime, timedelta
 import logging
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from config import LEAGUE_MONTHS, PROJECT_ROOT
@@ -103,7 +104,10 @@ def main():
                 league=league,
                 game_date=date_str
             )
-            raw_files = extractor.run()
+            raw_manifest = extractor.run()
+            raw_files = [
+                Path(item["path"]) for item in raw_manifest.get("items", [])
+            ]
             logger.info(
                 "%s file(s) retrieved for %s: %s",
                 len(raw_files), extractor.league.upper(),

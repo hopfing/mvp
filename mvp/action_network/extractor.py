@@ -152,14 +152,13 @@ class ActionNetworkExtractor(ActionNetworkJob):
             "run_datetime": self.run_datetime,
             "items": []
         }
-        files_saved = []
 
         if len(self.league_endpoints) == 0:
             logger.warning(
                 "No API endpoints configured for %s",
                 self.league.upper()
             )
-            return files_saved
+            return manifest
 
         for endpoint in self.league_endpoints:
             logger.info(
@@ -187,7 +186,6 @@ class ActionNetworkExtractor(ActionNetworkJob):
                 "retrieved_at": datetime.now(ZoneInfo("America/Chicago"))
             }
             manifest["items"].append(endpoint_meta)
-            files_saved.append(file_path)
 
         manifest_file = self.build_file_path(
             dir_path=self.raw_dir,
@@ -200,4 +198,4 @@ class ActionNetworkExtractor(ActionNetworkJob):
             manifest_file
         )
 
-        return files_saved
+        return manifest
