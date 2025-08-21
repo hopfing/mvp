@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 from datetime import datetime
+from functools import cached_property
 import json
 import logging
 from pathlib import Path
@@ -50,6 +51,10 @@ class BaseJob(ABC):
     @property
     def game_date_compact(self):
         return self.game_date.strftime("%Y%m%d")
+
+    @cached_property
+    def run_datetime(self):
+        return datetime.now(ZoneInfo("America/Chicago"))
 
     @property
     @abstractmethod
@@ -172,4 +177,4 @@ class BaseJob(ABC):
         """Save JSON data to given file path, creating directory if needed."""
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
+            json.dump(data, f, indent=2, default=str)

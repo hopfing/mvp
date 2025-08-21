@@ -1,5 +1,7 @@
+from datetime import datetime
 import logging
 import time
+from zoneinfo import ZoneInfo
 
 from playwright.sync_api import sync_playwright
 
@@ -144,6 +146,12 @@ class ActionNetworkExtractor(ActionNetworkJob):
 
     def run(self):
 
+        manifest = {
+            "league": self.league,
+            "game_date": self.game_date,
+            "run_datetime": self.run_datetime,
+            "items": []
+        }
         files_saved = []
 
         if len(self.league_endpoints) == 0:
@@ -172,6 +180,24 @@ class ActionNetworkExtractor(ActionNetworkJob):
                 "%s %s data saved to %s",
                 self.league.upper(), endpoint["name"], file_path
             )
+            endpoint_meta = {
+                "endpoint": endpoint["name"],
+                "path": file_path.as_posix(),
+                "url": endpoint["url"],
+                "retrieved_at": datetime.now(ZoneInfo("America/Chicago"))
+            }
+            manifest["items"].append(endpoint_meta)
             files_saved.append(file_path)
+
+        manifest_file = self.build_file_path(
+            dir_path=self.raw_dir,
+            file_name="manifest",
+            file_type="json"
+        )
+        self.save_json(manifest, manifest_file)
+        logger.info(
+            "Manifest file saved to %s",
+            manifest_file
+        )
 
         return files_saved
