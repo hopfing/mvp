@@ -106,7 +106,8 @@ def main():
             raw_files = extractor.run()
             logger.info(
                 "%s file(s) retrieved for %s: %s",
-                len(raw_files), extractor.league.upper(), pretty_paths(raw_files)
+                len(raw_files), extractor.league.upper(),
+                pretty_paths(raw_files)
             )
 
 
