@@ -1,7 +1,10 @@
 from abc import ABC, abstractmethod
 from datetime import datetime
 import json
+import logging
 from pathlib import Path
+import random
+import time
 from typing import Optional
 from zoneinfo import ZoneInfo
 
@@ -9,6 +12,16 @@ import requests
 import yaml
 
 from config import PROJECT_ROOT, SECRETS
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(filename)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+
+logger = logging.getLogger(__name__)
+
+RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 
 
 class BaseJob(ABC):
@@ -94,14 +107,19 @@ class BaseJob(ABC):
         """Centralized filename builder"""
         return dir_path / f"{file_name}_{self.game_date_compact}.{file_type}"
 
-    def _fetch_content(self, url, headers: Optional[dict] = None):
+    def _fetch_content(
+            self,
+            url,
+            headers: Optional[dict] = None,
+            retries: int = 2,
+            backoff: float = 0.75
+    ):
 
         base_headers = {
             'Accept': 'application/json',
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
                           'AppleWebKit/537.36 (KHTML, like Gecko) '
                           'Chrome/138.0.0.0 Safari/537.36',
-            'Accept-Encoding': 'gzip, deflate',
         }
 
         if headers is None:
@@ -109,10 +127,42 @@ class BaseJob(ABC):
         else:
             headers = {**base_headers, **headers}
 
-        response = requests.get(url, headers=headers)
-        response.raise_for_status()
+        timeout = (5, 20)
 
-        return response.json()
+        for attempt in range(retries + 1):
+            try:
+                resp = requests.get(url, headers=headers, timeout=timeout)
+                resp.raise_for_status()
+                return resp.json()
+            except (requests.exceptions.ReadTimeout,
+                    requests.exceptions.ConnectTimeout) as err:
+                if attempt == retries:
+                    logger.error(
+                        "Timeout on %s after %d attempts: %s",
+                        url, retries + 1, err
+                    )
+                    raise
+                sleep = backoff * (2 ** attempt) + random.random() * 0.2
+                logger.warning(
+                    "Timeout (%s) on %s (attempt %d/%d). Retrying in %.2fs…",
+                    err.__class__.__name__, url, attempt + 1, retries + 1,
+                    sleep
+                )
+                time.sleep(sleep)
+            except requests.exceptions.HTTPError as e:
+                status = getattr(e.response, "status_code", None)
+                if status in RETRYABLE_STATUS and attempt < retries:
+                    sleep = backoff * (2 ** attempt) + random.random() * 0.2
+                    logger.warning(
+                        "HTTP %s for %s (attempt %d/%d). Retrying in %.2fs…",
+                        status, url, attempt + 1, retries + 1, sleep
+                    )
+                    time.sleep(sleep)
+                    continue
+                raise
+            except requests.exceptions.JSONDecodeError:
+                logger.error("Non-JSON response from %s", url)
+                raise
 
     def save_json(
             self,
