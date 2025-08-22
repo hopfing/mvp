@@ -103,6 +103,16 @@ class BaseJob(ABC):
         return (Path(PROJECT_ROOT) / "data" / "raw" / self.source /
                 self._daily_dir)
 
+    @property
+    def staged_dir(self):
+        """
+        Directory path for storing staged data files.
+
+        Format: data/stage/{league}/{year}/{month}/{day}
+        """
+        return (Path(PROJECT_ROOT) / "data" / "staged" / self.source /
+                self._daily_dir)
+
     def build_file_path(
             self,
             dir_path: Path,
@@ -178,3 +188,18 @@ class BaseJob(ABC):
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, default=str)
+
+    def read_json(
+            self,
+            file_path
+    ):
+        return json.loads(Path(file_path).read_text(encoding="utf-8"))
+
+    def save_df_to_csv(self, df, path: Path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        df['updated_at'] = self.run_datetime
+        df.to_csv(
+            path,
+            index=False,
+            encoding='utf-8'
+        )
