@@ -54,7 +54,7 @@ class ActionNetworkJob(BaseJob):
             "periods": ["firstinning", "firstfiveinnings"],
             "endpoints": [
                 Endpoint.PRO_REPORT, Endpoint.PROJECTIONS, Endpoint.PICKS,
-            ]
+            ],
         },
         "nba": {
             "periods": [*_HALVES, *_QUARTERS],
@@ -102,4 +102,8 @@ class ActionNetworkJob(BaseJob):
         Get the league configuration for the current league.
         :return: Dictionary with league-specific configurations.
         """
-        return self.LEAGUES.get(self.league, {})
+        league_config = self.LEAGUES.get(self.league, {})
+        if not league_config.get('record_path'):
+            league_config['record_path'] = 'games'
+
+        return league_config

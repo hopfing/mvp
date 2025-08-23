@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 
 from config import LEAGUE_MONTHS, PROJECT_ROOT
 from mvp.action_network.extractor import ActionNetworkExtractor
+from mvp.action_network.stager import ActionNetworkStager
 
 logging.basicConfig(
     level=logging.INFO,
@@ -113,6 +114,11 @@ def main():
                 len(raw_files), extractor.league.upper(),
                 pretty_paths(raw_files)
             )
+            stager = ActionNetworkStager(
+                league=league,
+                game_date=date_str
+            )
+            stager.run(manifest=raw_manifest)
 
 
 if __name__ == "__main__":
