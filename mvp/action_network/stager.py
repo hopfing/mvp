@@ -34,7 +34,7 @@ class ActionNetworkStager(ActionNetworkJob):
 
         for event in events:
             boxscore = event.get("boxscore", {})
-            if self.league == 'mlb':
+            if self.league == "mlb":
                 away_box = boxscore.get("stats", {}).get("away", {})
                 home_box = boxscore.get("stats", {}).get("home", {})
                 box_dict = {
@@ -74,9 +74,43 @@ class ActionNetworkStager(ActionNetworkJob):
 
         return df
 
+    def _parse_teams(self, json_data, record_path):
+
+        df = pd.json_normalize(
+            data=json_data,
+            record_path=[record_path, "teams"],
+            meta=[
+                [record_path, 'id'],
+            ],
+            sep="_"
+        )
+
+        return df
+
+    def _parse_edge_projections(self, json_data, record_path):
+
+        events = json_data.get(record_path)
+        projection_dicts = []
+
+        for event in events:
+            edge_projections = event.get("edge_projections")
+            if not edge_projections:
+                logger.warning("No edge projections found for %s",
+                               event.get("id"))
+                continue
+            for segment, projections in edge_projections.items():
+                projection_dict = {
+                    "event_id": event.get("id"),
+                    "segment": segment,
+                    **projections
+                }
+                projection_dicts.append(projection_dict)
+
+        return pd.DataFrame(projection_dicts)
+
     def parse_projections(self, json_data):
 
-        datasets = ["events"]
+        datasets = ["events", "teams", "edge_projections"]
 
         for dataset in datasets:
             parser = getattr(self, f"_parse_{dataset}", None)
