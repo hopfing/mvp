@@ -1,4 +1,6 @@
+from datetime import datetime
 import logging
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -142,6 +144,8 @@ class ActionNetworkStager(ActionNetworkJob):
 
         datasets = ["events", "teams", "edge_projections", "markets"]
 
+        items = []
+
         for dataset in datasets:
             parser = getattr(self, f"_parse_{dataset}", None)
             if parser:
@@ -155,6 +159,15 @@ class ActionNetworkStager(ActionNetworkJob):
                     df=df,
                     path=file_path
                 )
+                dataset_meta = {
+                    "endpoint": "projections",
+                    "dataset": dataset,
+                    "file": file_path.as_posix(),
+                    "retrieved_at": datetime.now(ZoneInfo("America/Chicago"))
+                }
+                items.append(dataset_meta)
+
+        return items
 
     def run(self, manifest=None):
 
@@ -170,8 +183,30 @@ class ActionNetworkStager(ActionNetworkJob):
             )
             return None
 
+        out_manifest = {
+            "league": self.league,
+            "game_date": self.game_date,
+            "run_datetime": self.run_datetime,
+            "items": []
+        }
+
         for item in items:
             item_parser = getattr(self, f"parse_{item["endpoint"]}", None)
             if item_parser:
                 json_data = self.read_json(item["uri"])
-                item_parser(json_data)
+                staged_items = item_parser(json_data)
+                if staged_items:
+                    out_manifest["items"].extend(staged_items)
+
+        manifest_file = self.build_file_path(
+            dir_path=self.staged_dir,
+            file_name="manifest",
+            file_type="json"
+        )
+        self.save_json(manifest, manifest_file)
+        logger.info(
+            "Manifest file saved to %s",
+            manifest_file
+        )
+
+        return out_manifest

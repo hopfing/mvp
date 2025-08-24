@@ -118,7 +118,7 @@ def main():
                 league=league,
                 game_date=date_str
             )
-            stager.run(manifest=raw_manifest)
+            stage_manifest = stager.run(manifest=raw_manifest)
 
 
 if __name__ == "__main__":
