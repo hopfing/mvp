@@ -99,6 +99,7 @@ def main():
         logger.info("Processing date: %s", date_str)
         logger.info("Expected leagues: %s", ", ".join(leagues))
         for league in leagues:
+            # Extract raw JSON data
             logger.info("Running ActionNetwork extractor for league: %s",
                         league.upper())
             extractor = ActionNetworkExtractor(
@@ -111,14 +112,28 @@ def main():
             ]
             logger.info(
                 "%s file(s) retrieved for %s: %s",
-                len(raw_files), extractor.league.upper(),
+                len(raw_files), league.upper(),
                 pretty_paths(raw_files)
             )
+
+            # Parse raw JSON files to tabular format
+            logger.info("Running ActionNetwork stager for league: %s",
+                        league.upper())
             stager = ActionNetworkStager(
                 league=league,
                 game_date=date_str
             )
             stage_manifest = stager.run(manifest=raw_manifest)
+            stage_files = [
+                Path(item["file"])
+                for endpoint_items in stage_manifest.get("items", {}).values()
+                for item in endpoint_items
+            ]
+            logger.info(
+                "%s file(s) retrieved for %s: %s",
+                len(stage_files), league.upper(),
+                pretty_paths(stage_files)
+            )
 
 
 if __name__ == "__main__":

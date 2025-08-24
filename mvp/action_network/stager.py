@@ -160,7 +160,6 @@ class ActionNetworkStager(ActionNetworkJob):
                     path=file_path
                 )
                 dataset_meta = {
-                    "endpoint": "projections",
                     "dataset": dataset,
                     "file": file_path.as_posix(),
                     "retrieved_at": datetime.now(ZoneInfo("America/Chicago"))
@@ -187,7 +186,7 @@ class ActionNetworkStager(ActionNetworkJob):
             "league": self.league,
             "game_date": self.game_date,
             "run_datetime": self.run_datetime,
-            "items": []
+            "items": {}
         }
 
         for item in items:
@@ -196,7 +195,7 @@ class ActionNetworkStager(ActionNetworkJob):
                 json_data = self.read_json(item["uri"])
                 staged_items = item_parser(json_data)
                 if staged_items:
-                    out_manifest["items"].extend(staged_items)
+                    out_manifest["items"][item["endpoint"]] = staged_items
 
         manifest_file = self.build_file_path(
             dir_path=self.staged_dir,
