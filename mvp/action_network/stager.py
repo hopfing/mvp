@@ -87,6 +87,36 @@ class ActionNetworkStager(ActionNetworkJob):
 
         return df
 
+    def _parse_markets(self, json_data, record_path):
+
+        events = json_data.get(record_path)
+        market_dfs = []
+
+        if not events:
+            logger.warning("No events found in JSON data.")
+
+        for event in events:
+            markets_json = event.get("markets")
+            if not markets_json:
+                logger.warning("No markets found for %s",
+                               event.get("id"))
+                continue
+            for book_id, segments in markets_json.items():
+                for segment, markets in segments.items():
+                    for market, value in markets.items():
+                        market_df = pd.json_normalize(
+                            value,
+                            sep='_'
+                        )
+                        market_df['book_id'] = book_id
+                        market_df['book_name'] = self.SPORTSBOOKS.get(book_id)
+                        market_df['period'] = segment
+                        market_dfs.append(market_df)
+
+        markets_df = pd.concat(market_dfs, ignore_index=True)
+
+        return markets_df
+
     def _parse_edge_projections(self, json_data, record_path):
 
         events = json_data.get(record_path)
@@ -110,7 +140,7 @@ class ActionNetworkStager(ActionNetworkJob):
 
     def parse_projections(self, json_data):
 
-        datasets = ["events", "teams", "edge_projections"]
+        datasets = ["events", "teams", "edge_projections", "markets"]
 
         for dataset in datasets:
             parser = getattr(self, f"_parse_{dataset}", None)
