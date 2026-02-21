@@ -83,9 +83,9 @@ class TestMapPlayerId:
         for sr_id, expected_atp in SR_ID_MAPPING.items():
             assert map_player_id(sr_id) == expected_atp
 
-    def test_normal_atp_id_passthrough(self):
-        assert map_player_id("s0ag") == "s0ag"
-        assert map_player_id("mm58") == "mm58"
+    def test_normal_atp_id_uppercased(self):
+        assert map_player_id("s0ag") == "S0AG"
+        assert map_player_id("mm58") == "MM58"
         assert map_player_id("TE30") == "TE30"
 
     def test_unmapped_sr_id_raises_valueerror(self):
@@ -112,7 +112,7 @@ class TestIsPlaceholderId:
 
     def test_similar_but_not_placeholder(self):
         assert is_placeholder_id("00") is False
-        assert is_placeholder_id("AAA3") is False
+        assert is_placeholder_id("AAA9") is False
         assert is_placeholder_id("1") is False
 
 

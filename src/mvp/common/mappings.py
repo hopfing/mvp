@@ -73,16 +73,16 @@ _SR_PREFIX = "SR:COMPETITOR:"
 
 
 def map_player_id(raw: str) -> str:
-    """Map a raw player ID to a normalized ATP code.
+    """Map a raw player ID to a normalized uppercase ATP code.
 
-    Normal ATP IDs (e.g., "s0ag") pass through unchanged.
+    Normal ATP IDs (e.g., "s0ag" -> "S0AG") are uppercased.
     Sportradar-format IDs ("SR:COMPETITOR:*") are mapped via the lookup table.
     Raises ValueError on unmapped SR IDs — this is intentional fail-hard
     behavior per ADR-002.
     """
     upper = raw.upper()
     if not upper.startswith(_SR_PREFIX):
-        return raw
+        return upper
     result = SR_ID_MAPPING.get(upper)
     if result is None:
         raise ValueError(
