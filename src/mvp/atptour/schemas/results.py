@@ -4,14 +4,14 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from mvp.common.enums import Circuit, DrawType, ResultType, Round
-from mvp.common.mappings import map_player_id, normalize_round
-from mvp.schemas.helpers import (
-    compute_schema_hash,
+from mvp.atptour.mappings import map_player_id, normalize_round
+from mvp.atptour.schema_helpers import (
     validate_doubles_partners,
     validate_match_uid_placeholders,
     validate_winner_in_players,
 )
+from mvp.common.enums import Circuit, DrawType, ResultType, Round
+from mvp.common.schema_hash import compute_schema_hash
 
 SCHEMA_VERSION = "1.0.0"
 

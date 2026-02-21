@@ -1,9 +1,8 @@
-"""Tests for shared mapping tables and normalization functions."""
+"""Tests for ATP-specific mapping tables and normalization functions."""
 
 import pytest
 
-from mvp.common.enums import Round
-from mvp.common.mappings import (
+from mvp.atptour.mappings import (
     ROUND_NORMALIZATION,
     SR_ID_MAPPING,
     is_placeholder_id,
@@ -12,6 +11,7 @@ from mvp.common.mappings import (
     normalize_round,
     parse_duration,
 )
+from mvp.common.enums import Round
 
 
 class TestNormalizeRound:

@@ -1,30 +1,14 @@
-"""Shared schema validation helpers and utilities.
+"""ATP-specific schema validation helpers.
 
-Cross-field validation functions used by model validators across schemas.
-Each takes explicit arguments (no Pydantic dependency) so they're testable
-in isolation.
+Cross-field validation functions used by model validators across ATP schemas.
+Each takes explicit arguments so they're testable in isolation.
 """
 
-import hashlib
 from typing import Any
 
-from pydantic import BaseModel
-
 from mvp.common.enums import DrawType
-from mvp.common.mappings import is_placeholder_id
 
-
-def compute_schema_hash(model: type[BaseModel]) -> str:
-    """Compute a deterministic hash from a model's field names and types.
-
-    Returns a 16-character hex string. Any field addition, removal, or
-    type change produces a different hash. Used alongside SCHEMA_VERSION
-    for automatic drift detection per ADR-001.
-    """
-    fields = sorted(model.model_fields.items())
-    parts = [f"{name}:{info.annotation}" for name, info in fields]
-    content = "|".join(parts)
-    return hashlib.sha256(content.encode()).hexdigest()[:16]
+from .mappings import is_placeholder_id
 
 
 def validate_winner_in_players(winner_id: str, p1_id: str, p2_id: str) -> None:

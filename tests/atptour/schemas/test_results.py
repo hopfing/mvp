@@ -5,7 +5,7 @@ from datetime import datetime
 import pytest
 from pydantic import ValidationError
 
-from mvp.schemas.results import SCHEMA_HASH, SCHEMA_VERSION, ResultRecord
+from mvp.atptour.schemas.results import SCHEMA_HASH, SCHEMA_VERSION, ResultRecord
 
 PARSED_AT = datetime(2026, 2, 21)
 SOURCE_FILE = "data/raw/atptour/tournaments/tour/404/2023/results_singles.html"

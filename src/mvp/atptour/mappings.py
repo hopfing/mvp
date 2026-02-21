@@ -1,4 +1,8 @@
-"""Shared mapping utilities to normalize raw data from external sources."""
+"""ATP-specific mapping tables and normalization functions.
+
+Used by ATP parsers and schemas to normalize raw values from atptour.com
+into canonical forms during staging.
+"""
 
 import re
 
@@ -114,9 +118,6 @@ def normalize_flag_url(href: str) -> str:
     if idx == -1:
         raise ValueError(f"Flag URL does not contain '{marker}': '{href}'")
     return href[idx + len(marker) :]
-
-
-# --- Duration parsing ---
 
 
 def parse_duration(raw: str) -> int:
