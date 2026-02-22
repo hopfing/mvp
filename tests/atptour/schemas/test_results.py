@@ -184,13 +184,26 @@ class TestValidationErrors:
                 )
             )
 
-    def test_non_contiguous_sets(self):
-        with pytest.raises(ValidationError, match="contiguous"):
+    def test_non_contiguous_sets_p1(self):
+        with pytest.raises(ValidationError, match="p1.*contiguous"):
             ResultRecord(
                 **_base_singles(
                     p1_set1_games=6,
                     p2_set1_games=4,
                     p1_set2_games=None,
+                    p2_set2_games=None,
+                    p1_set3_games=6,
+                    p2_set3_games=3,
+                )
+            )
+
+    def test_non_contiguous_sets_p2(self):
+        with pytest.raises(ValidationError, match="p2.*contiguous"):
+            ResultRecord(
+                **_base_singles(
+                    p1_set1_games=6,
+                    p2_set1_games=4,
+                    p1_set2_games=7,
                     p2_set2_games=None,
                     p1_set3_games=6,
                     p2_set3_games=3,

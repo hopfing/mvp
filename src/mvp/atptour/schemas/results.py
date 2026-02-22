@@ -144,19 +144,34 @@ class ResultRecord(BaseModel):
 
     @model_validator(mode="after")
     def check_set_contiguity(self) -> "ResultRecord":
-        p1_games = [
-            self.p1_set1_games,
-            self.p1_set2_games,
-            self.p1_set3_games,
-            self.p1_set4_games,
-            self.p1_set5_games,
-        ]
-        seen_none = False
-        for g in p1_games:
-            if g is None:
-                seen_none = True
-            elif seen_none:
-                raise ValueError("Set scores must be contiguous (no gaps)")
+        for label, games in [
+            (
+                "p1",
+                [
+                    self.p1_set1_games,
+                    self.p1_set2_games,
+                    self.p1_set3_games,
+                    self.p1_set4_games,
+                    self.p1_set5_games,
+                ],
+            ),
+            (
+                "p2",
+                [
+                    self.p2_set1_games,
+                    self.p2_set2_games,
+                    self.p2_set3_games,
+                    self.p2_set4_games,
+                    self.p2_set5_games,
+                ],
+            ),
+        ]:
+            seen_none = False
+            for g in games:
+                if g is None:
+                    seen_none = True
+                elif seen_none:
+                    raise ValueError(f"{label} set scores must be contiguous (no gaps)")
         return self
 
 
