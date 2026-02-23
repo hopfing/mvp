@@ -39,11 +39,19 @@ _DAY_SUFFIX_RE = re.compile(r"\s+Day\s+\d+$", re.IGNORECASE)
 def normalize_round(raw: str) -> Round:
     """Normalize a raw round name string to a canonical Round enum value.
 
+    Tries enum member name first (e.g., "QF" -> Round.QF, case-insensitive),
+    then falls back to display-name lookup via ROUND_NORMALIZATION.
     Strips "Day N" suffixes (e.g., "Round Robin Day 2" -> "Round Robin")
     before lookup. Raises ValueError on unmapped round names — this is
     intentional fail-hard behavior per ADR-002.
     """
     cleaned = _DAY_SUFFIX_RE.sub("", raw.strip())
+    # Try enum member name first (e.g., "QF", "R16", "BRONZE")
+    try:
+        return Round[cleaned.upper()]
+    except KeyError:
+        pass
+    # Try display name (e.g., "Quarterfinals", "Round of 16")
     result = ROUND_NORMALIZATION.get(cleaned)
     if result is None:
         raise ValueError(
@@ -149,3 +157,50 @@ def parse_duration(raw: str) -> int:
             raise ValueError(f"Non-numeric duration components in '{raw}'")
         return hours * 3600 + minutes * 60 + seconds
     raise ValueError(f"Expected HH:MM or HH:MM:SS duration format, got '{raw}'")
+
+
+MATCH_UID_PATTERN = re.compile(
+    r"^\d{4}_\d+_(?:SGL|DBL)_[A-Z0-9]+_(?:[A-Z0-9]+_){1,3}[A-Z0-9]+$"
+)
+
+
+def create_match_uid(
+    year: int,
+    tournament_id: str,
+    round: Round,
+    player_ids: list[str],
+    is_doubles: bool,
+) -> str:
+    """Create stable match UID for joining across datasets."""
+    draw = "DBL" if is_doubles else "SGL"
+    sorted_ids = "_".join(sorted(pid.upper() for pid in player_ids))
+    match_uid = f"{year}_{tournament_id}_{draw}_{round.value}_{sorted_ids}"
+    if not MATCH_UID_PATTERN.match(match_uid):
+        bad_ids = [pid for pid in player_ids if ":" in pid]
+        hint = (
+            f" Player ID(s) {bad_ids} look like Sportradar format — "
+            f"add mapping to SR_ID_MAPPING in mappings.py."
+            if bad_ids
+            else ""
+        )
+        raise ValueError(f"Generated invalid match_uid: {match_uid}.{hint}")
+    return match_uid
+
+
+def parse_seed_entry(value: str | None) -> tuple[int | None, str | None]:
+    """Parse combined seed/entry text into (seed, entry) tuple."""
+    if not value:
+        return None, None
+    value = value.strip("()")
+    if not value:
+        return None, None
+    if "/" in value:
+        parts = value.split("/", 1)
+        try:
+            return int(parts[0]), parts[1] or None
+        except ValueError:
+            return None, value
+    try:
+        return int(value), None
+    except ValueError:
+        return None, value

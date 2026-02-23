@@ -3,13 +3,16 @@
 import pytest
 
 from mvp.atptour.mappings import (
+    MATCH_UID_PATTERN,
     ROUND_NORMALIZATION,
     SR_ID_MAPPING,
+    create_match_uid,
     is_placeholder_id,
     map_player_id,
     normalize_flag_url,
     normalize_round,
     parse_duration,
+    parse_seed_entry,
 )
 from mvp.common.enums import Round
 
@@ -74,6 +77,16 @@ class TestNormalizeRound:
     def test_empty_string_raises_valueerror(self):
         with pytest.raises(ValueError, match="Unmapped round name"):
             normalize_round("")
+
+    def test_enum_member_name_lookup(self):
+        assert normalize_round("F") == Round.F
+        assert normalize_round("QF") == Round.QF
+        assert normalize_round("R16") == Round.R16
+        assert normalize_round("BRONZE") == Round.BRONZE
+
+    def test_enum_member_name_case_insensitive(self):
+        assert normalize_round("qf") == Round.QF
+        assert normalize_round("r16") == Round.R16
 
 
 class TestMapPlayerId:
@@ -163,3 +176,63 @@ class TestParseDuration:
     def test_non_numeric_raises_valueerror(self):
         with pytest.raises(ValueError, match="Non-numeric"):
             parse_duration("ab:cd")
+
+
+class TestCreateMatchUid:
+    """Test match UID creation."""
+
+    def test_singles(self):
+        uid = create_match_uid(
+            2023, "404", Round.F, ["AB12", "CD34"], is_doubles=False
+        )
+        assert uid == "2023_404_SGL_F_AB12_CD34"
+
+    def test_doubles(self):
+        uid = create_match_uid(
+            2023,
+            "404",
+            Round.F,
+            ["AB12", "CD34", "EF56", "GH78"],
+            is_doubles=True,
+        )
+        assert uid == "2023_404_DBL_F_AB12_CD34_EF56_GH78"
+
+    def test_ids_sorted_alphabetically(self):
+        uid = create_match_uid(
+            2023, "404", Round.F, ["ZZ99", "AA01"], is_doubles=False
+        )
+        assert uid == "2023_404_SGL_F_AA01_ZZ99"
+
+    def test_matches_pattern(self):
+        uid = create_match_uid(
+            2023, "404", Round.QF, ["AB12", "CD34"], is_doubles=False
+        )
+        assert MATCH_UID_PATTERN.match(uid)
+
+    def test_sportradar_id_raises(self):
+        with pytest.raises(ValueError, match="Sportradar"):
+            create_match_uid(
+                2023, "404", Round.F, ["SR:COMPETITOR:123", "CD34"], is_doubles=False
+            )
+
+
+class TestParseSeedEntry:
+    """Test seed/entry parsing."""
+
+    def test_numeric_seed(self):
+        assert parse_seed_entry("1") == (1, None)
+        assert parse_seed_entry("16") == (16, None)
+
+    def test_entry_only(self):
+        assert parse_seed_entry("WC") == (None, "WC")
+        assert parse_seed_entry("LL") == (None, "LL")
+
+    def test_seed_and_entry(self):
+        assert parse_seed_entry("1/Alt") == (1, "Alt")
+
+    def test_parenthesized_seed(self):
+        assert parse_seed_entry("(3)") == (3, None)
+
+    def test_empty_returns_none(self):
+        assert parse_seed_entry("") == (None, None)
+        assert parse_seed_entry(None) == (None, None)
