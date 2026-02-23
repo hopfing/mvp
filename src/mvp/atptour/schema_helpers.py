@@ -11,6 +11,33 @@ from mvp.common.enums import DrawType
 from .mappings import is_placeholder_id
 
 
+def parse_indoor(v) -> bool | None:
+    """Parse indoor/outdoor indicator to boolean."""
+    if v is None or v == "":
+        return None
+    if v == "I":
+        return True
+    if v == "O":
+        return False
+    if isinstance(v, bool):
+        return v
+    raise ValueError(f"Unknown InOutdoor value '{v}'. Expected 'I', 'O', or ''.")
+
+
+def empty_to_none(v):
+    """Convert empty strings to None, pass through everything else."""
+    if v == "":
+        return None
+    return v
+
+
+def strip_or_none(v: str | None) -> str | None:
+    """Strip whitespace from string; return None for empty/whitespace-only strings."""
+    if isinstance(v, str):
+        return v.strip() or None
+    return v
+
+
 def validate_winner_in_players(winner_id: str, p1_id: str, p2_id: str) -> None:
     """Raise ValueError if winner_id is not one of the player IDs."""
     if winner_id not in (p1_id, p2_id):
