@@ -30,6 +30,8 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["slow: marks tests that process the full raw data corpus"]
+addopts = "-m 'not slow'"
 
 [tool.ruff]
 target-version = "py312"

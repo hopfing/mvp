@@ -20,7 +20,7 @@ class ResultRecord(BaseModel):
     """A single match result from a Tournament Results HTML page."""
 
     tournament_id: str
-    year: int = Field(ge=2010)
+    year: int
     circuit: Circuit
     draw_type: DrawType
     round: Round
