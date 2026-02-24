@@ -35,8 +35,11 @@ class RankingsTransformer(BaseJob):
     def __init__(self, data_root: Path | None = None):
         super().__init__(domain="atptour", data_root=data_root)
 
-    def run(self) -> list[Path]:
-        """Process all rankings HTML files into per-date parquets.
+    def run(self, start_year: int | None = None) -> list[Path]:
+        """Process rankings HTML files into per-date parquets.
+
+        Args:
+            start_year: If provided, only process files with year >= start_year.
 
         Returns list of parquet paths written.
         """
@@ -46,10 +49,32 @@ class RankingsTransformer(BaseJob):
             logger.info("No rankings HTML files to transform")
             return []
 
+        if start_year is not None:
+            html_files = [
+                f
+                for f in html_files
+                if _parse_date_from_stem(f.stem).year >= start_year
+            ]
+
+        stage_dir = self.build_path("stage", "rankings")
+        existing = {
+            p.stem
+            for p in self.list_files(stage_dir, "*.parquet")
+            if p.stem != "rankings_singles"
+        }
+        to_process = [f for f in html_files if f.stem not in existing]
+
+        if not to_process:
+            logger.info(
+                "Rankings transform: all %d files already staged",
+                len(html_files),
+            )
+            return []
+
         parsed_at = dt.datetime.now(dt.UTC).replace(tzinfo=None)
         paths: list[Path] = []
 
-        for html_path in html_files:
+        for html_path in to_process:
             ranking_date = _parse_date_from_stem(html_path.stem)
             html = self.read_html(html_path)
             source_file = str(self._display_path(html_path))
@@ -72,8 +97,9 @@ class RankingsTransformer(BaseJob):
                 paths.append(result)
 
         logger.info(
-            "Rankings transform: processed %d files, wrote %d parquets",
-            len(html_files),
+            "Rankings transform: %d to process (%d skipped), wrote %d parquets",
+            len(to_process),
+            len(html_files) - len(to_process),
             len(paths),
         )
         return paths

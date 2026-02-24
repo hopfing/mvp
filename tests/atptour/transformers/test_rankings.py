@@ -274,3 +274,100 @@ class TestConsolidate:
         result = xf.consolidate()
         df = pl.read_parquet(result)
         assert len(df) == 1
+
+
+class TestSkipLogic:
+    def test_skips_already_staged(self, tmp_path):
+        """Files with existing staged parquets are not reprocessed."""
+        html1 = _make_html(_row_html(points="13,150"))
+        html2 = _make_html(_row_html(points="12,000"))
+        _write_rankings_html(tmp_path, "rankings_singles_20260209.html", html1)
+        _write_rankings_html(tmp_path, "rankings_singles_20260216.html", html2)
+        xf = RankingsTransformer(data_root=tmp_path)
+
+        # First run: both files processed
+        paths = xf.run()
+        assert len(paths) == 2
+
+        # Second run: both already staged, nothing to process
+        paths = xf.run()
+        assert len(paths) == 0
+
+    def test_processes_only_new_files(self, tmp_path):
+        """Only unstaged files are processed on incremental runs."""
+        html1 = _make_html(_row_html(points="13,150"))
+        _write_rankings_html(tmp_path, "rankings_singles_20260209.html", html1)
+        xf = RankingsTransformer(data_root=tmp_path)
+
+        # First run: one file
+        paths = xf.run()
+        assert len(paths) == 1
+
+        # Add a second raw file
+        html2 = _make_html(_row_html(points="12,000"))
+        _write_rankings_html(tmp_path, "rankings_singles_20260216.html", html2)
+
+        # Second run: only the new file
+        paths = xf.run()
+        assert len(paths) == 1
+        assert paths[0].stem == "rankings_singles_20260216"
+
+    def test_consolidated_file_not_counted_as_existing(self, tmp_path):
+        """The merged rankings_singles.parquet should not block processing."""
+        html = _make_html(_row_html())
+        _write_rankings_html(tmp_path, "rankings_singles_20260216.html", html)
+        xf = RankingsTransformer(data_root=tmp_path)
+        xf.run()
+        xf.consolidate()
+
+        # Add a new raw file
+        html2 = _make_html(_row_html(points="12,000"))
+        _write_rankings_html(tmp_path, "rankings_singles_20260209.html", html2)
+
+        # Run again — should process the new file (not blocked by consolidated parquet)
+        paths = xf.run()
+        assert len(paths) == 1
+        assert paths[0].stem == "rankings_singles_20260209"
+
+
+class TestStartYearFilter:
+    def test_filters_by_start_year(self, tmp_path):
+        """Only HTML files with year >= start_year are processed."""
+        html = _make_html(_row_html())
+        _write_rankings_html(tmp_path, "rankings_singles_20240106.html", html)
+        _write_rankings_html(tmp_path, "rankings_singles_20250106.html", html)
+        _write_rankings_html(tmp_path, "rankings_singles_20260216.html", html)
+        xf = RankingsTransformer(data_root=tmp_path)
+
+        paths = xf.run(start_year=2025)
+        assert len(paths) == 2
+        stems = {p.stem for p in paths}
+        assert "rankings_singles_20250106" in stems
+        assert "rankings_singles_20260216" in stems
+        assert "rankings_singles_20240106" not in stems
+
+    def test_no_start_year_processes_all(self, tmp_path):
+        """Without start_year, all files are processed."""
+        html = _make_html(_row_html())
+        _write_rankings_html(tmp_path, "rankings_singles_20240106.html", html)
+        _write_rankings_html(tmp_path, "rankings_singles_20260216.html", html)
+        xf = RankingsTransformer(data_root=tmp_path)
+
+        paths = xf.run()
+        assert len(paths) == 2
+
+    def test_start_year_combined_with_skip(self, tmp_path):
+        """start_year and skip logic work together."""
+        html = _make_html(_row_html())
+        _write_rankings_html(tmp_path, "rankings_singles_20240106.html", html)
+        _write_rankings_html(tmp_path, "rankings_singles_20250106.html", html)
+        _write_rankings_html(tmp_path, "rankings_singles_20260216.html", html)
+        xf = RankingsTransformer(data_root=tmp_path)
+
+        # First run with start_year=2025: processes 2025 and 2026
+        paths = xf.run(start_year=2025)
+        assert len(paths) == 2
+
+        # Second run with start_year=2025: both already staged
+        paths = xf.run(start_year=2025)
+        assert len(paths) == 0
