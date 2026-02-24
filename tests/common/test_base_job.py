@@ -95,6 +95,38 @@ class TestSaveParquet:
         assert b"schema_hash" in meta.metadata
 
 
+class TestSaveHtml:
+    def test_save_html(self, tmp_path):
+        job = BaseJob(domain="atptour", data_root=tmp_path)
+        html = "<html><body>Hello</body></html>"
+        path = tmp_path / "test.html"
+        result = job.save_html(html, path)
+        assert result == path
+        assert path.read_text(encoding="utf-8") == html
+
+    def test_creates_parent_dirs(self, tmp_path):
+        job = BaseJob(domain="atptour", data_root=tmp_path)
+        path = tmp_path / "a" / "b" / "c" / "test.html"
+        job.save_html("<html></html>", path)
+        assert path.exists()
+        assert path.read_text(encoding="utf-8") == "<html></html>"
+
+    def test_unicode_content(self, tmp_path):
+        job = BaseJob(domain="atptour", data_root=tmp_path)
+        html = "<html><body>Djokovi\u0107 — Z\u00fcrich</body></html>"
+        path = tmp_path / "test.html"
+        job.save_html(html, path)
+        content = path.read_text(encoding="utf-8")
+        assert "Djokovi\u0107" in content
+        assert "Z\u00fcrich" in content
+
+    def test_no_tmp_file_on_success(self, tmp_path):
+        job = BaseJob(domain="atptour", data_root=tmp_path)
+        path = tmp_path / "test.html"
+        job.save_html("<html></html>", path)
+        assert not (tmp_path / "test.html.tmp").exists()
+
+
 class TestReadHtml:
     def test_read_html(self, tmp_path):
         job = BaseJob(domain="atptour", data_root=tmp_path)

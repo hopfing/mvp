@@ -66,6 +66,21 @@ class BaseJob:
         logger.info("Read JSON from %s", self._display_path(path))
         return data
 
+    def save_html(self, content: str, path: Path) -> Path:
+        """Save HTML content with atomic write."""
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with tmp_path.open("w", encoding="utf-8") as f:
+                f.write(content)
+            tmp_path.replace(path)
+        except Exception:
+            if tmp_path.exists():
+                tmp_path.unlink()
+            raise
+        logger.info("Saved HTML to %s", self._display_path(path))
+        return path
+
     def read_html(self, path: Path) -> str:
         """Read HTML content from file."""
         with path.open("r", encoding="utf-8") as f:
