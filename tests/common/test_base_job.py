@@ -162,6 +162,67 @@ class TestListFiles:
         assert result == []
 
 
+class TestRunTimestamps:
+    def test_run_dt_is_set(self, tmp_path):
+        import datetime as dt
+
+        job = BaseJob(domain="atptour", data_root=tmp_path)
+        assert isinstance(job._run_dt, dt.datetime)
+
+    def test_run_date_str_format(self, tmp_path):
+        job = BaseJob(domain="atptour", data_root=tmp_path)
+        assert len(job._run_date_str) == 8
+        assert job._run_date_str.isdigit()
+
+    def test_run_datetime_str_format(self, tmp_path):
+        job = BaseJob(domain="atptour", data_root=tmp_path)
+        # YYYYMMDD_HHMMSS = 15 chars
+        assert len(job._run_datetime_str) == 15
+        assert job._run_datetime_str[8] == "_"
+
+
+class TestBuildPathVersion:
+    def test_version_date(self, tmp_path):
+        job = BaseJob(domain="atptour", data_root=tmp_path)
+        path = job.build_path("raw", "rankings", "rankings.html", version="date")
+        assert "_" in path.stem
+        assert path.suffix == ".html"
+        assert path.stem.startswith("rankings_")
+        date_part = path.stem.split("_", 1)[1]
+        assert len(date_part) == 8
+        assert date_part.isdigit()
+
+    def test_version_datetime(self, tmp_path):
+        job = BaseJob(domain="atptour", data_root=tmp_path)
+        path = job.build_path("raw", "schedule", "schedule.html", version="datetime")
+        assert "_" in path.stem
+        assert path.suffix == ".html"
+        assert path.stem.startswith("schedule_")
+        parts = path.stem.split("_", 1)
+        assert len(parts[1]) == 15  # YYYYMMDD_HHMMSS
+
+    def test_version_none(self, tmp_path):
+        job = BaseJob(domain="atptour", data_root=tmp_path)
+        path = job.build_path("raw", "rankings", "rankings.html")
+        assert path.stem == "rankings"
+
+    def test_version_none_explicit(self, tmp_path):
+        job = BaseJob(domain="atptour", data_root=tmp_path)
+        path = job.build_path("raw", "rankings", "rankings.html", version=None)
+        assert path.stem == "rankings"
+
+    def test_version_invalid(self, tmp_path):
+        job = BaseJob(domain="atptour", data_root=tmp_path)
+        with pytest.raises(ValueError, match="Invalid version"):
+            job.build_path("raw", "rankings", "rankings.html", version="bogus")
+
+    def test_version_consistent_within_job(self, tmp_path):
+        job = BaseJob(domain="atptour", data_root=tmp_path)
+        path1 = job.build_path("raw", "a", "file.html", version="date")
+        path2 = job.build_path("raw", "b", "file.html", version="date")
+        assert path1.stem.split("_", 1)[1] == path2.stem.split("_", 1)[1]
+
+
 class TestAtomicWrite:
     def test_no_tmp_file_on_success(self, tmp_path):
         job = BaseJob(domain="atptour", data_root=tmp_path)

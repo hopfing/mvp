@@ -1,5 +1,6 @@
 """Base class for pipeline jobs providing file I/O and path management."""
 
+import datetime as dt
 import hashlib
 import json
 import logging
@@ -20,6 +21,9 @@ class BaseJob:
             data_root = Path(__file__).resolve().parents[3] / "data"
         self.domain = domain
         self.data_root = data_root
+        self._run_dt = dt.datetime.now()
+        self._run_date_str = self._run_dt.strftime("%Y%m%d")
+        self._run_datetime_str = self._run_dt.strftime("%Y%m%d_%H%M%S")
 
     def _display_path(self, path: Path) -> Path | str:
         """Path relative to data_root for logging; falls back to full path."""
@@ -33,6 +37,7 @@ class BaseJob:
         bucket: str,
         relative_path: str,
         filename: str | None = None,
+        version: str | None = None,
     ) -> Path:
         """Build absolute path within the data directory."""
         if bucket not in BUCKETS:
@@ -42,6 +47,14 @@ class BaseJob:
         path = self.data_root / bucket / self.domain / relative_path
         if filename is not None:
             path = path / filename
+        if version == "date":
+            path = path.with_stem(f"{path.stem}_{self._run_date_str}")
+        elif version == "datetime":
+            path = path.with_stem(f"{path.stem}_{self._run_datetime_str}")
+        elif version is not None:
+            raise ValueError(
+                f"Invalid version '{version}'. Must be 'date', 'datetime', or None."
+            )
         return path
 
     def save_json(self, data: dict | list, path: Path) -> Path:
