@@ -1,7 +1,7 @@
 """Common utility functions shared across the project."""
 
 import types
-from datetime import date
+from datetime import date, datetime
 
 import polars as pl
 from pydantic import BaseModel
@@ -11,6 +11,7 @@ _PYTHON_TO_POLARS: dict[type, pl.DataType] = {
     float: pl.Float64,
     str: pl.String,
     bool: pl.Boolean,
+    datetime: pl.Datetime,
     date: pl.Date,
 }
 
