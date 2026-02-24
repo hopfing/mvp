@@ -56,6 +56,7 @@ class Circuit(StrEnum):
     tour = auto()
     chal = auto()
     team = auto()
+    itf = auto()
 
     @property
     def display_name(self) -> str:
@@ -66,6 +67,7 @@ _CIRCUIT_DISPLAY = {
     Circuit.tour: "ATP",
     Circuit.chal: "Challenger",
     Circuit.team: "Team",
+    Circuit.itf: "ITF",
 }
 
 
@@ -107,4 +109,59 @@ _TOURNAMENT_TYPE_CIRCUIT = {
     TournamentType.OL: Circuit.tour,
     TournamentType.WT: Circuit.team,
     TournamentType.WS: Circuit.tour,
+}
+
+
+class ActivityEventType(StrEnum):
+    """Event type from player activity data, mapping to circuits."""
+
+    GS = "GS"
+    ATP_1000 = "1000"
+    ATP_500 = "500"
+    ATP_250 = "250"
+    CH = "CH"
+    FU = "FU"
+    DC = "DC"
+    OL = "OL"
+    WC = "WC"
+    UC = "UC"
+    ATPC = "ATPC"
+    LVR = "LVR"
+    XXI = "XXI"
+    WS = "WS"
+    CS = "CS"
+    Q = "Q"
+    PZ = "PZ"
+    GP = "GP"
+    GC = "GC"
+    WT = "WT"
+    AS = "AS"
+
+    @property
+    def circuit(self) -> Circuit:
+        return _ACTIVITY_EVENT_TYPE_CIRCUIT[self]
+
+
+_ACTIVITY_EVENT_TYPE_CIRCUIT = {
+    ActivityEventType.GS: Circuit.tour,
+    ActivityEventType.ATP_1000: Circuit.tour,
+    ActivityEventType.ATP_500: Circuit.tour,
+    ActivityEventType.ATP_250: Circuit.tour,
+    ActivityEventType.OL: Circuit.tour,
+    ActivityEventType.LVR: Circuit.tour,
+    ActivityEventType.XXI: Circuit.tour,
+    ActivityEventType.WC: Circuit.tour,
+    ActivityEventType.UC: Circuit.tour,
+    ActivityEventType.ATPC: Circuit.tour,
+    ActivityEventType.WS: Circuit.tour,
+    ActivityEventType.CS: Circuit.tour,
+    ActivityEventType.Q: Circuit.tour,
+    ActivityEventType.GP: Circuit.tour,
+    ActivityEventType.GC: Circuit.tour,
+    ActivityEventType.CH: Circuit.chal,
+    ActivityEventType.FU: Circuit.itf,
+    ActivityEventType.DC: Circuit.team,
+    ActivityEventType.PZ: Circuit.team,
+    ActivityEventType.WT: Circuit.team,
+    ActivityEventType.AS: Circuit.team,
 }

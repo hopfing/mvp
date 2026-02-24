@@ -1,6 +1,7 @@
 """Tests for shared enums."""
 
 from mvp.common.enums import (
+    ActivityEventType,
     Circuit,
     DrawType,
     ResultType,
@@ -74,14 +75,16 @@ class TestCircuit:
         assert Circuit.tour == "tour"
         assert Circuit.chal == "chal"
         assert Circuit.team == "team"
+        assert Circuit.itf == "itf"
 
-    def test_has_3_members(self):
-        assert len(Circuit) == 3
+    def test_has_4_members(self):
+        assert len(Circuit) == 4
 
     def test_display_name(self):
         assert Circuit.tour.display_name == "ATP"
         assert Circuit.chal.display_name == "Challenger"
         assert Circuit.team.display_name == "Team"
+        assert Circuit.itf.display_name == "ITF"
 
 
 class TestTournamentType:
@@ -118,3 +121,61 @@ class TestTournamentType:
 
     def test_circuit_property_team(self):
         assert TournamentType.WT.circuit == Circuit.team
+
+
+class TestActivityEventType:
+    def test_has_21_members(self):
+        assert len(ActivityEventType) == 21
+
+    def test_api_values(self):
+        assert ActivityEventType.GS == "GS"
+        assert ActivityEventType.ATP_1000 == "1000"
+        assert ActivityEventType.ATP_500 == "500"
+        assert ActivityEventType.ATP_250 == "250"
+        assert ActivityEventType.CH == "CH"
+        assert ActivityEventType.FU == "FU"
+        assert ActivityEventType.DC == "DC"
+        assert ActivityEventType.OL == "OL"
+        assert ActivityEventType.WC == "WC"
+        assert ActivityEventType.UC == "UC"
+        assert ActivityEventType.ATPC == "ATPC"
+        assert ActivityEventType.LVR == "LVR"
+        assert ActivityEventType.XXI == "XXI"
+        assert ActivityEventType.WS == "WS"
+        assert ActivityEventType.CS == "CS"
+        assert ActivityEventType.Q == "Q"
+        assert ActivityEventType.PZ == "PZ"
+        assert ActivityEventType.GP == "GP"
+        assert ActivityEventType.GC == "GC"
+        assert ActivityEventType.WT == "WT"
+        assert ActivityEventType.AS == "AS"
+
+    def test_circuit_property_tour(self):
+        tour_types = [
+            ActivityEventType.GS, ActivityEventType.ATP_1000,
+            ActivityEventType.ATP_500, ActivityEventType.ATP_250,
+            ActivityEventType.OL, ActivityEventType.LVR,
+            ActivityEventType.XXI, ActivityEventType.WC,
+            ActivityEventType.UC, ActivityEventType.ATPC,
+            ActivityEventType.WS, ActivityEventType.CS,
+            ActivityEventType.Q, ActivityEventType.GP,
+            ActivityEventType.GC,
+        ]
+        for et in tour_types:
+            assert et.circuit == Circuit.tour, f"{et} should map to tour"
+
+    def test_circuit_property_chal(self):
+        assert ActivityEventType.CH.circuit == Circuit.chal
+
+    def test_circuit_property_itf(self):
+        assert ActivityEventType.FU.circuit == Circuit.itf
+
+    def test_circuit_property_team(self):
+        for et in [ActivityEventType.DC, ActivityEventType.PZ,
+                    ActivityEventType.WT, ActivityEventType.AS]:
+            assert et.circuit == Circuit.team, f"{et} should map to team"
+
+    def test_all_members_have_circuit(self):
+        """Every ActivityEventType must have a circuit mapping."""
+        for et in ActivityEventType:
+            assert isinstance(et.circuit, Circuit), f"{et} missing circuit mapping"
