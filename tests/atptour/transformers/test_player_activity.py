@@ -219,6 +219,20 @@ class TestPlayerActivityStager:
         assert failed == []
 
 
+class TestUniquenessAssertion:
+    def test_assertion_fires_on_duplicate_pk(self):
+        import pytest
+
+        df = pl.DataFrame({
+            "player_id": ["N409", "N409"],
+            "match_id": ["MS001", "MS001"],
+        })
+        with pytest.raises(ValueError, match="Duplicate primary keys"):
+            PlayerActivityTransformer._assert_unique(
+                df, ["player_id", "match_id"]
+            )
+
+
 class TestPlayerActivityTransformer:
     def _stage_player(self, tmp_path, player_id, activity_data):
         """Helper to create a staged parquet for a player."""

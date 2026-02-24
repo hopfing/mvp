@@ -8,10 +8,7 @@ from pathlib import Path
 import polars as pl
 
 from mvp.atptour.mappings import (
-    create_match_uid,
-    is_placeholder_id,
     map_player_id,
-    normalize_round,
     parse_duration,
 )
 from mvp.atptour.schemas.match_stats import MatchStatsRecord
@@ -80,6 +77,8 @@ class MatchStatsTransformer(BaseJob):
         overrides = polars_schema_overrides(MatchStatsRecord)
         df = pl.DataFrame(rows, schema_overrides=overrides)
 
+        self._assert_unique(df, ["match_uid"])
+
         out_path = self.build_path(
             "stage", self.tournament.path, "match_stats.parquet"
         )
@@ -133,25 +132,6 @@ class MatchStatsTransformer(BaseJob):
         # Compute sets_played from SetScores length (minus the summary set at index 0)
         sets_played = max(len(player_team["SetScores"]) - 1, 0)
 
-        # Compute match_uid
-        all_ids = [p1_id, p2_id]
-        if is_doubles:
-            all_ids.extend([p1_partner_id, p2_partner_id])
-
-        has_placeholder = any(
-            is_placeholder_id(pid) for pid in all_ids if pid is not None
-        )
-        match_uid = None
-        if not has_placeholder:
-            round_enum = normalize_round(round_name)
-            match_uid = create_match_uid(
-                year=self.tournament.year,
-                tournament_id=self.tournament.tournament_id,
-                round=round_enum,
-                player_ids=all_ids,
-                is_doubles=is_doubles,
-            )
-
         # Extract stats
         p1_stats = self._extract_side_stats(player_team)
         p2_stats = self._extract_side_stats(opponent_team)
@@ -167,7 +147,6 @@ class MatchStatsTransformer(BaseJob):
             round=round_name,
             round_id=match_data["Round"].get("RoundId"),
             match_id=match_data["MatchId"],
-            match_uid=match_uid,
             surface=tournament_data.get("Court"),
             tournament_start_date=self._parse_date(tournament_data.get("StartDate")),
             tournament_end_date=self._parse_date(tournament_data.get("EndDate")),
@@ -248,3 +227,14 @@ class MatchStatsTransformer(BaseJob):
             return dt.datetime.fromisoformat(iso_str).date()
         except (ValueError, TypeError):
             return None
+
+    @staticmethod
+    def _assert_unique(df: pl.DataFrame, key_cols: list[str]) -> None:
+        """Assert primary key uniqueness, excluding null-uid rows."""
+        check = df.filter(pl.col(key_cols[0]).is_not_null())
+        dupes = check.group_by(key_cols).len().filter(pl.col("len") > 1)
+        if len(dupes) > 0:
+            samples = dupes.head(5)[key_cols].to_dicts()
+            raise ValueError(
+                f"Duplicate primary keys in match_stats: {samples}"
+            )

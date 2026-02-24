@@ -529,6 +529,23 @@ class TestTransformDoubles:
         assert "DBL" in row["match_uid"]
 
 
+class TestUniquenessAssertion:
+    def test_assertion_fires_on_duplicate_match_uid(self):
+        df = pl.DataFrame({
+            "match_uid": ["uid1", "uid1", "uid2"],
+        })
+        import pytest
+
+        with pytest.raises(ValueError, match="Duplicate primary keys"):
+            MatchStatsTransformer._assert_unique(df, ["match_uid"])
+
+    def test_assertion_skips_null_uids(self):
+        df = pl.DataFrame({
+            "match_uid": [None, None, "uid1"],
+        })
+        MatchStatsTransformer._assert_unique(df, ["match_uid"])
+
+
 class TestSkipConditions:
     def test_no_json_returns_empty(self, tmp_path):
         t = _make_tournament()

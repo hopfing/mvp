@@ -184,6 +184,17 @@ class TestPlayerBioStager:
         assert failed == []
 
 
+class TestUniquenessAssertion:
+    def test_assertion_fires_on_duplicate_pk(self):
+        import pytest
+
+        df = pl.DataFrame({
+            "player_id": ["N409", "N409"],
+        })
+        with pytest.raises(ValueError, match="Duplicate primary keys"):
+            PlayerBioTransformer._assert_unique(df, ["player_id"])
+
+
 class TestPlayerBioTransformer:
     def _stage_player(self, tmp_path, player_id, bio_data):
         """Helper to create a staged parquet for a player."""

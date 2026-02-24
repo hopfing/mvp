@@ -3,12 +3,16 @@
 from datetime import datetime
 from typing import ClassVar
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
 
-from mvp.atptour.mappings import map_player_id, normalize_round
+from mvp.atptour.mappings import (
+    create_match_uid,
+    is_placeholder_id,
+    map_player_id,
+    normalize_round,
+)
 from mvp.atptour.schema_helpers import (
     validate_doubles_partners,
-    validate_match_uid_placeholders,
     validate_winner_in_players,
 )
 from mvp.common.enums import Circuit, DrawType, ResultType, Round
@@ -28,7 +32,6 @@ class ResultRecord(BaseModel):
     draw_type: DrawType
     round: Round
 
-    match_uid: str | None = None
     match_id: str | None = None
 
     winner_id: str
@@ -114,13 +117,18 @@ class ResultRecord(BaseModel):
         )
         return self
 
-    @model_validator(mode="after")
-    def check_match_uid_placeholders(self) -> "ResultRecord":
+    @computed_field
+    @property
+    def match_uid(self) -> str | None:
         all_ids = [self.p1_id, self.p2_id]
-        if self.draw_type == DrawType.doubles:
+        is_doubles = self.draw_type == DrawType.doubles
+        if is_doubles:
             all_ids.extend([self.p1_partner_id, self.p2_partner_id])
-        validate_match_uid_placeholders(self.match_uid, all_ids)
-        return self
+        if any(is_placeholder_id(pid) for pid in all_ids if pid is not None):
+            return None
+        return create_match_uid(
+            self.year, self.tournament_id, self.round, all_ids, is_doubles,
+        )
 
     @model_validator(mode="after")
     def check_walkover_consistency(self) -> "ResultRecord":

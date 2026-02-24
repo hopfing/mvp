@@ -144,6 +144,25 @@ class TestTransformOverview:
         assert row["country"] == "Australia"
 
 
+class TestUniquenessAssertion:
+    def test_assertion_fires_on_duplicate_pk(self):
+        import pytest
+
+        df = pl.DataFrame({
+            "tournament_id": ["404", "404"],
+            "year": [2025, 2025],
+        })
+        with pytest.raises(ValueError, match="Duplicate primary keys"):
+            OverviewTransformer._assert_unique(df, ["tournament_id", "year"])
+
+    def test_assertion_passes_unique(self):
+        df = pl.DataFrame({
+            "tournament_id": ["404", "404"],
+            "year": [2025, 2024],
+        })
+        OverviewTransformer._assert_unique(df, ["tournament_id", "year"])
+
+
 class TestEdgeCases:
     def test_missing_file_returns_empty(self, tmp_path):
         t = _make_tournament()

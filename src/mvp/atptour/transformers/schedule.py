@@ -12,7 +12,7 @@ from bs4 import BeautifulSoup, Tag
 from mvp.atptour.schemas.schedule import ScheduleRecord
 from mvp.atptour.tournament import Tournament
 from mvp.common.base_job import BaseJob
-from mvp.common.enums import Circuit
+from mvp.common.enums import Circuit, DrawType
 from mvp.common.utils import polars_schema_overrides
 
 logger = logging.getLogger(__name__)
@@ -50,10 +50,10 @@ def _normalize_score(score_span: Tag) -> str | None:
     return text
 
 
-def _extract_player_info(div: Tag) -> tuple[str, str, str, str | None]:
-    """Extract player ID, name, country, seed/entry from a player/opponent div.
+def _extract_player_info(div: Tag) -> tuple[str, str, str, str | None, bool]:
+    """Extract player ID, name, country, seed/entry, and doubles flag.
 
-    Returns (player_id, display_name, country_code, seed_entry).
+    Returns (player_id, display_name, country_code, seed_entry, is_doubles).
     For doubles: multiple names joined with ' / ', first player's ID, first country.
     """
     # Check for doubles structure (multiple names in a "names" div)
@@ -87,7 +87,7 @@ def _extract_player_info(div: Tag) -> tuple[str, str, str, str | None]:
         seed_entry = rank_span.get_text(strip=True) if rank_span else ""
         seed_entry = seed_entry if seed_entry else None
 
-        return first_id, display_name, country, seed_entry
+        return first_id, display_name, country, seed_entry, True
 
     # Singles
     name_div = div.select_one("div.name")
@@ -111,7 +111,7 @@ def _extract_player_info(div: Tag) -> tuple[str, str, str, str | None]:
     seed_entry = rank_span.get_text(strip=True) if rank_span else ""
     seed_entry = seed_entry if seed_entry else None
 
-    return player_id, name_text, country, seed_entry
+    return player_id, name_text, country, seed_entry, False
 
 
 def _parse_schedule_html(
@@ -164,8 +164,14 @@ def _parse_schedule_html(
         if player_div is None or opponent_div is None:
             continue
 
-        p1_id, p1_name, p1_country, p1_seed_entry = _extract_player_info(player_div)
-        p2_id, p2_name, p2_country, p2_seed_entry = _extract_player_info(opponent_div)
+        p1_id, p1_name, p1_country, p1_seed_entry, p1_is_dbl = (
+            _extract_player_info(player_div)
+        )
+        p2_id, p2_name, p2_country, p2_seed_entry, p2_is_dbl = (
+            _extract_player_info(opponent_div)
+        )
+        is_doubles = p1_is_dbl or p2_is_dbl
+        draw_type = DrawType.doubles if is_doubles else DrawType.singles
 
         # Status
         status_div = content.select_one("div.status")
@@ -182,6 +188,7 @@ def _parse_schedule_html(
                 tournament_id=tournament_id,
                 year=year,
                 circuit=circuit,
+                draw_type=draw_type,
                 match_date=match_date,
                 scheduled_datetime=scheduled_datetime,
                 time_suffix=time_suffix,
@@ -253,22 +260,8 @@ class ScheduleTransformer(BaseJob):
             schema_overrides=polars_schema_overrides(ScheduleRecord),
         )
 
-        # Dedup: one row per match, keeping latest snapshot
-        sorted_ids = pl.min_horizontal("p1_id", "p2_id") + "_" + pl.max_horizontal("p1_id", "p2_id")
-        df = df.with_columns(
-            (
-                pl.col("year").cast(pl.Utf8) + "_"
-                + pl.col("tournament_id") + "_SGL_"
-                + pl.col("round") + "_"
-                + sorted_ids
-            ).alias("match_uid")
-        )
-        df = (
-            df.sort("snapshot_timestamp")
-            .group_by("match_uid")
-            .last()
-            .drop("snapshot_timestamp")
-        )
+        df = self._dedup(df)
+        self._assert_unique(df, ["match_uid"])
 
         target = self.build_path(
             "stage",
@@ -276,3 +269,36 @@ class ScheduleTransformer(BaseJob):
             "schedule.parquet",
         )
         return self.save_parquet(df, target)
+
+    def _dedup(self, df: pl.DataFrame) -> pl.DataFrame:
+        """Deduplicate by match_uid, keeping latest snapshot. Preserve null-uid rows."""
+        before = len(df)
+        has_uid = df.filter(pl.col("match_uid").is_not_null())
+        no_uid = df.filter(pl.col("match_uid").is_null())
+        has_uid = (
+            has_uid.sort("snapshot_timestamp")
+            .group_by("match_uid")
+            .last()
+            .select(df.columns)
+        )
+        df = pl.concat([has_uid, no_uid])
+        df = df.drop("snapshot_timestamp")
+        dupes_removed = before - len(df)
+        if dupes_removed > 0:
+            logger.info(
+                "Deduped %d duplicate match_uids for %s",
+                dupes_removed,
+                self.tournament.logging_id,
+            )
+        return df
+
+    @staticmethod
+    def _assert_unique(df: pl.DataFrame, key_cols: list[str]) -> None:
+        """Assert primary key uniqueness, excluding null-uid rows."""
+        check = df.filter(pl.col(key_cols[0]).is_not_null())
+        dupes = check.group_by(key_cols).len().filter(pl.col("len") > 1)
+        if len(dupes) > 0:
+            samples = dupes.head(5)[key_cols].to_dicts()
+            raise ValueError(
+                f"Duplicate primary keys in schedule: {samples}"
+            )

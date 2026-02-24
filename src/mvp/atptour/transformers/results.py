@@ -7,10 +7,7 @@ from pathlib import Path
 import polars as pl
 
 from mvp.atptour.mappings import (
-    create_match_uid,
-    is_placeholder_id,
     map_player_id,
-    normalize_round,
     parse_duration,
     parse_seed_entry,
 )
@@ -62,6 +59,7 @@ class ResultsTransformer(BaseJob):
         df = pl.DataFrame(rows, schema_overrides=overrides)
 
         df = self._dedup(df)
+        self._assert_unique(df, ["match_uid"])
 
         out_path = self.build_path("stage", self.tournament.path, "results.parquet")
         result = self.save_parquet(df, out_path)
@@ -143,39 +141,16 @@ class ResultsTransformer(BaseJob):
         p1_country = match["player_country"].upper()
         p2_country = match["opp_country"].upper()
 
-        round_enum = normalize_round(match["round_text"])
-
-        # Compute match_uid if no placeholder IDs
-        all_ids = [p1_id, p2_id]
-        if is_doubles:
-            p1_partner_id = map_player_id(match["partner_id"])
-            p2_partner_id = map_player_id(match["opp_partner_id"])
-            all_ids.extend([p1_partner_id, p2_partner_id])
-        else:
-            p1_partner_id = None
-            p2_partner_id = None
-
-        has_placeholder = any(is_placeholder_id(pid) for pid in all_ids)
-        match_uid = None
-        if not has_placeholder:
-            match_uid = create_match_uid(
-                year=self.tournament.year,
-                tournament_id=self.tournament.tournament_id,
-                round=round_enum,
-                player_ids=all_ids,
-                is_doubles=is_doubles,
-            )
-
         scores = self._flatten_scores(match)
 
         # Build partner fields for doubles
         partner_kwargs = {}
         if is_doubles:
             partner_kwargs = {
-                "p1_partner_id": p1_partner_id,
+                "p1_partner_id": map_player_id(match["partner_id"]),
                 "p1_partner_name": match["partner_name"],
                 "p1_partner_country": match["partner_country"].upper(),
-                "p2_partner_id": p2_partner_id,
+                "p2_partner_id": map_player_id(match["opp_partner_id"]),
                 "p2_partner_name": match["opp_partner_name"],
                 "p2_partner_country": match["opp_partner_country"].upper(),
             }
@@ -186,7 +161,6 @@ class ResultsTransformer(BaseJob):
             circuit=self.tournament.circuit,
             draw_type=draw_type,
             round=match["round_text"],
-            match_uid=match_uid,
             match_id=match.get("match_id"),
             winner_id=winner_id,
             p1_id=p1_id,
@@ -254,3 +228,14 @@ class ResultsTransformer(BaseJob):
                 self.tournament.logging_id,
             )
         return df
+
+    @staticmethod
+    def _assert_unique(df: pl.DataFrame, key_cols: list[str]) -> None:
+        """Assert primary key uniqueness, excluding null-uid rows."""
+        check = df.filter(pl.col(key_cols[0]).is_not_null())
+        dupes = check.group_by(key_cols).len().filter(pl.col("len") > 1)
+        if len(dupes) > 0:
+            samples = dupes.head(5)[key_cols].to_dicts()
+            raise ValueError(
+                f"Duplicate primary keys in results: {samples}"
+            )

@@ -59,7 +59,6 @@ def _base_singles(**overrides) -> dict:
         "round": "Final",
         "round_id": 1,
         "match_id": "MS001",
-        "match_uid": "404__2023__singles__f__AB12|CD34",
         "surface": "Hard",
         "tournament_start_date": date(2023, 1, 16),
         "tournament_end_date": date(2023, 1, 22),
@@ -97,7 +96,6 @@ def _base_doubles(**overrides) -> dict:
     """Minimal valid completed doubles match stats record."""
     data = _base_singles(
         draw_type="doubles",
-        match_uid="404__2023__doubles__f__AB12|CD34|EF56|GH78",
         p1_partner_id="ef56",
         p2_partner_id="gh78",
         match_id="MD001",
@@ -114,6 +112,7 @@ class TestValidRecords:
         assert record.p1_id == "AB12"
         assert record.p2_id == "CD34"
         assert record.draw_type == "singles"
+        assert record.match_uid == "2023_404_SGL_F_AB12_CD34"
         assert record.duration_seconds == 5400
         assert record.p1_svc_aces == 5
         assert record.p2_ret_return_rating == 180
@@ -123,6 +122,7 @@ class TestValidRecords:
         assert record.draw_type == "doubles"
         assert record.p1_partner_id == "EF56"
         assert record.p2_partner_id == "GH78"
+        assert record.match_uid == "2023_404_DBL_F_AB12_CD34_EF56_GH78"
 
     def test_retirement_with_reason(self):
         record = MatchStatsRecord(**_base_singles(reason="RET"))
@@ -182,7 +182,6 @@ class TestValidRecords:
             **_base_singles(
                 p2_id="0",
                 winner_id="ab12",
-                match_uid=None,
             )
         )
         assert record.match_uid is None
@@ -202,7 +201,6 @@ class TestValidationErrors:
             MatchStatsRecord(
                 **_base_singles(
                     draw_type="doubles",
-                    match_uid="404__2023__doubles__f__AB12|CD34",
                 )
             )
 
@@ -218,17 +216,6 @@ class TestValidationErrors:
     def test_unmapped_round(self):
         with pytest.raises(ValidationError, match="[Uu]nmapped round"):
             MatchStatsRecord(**_base_singles(round="Nonexistent Round"))
-
-    def test_placeholder_with_non_null_uid(self):
-        with pytest.raises(ValidationError, match="match_uid must be null"):
-            MatchStatsRecord(
-                **_base_singles(
-                    p2_id="0",
-                    winner_id="ab12",
-                    match_uid="404__2023__singles__f__AB12|CD34",
-                )
-            )
-
 
 class TestSchemaVersioning:
     def test_schema_version_is_semver(self):

@@ -68,6 +68,8 @@ class OverviewTransformer(BaseJob):
         overrides = polars_schema_overrides(OverviewRecord)
         df = pl.DataFrame(rows, schema_overrides=overrides)
 
+        self._assert_unique(df, ["tournament_id", "year"])
+
         out_path = self.build_path(
             "stage", self.tournament.path, "overview.parquet"
         )
@@ -75,3 +77,13 @@ class OverviewTransformer(BaseJob):
         if result is None:
             return []
         return [result]
+
+    @staticmethod
+    def _assert_unique(df: pl.DataFrame, key_cols: list[str]) -> None:
+        """Assert primary key uniqueness."""
+        dupes = df.group_by(key_cols).len().filter(pl.col("len") > 1)
+        if len(dupes) > 0:
+            samples = dupes.head(5)[key_cols].to_dicts()
+            raise ValueError(
+                f"Duplicate primary keys in overview: {samples}"
+            )

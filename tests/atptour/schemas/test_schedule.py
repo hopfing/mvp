@@ -7,7 +7,7 @@ from mvp.atptour.schemas.schedule import (
     SCHEMA_VERSION,
     ScheduleRecord,
 )
-from mvp.common.enums import Circuit
+from mvp.common.enums import Circuit, DrawType, Round
 
 PARSED_AT = datetime(2026, 2, 24)
 SOURCE_FILE = "tournaments/tour/339/2026/schedule/schedule_20260207_140000.html"
@@ -20,6 +20,7 @@ def _base_record(**overrides) -> dict:
         "tournament_id": "339",
         "year": 2026,
         "circuit": Circuit.tour,
+        "draw_type": DrawType.singles,
         "match_date": date(2026, 2, 7),
         "scheduled_datetime": datetime(2026, 2, 7, 14, 0, 0),
         "time_suffix": "Not Before",
@@ -50,18 +51,20 @@ class TestValidRecords:
         assert record.tournament_id == "339"
         assert record.year == 2026
         assert record.circuit == Circuit.tour
+        assert record.draw_type == DrawType.singles
         assert record.match_date == date(2026, 2, 7)
         assert record.scheduled_datetime == datetime(2026, 2, 7, 14, 0, 0)
         assert record.time_suffix == "Not Before"
         assert record.display_time == "Not Before 3:00 PM"
         assert record.court_name == "Center Court"
-        assert record.round == "SF"
+        assert record.round == Round.SF
         assert record.p1_name == "A. Mannarino"
         assert record.p1_seed_entry == "(1)"
         assert record.p2_name == "M. Damm"
         assert record.p2_seed_entry == "(Q)"
         assert record.status == "Vs"
         assert record.score is None
+        assert record.match_uid == "2026_339_SGL_SF_D0DT_ME82"
         assert record.snapshot_timestamp == SNAPSHOT_TS
         assert record.source_file == SOURCE_FILE
         assert record.parsed_at == PARSED_AT
@@ -115,7 +118,7 @@ class TestFieldValidation:
 
 class TestFieldCount:
     def test_field_count(self):
-        assert len(ScheduleRecord.model_fields) == 22
+        assert len(ScheduleRecord.model_fields) == 23
 
 
 class TestSchemaVersioning:

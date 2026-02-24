@@ -19,7 +19,6 @@ def _base_singles(**overrides) -> dict:
         "circuit": "tour",
         "draw_type": "singles",
         "round": "Final",
-        "match_uid": "404__2023__singles__f__AB12|CD34",
         "match_id": "MS001",
         "winner_id": "ab12",
         "p1_id": "ab12",
@@ -45,7 +44,6 @@ def _base_doubles(**overrides) -> dict:
     """Minimal valid completed doubles match."""
     data = _base_singles(
         draw_type="doubles",
-        match_uid="404__2023__doubles__f__AB12|CD34|EF56|GH78",
         p1_partner_id="ef56",
         p1_partner_name="Partner One",
         p1_partner_country="fra",
@@ -62,6 +60,7 @@ class TestValidRecords:
     def test_completed_straight_sets_p1_wins(self):
         record = ResultRecord(**_base_singles())
         assert record.winner_id == "AB12"
+        assert record.match_uid == "2023_404_SGL_F_AB12_CD34"
         assert record.p1_set1_games == 6
         assert record.p2_set1_games == 4
         assert record.p1_set3_games is None
@@ -93,6 +92,7 @@ class TestValidRecords:
         assert record.draw_type == "doubles"
         assert record.p1_partner_id == "EF56"
         assert record.p2_partner_id == "GH78"
+        assert record.match_uid == "2023_404_DBL_F_AB12_CD34_EF56_GH78"
 
     def test_walkover(self):
         record = ResultRecord(
@@ -140,7 +140,6 @@ class TestValidRecords:
             **_base_singles(
                 p2_id="0",
                 winner_id="ab12",
-                match_uid=None,
             )
         )
         assert record.match_uid is None
@@ -167,7 +166,6 @@ class TestValidationErrors:
             ResultRecord(
                 **_base_singles(
                     draw_type="doubles",
-                    match_uid="404__2023__doubles__f__AB12|CD34",
                 )
             )
 

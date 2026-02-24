@@ -308,7 +308,9 @@ class TestParseSinglesMatch:
         assert r.time_suffix == "Not Before"
         assert r.display_time == "Not Before 3:00 PM"
         assert r.court_name is None  # default has no court
+        assert r.draw_type == "singles"
         assert r.round == "SF"
+        assert r.match_uid == "2026_339_SGL_SF_D0DT_ME82"
         assert r.p1_id == "ME82"
         assert r.p1_name == "A. Mannarino"
         assert r.p1_country == "FRA"
@@ -331,6 +333,8 @@ class TestParseDoublesMatch:
         )
         assert len(records) == 1
         r = records[0]
+        assert r.draw_type == "doubles"
+        assert r.match_uid == "2026_339_DBL_SF_F09R_SY05"
         assert r.p1_id == "F09R"
         assert r.p1_name == "C. Frantzen / R. Haase"
         assert r.p1_country == "GER"
@@ -458,9 +462,11 @@ class TestFullTransformerRun:
         df = pl.read_parquet(result)
         row = df.row(0, named=True)
         assert row["tournament_id"] == "339"
+        assert row["draw_type"] == "singles"
         assert row["p1_id"] == "ME82"
         assert row["p2_id"] == "D0DT"
         assert row["round"] == "SF"
+        assert row["match_uid"] == "2026_339_SGL_SF_D0DT_ME82"
 
     def test_multiple_matches(self, tmp_path):
         html = _wrap(
@@ -520,6 +526,41 @@ class TestFullTransformerRun:
         assert len(df) == 1
         assert "match_uid" in df.columns
         assert "snapshot_timestamp" not in df.columns
+
+
+class TestUniquenessAssertion:
+    def test_assertion_fires_on_duplicate_match_uid(self):
+        import pytest
+
+        df = pl.DataFrame({
+            "match_uid": ["uid1", "uid1", "uid2"],
+        })
+        with pytest.raises(ValueError, match="Duplicate primary keys"):
+            ScheduleTransformer._assert_unique(df, ["match_uid"])
+
+    def test_assertion_skips_null_uids(self):
+        df = pl.DataFrame({
+            "match_uid": [None, None, "uid1"],
+        })
+        ScheduleTransformer._assert_unique(df, ["match_uid"])
+
+
+class TestDoublesDetection:
+    def test_doubles_draw_type_in_parquet(self, tmp_path):
+        _write_schedule_html(
+            tmp_path,
+            "schedule_20260207_140000.html",
+            FIXTURE_DOUBLES,
+        )
+        tournament = _make_tournament()
+        xf = ScheduleTransformer(
+            tournament, data_root=tmp_path
+        )
+        result = xf.run()
+        df = pl.read_parquet(result)
+        row = df.row(0, named=True)
+        assert row["draw_type"] == "doubles"
+        assert "DBL" in row["match_uid"]
 
 
 class TestEmptyScheduleDir:

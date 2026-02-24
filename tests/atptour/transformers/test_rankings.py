@@ -330,6 +330,29 @@ class TestSkipLogic:
         assert paths[0].stem == "rankings_singles_20260209"
 
 
+class TestUniquenessAssertion:
+    def test_assertion_fires_on_duplicate_pk(self):
+        import pytest
+
+        df = pl.DataFrame({
+            "player_id": ["A0E2", "A0E2"],
+        })
+        with pytest.raises(ValueError, match="Duplicate primary keys"):
+            RankingsTransformer._assert_unique(df, ["player_id"])
+
+    def test_consolidated_assertion_fires(self):
+        import pytest
+
+        df = pl.DataFrame({
+            "ranking_date": [date(2026, 2, 16), date(2026, 2, 16)],
+            "player_id": ["A0E2", "A0E2"],
+        })
+        with pytest.raises(ValueError, match="Duplicate primary keys"):
+            RankingsTransformer._assert_unique(
+                df, ["ranking_date", "player_id"]
+            )
+
+
 class TestStartYearFilter:
     def test_filters_by_start_year(self, tmp_path):
         """Only HTML files with year >= start_year are processed."""
