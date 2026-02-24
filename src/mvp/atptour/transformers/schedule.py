@@ -252,6 +252,24 @@ class ScheduleTransformer(BaseJob):
             [r.model_dump() for r in all_records],
             schema_overrides=polars_schema_overrides(ScheduleRecord),
         )
+
+        # Dedup: one row per match, keeping latest snapshot
+        sorted_ids = pl.min_horizontal("p1_id", "p2_id") + "_" + pl.max_horizontal("p1_id", "p2_id")
+        df = df.with_columns(
+            (
+                pl.col("year").cast(pl.Utf8) + "_"
+                + pl.col("tournament_id") + "_SGL_"
+                + pl.col("round") + "_"
+                + sorted_ids
+            ).alias("match_uid")
+        )
+        df = (
+            df.sort("snapshot_timestamp")
+            .group_by("match_uid")
+            .last()
+            .drop("snapshot_timestamp")
+        )
+
         target = self.build_path(
             "stage",
             f"tournaments/{self.tournament.circuit.value}/{self.tournament.tournament_id}/{self.tournament.year}",

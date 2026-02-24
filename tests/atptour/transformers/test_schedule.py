@@ -499,7 +499,8 @@ class TestFullTransformerRun:
         df = pl.read_parquet(result)
         assert len(df) == 2
 
-    def test_snapshot_timestamps_differ(self, tmp_path):
+    def test_dedup_keeps_latest_snapshot(self, tmp_path):
+        """Same match in two snapshots produces one row with latest data."""
         _write_schedule_html(
             tmp_path,
             "schedule_20260207_140000.html",
@@ -508,7 +509,7 @@ class TestFullTransformerRun:
         _write_schedule_html(
             tmp_path,
             "schedule_20260208_100000.html",
-            FIXTURE_NO_COURT,
+            FIXTURE_SINGLES,
         )
         tournament = _make_tournament()
         xf = ScheduleTransformer(
@@ -516,8 +517,9 @@ class TestFullTransformerRun:
         )
         result = xf.run()
         df = pl.read_parquet(result)
-        timestamps = df["snapshot_timestamp"].to_list()
-        assert timestamps[0] != timestamps[1]
+        assert len(df) == 1
+        assert "match_uid" in df.columns
+        assert "snapshot_timestamp" not in df.columns
 
 
 class TestEmptyScheduleDir:
