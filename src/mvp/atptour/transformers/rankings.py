@@ -57,11 +57,14 @@ class RankingsTransformer(BaseJob):
             ]
 
         stage_dir = self.build_path("stage", "rankings")
-        existing = {
-            p.stem
-            for p in self.list_files(stage_dir, "*.parquet")
-            if p.stem != "rankings_singles"
-        }
+        expected_cols = set(RankingsRecord.model_fields)
+        existing: set[str] = set()
+        for p in self.list_files(stage_dir, "*.parquet"):
+            if p.stem == "rankings_singles":
+                continue
+            cols = set(pl.read_parquet_schema(p).keys())
+            if cols == expected_cols:
+                existing.add(p.stem)
         to_process = [f for f in html_files if f.stem not in existing]
 
         if not to_process:

@@ -67,8 +67,9 @@ def _extract_player_info(div: Tag) -> tuple[str, str, str, str | None]:
             name_text = link.get_text(separator=" ", strip=True)
             names.append(name_text)
             if first_id is None:
-                href = link["href"]
-                first_id = href.split("/")[-2]
+                href = link.get("href", "")
+                parts = href.strip("/").split("/")
+                first_id = parts[-2] if len(parts) >= 2 else ""
         display_name = " / ".join(names)
 
         # Country: first flag in countries div
@@ -93,8 +94,9 @@ def _extract_player_info(div: Tag) -> tuple[str, str, str, str | None]:
     link = name_div.select_one("a") if name_div else None
     if link:
         name_text = link.get_text(separator=" ", strip=True)
-        href = link["href"]
-        player_id = href.split("/")[-2]
+        href = link.get("href", "")
+        parts = href.strip("/").split("/")
+        player_id = parts[-2] if len(parts) >= 2 else ""
     else:
         name_text = ""
         player_id = ""
