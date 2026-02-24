@@ -243,3 +243,34 @@ class TestAdRowSkipping:
         paths = xf.run()
         df = pl.read_parquet(paths[0])
         assert len(df) == 1
+
+
+class TestConsolidate:
+    def test_merges_multiple_dates(self, tmp_path):
+        html1 = _make_html(_row_html(points="13,150"))
+        html2 = _make_html(_row_html(points="12,000"))
+        _write_rankings_html(tmp_path, "rankings_singles_20260209.html", html1)
+        _write_rankings_html(tmp_path, "rankings_singles_20260216.html", html2)
+        xf = RankingsTransformer(data_root=tmp_path)
+        xf.run()
+        result = xf.consolidate()
+        assert result is not None
+        df = pl.read_parquet(result)
+        assert len(df) == 2
+        assert result.name == "rankings_singles.parquet"
+
+    def test_no_parquets_returns_none(self, tmp_path):
+        xf = RankingsTransformer(data_root=tmp_path)
+        result = xf.consolidate()
+        assert result is None
+
+    def test_excludes_consolidated_file_from_input(self, tmp_path):
+        html = _make_html(_row_html())
+        _write_rankings_html(tmp_path, "rankings_singles_20260216.html", html)
+        xf = RankingsTransformer(data_root=tmp_path)
+        xf.run()
+        # Run consolidate twice — should not double-count
+        xf.consolidate()
+        result = xf.consolidate()
+        df = pl.read_parquet(result)
+        assert len(df) == 1
