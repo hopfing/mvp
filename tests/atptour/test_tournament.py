@@ -51,7 +51,7 @@ class TestTournament:
             circuit=Circuit.tour,
             location="Melbourne, Australia",
         )
-        assert t.logging_id == "ATP Melbourne 2023 (580)"
+        assert t.logging_id == "ATP Australian Open 2023 (580)"
 
     def test_logging_id_uses_city(self):
         t = Tournament(
@@ -61,6 +61,54 @@ class TestTournament:
             location="Buenos Aires, Argentina",
         )
         assert "Buenos Aires" in t.logging_id
+
+
+class TestTournamentName:
+    def test_city_fallback(self):
+        t = Tournament(
+            tournament_id="339",
+            year=2026,
+            circuit=Circuit.tour,
+            location="Brisbane, Australia",
+        )
+        assert t.name == "Brisbane"
+
+    def test_grand_slam_lookup(self):
+        t = Tournament(
+            tournament_id="580",
+            year=2026,
+            circuit=Circuit.tour,
+            location="Melbourne, Australia",
+        )
+        assert t.name == "Australian Open"
+
+    def test_davis_cup(self):
+        t = Tournament(
+            tournament_id="8099",
+            year=2026,
+            circuit=Circuit.tour,
+            location="Multiple Locations",
+        )
+        assert t.name == "Davis Cup Finals"
+
+    def test_multiple_locations_without_lookup_raises(self):
+        t = Tournament(
+            tournament_id="9999",
+            year=2026,
+            circuit=Circuit.tour,
+            location="Multiple Locations",
+        )
+        with pytest.raises(ValueError, match="Unable to determine"):
+            _ = t.name
+
+    def test_logging_id_uses_name(self):
+        t = Tournament(
+            tournament_id="580",
+            year=2026,
+            circuit=Circuit.tour,
+            location="Melbourne, Australia",
+        )
+        assert "Australian Open" in t.logging_id
 
 
 class TestFromOverviewData:

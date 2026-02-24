@@ -4,6 +4,19 @@ from dataclasses import dataclass
 
 from mvp.common.enums import Circuit, TournamentType
 
+TOURNAMENT_NAMES: dict[str, str] = {
+    "9900": "United Cup",
+    "580": "Australian Open",
+    "8096": "Davis Cup Qualifiers 1st Rd",
+    "520": "Roland Garros",
+    "540": "Wimbledon",
+    "560": "US Open",
+    "8097": "Davis Cup Qualifiers 2nd Rd",
+    "9210": "Laver Cup",
+    "605": "Nitto ATP Finals",
+    "8099": "Davis Cup Finals",
+}
+
 
 @dataclass(frozen=True)
 class Tournament:
@@ -18,6 +31,19 @@ class Tournament:
     indoor: str | None = None
 
     @property
+    def name(self) -> str:
+        """Display name — TOURNAMENT_NAMES lookup for exceptions, city fallback."""
+        city = self.location.split(",")[0].strip()
+        name = TOURNAMENT_NAMES.get(self.tournament_id, city)
+        if name == "Multiple Locations":
+            raise ValueError(
+                f"Unable to determine tournament name for ID {self.tournament_id} "
+                f"with location '{self.location}'.\n"
+                f"Add entry to TOURNAMENT_NAMES in tournament.py."
+            )
+        return name
+
+    @property
     def path(self) -> str:
         """Storage path segment: tournaments/{circuit}/{tid}/{year}"""
         return f"tournaments/{self.circuit.value}/{self.tournament_id}/{self.year}"
@@ -25,8 +51,10 @@ class Tournament:
     @property
     def logging_id(self) -> str:
         """Human-readable identifier for logging."""
-        city = self.location.split(",")[0].strip()
-        return f"{self.circuit.display_name} {city} {self.year} ({self.tournament_id})"
+        return (
+            f"{self.circuit.display_name} {self.name} "
+            f"{self.year} ({self.tournament_id})"
+        )
 
     @classmethod
     def from_overview_data(
