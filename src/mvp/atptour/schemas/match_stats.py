@@ -1,6 +1,7 @@
 """Match Stats staged schema."""
 
 from datetime import date, datetime
+from typing import ClassVar
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -22,6 +23,8 @@ _VALID_REASONS = {"RET", "DEF", "W/O", "UNP"}
 
 class MatchStatsRecord(BaseModel):
     """A single match stats record from an ATP match_stats JSON file."""
+
+    SCHEMA_VERSION: ClassVar[str] = SCHEMA_VERSION
 
     # Context
     tournament_id: str
@@ -186,3 +189,4 @@ class MatchStatsRecord(BaseModel):
 
 
 SCHEMA_HASH = compute_schema_hash(MatchStatsRecord)
+MatchStatsRecord.SCHEMA_HASH = SCHEMA_HASH

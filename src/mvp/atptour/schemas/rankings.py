@@ -1,6 +1,7 @@
 """Rankings staged schema."""
 
 from datetime import date, datetime
+from typing import ClassVar
 
 from pydantic import BaseModel, field_validator
 
@@ -12,6 +13,8 @@ SCHEMA_VERSION = "1.0.0"
 
 class RankingsRecord(BaseModel):
     """A single player ranking from a weekly ATP rankings snapshot."""
+
+    SCHEMA_VERSION: ClassVar[str] = SCHEMA_VERSION
 
     ranking_date: date
     rank: int
@@ -42,3 +45,4 @@ class RankingsRecord(BaseModel):
 
 
 SCHEMA_HASH = compute_schema_hash(RankingsRecord)
+RankingsRecord.SCHEMA_HASH = SCHEMA_HASH

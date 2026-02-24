@@ -7,6 +7,7 @@ from mvp.atptour.schemas.schedule import (
     SCHEMA_VERSION,
     ScheduleRecord,
 )
+from mvp.common.enums import Circuit
 
 PARSED_AT = datetime(2026, 2, 24)
 SOURCE_FILE = "tournaments/tour/339/2026/schedule/schedule_20260207_140000.html"
@@ -18,7 +19,7 @@ def _base_record(**overrides) -> dict:
     data = {
         "tournament_id": "339",
         "year": 2026,
-        "circuit": "tour",
+        "circuit": Circuit.tour,
         "match_date": date(2026, 2, 7),
         "scheduled_datetime": datetime(2026, 2, 7, 14, 0, 0),
         "time_suffix": "Not Before",
@@ -48,7 +49,7 @@ class TestValidRecords:
         record = ScheduleRecord(**_base_record())
         assert record.tournament_id == "339"
         assert record.year == 2026
-        assert record.circuit == "tour"
+        assert record.circuit == Circuit.tour
         assert record.match_date == date(2026, 2, 7)
         assert record.scheduled_datetime == datetime(2026, 2, 7, 14, 0, 0)
         assert record.time_suffix == "Not Before"

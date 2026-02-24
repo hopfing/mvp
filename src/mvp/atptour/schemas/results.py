@@ -1,6 +1,7 @@
 """Tournament Results staged schema."""
 
 from datetime import datetime
+from typing import ClassVar
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -18,6 +19,8 @@ SCHEMA_VERSION = "1.0.0"
 
 class ResultRecord(BaseModel):
     """A single match result from a Tournament Results HTML page."""
+
+    SCHEMA_VERSION: ClassVar[str] = SCHEMA_VERSION
 
     tournament_id: str
     year: int
@@ -176,3 +179,4 @@ class ResultRecord(BaseModel):
 
 
 SCHEMA_HASH = compute_schema_hash(ResultRecord)
+ResultRecord.SCHEMA_HASH = SCHEMA_HASH

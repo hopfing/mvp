@@ -1,6 +1,7 @@
 """Overview (tournament metadata) staged schema."""
 
 from datetime import datetime
+from typing import ClassVar
 
 from pydantic import BaseModel, field_validator
 
@@ -13,6 +14,8 @@ SCHEMA_VERSION = "1.0.0"
 
 class OverviewRecord(BaseModel):
     """A single tournament overview record from an ATP overview JSON file."""
+
+    SCHEMA_VERSION: ClassVar[str] = SCHEMA_VERSION
 
     # Tournament identity
     tournament_id: str
@@ -48,3 +51,4 @@ class OverviewRecord(BaseModel):
 
 
 SCHEMA_HASH = compute_schema_hash(OverviewRecord)
+OverviewRecord.SCHEMA_HASH = SCHEMA_HASH

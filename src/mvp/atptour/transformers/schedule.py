@@ -12,6 +12,7 @@ from bs4 import BeautifulSoup, Tag
 from mvp.atptour.schemas.schedule import ScheduleRecord
 from mvp.atptour.tournament import Tournament
 from mvp.common.base_job import BaseJob
+from mvp.common.enums import Circuit
 from mvp.common.utils import polars_schema_overrides
 
 logger = logging.getLogger(__name__)
@@ -115,7 +116,7 @@ def _parse_schedule_html(
     html: str,
     tournament_id: str,
     year: int,
-    circuit: str,
+    circuit: "Circuit",
     snapshot_timestamp: datetime,
     source_file: str,
     parsed_at: datetime,
@@ -235,7 +236,7 @@ class ScheduleTransformer(BaseJob):
                 html_content,
                 tournament_id=self.tournament.tournament_id,
                 year=self.tournament.year,
-                circuit=self.tournament.circuit.value,
+                circuit=self.tournament.circuit,
                 snapshot_timestamp=snapshot_ts,
                 source_file=source_file,
                 parsed_at=parsed_at,

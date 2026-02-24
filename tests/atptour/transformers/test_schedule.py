@@ -240,7 +240,7 @@ def _parse_fixture(html, **kwargs):
     defaults = {
         "tournament_id": "339",
         "year": 2026,
-        "circuit": "tour",
+        "circuit": Circuit.tour,
         "snapshot_timestamp": datetime(2026, 2, 7, 14, 0, 0),
         "source_file": "test.html",
         "parsed_at": datetime(2026, 2, 24),
@@ -300,7 +300,7 @@ class TestParseSinglesMatch:
         r = records[0]
         assert r.tournament_id == "339"
         assert r.year == 2026
-        assert r.circuit == "tour"
+        assert r.circuit == Circuit.tour
         assert r.match_date == date(2026, 2, 7)
         assert r.scheduled_datetime == datetime(
             2026, 2, 7, 14, 0, 0
