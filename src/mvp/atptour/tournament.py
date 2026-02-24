@@ -1,5 +1,6 @@
 """Tournament metadata container."""
 
+import unicodedata
 from dataclasses import dataclass
 
 from mvp.common.enums import Circuit, TournamentType
@@ -42,6 +43,27 @@ class Tournament:
                 f"Add entry to TOURNAMENT_NAMES in tournament.py."
             )
         return name
+
+    @property
+    def url_slug(self) -> str:
+        """URL-friendly slug for atptour.com paths."""
+        name = unicodedata.normalize("NFKD", self.name)
+        name = name.encode("ascii", "ignore").decode()
+        return name.lower().replace("'", "").replace(" ", "-")
+
+    @property
+    def scores_url_prefix(self) -> str:
+        """URL prefix for atptour.com /scores/ paths."""
+        if self.is_archive:
+            return "archive"
+        if self.circuit == Circuit.tour:
+            return "current"
+        if self.circuit == Circuit.chal:
+            return "current-challenger"
+        raise ValueError(
+            f"No scores URL prefix for circuit {self.circuit!r}. "
+            f"Update Tournament.scores_url_prefix in tournament.py."
+        )
 
     @property
     def path(self) -> str:

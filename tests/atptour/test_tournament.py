@@ -149,3 +149,83 @@ class TestFromOverviewData:
         t = Tournament.from_overview_data(data, tournament_id="580", year=2023)
         assert t.surface is None
         assert t.indoor is None
+
+
+class TestUrlSlug:
+    def test_simple_city(self):
+        t = Tournament(
+            tournament_id="339",
+            year=2026,
+            circuit=Circuit.tour,
+            location="Brisbane, Australia",
+        )
+        assert t.url_slug == "brisbane"
+
+    def test_multi_word_name(self):
+        t = Tournament(
+            tournament_id="580",
+            year=2026,
+            circuit=Circuit.tour,
+            location="Melbourne, Australia",
+        )
+        assert t.url_slug == "australian-open"
+
+    def test_strips_accents(self):
+        t = Tournament(
+            tournament_id="999",
+            year=2026,
+            circuit=Circuit.tour,
+            location="Zürich, Switzerland",
+        )
+        assert t.url_slug == "zurich"
+
+    def test_strips_apostrophes(self):
+        t = Tournament(
+            tournament_id="999",
+            year=2026,
+            circuit=Circuit.tour,
+            location="Queen's Club, UK",
+        )
+        assert t.url_slug == "queens-club"
+
+
+class TestScoresUrlPrefix:
+    def test_archive(self):
+        t = Tournament(
+            tournament_id="580",
+            year=2023,
+            circuit=Circuit.tour,
+            location="Melbourne, Australia",
+            is_archive=True,
+        )
+        assert t.scores_url_prefix == "archive"
+
+    def test_active_tour(self):
+        t = Tournament(
+            tournament_id="580",
+            year=2026,
+            circuit=Circuit.tour,
+            location="Melbourne, Australia",
+            is_archive=False,
+        )
+        assert t.scores_url_prefix == "current"
+
+    def test_active_challenger(self):
+        t = Tournament(
+            tournament_id="1796",
+            year=2026,
+            circuit=Circuit.chal,
+            location="St. Brieuc, France",
+            is_archive=False,
+        )
+        assert t.scores_url_prefix == "current-challenger"
+
+    def test_archive_challenger(self):
+        t = Tournament(
+            tournament_id="1796",
+            year=2023,
+            circuit=Circuit.chal,
+            location="St. Brieuc, France",
+            is_archive=True,
+        )
+        assert t.scores_url_prefix == "archive"
