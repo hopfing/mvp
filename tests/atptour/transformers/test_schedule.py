@@ -314,11 +314,13 @@ class TestParseSinglesMatch:
         assert r.p1_id == "ME82"
         assert r.p1_name == "A. Mannarino"
         assert r.p1_country == "FRA"
-        assert r.p1_seed_entry == "(1)"
+        assert r.p1_seed == 1
+        assert r.p1_entry is None
         assert r.p2_id == "D0DT"
         assert r.p2_name == "M. Damm"
         assert r.p2_country == "USA"
-        assert r.p2_seed_entry == "(Q)"
+        assert r.p2_seed is None
+        assert r.p2_entry == "Q"
         assert r.status == "Vs"
         assert r.score is None
 
@@ -338,13 +340,15 @@ class TestParseDoublesMatch:
         assert r.p1_id == "F09R"
         assert r.p1_name == "C. Frantzen / R. Haase"
         assert r.p1_country == "GER"
-        assert r.p1_seed_entry == "(3)"
+        assert r.p1_seed == 3
+        assert r.p1_entry is None
         assert r.p2_id == "SY05"
         assert r.p2_name == (
             "J. Schnaitter / M. Wallner"
         )
         assert r.p2_country == "GER"
-        assert r.p2_seed_entry == "(2)"
+        assert r.p2_seed == 2
+        assert r.p2_entry is None
         assert r.status == "Defeats"
         assert r.score == "76(6) 61"
         assert r.court_name == "Court Patrice Dominguez"
@@ -378,16 +382,20 @@ class TestParseCourtName:
 class TestParseSeedEntry:
     def test_seed_number(self):
         records = _parse_fixture(FIXTURE_SINGLES)
-        assert records[0].p1_seed_entry == "(1)"
+        assert records[0].p1_seed == 1
+        assert records[0].p1_entry is None
 
     def test_qualifier_entry(self):
         records = _parse_fixture(FIXTURE_SINGLES)
-        assert records[0].p2_seed_entry == "(Q)"
+        assert records[0].p2_seed is None
+        assert records[0].p2_entry == "Q"
 
     def test_empty_seed(self):
         records = _parse_fixture(FIXTURE_NO_COURT)
-        assert records[0].p1_seed_entry is None
-        assert records[0].p2_seed_entry is None
+        assert records[0].p1_seed is None
+        assert records[0].p1_entry is None
+        assert records[0].p2_seed is None
+        assert records[0].p2_entry is None
 
 
 class TestParseFollowedBy:

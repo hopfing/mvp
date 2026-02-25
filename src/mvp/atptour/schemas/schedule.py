@@ -36,12 +36,14 @@ class ScheduleRecord(BaseModel):
     p1_id: str
     p1_name: str
     p1_country: str
-    p1_seed_entry: str | None
+    p1_seed: int | None = None
+    p1_entry: str | None = None
 
     p2_id: str
     p2_name: str
     p2_country: str
-    p2_seed_entry: str | None
+    p2_seed: int | None = None
+    p2_entry: str | None = None
 
     status: str | None
     score: str | None

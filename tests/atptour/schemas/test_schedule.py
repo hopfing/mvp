@@ -30,11 +30,13 @@ def _base_record(**overrides) -> dict:
         "p1_id": "me82",
         "p1_name": "A. Mannarino",
         "p1_country": "fra",
-        "p1_seed_entry": "(1)",
+        "p1_seed": 1,
+        "p1_entry": None,
         "p2_id": "d0dt",
         "p2_name": "M. Damm",
         "p2_country": "usa",
-        "p2_seed_entry": "(Q)",
+        "p2_seed": None,
+        "p2_entry": "Q",
         "status": "Vs",
         "score": None,
         "snapshot_timestamp": SNAPSHOT_TS,
@@ -59,9 +61,11 @@ class TestValidRecords:
         assert record.court_name == "Center Court"
         assert record.round == Round.SF
         assert record.p1_name == "A. Mannarino"
-        assert record.p1_seed_entry == "(1)"
+        assert record.p1_seed == 1
+        assert record.p1_entry is None
         assert record.p2_name == "M. Damm"
-        assert record.p2_seed_entry == "(Q)"
+        assert record.p2_seed is None
+        assert record.p2_entry == "Q"
         assert record.status == "Vs"
         assert record.score is None
         assert record.match_uid == "2026_339_SGL_SF_D0DT_ME82"
@@ -73,15 +77,19 @@ class TestValidRecords:
         record = ScheduleRecord(**_base_record(
             scheduled_datetime=None,
             court_name=None,
-            p1_seed_entry=None,
-            p2_seed_entry=None,
+            p1_seed=None,
+            p1_entry=None,
+            p2_seed=None,
+            p2_entry=None,
             status=None,
             score=None,
         ))
         assert record.scheduled_datetime is None
         assert record.court_name is None
-        assert record.p1_seed_entry is None
-        assert record.p2_seed_entry is None
+        assert record.p1_seed is None
+        assert record.p1_entry is None
+        assert record.p2_seed is None
+        assert record.p2_entry is None
         assert record.status is None
         assert record.score is None
 
@@ -118,7 +126,7 @@ class TestFieldValidation:
 
 class TestFieldCount:
     def test_field_count(self):
-        assert len(ScheduleRecord.model_fields) == 23
+        assert len(ScheduleRecord.model_fields) == 25
 
 
 class TestSchemaVersioning:

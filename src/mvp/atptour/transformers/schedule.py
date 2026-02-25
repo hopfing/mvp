@@ -9,6 +9,7 @@ from pathlib import Path
 import polars as pl
 from bs4 import BeautifulSoup, Tag
 
+from mvp.atptour.mappings import parse_seed_entry
 from mvp.atptour.schemas.schedule import ScheduleRecord
 from mvp.atptour.tournament import Tournament
 from mvp.common.base_job import BaseJob
@@ -198,11 +199,13 @@ def _parse_schedule_html(
                 p1_id=p1_id,
                 p1_name=p1_name,
                 p1_country=p1_country,
-                p1_seed_entry=p1_seed_entry,
+                p1_seed=parse_seed_entry(p1_seed_entry)[0],
+                p1_entry=parse_seed_entry(p1_seed_entry)[1],
                 p2_id=p2_id,
                 p2_name=p2_name,
                 p2_country=p2_country,
-                p2_seed_entry=p2_seed_entry,
+                p2_seed=parse_seed_entry(p2_seed_entry)[0],
+                p2_entry=parse_seed_entry(p2_seed_entry)[1],
                 status=status,
                 score=score,
                 snapshot_timestamp=snapshot_timestamp,
