@@ -81,8 +81,10 @@ def _base_singles(**overrides) -> dict:
         "p2_id": "cd34",
         "p1_partner_id": None,
         "p2_partner_id": None,
-        "p1_seed": "1",
-        "p2_seed": "2",
+        "p1_seed": 1,
+        "p1_entry": None,
+        "p2_seed": 2,
+        "p2_entry": None,
         **_stat_fields("p1"),
         **_stat_fields("p2"),
         "source_file": SOURCE_FILE,
@@ -132,6 +134,22 @@ class TestValidRecords:
         record = MatchStatsRecord(**_base_singles(winner_id=None))
         assert record.winner_id is None
 
+    def test_seed_as_int(self):
+        record = MatchStatsRecord(**_base_singles(p1_seed=4, p2_seed=7))
+        assert record.p1_seed == 4
+        assert record.p2_seed == 7
+
+    def test_seed_with_entry(self):
+        record = MatchStatsRecord(
+            **_base_singles(
+                p1_seed=None, p1_entry="WC", p2_seed=None, p2_entry="Q",
+            )
+        )
+        assert record.p1_seed is None
+        assert record.p1_entry == "WC"
+        assert record.p2_seed is None
+        assert record.p2_entry == "Q"
+
     def test_null_optional_fields(self):
         record = MatchStatsRecord(
             **_base_singles(
@@ -152,7 +170,9 @@ class TestValidRecords:
                 umpire_first_name=None,
                 umpire_last_name=None,
                 p1_seed=None,
+                p1_entry=None,
                 p2_seed=None,
+                p2_entry=None,
             )
         )
         assert record.surface is None

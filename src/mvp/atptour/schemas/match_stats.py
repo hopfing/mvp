@@ -66,8 +66,10 @@ class MatchStatsRecord(BaseModel):
     p2_id: str
     p1_partner_id: str | None = None
     p2_partner_id: str | None = None
-    p1_seed: str | None = None
-    p2_seed: str | None = None
+    p1_seed: int | None = None
+    p1_entry: str | None = None
+    p2_seed: int | None = None
+    p2_entry: str | None = None
 
     # Stats — P1 service
     p1_svc_aces: int

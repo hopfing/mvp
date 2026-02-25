@@ -454,8 +454,44 @@ class TestTransformSingles:
         paths = xf.run()
         df = pl.read_parquet(paths[0])
         row = df.row(0, named=True)
-        assert row["p1_seed"] == "4"
-        assert row["p2_seed"] == "7"
+        assert row["p1_seed"] == 4
+        assert row["p2_seed"] == 7
+        assert row["p1_entry"] is None
+        assert row["p2_entry"] is None
+
+    def test_seed_with_entry(self, tmp_path):
+        t = _make_tournament()
+        _write_json(
+            tmp_path,
+            t,
+            "ms001.json",
+            _match_json(p1_seed="1/WC", p2_seed="Q"),
+        )
+        xf = MatchStatsTransformer(tournament=t, data_root=tmp_path)
+        paths = xf.run()
+        df = pl.read_parquet(paths[0])
+        row = df.row(0, named=True)
+        assert row["p1_seed"] == 1
+        assert row["p1_entry"] == "WC"
+        assert row["p2_seed"] is None
+        assert row["p2_entry"] == "Q"
+
+    def test_null_seed(self, tmp_path):
+        t = _make_tournament()
+        _write_json(
+            tmp_path,
+            t,
+            "ms001.json",
+            _match_json(p1_seed=None, p2_seed=None),
+        )
+        xf = MatchStatsTransformer(tournament=t, data_root=tmp_path)
+        paths = xf.run()
+        df = pl.read_parquet(paths[0])
+        row = df.row(0, named=True)
+        assert row["p1_seed"] is None
+        assert row["p2_seed"] is None
+        assert row["p1_entry"] is None
+        assert row["p2_entry"] is None
 
     def test_match_uid_computed(self, tmp_path):
         t = _make_tournament()

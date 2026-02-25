@@ -10,6 +10,7 @@ import polars as pl
 from mvp.atptour.mappings import (
     map_player_id,
     parse_duration,
+    parse_seed_entry,
 )
 from mvp.atptour.schemas.match_stats import MatchStatsRecord
 from mvp.atptour.tournament import Tournament
@@ -139,6 +140,9 @@ class MatchStatsTransformer(BaseJob):
         p1_prefixed = {f"p1_{k}": v for k, v in p1_stats.items()}
         p2_prefixed = {f"p2_{k}": v for k, v in p2_stats.items()}
 
+        p1_seed_val, p1_entry_val = parse_seed_entry(player_team1.get("SeedPlayerTeam"))
+        p2_seed_val, p2_entry_val = parse_seed_entry(player_team2.get("SeedPlayerTeam"))
+
         return MatchStatsRecord(
             tournament_id=self.tournament.tournament_id,
             year=self.tournament.year,
@@ -169,8 +173,10 @@ class MatchStatsTransformer(BaseJob):
             p2_id=p2_id,
             p1_partner_id=p1_partner_id,
             p2_partner_id=p2_partner_id,
-            p1_seed=player_team1.get("SeedPlayerTeam"),
-            p2_seed=player_team2.get("SeedPlayerTeam"),
+            p1_seed=p1_seed_val,
+            p1_entry=p1_entry_val,
+            p2_seed=p2_seed_val,
+            p2_entry=p2_entry_val,
             source_file=source_file,
             parsed_at=parsed_at,
             **p1_prefixed,
