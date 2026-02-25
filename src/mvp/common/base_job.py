@@ -10,7 +10,7 @@ import polars as pl
 
 logger = logging.getLogger(__name__)
 
-BUCKETS = ("raw", "stage", "analytics")
+BUCKETS = ("raw", "stage", "aggregate", "analytics")
 
 
 class BaseJob:

@@ -27,9 +27,19 @@ class TestBuildPath:
         with pytest.raises(ValueError, match="Invalid bucket"):
             job.build_path("invalid", "some/path")
 
+    def test_aggregate_bucket(self, tmp_path):
+        job = BaseJob(domain="atptour", data_root=tmp_path)
+        path = job.build_path(
+            "aggregate", "tournaments/tour/580/2023", "matches.parquet",
+        )
+        assert path == (
+            tmp_path / "aggregate" / "atptour" / "tournaments"
+            / "tour" / "580" / "2023" / "matches.parquet"
+        )
+
     def test_all_valid_buckets(self, tmp_path):
         job = BaseJob(domain="atptour", data_root=tmp_path)
-        for bucket in ("raw", "stage", "analytics"):
+        for bucket in ("raw", "stage", "aggregate", "analytics"):
             path = job.build_path(bucket, "some/path")
             assert bucket in str(path)
 
