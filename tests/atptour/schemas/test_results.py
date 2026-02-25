@@ -214,6 +214,12 @@ class TestValidationErrors:
             )
 
 
+class TestEmptyToNone:
+    def test_empty_match_id_becomes_none(self):
+        record = ResultRecord(**_base_singles(match_id=""))
+        assert record.match_id is None
+
+
 class TestSchemaVersioning:
     def test_schema_version_is_semver(self):
         parts = SCHEMA_VERSION.split(".")

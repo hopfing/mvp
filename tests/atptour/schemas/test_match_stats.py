@@ -237,6 +237,12 @@ class TestValidationErrors:
         with pytest.raises(ValidationError, match="[Uu]nmapped round"):
             MatchStatsRecord(**_base_singles(round="Nonexistent Round"))
 
+class TestEmptyToNone:
+    def test_empty_reason_becomes_none(self):
+        record = MatchStatsRecord(**_base_singles(reason=""))
+        assert record.reason is None
+
+
 class TestSchemaVersioning:
     def test_schema_version_is_semver(self):
         parts = SCHEMA_VERSION.split(".")

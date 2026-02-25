@@ -12,6 +12,7 @@ from mvp.atptour.mappings import (
     normalize_round,
 )
 from mvp.atptour.schema_helpers import (
+    empty_to_none,
     validate_doubles_partners,
     validate_winner_in_players,
 )
@@ -89,6 +90,7 @@ class ResultRecord(BaseModel):
     _normalize_ids = field_validator("p1_id", "p2_id", "winner_id", mode="before")(
         map_player_id
     )
+    _empty_to_none_match_id = field_validator("match_id", mode="before")(empty_to_none)
 
     @field_validator("p1_country", "p2_country", mode="before")
     @classmethod

@@ -51,7 +51,7 @@ class PlayerBioRecord(BaseModel):
     @field_validator("natl_id", mode="before")
     @classmethod
     def _uppercase_natl_id(cls, v: str | None) -> str | None:
-        if v is None:
+        if v is None or v == "":
             return None
         return v.upper()
 

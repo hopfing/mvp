@@ -237,6 +237,17 @@ class TestComputedFields:
         assert record.match_uid is None
 
 
+class TestEmptyToNone:
+    def test_empty_strings_to_none(self):
+        record = PlayerActivityRecord(**_base_activity(
+            reason="", match_stats_url="", opp_first_name="", opp_last_name="",
+        ))
+        assert record.reason is None
+        assert record.match_stats_url is None
+        assert record.opp_first_name is None
+        assert record.opp_last_name is None
+
+
 class TestSetScores:
     def test_all_set_scores_none_by_default(self):
         record = PlayerActivityRecord(**_base_activity())

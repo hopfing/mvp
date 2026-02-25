@@ -124,6 +124,14 @@ class TestFieldValidation:
         assert record.p2_country == "USA"
 
 
+class TestEmptyToNone:
+    def test_empty_strings_to_none(self):
+        record = ScheduleRecord(**_base_record(court_name="", status="", score=""))
+        assert record.court_name is None
+        assert record.status is None
+        assert record.score is None
+
+
 class TestFieldCount:
     def test_field_count(self):
         assert len(ScheduleRecord.model_fields) == 25

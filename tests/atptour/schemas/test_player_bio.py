@@ -138,6 +138,19 @@ class TestPlayerBioRecord:
         assert hasattr(PlayerBioRecord, "SCHEMA_HASH")
         assert isinstance(PlayerBioRecord.SCHEMA_HASH, str)
 
+    def test_empty_natl_id_becomes_none(self):
+        r = PlayerBioRecord(
+            player_id="x",
+            first_name="A",
+            last_name="B",
+            natl_id="",
+            is_active=False,
+            is_dbl_specialist=False,
+            source_file="test",
+            parsed_at=datetime(2026, 1, 1),
+        )
+        assert r.natl_id is None
+
     def test_unexpected_right_handed_raises(self):
         with pytest.raises(ValueError):
             PlayerBioRecord(

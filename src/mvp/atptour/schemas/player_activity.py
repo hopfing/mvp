@@ -93,6 +93,10 @@ class PlayerActivityRecord(BaseModel):
     _normalize_surface = field_validator("surface", mode="before")(empty_to_none)
     _normalize_indoor = field_validator("indoor", mode="before")(parse_indoor)
     _normalize_win_loss = field_validator("win_loss", mode="before")(empty_to_none)
+    _empty_to_none_fields = field_validator(
+        "reason", "match_stats_url", "opp_first_name", "opp_last_name",
+        mode="before",
+    )(empty_to_none)
 
     @field_validator("player_id", mode="before")
     @classmethod

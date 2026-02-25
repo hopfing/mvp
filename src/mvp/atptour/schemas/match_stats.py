@@ -153,7 +153,7 @@ class MatchStatsRecord(BaseModel):
     @field_validator("reason", mode="before")
     @classmethod
     def _validate_reason(cls, v: str | None) -> str | None:
-        if v is None:
+        if v is None or v == "":
             return None
         if v not in _VALID_REASONS:
             raise ValueError(

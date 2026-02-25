@@ -11,6 +11,7 @@ from mvp.atptour.mappings import (
     map_player_id,
     normalize_round,
 )
+from mvp.atptour.schema_helpers import empty_to_none
 from mvp.common.enums import Circuit, DrawType, Round
 from mvp.common.schema_hash import compute_schema_hash
 
@@ -55,6 +56,9 @@ class ScheduleRecord(BaseModel):
     parsed_at: datetime
 
     _normalize_round = field_validator("round", mode="before")(normalize_round)
+    _empty_to_none = field_validator(
+        "court_name", "status", "score", mode="before",
+    )(empty_to_none)
 
     @field_validator("p1_id", "p2_id", mode="before")
     @classmethod
