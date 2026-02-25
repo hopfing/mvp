@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 
 from mvp.atptour.discovery import TournamentDiscovery
+from mvp.atptour.aggregators.tournament_matches import TournamentMatchesAggregator
 from mvp.atptour.extractors.match_stats import MatchStatsExtractor
 from mvp.atptour.extractors.overview import OverviewExtractor
 from mvp.atptour.extractors.player_activity import PlayerActivityExtractor
@@ -130,6 +131,13 @@ def _process_tournaments(
                 tournament, refresh=stats_refresh
             )
             MatchStatsTransformer(tournament, data_root=data_root).run()
+
+            TournamentMatchesAggregator(
+                circuit=tournament.circuit,
+                tid=tournament.tournament_id,
+                year=tournament.year,
+                data_root=data_root,
+            ).run()
 
             logger.info("[%d/%d] Completed %s", idx, total, tournament.logging_id)
         except Exception as e:
