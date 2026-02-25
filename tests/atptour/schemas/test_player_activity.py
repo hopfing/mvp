@@ -110,6 +110,14 @@ class TestFieldValidation:
         ))
         assert record.opp_id is None
 
+    def test_opp_natl_id_uppercased(self):
+        record = PlayerActivityRecord(**_base_activity(opp_natl_id="esp"))
+        assert record.opp_natl_id == "ESP"
+
+    def test_opp_natl_id_none_passes(self):
+        record = PlayerActivityRecord(**_base_activity(opp_natl_id=None))
+        assert record.opp_natl_id is None
+
     def test_round_normalization(self):
         record = PlayerActivityRecord(**_base_activity(round="Quarterfinals"))
         assert record.round.value == "QF"

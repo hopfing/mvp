@@ -101,7 +101,14 @@ class PlayerActivityRecord(BaseModel):
 
     @field_validator("opp_id", mode="before")
     @classmethod
-    def _uppercase_opp_id(cls, v: str | None) -> str | None:
+    def _normalize_opp_id(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        return map_player_id(v)
+
+    @field_validator("opp_natl_id", mode="before")
+    @classmethod
+    def _uppercase_opp_natl_id(cls, v: str | None) -> str | None:
         if v is None:
             return None
         return v.upper()

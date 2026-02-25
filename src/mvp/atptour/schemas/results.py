@@ -90,6 +90,11 @@ class ResultRecord(BaseModel):
         map_player_id
     )
 
+    @field_validator("p1_country", "p2_country", mode="before")
+    @classmethod
+    def _uppercase_country(cls, v: str) -> str:
+        return v.upper()
+
     @field_validator("p1_partner_id", "p2_partner_id", mode="before")
     @classmethod
     def _normalize_partner_ids(cls, v: str | None) -> str | None:

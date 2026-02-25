@@ -144,6 +144,11 @@ class TestValidRecords:
         )
         assert record.match_uid is None
 
+    def test_country_uppercased(self):
+        record = ResultRecord(**_base_singles(p1_country="usa", p2_country="gbr"))
+        assert record.p1_country == "USA"
+        assert record.p2_country == "GBR"
+
     def test_non_placeholder_match_uid_required(self):
         """Covered implicitly by all valid records above, but explicit."""
         record = ResultRecord(**_base_singles())
