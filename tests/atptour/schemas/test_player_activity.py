@@ -81,17 +81,17 @@ class TestValidRecords:
             opp_natl_id="ESP",
             reason=None,
             match_stats_url="/en/scores/stats/2023/580/ms001",
-            player_set1_score=6,
-            opp_set1_score=4,
-            player_set2_score=6,
-            opp_set2_score=3,
+            player_set1_games=6,
+            opp_set1_games=4,
+            player_set2_games=6,
+            opp_set2_games=3,
         ))
         assert record.surface == "Hard"
         assert record.indoor is True
         assert record.tournament_start_date == date(2023, 1, 16)
         assert record.tournament_end_date == date(2023, 1, 29)
-        assert record.player_set1_score == 6
-        assert record.opp_set1_score == 4
+        assert record.player_set1_games == 6
+        assert record.opp_set1_games == 4
 
 
 class TestFieldValidation:
@@ -241,25 +241,25 @@ class TestSetScores:
     def test_all_set_scores_none_by_default(self):
         record = PlayerActivityRecord(**_base_activity())
         for i in range(1, 6):
-            assert getattr(record, f"player_set{i}_score") is None
-            assert getattr(record, f"opp_set{i}_score") is None
-            assert getattr(record, f"player_set{i}_tiebreak_score") is None
-            assert getattr(record, f"opp_set{i}_tiebreak_score") is None
+            assert getattr(record, f"player_set{i}_games") is None
+            assert getattr(record, f"opp_set{i}_games") is None
+            assert getattr(record, f"player_set{i}_tiebreak") is None
+            assert getattr(record, f"opp_set{i}_tiebreak") is None
 
     def test_partial_set_scores(self):
         record = PlayerActivityRecord(**_base_activity(
-            player_set1_score=6,
-            opp_set1_score=4,
-            player_set2_score=7,
-            opp_set2_score=6,
-            player_set2_tiebreak_score=7,
-            opp_set2_tiebreak_score=3,
+            player_set1_games=6,
+            opp_set1_games=4,
+            player_set2_games=7,
+            opp_set2_games=6,
+            player_set2_tiebreak=7,
+            opp_set2_tiebreak=3,
         ))
-        assert record.player_set1_score == 6
-        assert record.opp_set1_score == 4
-        assert record.player_set2_tiebreak_score == 7
-        assert record.opp_set2_tiebreak_score == 3
-        assert record.player_set3_score is None
+        assert record.player_set1_games == 6
+        assert record.opp_set1_games == 4
+        assert record.player_set2_tiebreak == 7
+        assert record.opp_set2_tiebreak == 3
+        assert record.player_set3_games is None
 
 
 class TestFieldCount:

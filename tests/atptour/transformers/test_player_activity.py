@@ -120,16 +120,16 @@ class TestParseActivityJson:
         assert r.opp_last_name == "Doe"
         assert r.opp_natl_id == "USA"
         assert r.opp_rank == 50
-        assert r.player_set1_score == 6
-        assert r.opp_set1_score == 4
-        assert r.player_set1_tiebreak_score is None
-        assert r.opp_set1_tiebreak_score is None
-        assert r.player_set2_score == 7
-        assert r.opp_set2_score == 6
-        assert r.player_set2_tiebreak_score == 7
-        assert r.opp_set2_tiebreak_score == 5
-        assert r.player_set3_score == 6
-        assert r.opp_set3_score == 3
+        assert r.player_set1_games == 6
+        assert r.opp_set1_games == 4
+        assert r.player_set1_tiebreak is None
+        assert r.opp_set1_tiebreak is None
+        assert r.player_set2_games == 7
+        assert r.opp_set2_games == 6
+        assert r.player_set2_tiebreak == 7
+        assert r.opp_set2_tiebreak == 5
+        assert r.player_set3_games == 6
+        assert r.opp_set3_games == 3
         assert r.has_stats is True
         assert r.match_stats_url == "/en/scores/match-stats/ms001"
         assert r.is_bye is False

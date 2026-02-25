@@ -54,10 +54,10 @@ def _parse_activity_json(
                     sp = m.get(f"Set{n}Player")
                     so = m.get(f"Set{n}Opponent")
                     p_tb, o_tb = _derive_tiebreak_scores(sp, so, m.get(f"Set{n}Tie"))
-                    set_scores[f"player_set{n}_score"] = sp
-                    set_scores[f"opp_set{n}_score"] = so
-                    set_scores[f"player_set{n}_tiebreak_score"] = p_tb
-                    set_scores[f"opp_set{n}_tiebreak_score"] = o_tb
+                    set_scores[f"player_set{n}_games"] = sp
+                    set_scores[f"opp_set{n}_games"] = so
+                    set_scores[f"player_set{n}_tiebreak"] = p_tb
+                    set_scores[f"opp_set{n}_tiebreak"] = o_tb
                 record = PlayerActivityRecord(
                     player_id=player_id,
                     year=int(event_year),

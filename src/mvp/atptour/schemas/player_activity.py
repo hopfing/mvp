@@ -59,26 +59,26 @@ class PlayerActivityRecord(BaseModel):
     opp_rank: int | None = None
 
     # Set scores (5 sets * 4 fields = 20)
-    player_set1_score: int | None = None
-    opp_set1_score: int | None = None
-    player_set1_tiebreak_score: int | None = None
-    opp_set1_tiebreak_score: int | None = None
-    player_set2_score: int | None = None
-    opp_set2_score: int | None = None
-    player_set2_tiebreak_score: int | None = None
-    opp_set2_tiebreak_score: int | None = None
-    player_set3_score: int | None = None
-    opp_set3_score: int | None = None
-    player_set3_tiebreak_score: int | None = None
-    opp_set3_tiebreak_score: int | None = None
-    player_set4_score: int | None = None
-    opp_set4_score: int | None = None
-    player_set4_tiebreak_score: int | None = None
-    opp_set4_tiebreak_score: int | None = None
-    player_set5_score: int | None = None
-    opp_set5_score: int | None = None
-    player_set5_tiebreak_score: int | None = None
-    opp_set5_tiebreak_score: int | None = None
+    player_set1_games: int | None = None
+    opp_set1_games: int | None = None
+    player_set1_tiebreak: int | None = None
+    opp_set1_tiebreak: int | None = None
+    player_set2_games: int | None = None
+    opp_set2_games: int | None = None
+    player_set2_tiebreak: int | None = None
+    opp_set2_tiebreak: int | None = None
+    player_set3_games: int | None = None
+    opp_set3_games: int | None = None
+    player_set3_tiebreak: int | None = None
+    opp_set3_tiebreak: int | None = None
+    player_set4_games: int | None = None
+    opp_set4_games: int | None = None
+    player_set4_tiebreak: int | None = None
+    opp_set4_tiebreak: int | None = None
+    player_set5_games: int | None = None
+    opp_set5_games: int | None = None
+    player_set5_tiebreak: int | None = None
+    opp_set5_tiebreak: int | None = None
 
     # Flags
     has_stats: bool
