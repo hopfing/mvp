@@ -5,7 +5,10 @@ from pathlib import Path
 
 import polars as pl
 
-from mvp.atptour.aggregators.tournament_matches import TournamentMatchesAggregator
+from mvp.atptour.aggregators.tournament_matches import (
+    MATCHES_SCHEMA,
+    TournamentMatchesAggregator,
+)
 from mvp.common.enums import Circuit
 
 
@@ -526,3 +529,91 @@ class TestTournamentMatchesAggregator:
         df = agg.aggregate()
         counts = df.group_by(["match_uid", "player_id"]).len()
         assert (counts["len"] == 1).all()
+
+    def test_output_schema_matches_expected(self, tmp_path):
+        """Output DataFrame columns match MATCHES_SCHEMA."""
+        _write_results_parquet(tmp_path)
+        _write_schedule_parquet(tmp_path)
+        _write_match_stats_parquet(tmp_path)
+        _write_overview_parquet(tmp_path)
+        agg = TournamentMatchesAggregator(
+            circuit=Circuit.tour, tid="580", year=2023, data_root=tmp_path
+        )
+        df = agg.aggregate()
+        expected_cols = set(MATCHES_SCHEMA.keys())
+        actual_cols = set(df.columns)
+        missing = expected_cols - actual_cols
+        extra = actual_cols - expected_cols
+        assert expected_cols == actual_cols, (
+            f"Missing: {missing}, Extra: {extra}"
+        )
+
+    def test_validate_schema_raises_on_extra_column(self, tmp_path):
+        """_validate_schema raises ValueError when extra columns present."""
+        agg = TournamentMatchesAggregator(
+            circuit=Circuit.tour, tid="580", year=2023, data_root=tmp_path
+        )
+        # Build a DataFrame with MATCHES_SCHEMA columns + one extra
+        data = {col: [None] for col in MATCHES_SCHEMA}
+        data["bogus_column"] = [None]
+        df = pl.DataFrame(data)
+        try:
+            agg._validate_schema(df)
+            assert False, "Expected ValueError"
+        except ValueError as e:
+            assert "bogus_column" in str(e)
+
+    def test_validate_schema_raises_on_missing_column(self, tmp_path):
+        """_validate_schema raises ValueError when columns are missing."""
+        agg = TournamentMatchesAggregator(
+            circuit=Circuit.tour, tid="580", year=2023, data_root=tmp_path
+        )
+        cols = list(MATCHES_SCHEMA.keys())
+        data = {col: [None] for col in cols[:-1]}  # drop last column
+        df = pl.DataFrame(data)
+        try:
+            agg._validate_schema(df)
+            assert False, "Expected ValueError"
+        except ValueError as e:
+            assert cols[-1] in str(e)
+
+    def test_run_writes_parquet(self, tmp_path):
+        """run() writes to aggregate bucket."""
+        _write_results_parquet(tmp_path)
+        _write_schedule_parquet(tmp_path)
+        agg = TournamentMatchesAggregator(
+            circuit=Circuit.tour, tid="580", year=2023, data_root=tmp_path
+        )
+        result_path = agg.run()
+        assert result_path is not None
+        assert result_path.exists()
+        df = pl.read_parquet(result_path)
+        assert len(df) == 4  # 2 matches * 2 rows
+
+    def test_run_returns_none_when_no_data(self, tmp_path):
+        """run() returns None when no staged data."""
+        agg = TournamentMatchesAggregator(
+            circuit=Circuit.tour, tid="580", year=2023, data_root=tmp_path
+        )
+        result = agg.run()
+        assert result is None
+
+    def test_run_output_path(self, tmp_path):
+        """run() returns correct output path."""
+        _write_results_parquet(tmp_path)
+        agg = TournamentMatchesAggregator(
+            circuit=Circuit.tour, tid="580", year=2023, data_root=tmp_path
+        )
+        result_path = agg.run()
+        assert result_path is not None
+        expected = (
+            tmp_path
+            / "aggregate"
+            / "atptour"
+            / "tournaments"
+            / "tour"
+            / "580"
+            / "2023"
+            / "matches.parquet"
+        )
+        assert result_path == expected

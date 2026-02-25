@@ -15,6 +15,94 @@ from mvp.common.enums import Circuit
 
 logger = logging.getLogger(__name__)
 
+# Set score field suffixes for generating schema entries
+_SET_SCORE_FIELDS = [
+    f"{side}_set{n}_{kind}"
+    for side in ("player", "opp")
+    for n in range(1, 6)
+    for kind in ("games", "tiebreak")
+]
+
+# All 26 stat field names (service, return, points)
+_STAT_FIELDS = [
+    "svc_aces", "svc_double_faults",
+    "svc_first_serve_in", "svc_first_serve_att",
+    "svc_first_serve_pts_won", "svc_first_serve_pts_played",
+    "svc_second_serve_pts_won", "svc_second_serve_pts_played",
+    "svc_bp_saved", "svc_bp_faced",
+    "svc_games_played", "svc_serve_rating",
+    "ret_first_serve_pts_won", "ret_first_serve_pts_played",
+    "ret_second_serve_pts_won", "ret_second_serve_pts_played",
+    "ret_bp_converted", "ret_bp_opportunities",
+    "ret_games_played", "ret_return_rating",
+    "pts_service_pts_won", "pts_service_pts_played",
+    "pts_return_pts_won", "pts_return_pts_played",
+    "pts_total_pts_won", "pts_total_pts_played",
+]
+
+MATCHES_SCHEMA: dict[str, pl.DataType] = {
+    # Join keys
+    "match_uid": pl.String,
+    "player_id": pl.String,
+    "opp_id": pl.String,
+    "tournament_id": pl.String,
+    "year": pl.Int64,
+    "circuit": pl.String,
+    "draw_type": pl.String,
+    "round": pl.String,
+    # Waterfall fields
+    "player_seed": pl.Int64,
+    "player_entry": pl.String,
+    "opp_seed": pl.Int64,
+    "opp_entry": pl.String,
+    "duration_seconds": pl.Int64,
+    "surface": pl.String,
+    "court_name": pl.String,
+    "won": pl.Boolean,
+    "match_id": pl.String,
+    "city": pl.String,
+    "singles_draw_size": pl.Int64,
+    "doubles_draw_size": pl.Int64,
+    # Results-only
+    "result_type": pl.String,
+    **{field: pl.Int64 for field in _SET_SCORE_FIELDS},
+    # Match Stats-only
+    "reason": pl.String,
+    **{field: pl.Int64 for field in _STAT_FIELDS},
+    "number_of_sets": pl.Int64,
+    "sets_played": pl.Int64,
+    "scoring_system": pl.String,
+    "umpire_first_name": pl.String,
+    "umpire_last_name": pl.String,
+    "round_id": pl.Int64,
+    "is_qualifier": pl.Boolean,
+    # Tournament dates from Match Stats
+    "tournament_start_date": pl.Date,
+    "tournament_end_date": pl.Date,
+    "prize_money": pl.Int64,
+    "currency": pl.String,
+    # Schedule-only
+    "match_date": pl.Date,
+    "scheduled_datetime": pl.Datetime,
+    "time_suffix": pl.String,
+    "display_time": pl.String,
+    "status": pl.String,
+    "score": pl.String,
+    # Overview-only
+    "tournament_name": pl.String,
+    "country": pl.String,
+    "sponsor_title": pl.String,
+    "event_type": pl.String,
+    "event_type_detail": pl.Int64,
+    "indoor": pl.Boolean,
+    "surface_detail": pl.String,
+    "prize": pl.String,
+    "total_financial_commitment": pl.String,
+    # Doubles
+    "player_partner_id": pl.String,
+    "opp_partner_id": pl.String,
+}
+
 
 class TournamentMatchesAggregator(BaseJob):
     """Aggregate staged tournament data into unified player-match rows.
@@ -518,3 +606,40 @@ class TournamentMatchesAggregator(BaseJob):
         ]
 
         return output_cols
+
+    def _validate_schema(self, df: pl.DataFrame) -> None:
+        """Validate output DataFrame matches MATCHES_SCHEMA."""
+        expected = set(MATCHES_SCHEMA.keys())
+        actual = set(df.columns)
+        missing = expected - actual
+        extra = actual - expected
+        if missing or extra:
+            raise ValueError(
+                f"Schema mismatch. Missing: {missing}, Extra: {extra}"
+            )
+        for col, expected_type in MATCHES_SCHEMA.items():
+            actual_type = df[col].dtype
+            if actual_type != expected_type and actual_type != pl.Null:
+                logger.warning(
+                    "Column %s: expected %s, got %s",
+                    col,
+                    expected_type,
+                    actual_type,
+                )
+
+    def run(self) -> Path | None:
+        """Aggregate and write to parquet."""
+        df = self.aggregate()
+        if df.is_empty():
+            logger.info(
+                "No matches for %s/%s/%d",
+                self.circuit.value,
+                self.tid,
+                self.year,
+            )
+            return None
+        self._validate_schema(df)
+        out_path = self.build_path(
+            "aggregate", self._tournament_rel_path, "matches.parquet"
+        )
+        return self.save_parquet(df, out_path)
