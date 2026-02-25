@@ -1,7 +1,5 @@
 """ATP Tour data pipeline — extraction, transformation, and orchestration."""
 
-from __future__ import annotations
-
 import argparse
 import logging
 from datetime import datetime
