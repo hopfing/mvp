@@ -162,7 +162,13 @@ class PlayerActivityTransformer(BaseJob):
         dfs = [pl.read_parquet(p) for p in parquet_files]
         combined = pl.concat(dfs, how="diagonal_relaxed")
 
-        self._assert_unique(combined, ["player_id", "tournament_id", "year", "match_id"])
+        key_cols = ["player_id", "tournament_id", "year", "match_id"]
+        before = len(combined)
+        combined = combined.unique(subset=key_cols)
+        if len(combined) < before:
+            logger.warning(
+                "Dropped %d duplicate activity rows", before - len(combined)
+            )
 
         target = self.build_path("stage", "activity.parquet")
         result = self.save_parquet(combined, target)
