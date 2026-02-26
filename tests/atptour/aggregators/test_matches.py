@@ -35,3 +35,28 @@ class TestRoundOrder:
             ROUND_ORDER["R32"],
             ROUND_ORDER["THIRDPLACE"],
         ]
+
+
+class TestDCFilter:
+    def test_filter_dc_from_layer1(self):
+        """DC tournaments should be excluded from Layer 1 stack."""
+        from mvp.atptour.aggregators.matches import filter_dc_tournaments
+
+        df = pl.DataFrame({
+            "tournament_id": ["339", "8096", "615", "1234"],
+            "event_type": ["250", "DCR", None, "CH"],
+            "circuit": ["tour", "tour", "team", "chal"],
+        })
+        result = filter_dc_tournaments(df)
+        assert result["tournament_id"].to_list() == ["339", "1234"]
+
+    def test_filter_dc_from_activity(self):
+        """DC activity rows should be excluded."""
+        from mvp.atptour.aggregators.matches import filter_dc_activity
+
+        df = pl.DataFrame({
+            "event_type": ["250", "DC", "CH", "FU", "DC"],
+        })
+        result = filter_dc_activity(df)
+        assert len(result) == 3
+        assert "DC" not in result["event_type"].to_list()

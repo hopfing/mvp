@@ -20,6 +20,24 @@ ROUND_ORDER: dict[str, int] = {
 }
 
 
+def filter_dc_tournaments(df: pl.DataFrame) -> pl.DataFrame:
+    """Exclude Davis Cup tournaments from a Layer 1 stacked DataFrame.
+
+    Filters out rows where event_type starts with 'DC' or circuit is 'team'.
+    """
+    return df.filter(
+        ~(
+            pl.col("event_type").str.starts_with("DC").fill_null(False)
+            | (pl.col("circuit") == "team")
+        )
+    )
+
+
+def filter_dc_activity(df: pl.DataFrame) -> pl.DataFrame:
+    """Exclude Davis Cup rows from Activity data."""
+    return df.filter(pl.col("event_type") != "DC")
+
+
 def add_round_order(df: pl.DataFrame) -> pl.DataFrame:
     """Add round_order column from the round column using ROUND_ORDER mapping."""
     return df.with_columns(
