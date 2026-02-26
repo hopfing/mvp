@@ -168,9 +168,20 @@ class PlayerActivityTransformer(BaseJob):
         dfs = [pl.read_parquet(p) for p in parquet_files]
         combined = pl.concat(dfs, how="vertical_relaxed")
 
-        self._assert_unique(
-            combined, ["player_id", "tournament_id", "year", "match_id"]
-        )
+        # Deduplicate on (player_id, match_uid) for non-bye rows.
+        # A handful of raw activity entries are genuine duplicates from ATP.
+        matches = combined.filter(pl.col("match_uid").is_not_null())
+        byes = combined.filter(pl.col("match_uid").is_null())
+        key_cols = ["player_id", "match_uid"]
+        n_before = len(matches)
+        matches = matches.unique(subset=key_cols, keep="first")
+        n_dropped = n_before - len(matches)
+        if n_dropped:
+            logger.info(
+                "Player activity consolidate: dropped %d duplicate rows",
+                n_dropped,
+            )
+        combined = pl.concat([matches, byes], how="vertical_relaxed")
 
         target = self.build_path("stage", "activity.parquet")
         result = self.save_parquet(combined, target)
@@ -181,13 +192,3 @@ class PlayerActivityTransformer(BaseJob):
             len(combined),
         )
         return result
-
-    @staticmethod
-    def _assert_unique(df: pl.DataFrame, key_cols: list[str]) -> None:
-        """Assert primary key uniqueness."""
-        dupes = df.group_by(key_cols).len().filter(pl.col("len") > 1)
-        if len(dupes) > 0:
-            samples = dupes.head(5)[key_cols].to_dicts()
-            raise ValueError(
-                f"Duplicate primary keys in player_activity: {samples}"
-            )
