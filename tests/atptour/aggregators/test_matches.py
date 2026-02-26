@@ -187,3 +187,59 @@ class TestRankingsJoin:
         })
         result = join_rankings(matches, rankings)
         assert result["rankings_rank"][0] is None
+
+
+class TestBioJoin:
+    def test_bio_enrichment_adds_player_and_opp_fields(self):
+        """Bio join should add prefixed fields for both player and opponent."""
+        from mvp.atptour.aggregators.matches import join_player_bio
+
+        matches = pl.DataFrame({
+            "player_id": ["A001"],
+            "opp_id": ["B002"],
+        })
+        bio = pl.DataFrame({
+            "player_id": ["A001", "B002"],
+            "first_name": ["Alice", "Bob"],
+            "last_name": ["Alpha", "Beta"],
+            "height_cm": [175, 185],
+            "weight_kg": [65, 80],
+            "right_handed": [True, False],
+            "twohand_backhand": [True, True],
+            "birth_date": [date(2000, 1, 1), date(1998, 6, 15)],
+            "pro_year": [2018, 2016],
+            "nationality": ["USA", "GBR"],
+            "natl_id": ["USA", "GBR"],
+        })
+        result = join_player_bio(matches, bio)
+        assert result["player_first_name"][0] == "Alice"
+        assert result["opp_first_name"][0] == "Bob"
+        assert result["player_height_cm"][0] == 175
+        assert result["opp_height_cm"][0] == 185
+        assert result["player_natl_id"][0] == "USA"
+        assert result["opp_natl_id"][0] == "GBR"
+
+    def test_bio_unknown_player_gets_nulls(self):
+        """Players not in bio should get null fields."""
+        from mvp.atptour.aggregators.matches import join_player_bio
+
+        matches = pl.DataFrame({
+            "player_id": ["UNKNOWN"],
+            "opp_id": ["ALSO_UNKNOWN"],
+        })
+        bio = pl.DataFrame({
+            "player_id": ["A001"],
+            "first_name": ["Alice"],
+            "last_name": ["Alpha"],
+            "height_cm": [175],
+            "weight_kg": [65],
+            "right_handed": [True],
+            "twohand_backhand": [True],
+            "birth_date": [date(2000, 1, 1)],
+            "pro_year": [2018],
+            "nationality": ["USA"],
+            "natl_id": ["USA"],
+        })
+        result = join_player_bio(matches, bio)
+        assert result["player_first_name"][0] is None
+        assert result["opp_first_name"][0] is None

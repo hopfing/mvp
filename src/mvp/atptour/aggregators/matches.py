@@ -113,6 +113,35 @@ def join_rankings(matches: pl.DataFrame, rankings: pl.DataFrame) -> pl.DataFrame
     return result
 
 
+_BIO_FIELDS = [
+    "first_name", "last_name", "height_cm", "weight_kg",
+    "right_handed", "twohand_backhand", "birth_date", "pro_year",
+    "nationality", "natl_id",
+]
+
+
+def join_player_bio(matches: pl.DataFrame, bio: pl.DataFrame) -> pl.DataFrame:
+    """Join PlayerBio data for both player and opponent.
+
+    Adds player_first_name, player_last_name, ..., opp_first_name, etc.
+    """
+    bio_subset = bio.select(["player_id"] + _BIO_FIELDS)
+
+    # Player bio
+    player_bio = bio_subset.rename(
+        {f: f"player_{f}" for f in _BIO_FIELDS} | {"player_id": "_bio_pid"}
+    )
+    result = matches.join(player_bio, left_on="player_id", right_on="_bio_pid", how="left")
+
+    # Opponent bio
+    opp_bio = bio_subset.rename(
+        {f: f"opp_{f}" for f in _BIO_FIELDS} | {"player_id": "_bio_pid"}
+    )
+    result = result.join(opp_bio, left_on="opp_id", right_on="_bio_pid", how="left")
+
+    return result
+
+
 def add_round_order(df: pl.DataFrame) -> pl.DataFrame:
     """Add round_order column from the round column using ROUND_ORDER mapping."""
     return df.with_columns(
