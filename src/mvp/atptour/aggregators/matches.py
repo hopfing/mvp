@@ -1,6 +1,14 @@
 """Layer 2: Cross-tournament aggregation into a single enriched matches dataset."""
 
+import glob
+import logging
+from pathlib import Path
+
 import polars as pl
+
+from mvp.common.base_job import BaseJob
+
+logger = logging.getLogger(__name__)
 
 ROUND_ORDER: dict[str, int] = {
     "Q1": 1,
@@ -131,7 +139,9 @@ def join_player_bio(matches: pl.DataFrame, bio: pl.DataFrame) -> pl.DataFrame:
     player_bio = bio_subset.rename(
         {f: f"player_{f}" for f in _BIO_FIELDS} | {"player_id": "_bio_pid"}
     )
-    result = matches.join(player_bio, left_on="player_id", right_on="_bio_pid", how="left")
+    result = matches.join(
+        player_bio, left_on="player_id", right_on="_bio_pid", how="left"
+    )
 
     # Opponent bio
     opp_bio = bio_subset.rename(
@@ -187,3 +197,176 @@ def validate_tournament_clusters(
                 break  # One warning per player is enough
 
     return warnings
+
+
+class MatchesAggregator(BaseJob):
+    """Layer 2: Cross-tournament aggregation."""
+
+    def __init__(self, data_root: Path | None = None):
+        super().__init__(domain="atptour", data_root=data_root)
+
+    def aggregate(self) -> pl.DataFrame:
+        """Run the full Layer 2 aggregation pipeline."""
+        # Step 1: Stack Layer 1
+        l1 = self._stack_layer1()
+        logger.info("Layer 1 stacked: %d rows", len(l1))
+
+        # Step 2: Load and filter Activity
+        activity = self._load_activity()
+        logger.info("Activity loaded: %d rows", len(activity))
+
+        # Step 3: Activity enrichment (overlapping matches)
+        l1 = self._enrich_from_activity(l1, activity)
+
+        # Step 4: Activity gap-fill (new matches)
+        gap_fill = self._activity_gap_fill(l1, activity)
+        logger.info("Activity gap-fill: %d rows", len(gap_fill))
+
+        # Step 5: Concat
+        combined = pl.concat([l1, gap_fill], how="diagonal_relaxed")
+        logger.info("Combined: %d rows", len(combined))
+
+        # Step 6: Rankings enrichment
+        rankings = self._load_rankings()
+        if rankings is not None:
+            combined = join_rankings(combined, rankings)
+            logger.info("Rankings joined")
+
+        # Step 7: Bio enrichment
+        bio = self._load_bio()
+        if bio is not None:
+            combined = join_player_bio(combined, bio)
+            logger.info("Bio joined")
+
+        # Step 8: Round order + sort
+        combined = add_round_order(combined)
+        combined = combined.sort(
+            ["tournament_start_date", "round_order", "match_uid", "player_id"],
+            nulls_last=True,
+        )
+
+        # Step 9: Validation
+        warnings = validate_tournament_clusters(combined)
+        for w in warnings:
+            logger.warning(
+                "Suspicious cluster: player=%s, tournaments=%s, dates=%s",
+                w["player_id"],
+                w["tournament_ids"],
+                w["dates"],
+            )
+
+        return combined
+
+    def _stack_layer1(self) -> pl.DataFrame:
+        """Glob and concat all Layer 1 matches parquets, filtering DC."""
+        pattern = str(
+            self.data_root
+            / "aggregate"
+            / "atptour"
+            / "tournaments"
+            / "**"
+            / "matches.parquet"
+        )
+        files = glob.glob(pattern, recursive=True)
+        if not files:
+            return pl.DataFrame()
+        dfs = [pl.read_parquet(f) for f in files]
+        stacked = pl.concat(dfs, how="diagonal_relaxed")
+        return filter_dc_tournaments(stacked)
+
+    def _load_activity(self) -> pl.DataFrame:
+        """Load Activity parquet and filter out DC and byes."""
+        path = self.data_root / "stage" / "atptour" / "activity.parquet"
+        if not path.exists():
+            return pl.DataFrame()
+        act = pl.read_parquet(path)
+        act = filter_dc_activity(act)
+        act = act.filter(
+            (pl.col("is_bye") == False) & pl.col("match_uid").is_not_null()  # noqa: E712
+        )
+        return act
+
+    def _enrich_from_activity(
+        self, l1: pl.DataFrame, activity: pl.DataFrame
+    ) -> pl.DataFrame:
+        """LEFT JOIN Activity rank fields onto overlapping Layer 1 rows."""
+        if activity.is_empty():
+            return l1.with_columns([
+                pl.lit(None).cast(pl.Int64).alias("activity_rank"),
+                pl.lit(None).cast(pl.Int64).alias("activity_opp_rank"),
+                pl.lit(None).cast(pl.Int64).alias("activity_points"),
+            ])
+        act_enrichment = activity.select([
+            "match_uid",
+            "player_id",
+            pl.col("player_rank").alias("activity_rank"),
+            pl.col("opp_rank").alias("activity_opp_rank"),
+            pl.col("points").alias("activity_points"),
+            pl.col("tournament_start_date").alias("_act_start_date"),
+            pl.col("tournament_end_date").alias("_act_end_date"),
+        ])
+
+        result = l1.join(
+            act_enrichment, on=["match_uid", "player_id"], how="left"
+        )
+
+        # Fill tournament dates from Activity where Layer 1 is missing them
+        if "_act_start_date" in result.columns:
+            result = result.with_columns([
+                pl.coalesce([
+                    pl.col("tournament_start_date"),
+                    pl.col("_act_start_date"),
+                ]).alias("tournament_start_date"),
+                pl.coalesce([
+                    pl.col("tournament_end_date"),
+                    pl.col("_act_end_date"),
+                ]).alias("tournament_end_date"),
+            ]).drop(["_act_start_date", "_act_end_date"])
+
+        return result
+
+    def _activity_gap_fill(
+        self, l1: pl.DataFrame, activity: pl.DataFrame
+    ) -> pl.DataFrame:
+        """Get Activity rows not in Layer 1 and map to Layer 2 schema."""
+        if activity.is_empty():
+            return pl.DataFrame()
+        l1_uids = (
+            set(l1["match_uid"].unique().to_list()) if not l1.is_empty() else set()
+        )
+        gap = activity.filter(~pl.col("match_uid").is_in(list(l1_uids)))
+        if gap.is_empty():
+            return pl.DataFrame()
+        return map_activity_to_layer2(gap)
+
+    def _load_rankings(self) -> pl.DataFrame | None:
+        """Load consolidated rankings parquet."""
+        path = (
+            self.data_root
+            / "stage"
+            / "atptour"
+            / "rankings"
+            / "rankings_singles.parquet"
+        )
+        if not path.exists():
+            return None
+        return pl.read_parquet(path)
+
+    def _load_bio(self) -> pl.DataFrame | None:
+        """Load all player bio parquets into one DataFrame."""
+        bio_dir = self.data_root / "stage" / "atptour" / "players"
+        if not bio_dir.is_dir():
+            return None
+        files = sorted(bio_dir.glob("*.parquet"))
+        if not files:
+            return None
+        return pl.concat([pl.read_parquet(f) for f in files])
+
+    def run(self) -> Path | None:
+        """Aggregate and write to parquet."""
+        df = self.aggregate()
+        if df.is_empty():
+            logger.info("No matches to aggregate")
+            return None
+        out_path = self.build_path("aggregate", "", "matches.parquet")
+        return self.save_parquet(df, out_path)

@@ -1,6 +1,7 @@
 """Tests for Layer 2 cross-tournament aggregation."""
 
-from datetime import date
+from datetime import date, datetime
+from pathlib import Path
 
 import polars as pl
 
@@ -271,3 +272,160 @@ class TestValidation:
         assert len(warnings) == 1
         assert warnings[0]["player_id"] == "A001"
         assert len(warnings[0]["tournament_ids"]) == 3
+
+
+class TestMatchesAggregator:
+    def _create_test_data(self, tmp_path: Path):
+        """Create minimal Layer 1, Activity, Rankings, and Bio data for testing."""
+        data_root = tmp_path / "data"
+
+        # Layer 1: one tournament with 2 matches (4 rows at player-match grain)
+        agg_dir = (
+            data_root / "aggregate" / "atptour" / "tournaments"
+            / "tour" / "339" / "2024"
+        )
+        agg_dir.mkdir(parents=True)
+        l1 = pl.DataFrame({
+            "match_uid": ["uid1", "uid1", "uid2", "uid2"],
+            "player_id": ["A001", "B002", "A001", "C003"],
+            "opp_id": ["B002", "A001", "C003", "A001"],
+            "tournament_id": ["339", "339", "339", "339"],
+            "year": [2024, 2024, 2024, 2024],
+            "circuit": ["tour", "tour", "tour", "tour"],
+            "draw_type": ["singles"] * 4,
+            "round": ["R32", "R32", "R16", "R16"],
+            "won": [True, False, True, False],
+            "tournament_start_date": [date(2024, 3, 4)] * 4,
+            "tournament_end_date": [date(2024, 3, 10)] * 4,
+            "event_type": ["250", "250", "250", "250"],
+            "indoor": [False] * 4,
+            "surface": ["Hard"] * 4,
+        })
+        # Add remaining MATCHES_SCHEMA columns as null
+        from mvp.atptour.aggregators.tournament_matches import MATCHES_SCHEMA
+
+        for col, dtype in MATCHES_SCHEMA.items():
+            if col not in l1.columns:
+                l1 = l1.with_columns(pl.lit(None).cast(dtype).alias(col))
+        l1.write_parquet(agg_dir / "matches.parquet")
+
+        # Activity: one overlapping match + one gap-fill match
+        act = pl.DataFrame({
+            "match_uid": ["uid1", "uid_itf"],
+            "player_id": ["A001", "D004"],
+            "opp_id": ["B002", "E005"],
+            "tournament_id": ["339", "9999"],
+            "year": [2024, 2024],
+            "event_type": ["250", "FU"],
+            "circuit": ["tour", "itf"],
+            "round": ["R32", "R32"],
+            "surface": ["Hard", "Clay"],
+            "indoor": [False, True],
+            "tournament_start_date": [date(2024, 3, 4), date(2024, 4, 1)],
+            "tournament_end_date": [date(2024, 3, 10), date(2024, 4, 7)],
+            "win_loss": ["W", "L"],
+            "reason": [None, None],
+            "player_rank": [50, 500],
+            "opp_rank": [100, 600],
+            "points": [45, 0],
+            "is_bye": [False, False],
+            "match_id": ["m1", "m2"],
+            **{
+                f"player_set{n}_{k}": [None, None]
+                for n in range(1, 6)
+                for k in ("games", "tiebreak")
+            },
+            **{
+                f"opp_set{n}_{k}": [None, None]
+                for n in range(1, 6)
+                for k in ("games", "tiebreak")
+            },
+        })
+        act_dir = data_root / "stage" / "atptour"
+        act_dir.mkdir(parents=True)
+        act.write_parquet(act_dir / "activity.parquet")
+
+        # Rankings
+        rnk = pl.DataFrame({
+            "player_id": ["A001", "B002", "C003"],
+            "ranking_date": [date(2024, 2, 26)] * 3,
+            "rank": [10, 20, 30],
+            "points": [1000, 500, 400],
+            "tournaments_played": [5, 10, 8],
+            "player_name": ["A", "B", "C"],
+            "nationality": ["USA", "GBR", "FRA"],
+            "age": [25, 28, 22],
+            "rank_move": [1, -1, 0],
+            "points_move": [10, -5, 0],
+            "points_dropping": [100, 50, 30],
+            "next_best": [90, 45, 25],
+            "source_file": ["f"] * 3,
+            "parsed_at": [datetime(2024, 1, 1)] * 3,
+        })
+        rnk_dir = data_root / "stage" / "atptour" / "rankings"
+        rnk_dir.mkdir(parents=True)
+        rnk.write_parquet(rnk_dir / "rankings_singles.parquet")
+
+        # Bio
+        bio_dir = data_root / "stage" / "atptour" / "players"
+        bio_dir.mkdir(parents=True)
+        for pid, fname, lname, nat in [
+            ("A001", "Alice", "A", "USA"),
+            ("B002", "Bob", "B", "GBR"),
+            ("C003", "Carol", "C", "FRA"),
+        ]:
+            bio = pl.DataFrame({
+                "player_id": [pid],
+                "first_name": [fname],
+                "last_name": [lname],
+                "birth_date": [date(2000, 1, 1)],
+                "birth_city": [None],
+                "nationality": [nat],
+                "natl_id": [nat],
+                "height_cm": [180],
+                "weight_kg": [75],
+                "right_handed": [True],
+                "twohand_backhand": [True],
+                "pro_year": [2018],
+                "is_active": [True],
+                "is_dbl_specialist": [False],
+                "source_file": ["f"],
+                "parsed_at": [datetime(2024, 1, 1)],
+            })
+            bio.write_parquet(bio_dir / f"{pid}.parquet")
+
+        return data_root
+
+    def test_full_aggregation(self, tmp_path):
+        """End-to-end: stack, enrich, gap-fill, rank, bio, sort, validate."""
+        from mvp.atptour.aggregators.matches import MatchesAggregator
+
+        data_root = self._create_test_data(tmp_path)
+        agg = MatchesAggregator(data_root=data_root)
+        result = agg.aggregate()
+
+        # 4 Layer 1 rows + 1 gap-fill row = 5 rows
+        assert len(result) == 5
+        assert "round_order" in result.columns
+        assert "rankings_rank" in result.columns
+        assert "player_first_name" in result.columns
+
+        # Verify gap-fill row
+        itf_rows = result.filter(pl.col("tournament_id") == "9999")
+        assert len(itf_rows) == 1
+        assert itf_rows["activity_rank"][0] == 500
+
+        # Verify Activity enrichment on overlap
+        a001_r32 = result.filter(
+            (pl.col("player_id") == "A001") & (pl.col("round") == "R32")
+        )
+        assert a001_r32["activity_rank"][0] == 50
+
+        # Verify Rankings enrichment
+        assert a001_r32["rankings_rank"][0] == 10
+
+        # Verify Bio enrichment
+        assert a001_r32["player_first_name"][0] == "Alice"
+
+        # Verify no duplicate (match_uid, player_id) combos
+        assert result.select(["match_uid", "player_id"]).unique().height == len(result)
