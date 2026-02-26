@@ -3,7 +3,7 @@
 import datetime as dt
 import logging
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import polars as pl
@@ -17,6 +17,8 @@ from mvp.common.enums import Circuit, DrawType
 from mvp.common.utils import polars_schema_overrides
 
 logger = logging.getLogger(__name__)
+
+_MATCH_DURATION_ESTIMATE = timedelta(minutes=90)
 
 
 def _parse_snapshot_timestamp(stem: str) -> datetime:
@@ -131,6 +133,8 @@ def _parse_schedule_html(
     for group in soup.select("div.content-group"):
         court_name = None
         court_match_num = 0
+        anchor_time: datetime | None = None
+        anchor_position: int = 0
 
         for match_div in group.select("div.schedule[data-matchdate]"):
             court_match_num += 1
@@ -160,7 +164,18 @@ def _parse_schedule_html(
                     if extracted:
                         court_name = extracted
 
-            is_time_estimated = scheduled_datetime is None
+            # Time anchor and estimation
+            if datetime_str:
+                is_time_estimated = False
+                if time_suffix in ("Starts At", "Not Before"):
+                    anchor_time = scheduled_datetime
+                    anchor_position = court_match_num
+            elif time_suffix == "Followed By" and anchor_time is not None:
+                offset = (court_match_num - anchor_position) * _MATCH_DURATION_ESTIMATE
+                scheduled_datetime = anchor_time + offset
+                is_time_estimated = True
+            else:
+                is_time_estimated = True
 
             # Round
             round_div = match_div.select_one(

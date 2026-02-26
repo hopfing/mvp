@@ -474,6 +474,30 @@ class TestContentGroupCourtPropagation:
         assert records[1].court_name == "Center Court"
 
 
+class TestTimeEstimation:
+    def test_followed_by_estimated_from_anchor(self):
+        html = _wrap_groups(
+            [
+                _singles_div(court="Court 1", suffix="Starts At",
+                             dt_attr="2026-02-07 10:00:00",
+                             displaytime="Starts At 10:00 AM"),
+                _singles_div(court=None, suffix="Followed By",
+                             dt_attr="", displaytime="Followed By",
+                             round_str="QF",
+                             p1_slug="carlos-alcaraz", p1_id="a0e2",
+                             p1_first="C.", p1_last="Alcaraz", p1_flag="esp",
+                             p2_slug="jannik-sinner", p2_id="s0ag",
+                             p2_first="J.", p2_last="Sinner", p2_flag="ita",
+                             p1_rank="(1)", p2_rank="(2)"),
+            ],
+        )
+        records = _parse_fixture(html)
+        assert records[0].scheduled_datetime == datetime(2026, 2, 7, 10, 0, 0)
+        assert records[0].is_time_estimated is False
+        assert records[1].scheduled_datetime == datetime(2026, 2, 7, 11, 30, 0)
+        assert records[1].is_time_estimated is True
+
+
 class TestCourtMatchNum:
     def test_sequential_within_group(self):
         html = _wrap_groups(
