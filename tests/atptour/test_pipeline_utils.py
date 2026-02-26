@@ -13,6 +13,7 @@ class TestGetActivePlayers:
         df = pl.DataFrame({
             "tournament_id": ["580", "580"],
             "year": [2023, 2023],
+            "draw_type": ["singles", "singles"],
             "p1_id": ["S0AG", "N409"],
             "p2_id": ["N409", "D875"],
         })
@@ -30,6 +31,7 @@ class TestGetActivePlayers:
         df = pl.DataFrame({
             "tournament_id": ["580"],
             "year": [2023],
+            "draw_type": ["singles"],
             "p1_id": ["S0AG"],
             "p2_id": ["0"],
         })
@@ -37,6 +39,24 @@ class TestGetActivePlayers:
 
         result = get_active_players(tmp_path)
         assert "0" not in result
+
+    def test_excludes_doubles(self, tmp_path):
+        stage_dir = tmp_path / "tournaments" / "tour" / "580" / "2023"
+        stage_dir.mkdir(parents=True)
+        df = pl.DataFrame({
+            "tournament_id": ["580", "580"],
+            "year": [2023, 2023],
+            "draw_type": ["singles", "doubles"],
+            "p1_id": ["S0AG", "X123"],
+            "p2_id": ["N409", "Y456"],
+        })
+        df.write_parquet(stage_dir / "results.parquet")
+
+        result = get_active_players(tmp_path)
+        assert "S0AG" in result
+        assert "N409" in result
+        assert "X123" not in result
+        assert "Y456" not in result
 
     def test_empty_dir(self, tmp_path):
         result = get_active_players(tmp_path)

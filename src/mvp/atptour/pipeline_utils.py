@@ -21,13 +21,14 @@ def get_active_players(
     """
     player_tournaments: dict[str, set[tuple[str, int]]] = {}
 
-    id_columns = ["p1_id", "p2_id", "p1_partner_id", "p2_partner_id"]
+    id_columns = ["p1_id", "p2_id"]
     for path in sorted(tournaments_stage_dir.rglob("results.parquet")):
         available = pl.read_parquet_schema(path)
-        cols_to_read = ["tournament_id", "year"] + [
+        cols_to_read = ["tournament_id", "year", "draw_type"] + [
             c for c in id_columns if c in available
         ]
         df = pl.read_parquet(path, columns=cols_to_read)
+        df = df.filter(pl.col("draw_type") == "singles")
         for row in df.iter_rows(named=True):
             tid_year = (row["tournament_id"], row["year"])
             for col in id_columns:
