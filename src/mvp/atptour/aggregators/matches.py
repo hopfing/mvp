@@ -68,6 +68,51 @@ def map_activity_to_layer2(df: pl.DataFrame) -> pl.DataFrame:
     )
 
 
+def join_rankings(matches: pl.DataFrame, rankings: pl.DataFrame) -> pl.DataFrame:
+    """Join rankings data for both player and opponent using as-of join.
+
+    For each match, finds the most recent rankings snapshot on or before
+    tournament_start_date for both player_id and opp_id.
+    """
+    rnk = rankings.select([
+        "player_id", "ranking_date", "rank", "points", "tournaments_played",
+    ]).sort("ranking_date")
+
+    # Player rankings
+    player_rnk = rnk.rename({
+        "player_id": "_rnk_pid",
+        "rank": "rankings_rank",
+        "points": "rankings_points",
+        "tournaments_played": "rankings_tournaments_played",
+    })
+    result = matches.sort("tournament_start_date").join_asof(
+        player_rnk,
+        left_on="tournament_start_date",
+        right_on="ranking_date",
+        by_left="player_id",
+        by_right="_rnk_pid",
+        strategy="backward",
+    )
+
+    # Opponent rankings
+    opp_rnk = rnk.rename({
+        "player_id": "_rnk_pid",
+        "rank": "rankings_opp_rank",
+        "points": "rankings_opp_points",
+        "tournaments_played": "rankings_opp_tournaments_played",
+    })
+    result = result.sort("tournament_start_date").join_asof(
+        opp_rnk,
+        left_on="tournament_start_date",
+        right_on="ranking_date",
+        by_left="opp_id",
+        by_right="_rnk_pid",
+        strategy="backward",
+    )
+
+    return result
+
+
 def add_round_order(df: pl.DataFrame) -> pl.DataFrame:
     """Add round_order column from the round column using ROUND_ORDER mapping."""
     return df.with_columns(

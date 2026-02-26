@@ -144,3 +144,46 @@ class TestActivityMapping:
         })
         result = map_activity_to_layer2(act)
         assert result["won"][0] is False
+
+
+class TestRankingsJoin:
+    def test_asof_join_picks_most_recent_before_tournament(self):
+        """Rankings join should use the most recent snapshot <= tournament_start_date."""
+        from mvp.atptour.aggregators.matches import join_rankings
+
+        matches = pl.DataFrame({
+            "player_id": ["A001", "A001"],
+            "opp_id": ["B002", "C003"],
+            "tournament_start_date": [date(2024, 3, 4), date(2024, 3, 11)],
+        })
+        rankings = pl.DataFrame({
+            "player_id": ["A001", "A001", "B002", "C003"],
+            "ranking_date": [date(2024, 2, 26), date(2024, 3, 4), date(2024, 3, 4), date(2024, 3, 4)],
+            "rank": [10, 9, 20, 30],
+            "points": [1000, 1100, 500, 400],
+            "tournaments_played": [5, 6, 10, 8],
+        })
+        result = join_rankings(matches, rankings)
+        # First match: tournament_start 3/4, should pick 3/4 snapshot (rank=9)
+        assert result.filter(pl.col("opp_id") == "B002")["rankings_rank"][0] == 9
+        # Opponent B002 should have rank 20
+        assert result.filter(pl.col("opp_id") == "B002")["rankings_opp_rank"][0] == 20
+
+    def test_null_tournament_date_gets_null_rankings(self):
+        """Matches with null tournament_start_date should get null rankings."""
+        from mvp.atptour.aggregators.matches import join_rankings
+
+        matches = pl.DataFrame({
+            "player_id": ["A001"],
+            "opp_id": ["B002"],
+            "tournament_start_date": [None],
+        }).cast({"tournament_start_date": pl.Date})
+        rankings = pl.DataFrame({
+            "player_id": ["A001"],
+            "ranking_date": [date(2024, 3, 4)],
+            "rank": [10],
+            "points": [1000],
+            "tournaments_played": [5],
+        })
+        result = join_rankings(matches, rankings)
+        assert result["rankings_rank"][0] is None
