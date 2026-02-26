@@ -5,6 +5,7 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
+from mvp.atptour.aggregators.matches import MatchesAggregator
 from mvp.atptour.aggregators.tournament_matches import TournamentMatchesAggregator
 from mvp.atptour.discovery import TournamentDiscovery
 from mvp.atptour.extractors.match_stats import MatchStatsExtractor
@@ -49,6 +50,11 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--year", type=int, metavar="YEAR")
     parser.add_argument("--circuit", choices=["tour", "chal"])
     parser.add_argument("--refresh", action="store_true")
+    parser.add_argument(
+        "--aggregate-only",
+        action="store_true",
+        help="Skip extraction/staging, only run Layer 2 aggregation",
+    )
     parsed = parser.parse_args(args)
     if parsed.tid and not parsed.year:
         parser.error("--tid requires --year")
@@ -56,6 +62,10 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         parser.error("--circuit requires --year")
     if parsed.circuit and parsed.tid:
         parser.error("--circuit cannot be used with --tid")
+    if parsed.aggregate_only and (parsed.tid or parsed.year or parsed.circuit):
+        parser.error(
+            "--aggregate-only cannot be used with --tid, --year, or --circuit"
+        )
     return parsed
 
 
@@ -152,11 +162,20 @@ def run_pipeline(
     tournament_ids: list[str] | None = None,
     circuit: str | None = None,
     refresh: bool = False,
+    aggregate_only: bool = False,
 ) -> None:
     """Core pipeline function — callable from code.
 
+    When aggregate_only is True, skips extraction/staging and only runs
+    Layer 2 aggregation (MatchesAggregator).
+
     Raises RuntimeError if any operations fail.
     """
+    if aggregate_only:
+        logger.info("Running Layer 2 aggregation only")
+        MatchesAggregator(data_root=data_root).run()
+        return
+
     start_year = (year - 1) if year else (_current_year() - 1)
     RankingsExtractor(start_year=start_year, data_root=data_root).run()
     RankingsTransformer(data_root=data_root).run(start_year=start_year)
@@ -205,6 +224,10 @@ def run_pipeline(
         )
         failed_activity_stage = PlayerActivityStager(data_root=data_root).run()
         PlayerActivityTransformer(data_root=data_root).run()
+
+    # Layer 2: cross-tournament aggregation
+    logger.info("Running Layer 2 aggregation")
+    MatchesAggregator(data_root=data_root).run()
 
     _log_summary(
         tournaments,
@@ -279,4 +302,5 @@ def main():
         tournament_ids=args.tid,
         circuit=args.circuit,
         refresh=args.refresh,
+        aggregate_only=args.aggregate_only,
     )
