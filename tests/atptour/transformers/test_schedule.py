@@ -184,8 +184,22 @@ def _doubles_div(
     )
 
 
+def _wrap_groups(*groups):
+    """Wrap groups of schedule divs in content-group containers.
+
+    Each group is a list of div HTML strings.
+    """
+    parts = []
+    for divs in groups:
+        parts.append('<div class="content-group">')
+        parts.extend(divs)
+        parts.append("</div>")
+    return "<html><body>" + "".join(parts) + "</body></html>"
+
+
 def _wrap(*divs):
-    return "<html><body>" + "".join(divs) + "</body></html>"
+    """Wrap bare divs in a single content-group."""
+    return _wrap_groups(list(divs))
 
 
 FIXTURE_SINGLES = _wrap(_singles_div())
