@@ -150,3 +150,40 @@ def add_round_order(df: pl.DataFrame) -> pl.DataFrame:
         .cast(pl.Int64)
         .alias("round_order")
     )
+
+
+def validate_tournament_clusters(
+    df: pl.DataFrame, window_days: int = 7, threshold: int = 3
+) -> list[dict]:
+    """Flag players with suspiciously many tournaments in a short window.
+
+    Returns a list of warning dicts with player_id, tournament_ids, and dates.
+    """
+    warnings: list[dict] = []
+
+    pts = df.select(["player_id", "tournament_id", "tournament_start_date"]).unique()
+    pts = pts.filter(pl.col("tournament_start_date").is_not_null())
+
+    for pid in pts["player_id"].unique().to_list():
+        player = pts.filter(pl.col("player_id") == pid).sort("tournament_start_date")
+        tourneys = player.select(["tournament_id", "tournament_start_date"]).rows()
+
+        for i, (tid_i, date_i) in enumerate(tourneys):
+            cluster_tids = [tid_i]
+            cluster_dates = [date_i]
+            for j in range(i + 1, len(tourneys)):
+                tid_j, date_j = tourneys[j]
+                if (date_j - date_i).days <= window_days:
+                    cluster_tids.append(tid_j)
+                    cluster_dates.append(date_j)
+                else:
+                    break
+            if len(cluster_tids) >= threshold:
+                warnings.append({
+                    "player_id": pid,
+                    "tournament_ids": cluster_tids,
+                    "dates": cluster_dates,
+                })
+                break  # One warning per player is enough
+
+    return warnings

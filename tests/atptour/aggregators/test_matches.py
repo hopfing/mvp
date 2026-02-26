@@ -243,3 +243,31 @@ class TestBioJoin:
         result = join_player_bio(matches, bio)
         assert result["player_first_name"][0] is None
         assert result["opp_first_name"][0] is None
+
+
+class TestValidation:
+    def test_clean_data_passes(self):
+        """Normal data (1-2 tournaments per week) should produce no warnings."""
+        from mvp.atptour.aggregators.matches import validate_tournament_clusters
+
+        df = pl.DataFrame({
+            "player_id": ["A001", "A001", "A001"],
+            "tournament_id": ["100", "200", "300"],
+            "tournament_start_date": [date(2024, 1, 1), date(2024, 2, 1), date(2024, 3, 1)],
+        })
+        warnings = validate_tournament_clusters(df)
+        assert len(warnings) == 0
+
+    def test_suspicious_cluster_flagged(self):
+        """3+ tournaments within 7 days should be flagged."""
+        from mvp.atptour.aggregators.matches import validate_tournament_clusters
+
+        df = pl.DataFrame({
+            "player_id": ["A001"] * 3,
+            "tournament_id": ["100", "200", "300"],
+            "tournament_start_date": [date(2024, 1, 1), date(2024, 1, 3), date(2024, 1, 5)],
+        })
+        warnings = validate_tournament_clusters(df)
+        assert len(warnings) == 1
+        assert warnings[0]["player_id"] == "A001"
+        assert len(warnings[0]["tournament_ids"]) == 3
