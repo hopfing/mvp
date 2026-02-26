@@ -402,6 +402,8 @@ class ResultsParser:
         """
         if not player_scores and not opp_scores:
             return "walkover"
+        if not player_scores or not opp_scores:
+            return "retirement"
         last_set_max = max(player_scores[-1], opp_scores[-1])
         if last_set_max < 6:
             return "retirement"
