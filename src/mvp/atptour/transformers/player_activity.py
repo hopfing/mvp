@@ -103,7 +103,13 @@ class PlayerActivityStager(BaseJob):
             return []
 
         stage_dir = self.build_path("stage", "activity")
-        existing = {p.stem: p for p in self.list_files(stage_dir, "*.parquet")}
+        expected_cols = set(
+            polars_schema_overrides(PlayerActivityRecord).keys()
+        )
+        existing: dict[str, Path] = {}
+        for p in self.list_files(stage_dir, "*.parquet"):
+            if set(pl.read_parquet_schema(p).keys()) == expected_cols:
+                existing[p.stem] = p
 
         to_process = []
         for raw_path in raw_files:
@@ -162,7 +168,9 @@ class PlayerActivityTransformer(BaseJob):
         dfs = [pl.read_parquet(p) for p in parquet_files]
         combined = pl.concat(dfs, how="diagonal_relaxed")
 
-        self._assert_unique(combined, ["player_id", "tournament_id", "year", "match_id"])
+        self._assert_unique(
+            combined, ["player_id", "tournament_id", "year", "match_id"]
+        )
 
         target = self.build_path("stage", "activity.parquet")
         result = self.save_parquet(combined, target)
