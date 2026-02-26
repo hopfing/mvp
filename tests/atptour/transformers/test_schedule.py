@@ -474,6 +474,76 @@ class TestContentGroupCourtPropagation:
         assert records[1].court_name == "Center Court"
 
 
+class TestCourtMatchNum:
+    def test_sequential_within_group(self):
+        html = _wrap_groups(
+            [
+                _singles_div(court="Court 1", suffix="Starts At",
+                             dt_attr="2026-02-07 10:00:00",
+                             displaytime="Starts At 10:00 AM"),
+                _singles_div(court=None, suffix="Followed By",
+                             dt_attr="", displaytime="Followed By",
+                             round_str="QF",
+                             p1_slug="carlos-alcaraz", p1_id="a0e2",
+                             p1_first="C.", p1_last="Alcaraz", p1_flag="esp",
+                             p2_slug="jannik-sinner", p2_id="s0ag",
+                             p2_first="J.", p2_last="Sinner", p2_flag="ita",
+                             p1_rank="(1)", p2_rank="(2)"),
+                _singles_div(court=None, suffix="Followed By",
+                             dt_attr="", displaytime="Followed By",
+                             round_str="R16",
+                             p1_slug="novak-djokovic", p1_id="d643",
+                             p1_first="N.", p1_last="Djokovic", p1_flag="srb",
+                             p2_slug="rafael-nadal", p2_id="n409",
+                             p2_first="R.", p2_last="Nadal", p2_flag="esp",
+                             p1_rank="(3)", p2_rank="(4)"),
+            ],
+        )
+        records = _parse_fixture(html)
+        assert [r.court_match_num for r in records] == [1, 2, 3]
+
+    def test_resets_per_group(self):
+        html = _wrap_groups(
+            [
+                _singles_div(court="Court A", suffix="Starts At",
+                             dt_attr="2026-02-07 10:00:00",
+                             displaytime="Starts At 10:00 AM"),
+                _singles_div(court=None, suffix="Followed By",
+                             dt_attr="", displaytime="Followed By",
+                             round_str="QF",
+                             p1_slug="carlos-alcaraz", p1_id="a0e2",
+                             p1_first="C.", p1_last="Alcaraz", p1_flag="esp",
+                             p2_slug="jannik-sinner", p2_id="s0ag",
+                             p2_first="J.", p2_last="Sinner", p2_flag="ita",
+                             p1_rank="(1)", p2_rank="(2)"),
+            ],
+            [
+                _singles_div(court="Court B", suffix="Starts At",
+                             dt_attr="2026-02-07 11:00:00",
+                             displaytime="Starts At 11:00 AM",
+                             round_str="R16",
+                             p1_slug="novak-djokovic", p1_id="d643",
+                             p1_first="N.", p1_last="Djokovic", p1_flag="srb",
+                             p2_slug="rafael-nadal", p2_id="n409",
+                             p2_first="R.", p2_last="Nadal", p2_flag="esp",
+                             p1_rank="(3)", p2_rank="(4)"),
+            ],
+        )
+        records = _parse_fixture(html)
+        assert [r.court_match_num for r in records] == [1, 2, 1]
+
+    def test_counts_doubles(self):
+        html = _wrap_groups(
+            [
+                _doubles_div(court="Court 1"),
+                _singles_div(court=None, suffix="Followed By",
+                             dt_attr="", displaytime="Followed By"),
+            ],
+        )
+        records = _parse_fixture(html)
+        assert [r.court_match_num for r in records] == [1, 2]
+
+
 def _make_tournament():
     """Create a test Tournament object."""
     from mvp.atptour.tournament import Tournament
