@@ -9,7 +9,7 @@ import polars as pl
 
 from mvp.atptour.schemas.player_bio import PlayerBioRecord
 from mvp.common.base_job import BaseJob
-from mvp.common.utils import polars_schema_overrides
+from mvp.common.utils import polars_schema
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +90,7 @@ class PlayerBioStager(BaseJob):
                 record = _parse_bio_json(pid, data, source_file, parsed_at)
                 df = pl.DataFrame(
                     [record.model_dump()],
-                    schema_overrides=polars_schema_overrides(PlayerBioRecord),
+                    schema_overrides=polars_schema(PlayerBioRecord),
                 )
                 target = self.build_path("stage", "players", f"{pid}.parquet")
                 self.save_parquet(df, target)

@@ -14,7 +14,7 @@ from mvp.atptour.schemas.schedule import ScheduleRecord
 from mvp.atptour.tournament import Tournament
 from mvp.common.base_job import BaseJob
 from mvp.common.enums import Circuit, DrawType
-from mvp.common.utils import polars_schema_overrides
+from mvp.common.utils import polars_schema
 
 logger = logging.getLogger(__name__)
 
@@ -288,7 +288,7 @@ class ScheduleTransformer(BaseJob):
 
         df = pl.DataFrame(
             [r.model_dump() for r in all_records],
-            schema_overrides=polars_schema_overrides(ScheduleRecord),
+            schema_overrides=polars_schema(ScheduleRecord),
         )
 
         df = self._dedup(df)

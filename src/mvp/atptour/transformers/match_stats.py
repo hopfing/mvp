@@ -16,7 +16,7 @@ from mvp.atptour.schemas.match_stats import MatchStatsRecord
 from mvp.atptour.tournament import Tournament
 from mvp.common.base_job import BaseJob
 from mvp.common.enums import DrawType
-from mvp.common.utils import polars_schema_overrides
+from mvp.common.utils import polars_schema
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +75,7 @@ class MatchStatsTransformer(BaseJob):
             return []
 
         rows = [r.model_dump() for r in records]
-        overrides = polars_schema_overrides(MatchStatsRecord)
+        overrides = polars_schema(MatchStatsRecord)
         df = pl.DataFrame(rows, schema_overrides=overrides)
 
         self._assert_unique(df, ["match_uid"])

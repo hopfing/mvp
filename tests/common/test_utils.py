@@ -5,7 +5,7 @@ from datetime import date
 import polars as pl
 from pydantic import BaseModel
 
-from mvp.common.utils import polars_schema_overrides
+from mvp.common.utils import polars_schema
 
 
 class SampleModel(BaseModel):
@@ -17,18 +17,35 @@ class SampleModel(BaseModel):
     optional_bool: bool | None = None
 
 
-class TestPolarsSchemaOverrides:
-    def test_only_optional_fields(self):
-        overrides = polars_schema_overrides(SampleModel)
-        assert "required_str" not in overrides
-        assert "required_int" not in overrides
-        assert overrides["optional_str"] == pl.String
-        assert overrides["optional_int"] == pl.Int64
-        assert overrides["optional_date"] == pl.Date
-        assert overrides["optional_bool"] == pl.Boolean
+class TestPolarsSchema:
+    def test_includes_non_nullable_fields(self):
+        """polars_schema should map ALL fields, not just nullable ones."""
+        schema = polars_schema(SampleModel)
+        assert schema["required_str"] == pl.String
+        assert schema["required_int"] == pl.Int64
 
-    def test_empty_model(self):
-        class Empty(BaseModel):
+    def test_includes_nullable_fields(self):
+        schema = polars_schema(SampleModel)
+        assert schema["optional_str"] == pl.String
+        assert schema["optional_int"] == pl.Int64
+        assert schema["optional_date"] == pl.Date
+        assert schema["optional_bool"] == pl.Boolean
+
+    def test_all_fields_present(self):
+        schema = polars_schema(SampleModel)
+        assert set(schema.keys()) == {
+            "required_str",
+            "required_int",
+            "optional_str",
+            "optional_int",
+            "optional_date",
+            "optional_bool",
+        }
+
+    def test_non_nullable_only_model(self):
+        class Simple(BaseModel):
             name: str
+            age: int
 
-        assert polars_schema_overrides(Empty) == {}
+        schema = polars_schema(Simple)
+        assert schema == {"name": pl.String, "age": pl.Int64}

@@ -10,7 +10,7 @@ from bs4 import BeautifulSoup
 
 from mvp.atptour.schemas.rankings import RankingsRecord
 from mvp.common.base_job import BaseJob
-from mvp.common.utils import polars_schema_overrides
+from mvp.common.utils import polars_schema
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +89,7 @@ class RankingsTransformer(BaseJob):
                 continue
 
             rows = [r.model_dump() for r in records]
-            overrides = polars_schema_overrides(RankingsRecord)
+            overrides = polars_schema(RankingsRecord)
             df = pl.DataFrame(rows, schema_overrides=overrides)
 
             self._assert_unique(df, ["player_id"])

@@ -9,7 +9,7 @@ import polars as pl
 from mvp.atptour.schemas.overview import OverviewRecord
 from mvp.atptour.tournament import Tournament
 from mvp.common.base_job import BaseJob
-from mvp.common.utils import polars_schema_overrides
+from mvp.common.utils import polars_schema
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +65,7 @@ class OverviewTransformer(BaseJob):
         )
 
         rows = [record.model_dump()]
-        overrides = polars_schema_overrides(OverviewRecord)
+        overrides = polars_schema(OverviewRecord)
         df = pl.DataFrame(rows, schema_overrides=overrides)
 
         self._assert_unique(df, ["tournament_id", "year"])

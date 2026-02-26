@@ -8,7 +8,7 @@ import polars as pl
 
 from mvp.atptour.schemas.player_activity import PlayerActivityRecord
 from mvp.common.base_job import BaseJob
-from mvp.common.utils import polars_schema_overrides
+from mvp.common.utils import polars_schema
 
 logger = logging.getLogger(__name__)
 
@@ -135,7 +135,7 @@ class PlayerActivityStager(BaseJob):
                     continue
                 df = pl.DataFrame(
                     [r.model_dump() for r in records],
-                    schema_overrides=polars_schema_overrides(PlayerActivityRecord),
+                    schema_overrides=polars_schema(PlayerActivityRecord),
                 )
                 target = self.build_path("stage", "activity", f"{pid}.parquet")
                 self.save_parquet(df, target)

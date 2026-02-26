@@ -16,7 +16,7 @@ from mvp.atptour.schemas.results import ResultRecord
 from mvp.atptour.tournament import Tournament
 from mvp.common.base_job import BaseJob
 from mvp.common.enums import DrawType
-from mvp.common.utils import polars_schema_overrides
+from mvp.common.utils import polars_schema
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +55,7 @@ class ResultsTransformer(BaseJob):
             return []
 
         rows = [r.model_dump() for r in records]
-        overrides = polars_schema_overrides(ResultRecord)
+        overrides = polars_schema(ResultRecord)
         df = pl.DataFrame(rows, schema_overrides=overrides)
 
         df = self._dedup(df)
