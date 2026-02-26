@@ -103,8 +103,8 @@ class PlayerActivityStager(BaseJob):
             return []
 
         stage_dir = self.build_path("stage", "activity")
-        expected_cols = set(
-            polars_schema_overrides(PlayerActivityRecord).keys()
+        expected_cols = set(PlayerActivityRecord.model_fields) | set(
+            PlayerActivityRecord.model_computed_fields
         )
         existing: dict[str, Path] = {}
         for p in self.list_files(stage_dir, "*.parquet"):
