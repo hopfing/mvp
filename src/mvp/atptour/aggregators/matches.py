@@ -38,6 +38,36 @@ def filter_dc_activity(df: pl.DataFrame) -> pl.DataFrame:
     return df.filter(pl.col("event_type") != "DC")
 
 
+def map_activity_to_layer2(df: pl.DataFrame) -> pl.DataFrame:
+    """Map Activity columns to Layer 2 schema for gap-fill rows.
+
+    Renames rank fields, derives won from win_loss, adds draw_type.
+    Does NOT add null columns for stats/overview -- that happens during concat.
+    """
+    return df.select(
+        "match_uid",
+        "player_id",
+        "opp_id",
+        "tournament_id",
+        "year",
+        "circuit",
+        pl.lit("singles").alias("draw_type"),
+        "round",
+        "surface",
+        "indoor",
+        "event_type",
+        "tournament_start_date",
+        "tournament_end_date",
+        (pl.col("win_loss") == "W").alias("won"),
+        "reason",
+        pl.col("player_rank").alias("activity_rank"),
+        pl.col("opp_rank").alias("activity_opp_rank"),
+        pl.col("points").alias("activity_points"),
+        *[f"player_set{n}_{k}" for n in range(1, 6) for k in ("games", "tiebreak")],
+        *[f"opp_set{n}_{k}" for n in range(1, 6) for k in ("games", "tiebreak")],
+    )
+
+
 def add_round_order(df: pl.DataFrame) -> pl.DataFrame:
     """Add round_order column from the round column using ROUND_ORDER mapping."""
     return df.with_columns(
