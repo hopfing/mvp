@@ -6,13 +6,13 @@ from pathlib import Path
 import polars as pl
 from bs4 import BeautifulSoup
 
+from mvp.atptour.schemas.schedule import SCHEMA_VERSION, ScheduleRecord
 from mvp.atptour.transformers.schedule import (
     ScheduleTransformer,
     _normalize_score,
     _parse_schedule_html,
     _parse_snapshot_timestamp,
 )
-from mvp.atptour.schemas.schedule import SCHEMA_VERSION, ScheduleRecord
 from mvp.common.enums import Circuit, DrawType
 
 
@@ -740,6 +740,8 @@ class TestFullTransformerRun:
         assert row["p1_id"] == "ME82"
         assert row["p2_id"] == "D0DT"
         assert row["round"] == "SF"
+        assert row["court_match_num"] == 1
+        assert row["is_time_estimated"] is False
         assert row["match_uid"] == "2026_339_SGL_SF_D0DT_ME82"
 
     def test_multiple_matches(self, tmp_path):

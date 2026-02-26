@@ -26,6 +26,8 @@ def _base_record(**overrides) -> dict:
         "time_suffix": "Not Before",
         "display_time": "Not Before 3:00 PM",
         "court_name": "Center Court",
+        "court_match_num": 1,
+        "is_time_estimated": False,
         "round": "SF",
         "p1_id": "me82",
         "p1_name": "A. Mannarino",
@@ -134,7 +136,7 @@ class TestEmptyToNone:
 
 class TestFieldCount:
     def test_field_count(self):
-        assert len(ScheduleRecord.model_fields) == 25
+        assert len(ScheduleRecord.model_fields) == 27
 
 
 class TestSchemaVersioning:
