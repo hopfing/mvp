@@ -125,7 +125,7 @@ class PlayerBioTransformer(BaseJob):
             return None
 
         dfs = [pl.read_parquet(p) for p in parquet_files]
-        combined = pl.concat(dfs, how="diagonal_relaxed")
+        combined = pl.concat(dfs, how="vertical_relaxed")
 
         self._assert_unique(combined, ["player_id"])
 
