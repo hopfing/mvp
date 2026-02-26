@@ -42,8 +42,10 @@ def filter_dc_tournaments(df: pl.DataFrame) -> pl.DataFrame:
 
 
 def filter_dc_activity(df: pl.DataFrame) -> pl.DataFrame:
-    """Exclude Davis Cup rows from Activity data."""
-    return df.filter(pl.col("event_type") != "DC")
+    """Exclude Davis Cup and team event rows from Activity data."""
+    return df.filter(
+        (pl.col("event_type") != "DC") & (pl.col("circuit") != "team")
+    )
 
 
 def map_activity_to_layer2(df: pl.DataFrame) -> pl.DataFrame:

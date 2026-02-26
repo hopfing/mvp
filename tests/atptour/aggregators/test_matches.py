@@ -54,15 +54,16 @@ class TestDCFilter:
         assert result["tournament_id"].to_list() == ["339", "1234"]
 
     def test_filter_dc_from_activity(self):
-        """DC activity rows should be excluded."""
+        """DC and team circuit activity rows should be excluded."""
         from mvp.atptour.aggregators.matches import filter_dc_activity
 
         df = pl.DataFrame({
-            "event_type": ["250", "DC", "CH", "FU", "DC"],
+            "event_type": ["250", "DC", "CH", "WT", "DC"],
+            "circuit": ["tour", "tour", "chal", "team", "tour"],
         })
         result = filter_dc_activity(df)
-        assert len(result) == 3
-        assert "DC" not in result["event_type"].to_list()
+        assert len(result) == 2
+        assert result["event_type"].to_list() == ["250", "CH"]
 
 
 class TestActivityMapping:
