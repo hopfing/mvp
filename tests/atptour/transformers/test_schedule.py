@@ -497,6 +497,112 @@ class TestTimeEstimation:
         assert records[1].scheduled_datetime == datetime(2026, 2, 7, 11, 30, 0)
         assert records[1].is_time_estimated is True
 
+    def test_not_before_resets_anchor_mid_group(self):
+        html = _wrap_groups(
+            [
+                _singles_div(court="Court 1", suffix="Starts At",
+                             dt_attr="2026-02-07 10:00:00",
+                             displaytime="Starts At 10:00 AM"),
+                _singles_div(court=None, suffix="Followed By",
+                             dt_attr="", displaytime="Followed By",
+                             round_str="QF",
+                             p1_slug="carlos-alcaraz", p1_id="a0e2",
+                             p1_first="C.", p1_last="Alcaraz", p1_flag="esp",
+                             p2_slug="jannik-sinner", p2_id="s0ag",
+                             p2_first="J.", p2_last="Sinner", p2_flag="ita",
+                             p1_rank="(1)", p2_rank="(2)"),
+                _singles_div(court=None, suffix="Not Before",
+                             dt_attr="2026-02-07 15:00:00",
+                             displaytime="Not Before 3:00 PM",
+                             round_str="R16",
+                             p1_slug="novak-djokovic", p1_id="d643",
+                             p1_first="N.", p1_last="Djokovic", p1_flag="srb",
+                             p2_slug="rafael-nadal", p2_id="n409",
+                             p2_first="R.", p2_last="Nadal", p2_flag="esp",
+                             p1_rank="(3)", p2_rank="(4)"),
+                _singles_div(court=None, suffix="Followed By",
+                             dt_attr="", displaytime="Followed By",
+                             round_str="R16",
+                             p1_slug="daniil-medvedev", p1_id="mm58",
+                             p1_first="D.", p1_last="Medvedev", p1_flag="rus",
+                             p2_slug="alexander-zverev", p2_id="z355",
+                             p2_first="A.", p2_last="Zverev", p2_flag="ger",
+                             p1_rank="(5)", p2_rank="(6)"),
+            ],
+        )
+        records = _parse_fixture(html)
+        assert len(records) == 4
+        assert records[0].scheduled_datetime == datetime(2026, 2, 7, 10, 0, 0)
+        assert records[0].is_time_estimated is False
+        assert records[1].scheduled_datetime == datetime(2026, 2, 7, 11, 30, 0)
+        assert records[1].is_time_estimated is True
+        assert records[2].scheduled_datetime == datetime(2026, 2, 7, 15, 0, 0)
+        assert records[2].is_time_estimated is False
+        # Anchor reset: 15:00 + (4-3)*90 = 16:30
+        assert records[3].scheduled_datetime == datetime(2026, 2, 7, 16, 30, 0)
+        assert records[3].is_time_estimated is True
+
+    def test_no_anchor_leaves_datetime_none(self):
+        html = _wrap_groups(
+            [
+                _singles_div(court=None, suffix="Followed By",
+                             dt_attr="", displaytime="Followed By"),
+            ],
+        )
+        records = _parse_fixture(html)
+        assert records[0].scheduled_datetime is None
+        assert records[0].is_time_estimated is True
+
+    def test_multiple_followed_by_chain(self):
+        html = _wrap_groups(
+            [
+                _singles_div(court="Court 1", suffix="Starts At",
+                             dt_attr="2026-02-07 10:00:00",
+                             displaytime="Starts At 10:00 AM"),
+                _singles_div(court=None, suffix="Followed By",
+                             dt_attr="", displaytime="Followed By",
+                             round_str="QF",
+                             p1_slug="carlos-alcaraz", p1_id="a0e2",
+                             p1_first="C.", p1_last="Alcaraz", p1_flag="esp",
+                             p2_slug="jannik-sinner", p2_id="s0ag",
+                             p2_first="J.", p2_last="Sinner", p2_flag="ita",
+                             p1_rank="(1)", p2_rank="(2)"),
+                _singles_div(court=None, suffix="Followed By",
+                             dt_attr="", displaytime="Followed By",
+                             round_str="R16",
+                             p1_slug="novak-djokovic", p1_id="d643",
+                             p1_first="N.", p1_last="Djokovic", p1_flag="srb",
+                             p2_slug="rafael-nadal", p2_id="n409",
+                             p2_first="R.", p2_last="Nadal", p2_flag="esp",
+                             p1_rank="(3)", p2_rank="(4)"),
+            ],
+        )
+        records = _parse_fixture(html)
+        assert records[0].scheduled_datetime == datetime(2026, 2, 7, 10, 0, 0)
+        assert records[1].scheduled_datetime == datetime(2026, 2, 7, 11, 30, 0)
+        assert records[2].scheduled_datetime == datetime(2026, 2, 7, 13, 0, 0)
+
+    def test_midnight_crossover(self):
+        html = _wrap_groups(
+            [
+                _singles_div(court="Court 1", suffix="Starts At",
+                             dt_attr="2026-02-07 23:00:00",
+                             displaytime="Starts At 11:00 PM"),
+                _singles_div(court=None, suffix="Followed By",
+                             dt_attr="", displaytime="Followed By",
+                             round_str="QF",
+                             p1_slug="carlos-alcaraz", p1_id="a0e2",
+                             p1_first="C.", p1_last="Alcaraz", p1_flag="esp",
+                             p2_slug="jannik-sinner", p2_id="s0ag",
+                             p2_first="J.", p2_last="Sinner", p2_flag="ita",
+                             p1_rank="(1)", p2_rank="(2)"),
+            ],
+        )
+        records = _parse_fixture(html)
+        assert records[1].scheduled_datetime == datetime(2026, 2, 8, 0, 30, 0)
+        assert records[1].is_time_estimated is True
+        assert records[1].match_date == date(2026, 2, 7)  # unchanged
+
 
 class TestCourtMatchNum:
     def test_sequential_within_group(self):
