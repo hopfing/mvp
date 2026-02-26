@@ -74,7 +74,7 @@ class ScheduleRecord(BaseModel):
     @property
     def match_uid(self) -> str | None:
         all_ids = [self.p1_id, self.p2_id]
-        if any(is_placeholder_id(pid) for pid in all_ids):
+        if any(not pid or is_placeholder_id(pid) for pid in all_ids):
             return None
         return create_match_uid(
             self.year,
