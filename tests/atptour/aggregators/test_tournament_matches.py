@@ -132,6 +132,8 @@ def _write_schedule_parquet(
             "time_suffix": ["Not Before", ""],
             "display_time": ["14:00", "11:00"],
             "court_name": ["Rod Laver Arena", "Rod Laver Arena"],
+            "court_match_num": [1, 1],
+            "is_time_estimated": [False, False],
             # Draw order: BBBB is p1 in the final (opposite of Results)
             "p1_id": ["BBBB", "CCCC"],
             "p1_name": ["Player B", "Player C"],

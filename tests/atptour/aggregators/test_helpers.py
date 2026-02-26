@@ -480,6 +480,8 @@ def _make_schedule_df(
             "time_suffix": [""],
             "display_time": ["2:00 PM"],
             "court_name": ["Centre Court"],
+            "court_match_num": [1],
+            "is_time_estimated": [False],
             "status": ["completed"],
             "score": ["6-4 3-6 7-6(3)"],
             "snapshot_timestamp": [datetime(2023, 1, 7, 10, 0, 0)],
