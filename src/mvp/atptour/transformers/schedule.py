@@ -128,91 +128,104 @@ def _parse_schedule_html(
     soup = BeautifulSoup(html, "lxml")
     records = []
 
-    for match_div in soup.select("div.schedule[data-matchdate]"):
-        # Match date
-        match_date_str = match_div["data-matchdate"]
-        match_date = date.fromisoformat(match_date_str)
-
-        # Scheduled datetime
-        datetime_str = match_div.get("data-datetime", "").strip()
-        if datetime_str:
-            scheduled_datetime = datetime.strptime(datetime_str, "%Y-%m-%d %H:%M:%S")
-        else:
-            scheduled_datetime = None
-
-        time_suffix = match_div.get("data-suffix", "").strip()
-        display_time = match_div.get("data-displaytime", "").strip()
-
-        # Court name from <strong> in schedule-location-timestamp
-        header = match_div.select_one("div.schedule-header")
+    for group in soup.select("div.content-group"):
         court_name = None
-        if header:
-            strong = header.select_one("div.schedule-location-timestamp strong")
-            if strong:
-                court_name = strong.get_text(strip=True) or None
+        court_match_num = 0
 
-        # Round
-        round_div = match_div.select_one("div.schedule-header div.schedule-type")
-        round_str = round_div.get_text(strip=True) if round_div else ""
+        for match_div in group.select("div.schedule[data-matchdate]"):
+            court_match_num += 1
 
-        # Players
-        content = match_div.select_one("div.schedule-content")
-        if content is None:
-            continue
+            match_date_str = match_div["data-matchdate"]
+            match_date = date.fromisoformat(match_date_str)
 
-        player_div = content.select_one("div.player")
-        opponent_div = content.select_one("div.opponent")
-        if player_div is None or opponent_div is None:
-            continue
+            datetime_str = match_div.get("data-datetime", "").strip()
+            if datetime_str:
+                scheduled_datetime = datetime.strptime(
+                    datetime_str, "%Y-%m-%d %H:%M:%S"
+                )
+            else:
+                scheduled_datetime = None
 
-        p1_id, p1_name, p1_country, p1_seed_entry, p1_is_dbl = (
-            _extract_player_info(player_div)
-        )
-        p2_id, p2_name, p2_country, p2_seed_entry, p2_is_dbl = (
-            _extract_player_info(opponent_div)
-        )
-        is_doubles = p1_is_dbl or p2_is_dbl
-        draw_type = DrawType.doubles if is_doubles else DrawType.singles
+            time_suffix = match_div.get("data-suffix", "").strip()
+            display_time = match_div.get("data-displaytime", "").strip()
 
-        # Status
-        status_div = content.select_one("div.status")
-        status = status_div.get_text(strip=True) if status_div else None
-        if status == "":
-            status = None
+            # Court name: extract from <strong> if present, otherwise propagate
+            header = match_div.select_one("div.schedule-header")
+            if header:
+                strong = header.select_one(
+                    "div.schedule-location-timestamp strong"
+                )
+                if strong:
+                    extracted = strong.get_text(strip=True) or None
+                    if extracted:
+                        court_name = extracted
 
-        # Score
-        score_span = content.select_one("span.schedule-cta-score")
-        score = _normalize_score(score_span)
+            is_time_estimated = scheduled_datetime is None
 
-        records.append(
-            ScheduleRecord(
-                tournament_id=tournament_id,
-                year=year,
-                circuit=circuit,
-                draw_type=draw_type,
-                match_date=match_date,
-                scheduled_datetime=scheduled_datetime,
-                time_suffix=time_suffix,
-                display_time=display_time,
-                court_name=court_name,
-                round=round_str,
-                p1_id=p1_id,
-                p1_name=p1_name,
-                p1_country=p1_country,
-                p1_seed=parse_seed_entry(p1_seed_entry)[0],
-                p1_entry=parse_seed_entry(p1_seed_entry)[1],
-                p2_id=p2_id,
-                p2_name=p2_name,
-                p2_country=p2_country,
-                p2_seed=parse_seed_entry(p2_seed_entry)[0],
-                p2_entry=parse_seed_entry(p2_seed_entry)[1],
-                status=status,
-                score=score,
-                snapshot_timestamp=snapshot_timestamp,
-                source_file=source_file,
-                parsed_at=parsed_at,
+            # Round
+            round_div = match_div.select_one(
+                "div.schedule-header div.schedule-type"
             )
-        )
+            round_str = round_div.get_text(strip=True) if round_div else ""
+
+            # Players
+            content = match_div.select_one("div.schedule-content")
+            if content is None:
+                continue
+
+            player_div = content.select_one("div.player")
+            opponent_div = content.select_one("div.opponent")
+            if player_div is None or opponent_div is None:
+                continue
+
+            p1_id, p1_name, p1_country, p1_seed_entry, p1_is_dbl = (
+                _extract_player_info(player_div)
+            )
+            p2_id, p2_name, p2_country, p2_seed_entry, p2_is_dbl = (
+                _extract_player_info(opponent_div)
+            )
+            is_doubles = p1_is_dbl or p2_is_dbl
+            draw_type = DrawType.doubles if is_doubles else DrawType.singles
+
+            status_div = content.select_one("div.status")
+            status = status_div.get_text(strip=True) if status_div else None
+            if status == "":
+                status = None
+
+            score_span = content.select_one("span.schedule-cta-score")
+            score = _normalize_score(score_span)
+
+            records.append(
+                ScheduleRecord(
+                    tournament_id=tournament_id,
+                    year=year,
+                    circuit=circuit,
+                    draw_type=draw_type,
+                    match_date=match_date,
+                    scheduled_datetime=scheduled_datetime,
+                    time_suffix=time_suffix,
+                    display_time=display_time,
+                    court_name=court_name,
+                    court_match_num=court_match_num,
+                    is_time_estimated=is_time_estimated,
+                    round=round_str,
+                    p1_id=p1_id,
+                    p1_name=p1_name,
+                    p1_country=p1_country,
+                    p1_seed=parse_seed_entry(p1_seed_entry)[0],
+                    p1_entry=parse_seed_entry(p1_seed_entry)[1],
+                    p2_id=p2_id,
+                    p2_name=p2_name,
+                    p2_country=p2_country,
+                    p2_seed=parse_seed_entry(p2_seed_entry)[0],
+                    p2_entry=parse_seed_entry(p2_seed_entry)[1],
+                    status=status,
+                    score=score,
+                    snapshot_timestamp=snapshot_timestamp,
+                    source_file=source_file,
+                    parsed_at=parsed_at,
+                )
+            )
 
     return records
 

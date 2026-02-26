@@ -15,7 +15,7 @@ from mvp.atptour.schema_helpers import empty_to_none
 from mvp.common.enums import Circuit, DrawType, Round
 from mvp.common.schema_hash import compute_schema_hash
 
-SCHEMA_VERSION = "2.0.0"
+SCHEMA_VERSION = "3.0.0"
 
 
 class ScheduleRecord(BaseModel):
@@ -32,6 +32,8 @@ class ScheduleRecord(BaseModel):
     time_suffix: str
     display_time: str
     court_name: str | None
+    court_match_num: int
+    is_time_estimated: bool
     round: Round
 
     p1_id: str

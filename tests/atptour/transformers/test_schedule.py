@@ -12,7 +12,8 @@ from mvp.atptour.transformers.schedule import (
     _parse_schedule_html,
     _parse_snapshot_timestamp,
 )
-from mvp.common.enums import Circuit
+from mvp.atptour.schemas.schedule import SCHEMA_VERSION, ScheduleRecord
+from mvp.common.enums import Circuit, DrawType
 
 
 def _flag(code):
@@ -337,6 +338,8 @@ class TestParseSinglesMatch:
         assert r.p2_entry == "Q"
         assert r.status == "Vs"
         assert r.score is None
+        assert r.court_match_num == 1
+        assert r.is_time_estimated is False
 
 
 class TestParseDoublesMatch:
@@ -366,6 +369,8 @@ class TestParseDoublesMatch:
         assert r.status == "Defeats"
         assert r.score == "76(6) 61"
         assert r.court_name == "Court Patrice Dominguez"
+        assert r.court_match_num == 1
+        assert r.is_time_estimated is False
 
 
 class TestParseScoreWithTiebreak:
@@ -420,6 +425,53 @@ class TestParseFollowedBy:
         assert r.scheduled_datetime is None
         assert r.time_suffix == "Followed By"
         assert r.display_time == "Followed By"
+        assert r.court_match_num == 1
+        assert r.is_time_estimated is True
+
+
+class TestNewSchemaFields:
+    def test_schema_version_bumped(self):
+        assert SCHEMA_VERSION == "3.0.0"
+
+    def test_court_match_num_and_is_time_estimated(self):
+        record = ScheduleRecord(
+            tournament_id="339", year=2026, circuit=Circuit.tour,
+            draw_type=DrawType.singles, match_date=date(2026, 2, 7),
+            scheduled_datetime=datetime(2026, 2, 7, 14, 0, 0),
+            time_suffix="Not Before", display_time="Not Before 3:00 PM",
+            court_name="Center Court", court_match_num=2, is_time_estimated=False,
+            round="SF",
+            p1_id="ME82", p1_name="A. Mannarino", p1_country="FRA",
+            p2_id="D0DT", p2_name="M. Damm", p2_country="USA",
+            status="Vs", score=None,
+            snapshot_timestamp=datetime(2026, 2, 7, 14, 0, 0),
+            source_file="test.html", parsed_at=datetime(2026, 2, 24),
+        )
+        assert record.court_match_num == 2
+        assert record.is_time_estimated is False
+
+
+class TestContentGroupCourtPropagation:
+    def test_court_name_propagated_to_all_matches_in_group(self):
+        html = _wrap_groups(
+            [
+                _singles_div(court="Center Court", suffix="Starts At",
+                             dt_attr="2026-02-07 10:00:00",
+                             displaytime="Starts At 10:00 AM"),
+                _singles_div(court=None, suffix="Followed By",
+                             dt_attr="", displaytime="Followed By",
+                             round_str="QF",
+                             p1_slug="carlos-alcaraz", p1_id="a0e2",
+                             p1_first="C.", p1_last="Alcaraz", p1_flag="esp",
+                             p2_slug="jannik-sinner", p2_id="s0ag",
+                             p2_first="J.", p2_last="Sinner", p2_flag="ita",
+                             p1_rank="(1)", p2_rank="(2)"),
+            ],
+        )
+        records = _parse_fixture(html)
+        assert len(records) == 2
+        assert records[0].court_name == "Center Court"
+        assert records[1].court_name == "Center Court"
 
 
 def _make_tournament():
