@@ -174,7 +174,16 @@ class TournamentMatchesAggregator(BaseJob):
         # Step 5: LEFT JOIN Match Stats
         joined = self._join_match_stats(joined, ex_stats)
 
-        # Step 6: LEFT JOIN Overview
+        # Step 6: Coalesce join key fields before Overview join so
+        # schedule-only rows (null Results keys) can match Overview.
+        for key in ["tournament_id", "year", "circuit"]:
+            variants = [c for c in joined.columns if c == key or c.startswith(f"{key}_")]
+            if len(variants) > 1:
+                joined = joined.with_columns(
+                    pl.coalesce([pl.col(v) for v in variants]).alias(key)
+                )
+
+        # Step 7: LEFT JOIN Overview
         joined = self._join_overview(joined, overview_df)
 
         # Step 7: Waterfall resolution
@@ -371,12 +380,12 @@ class TournamentMatchesAggregator(BaseJob):
 
         # surface: coalesce(stats, overview)
         coalesce_exprs.extend(
-            self._waterfall_expr(df, "surface", ["_stats", "_overview"])
+            self._waterfall_expr(df, "surface", ["", "_stats", "_overview"])
         )
 
         # court_name: coalesce(stats, schedule)
         coalesce_exprs.extend(
-            self._waterfall_expr(df, "court_name", ["_stats", "_schedule"])
+            self._waterfall_expr(df, "court_name", ["", "_stats", "_schedule"])
         )
 
         # won: coalesce(results, stats)
@@ -490,7 +499,7 @@ class TournamentMatchesAggregator(BaseJob):
             if col_name in df.columns:
                 candidates.append(pl.col(col_name))
 
-        if len(candidates) <= 1:
+        if not candidates:
             return []
 
         return [pl.coalesce(candidates).alias(field)]
