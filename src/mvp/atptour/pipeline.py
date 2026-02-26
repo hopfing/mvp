@@ -5,8 +5,8 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
-from mvp.atptour.discovery import TournamentDiscovery
 from mvp.atptour.aggregators.tournament_matches import TournamentMatchesAggregator
+from mvp.atptour.discovery import TournamentDiscovery
 from mvp.atptour.extractors.match_stats import MatchStatsExtractor
 from mvp.atptour.extractors.overview import OverviewExtractor
 from mvp.atptour.extractors.player_activity import PlayerActivityExtractor

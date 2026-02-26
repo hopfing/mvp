@@ -177,7 +177,10 @@ class TournamentMatchesAggregator(BaseJob):
         # Step 6: Coalesce join key fields before Overview join so
         # schedule-only rows (null Results keys) can match Overview.
         for key in ["tournament_id", "year", "circuit"]:
-            variants = [c for c in joined.columns if c == key or c.startswith(f"{key}_")]
+            variants = [
+                c for c in joined.columns
+                if c == key or c.startswith(f"{key}_")
+            ]
             if len(variants) > 1:
                 joined = joined.with_columns(
                     pl.coalesce([pl.col(v) for v in variants]).alias(key)

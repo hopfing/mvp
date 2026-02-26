@@ -1,8 +1,6 @@
 import polars as pl
-import pytest
-from pathlib import Path
 
-from mvp.atptour.pipeline_utils import get_active_players, activity_covers_tournament
+from mvp.atptour.pipeline_utils import activity_covers_tournament, get_active_players
 
 
 class TestGetActivePlayers:
