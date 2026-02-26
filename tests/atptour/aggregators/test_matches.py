@@ -170,6 +170,25 @@ class TestRankingsJoin:
         # Opponent B002 should have rank 20
         assert result.filter(pl.col("opp_id") == "B002")["rankings_opp_rank"][0] == 20
 
+    def test_no_ranking_date_in_output(self):
+        """join_rankings should not leak ranking_date columns into output."""
+        from mvp.atptour.aggregators.matches import join_rankings
+
+        matches = pl.DataFrame({
+            "player_id": ["A001"],
+            "opp_id": ["B002"],
+            "tournament_start_date": [date(2024, 3, 4)],
+        })
+        rankings = pl.DataFrame({
+            "player_id": ["A001", "B002"],
+            "ranking_date": [date(2024, 2, 26), date(2024, 2, 26)],
+            "rank": [10, 20],
+            "points": [1000, 500],
+            "tournaments_played": [5, 10],
+        })
+        result = join_rankings(matches, rankings)
+        assert not any(c.startswith("ranking_date") for c in result.columns)
+
     def test_null_tournament_date_gets_null_rankings(self):
         """Matches with null tournament_start_date should get null rankings."""
         from mvp.atptour.aggregators.matches import join_rankings

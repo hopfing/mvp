@@ -118,7 +118,9 @@ def join_rankings(matches: pl.DataFrame, rankings: pl.DataFrame) -> pl.DataFrame
         strategy="backward",
     )
 
-    return result
+    # Drop temporary ranking_date columns from both join_asof calls
+    drop_cols = [c for c in result.columns if c.startswith("ranking_date")]
+    return result.drop(drop_cols)
 
 
 _BIO_FIELDS = [
