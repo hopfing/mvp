@@ -1,7 +1,6 @@
 """Tests for Layer 2 cross-tournament aggregation."""
 
 import polars as pl
-import pytest
 
 from mvp.atptour.aggregators.matches import ROUND_ORDER
 from mvp.common.enums import Round
