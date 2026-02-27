@@ -88,6 +88,8 @@ MATCHES_SCHEMA: dict[str, pl.DataType] = {
     "display_time": pl.String,
     "status": pl.String,
     "score": pl.String,
+    "is_time_estimated": pl.Boolean,
+    "court_match_num": pl.Int64,
     # Overview-only
     "tournament_name": pl.String,
     "country": pl.String,
@@ -602,6 +604,8 @@ class TournamentMatchesAggregator(BaseJob):
             "display_time",
             "status",
             "score",
+            "is_time_estimated",
+            "court_match_num",
             # Overview-only
             "tournament_name",
             "country",
