@@ -87,3 +87,26 @@ class TestRollingSum:
 
         # Row 1: day 1 is exactly 7 days before day 8, should be included
         assert result["rolling_wins"].to_list() == [0, 1]
+
+    def test_rolling_sum_isolates_players(self):
+        """Each player's rolling sum is independent."""
+        df = pl.DataFrame({
+            "player_id": ["A", "B", "A", "B"],
+            "effective_match_date": [
+                date(2024, 1, 1),
+                date(2024, 1, 2),
+                date(2024, 1, 3),
+                date(2024, 1, 4),
+            ],
+            "won": [1, 1, 1, 0],
+        }).lazy()
+
+        result = df.with_columns(
+            rolling_sum("won", days=30, group_by="player_id").alias("rolling_wins")
+        ).collect()
+
+        # Row 0 (A): no prior A matches → 0
+        # Row 1 (B): no prior B matches → 0
+        # Row 2 (A): 1 prior A match (won=1) → 1
+        # Row 3 (B): 1 prior B match (won=1) → 1
+        assert result["rolling_wins"].to_list() == [0, 0, 1, 1]
