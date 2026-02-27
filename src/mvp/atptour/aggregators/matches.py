@@ -213,16 +213,50 @@ def add_effective_match_date(df: pl.DataFrame) -> pl.DataFrame:
     )
 
     # Validate no nulls
-    null_count = df.filter(pl.col("effective_match_date").is_null()).height
+    bad_rows = df.filter(pl.col("effective_match_date").is_null())
+    null_count = bad_rows.height
     if null_count > 0:
-        bad_rows = df.filter(
-            pl.col("effective_match_date").is_null()
-        ).select(
-            group_keys + ["round", "round_order",
-                          "tournament_end_date", "scheduled_datetime"]
+        # Summarize by tournament/year for actionable diagnosis
+        summary = (
+            bad_rows
+            .group_by(["tournament_id", "year", "circuit"])
+            .agg([
+                pl.len().alias("count"),
+                pl.col("tournament_end_date").is_null().sum().alias("null_end_date"),
+                pl.col("round_order").is_null().sum().alias("null_round_order"),
+            ])
+            .sort(["year", "tournament_id"])
         )
-        logger.error("Rows with null effective_match_date:\n%s", bad_rows)
-        msg = f"null effective_match_date: {null_count} rows"
+        logger.error(
+            "Missing effective_match_date: %d rows across %d tournaments",
+            null_count,
+            summary.height,
+        )
+        logger.error("Affected tournaments (tournament_id, year, circuit, count, "
+                     "null_end_date, null_round_order):")
+        for row in summary.iter_rows(named=True):
+            logger.error(
+                "  %s/%s (%s): %d matches, %d missing end_date, %d missing round_order",
+                row["tournament_id"],
+                row["year"],
+                row["circuit"],
+                row["count"],
+                row["null_end_date"],
+                row["null_round_order"],
+            )
+
+        # Log sample of actual bad rows (limited to 20)
+        detail_cols = group_keys + [
+            "match_uid", "round", "round_order",
+            "tournament_end_date", "scheduled_datetime",
+        ]
+        sample_rows = bad_rows.select(detail_cols).head(20)
+        logger.debug("Sample rows with null effective_match_date:\n%s", sample_rows)
+
+        msg = (
+            f"null effective_match_date: {null_count} rows "
+            f"across {summary.height} tournaments"
+        )
         raise ValueError(msg)
 
     # Drop temporary columns
