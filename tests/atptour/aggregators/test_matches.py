@@ -602,6 +602,23 @@ class TestEffectiveMatchDate:
         with pytest.raises(ValueError, match="null effective_match_date"):
             add_effective_match_date(df)
 
+    def test_null_round_order_raises(self):
+        """Rows with null round_order (unknown round) in estimated groups trigger ValueError."""
+        from mvp.atptour.aggregators.matches import add_effective_match_date
+
+        df = pl.DataFrame({
+            "tournament_id": ["T1"],
+            "year": [2024],
+            "draw_type": ["singles"],
+            "round": ["UNKNOWN"],
+            "round_order": [None],
+            "tournament_end_date": [date(2024, 3, 10)],
+            "scheduled_datetime": [None],
+        }).cast({"scheduled_datetime": pl.Datetime, "tournament_end_date": pl.Date, "round_order": pl.Int64})
+
+        with pytest.raises(ValueError, match="null effective_match_date"):
+            add_effective_match_date(df)
+
     def test_preserves_existing_columns(self):
         """Function should not drop any existing columns."""
         from mvp.atptour.aggregators.matches import add_effective_match_date
@@ -621,3 +638,29 @@ class TestEffectiveMatchDate:
         assert "match_uid" in result.columns
         assert "player_id" in result.columns
         assert len(result.columns) == len(df.columns) + 1  # only added effective_match_date
+
+
+class TestMatchesAggregatorSort:
+    def test_effective_match_date_in_output(self, tmp_path):
+        """aggregate() output should include effective_match_date column."""
+        from mvp.atptour.aggregators.matches import MatchesAggregator
+
+        data_root = TestMatchesAggregator()._create_test_data(tmp_path)
+        agg = MatchesAggregator(data_root=data_root)
+        result = agg.aggregate()
+        assert "effective_match_date" in result.columns
+        assert result["effective_match_date"].null_count() == 0
+
+    def test_sorted_by_effective_match_date(self, tmp_path):
+        """Output should be sorted by (effective_match_date, draw_type, match_uid, player_id)."""
+        from mvp.atptour.aggregators.matches import MatchesAggregator
+
+        data_root = TestMatchesAggregator()._create_test_data(tmp_path)
+        agg = MatchesAggregator(data_root=data_root)
+        result = agg.aggregate()
+        expected = result.sort(
+            ["effective_match_date", "draw_type", "match_uid", "player_id"],
+            nulls_last=True,
+        )
+        assert result["match_uid"].to_list() == expected["match_uid"].to_list()
+        assert result["player_id"].to_list() == expected["player_id"].to_list()

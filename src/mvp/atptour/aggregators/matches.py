@@ -294,10 +294,11 @@ class MatchesAggregator(BaseJob):
             combined = join_player_bio(combined, bio)
             logger.info("Bio joined")
 
-        # Step 8: Round order + sort
+        # Step 8: Round order + effective match date + sort
         combined = add_round_order(combined)
+        combined = add_effective_match_date(combined)
         combined = combined.sort(
-            ["tournament_start_date", "round_order", "match_uid", "player_id"],
+            ["effective_match_date", "draw_type", "match_uid", "player_id"],
             nulls_last=True,
         )
 
