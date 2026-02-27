@@ -102,6 +102,7 @@ def explode_results(df: pl.DataFrame) -> pl.DataFrame:
         "match_uid", "tournament_id", "year", "circuit",
         "draw_type", "round", "match_id", "winner_id",
         "result_type", "duration_seconds",
+        "tournament_start_date", "tournament_end_date",
     ]
 
     result = explode_to_player_match(df, player_cols, opp_cols, shared_cols)

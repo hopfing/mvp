@@ -76,7 +76,7 @@ MATCHES_SCHEMA: dict[str, pl.DataType] = {
     "umpire_last_name": pl.String,
     "round_id": pl.Int64,
     "is_qualifier": pl.Boolean,
-    # Tournament dates from Match Stats
+    # Tournament dates: Results > MatchStats waterfall
     "tournament_start_date": pl.Date,
     "tournament_end_date": pl.Date,
     "prize_money": pl.Int64,
@@ -458,6 +458,14 @@ class TournamentMatchesAggregator(BaseJob):
             self._waterfall_expr(df, "opp_partner_id", ["", "_stats"])
         )
 
+        # tournament dates: coalesce(results, stats)
+        coalesce_exprs.extend(
+            self._waterfall_expr(df, "tournament_start_date", ["", "_stats"])
+        )
+        coalesce_exprs.extend(
+            self._waterfall_expr(df, "tournament_end_date", ["", "_stats"])
+        )
+
         # Apply all coalesce expressions
         if coalesce_exprs:
             df = df.with_columns(coalesce_exprs)
@@ -592,7 +600,7 @@ class TournamentMatchesAggregator(BaseJob):
             "umpire_last_name",
             "round_id",
             "is_qualifier",
-            # Tournament dates from Match Stats
+            # Tournament dates: Results > MatchStats waterfall
             "tournament_start_date",
             "tournament_end_date",
             "prize_money",

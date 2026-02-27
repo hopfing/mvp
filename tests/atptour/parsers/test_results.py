@@ -1125,3 +1125,110 @@ class TestParseTeam:
         assert result is not None
         assert result["players"][0]["country"] == ""
         assert result["players"][1]["country"] == ""
+
+
+class TestParseTournamentDates:
+    """Tests for _parse_tournament_dates."""
+
+    def test_parses_date_range(self):
+        """Parses '2-8 May, 2022' format correctly."""
+        from datetime import date
+
+        from bs4 import BeautifulSoup
+
+        html = """
+        <div class="date-location">
+          <span>Salvador De Bahia, Brazil</span>
+          |
+          <span>2-8 May, 2022</span>
+        </div>
+        """
+        soup = BeautifulSoup(html, "lxml")
+        start, end = ResultsParser()._parse_tournament_dates(soup)
+        assert start == date(2022, 5, 2)
+        assert end == date(2022, 5, 8)
+
+    def test_parses_single_day(self):
+        """Parses '8 May, 2022' as start=end."""
+        from datetime import date
+
+        from bs4 import BeautifulSoup
+
+        html = """
+        <div class="date-location">
+          <span>City, Country</span>
+          |
+          <span>8 May, 2022</span>
+        </div>
+        """
+        soup = BeautifulSoup(html, "lxml")
+        start, end = ResultsParser()._parse_tournament_dates(soup)
+        assert start == date(2022, 5, 8)
+        assert end == date(2022, 5, 8)
+
+    def test_parses_jan_format(self):
+        """Parses '4-9 Jan, 2022' format."""
+        from datetime import date
+
+        from bs4 import BeautifulSoup
+
+        html = """
+        <div class="date-location">
+          <span>City</span>
+          |
+          <span>4-9 Jan, 2022</span>
+        </div>
+        """
+        soup = BeautifulSoup(html, "lxml")
+        start, end = ResultsParser()._parse_tournament_dates(soup)
+        assert start == date(2022, 1, 4)
+        assert end == date(2022, 1, 9)
+
+    def test_missing_date_location_returns_none(self):
+        """Missing date-location div returns (None, None)."""
+        from bs4 import BeautifulSoup
+
+        html = "<div>No date here</div>"
+        soup = BeautifulSoup(html, "lxml")
+        start, end = ResultsParser()._parse_tournament_dates(soup)
+        assert start is None
+        assert end is None
+
+    def test_missing_date_span_returns_none(self):
+        """Only one span (no date) returns (None, None)."""
+        from bs4 import BeautifulSoup
+
+        html = """
+        <div class="date-location">
+          <span>City, Country</span>
+        </div>
+        """
+        soup = BeautifulSoup(html, "lxml")
+        start, end = ResultsParser()._parse_tournament_dates(soup)
+        assert start is None
+        assert end is None
+
+    def test_dates_in_parsed_matches(self):
+        """Tournament dates appear in parsed match dicts."""
+        from datetime import date
+
+        # Build a minimal match div
+        stats = _singles_stats_item() + _singles_stats_item(
+            player_id="s0ag", name="Opponent", is_winner=False
+        )
+        match_content = _match_div("Finals", "02:00", stats, "ms001")
+
+        html = f"""
+        <html>
+        <div class="date-location">
+          <span>City</span>
+          |
+          <span>2-8 May, 2022</span>
+        </div>
+        {match_content}
+        </html>
+        """
+        matches = ResultsParser().parse_singles(html)
+        assert len(matches) == 1
+        assert matches[0]["tournament_start_date"] == date(2022, 5, 2)
+        assert matches[0]["tournament_end_date"] == date(2022, 5, 8)

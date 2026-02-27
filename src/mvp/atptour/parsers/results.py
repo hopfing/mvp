@@ -6,12 +6,22 @@ plain dicts; schema validation is the transformer's responsibility.
 
 import logging
 import re
+from datetime import date
 
 from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
 
 _DAY_SUFFIX_RE = re.compile(r"\s+Day\s+\d+$", re.IGNORECASE)
+
+_MONTH_MAP = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+}
+
+_DATE_RANGE_RE = re.compile(
+    r"(\d{1,2})(?:\s*-\s*(\d{1,2}))?\s+([A-Za-z]{3}),?\s+(\d{4})"
+)
 
 
 class ResultsParser:
@@ -24,9 +34,10 @@ class ResultsParser:
         duration_text, player_id, player_name, player_seed_entry,
         player_country, player_won, opp_id, opp_name, opp_seed_entry,
         opp_country, player_scores, opp_scores, player_tiebreaks,
-        opp_tiebreaks, result_type.
+        opp_tiebreaks, result_type, tournament_start_date, tournament_end_date.
         """
         soup = BeautifulSoup(html, "lxml")
+        start_date, end_date = self._parse_tournament_dates(soup)
         matches = []
 
         for match_div in soup.find_all("div", class_="match"):
@@ -95,6 +106,8 @@ class ResultsParser:
                     "player_tiebreaks": player_tiebreaks,
                     "opp_tiebreaks": opp_tiebreaks,
                     "result_type": result_type,
+                    "tournament_start_date": start_date,
+                    "tournament_end_date": end_date,
                 }
             )
 
@@ -108,6 +121,7 @@ class ResultsParser:
         opp_partner_name, opp_partner_country.
         """
         soup = BeautifulSoup(html, "lxml")
+        start_date, end_date = self._parse_tournament_dates(soup)
         matches = []
 
         for match_div in soup.find_all("div", class_="match"):
@@ -182,10 +196,57 @@ class ResultsParser:
                     "player_tiebreaks": player_tiebreaks,
                     "opp_tiebreaks": opp_tiebreaks,
                     "result_type": result_type,
+                    "tournament_start_date": start_date,
+                    "tournament_end_date": end_date,
                 }
             )
 
         return matches
+
+    def _parse_tournament_dates(
+        self, soup: BeautifulSoup
+    ) -> tuple[date | None, date | None]:
+        """Extract tournament start and end dates from date-location div.
+
+        Parses formats like "2-8 May, 2022" or "28 Dec - 3 Jan, 2022".
+        Returns (start_date, end_date), either may be None if parsing fails.
+
+        Note: Some pages have template placeholders ({{tournament.FormattedDate}})
+        in the first date-location div; we skip those and look for real data.
+        """
+        for date_loc in soup.find_all("div", class_="date-location"):
+            spans = date_loc.find_all("span")
+            if len(spans) < 2:
+                continue
+
+            date_text = spans[1].get_text(strip=True)
+            if not date_text or "{{" in date_text:
+                continue
+
+            match = _DATE_RANGE_RE.search(date_text)
+            if not match:
+                logger.warning("Could not parse tournament date: %s", date_text)
+                continue
+
+            start_day = int(match.group(1))
+            end_day = int(match.group(2)) if match.group(2) else start_day
+            month_str = match.group(3).lower()
+            year = int(match.group(4))
+
+            month = _MONTH_MAP.get(month_str)
+            if month is None:
+                logger.warning("Unknown month in tournament date: %s", month_str)
+                continue
+
+            try:
+                start_date = date(year, month, start_day)
+                end_date = date(year, month, end_day)
+                return start_date, end_date
+            except ValueError as e:
+                logger.warning("Invalid tournament date: %s (%s)", date_text, e)
+                continue
+
+        return None, None
 
     @staticmethod
     def _parse_round_text(strong_tag) -> str:

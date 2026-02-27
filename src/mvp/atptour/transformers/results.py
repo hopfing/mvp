@@ -175,6 +175,8 @@ class ResultsTransformer(BaseJob):
             p2_entry=p2_entry,
             result_type=match["result_type"],
             duration_seconds=duration_seconds,
+            tournament_start_date=match.get("tournament_start_date"),
+            tournament_end_date=match.get("tournament_end_date"),
             source_file=source_file,
             parsed_at=parsed_at,
             **scores,

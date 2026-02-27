@@ -1,6 +1,6 @@
 """Tournament Results staged schema."""
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import ClassVar
 
 from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
@@ -19,7 +19,7 @@ from mvp.atptour.schema_helpers import (
 from mvp.common.enums import Circuit, DrawType, ResultType, Round
 from mvp.common.schema_hash import compute_schema_hash
 
-SCHEMA_VERSION = "1.0.0"
+SCHEMA_VERSION = "2.0.0"
 
 
 class ResultRecord(BaseModel):
@@ -82,6 +82,9 @@ class ResultRecord(BaseModel):
     p2_set4_tiebreak: int | None = Field(default=None, ge=0)
     p2_set5_games: int | None = Field(default=None, ge=0)
     p2_set5_tiebreak: int | None = Field(default=None, ge=0)
+
+    tournament_start_date: date | None = None
+    tournament_end_date: date | None = None
 
     source_file: str
     parsed_at: datetime

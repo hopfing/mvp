@@ -165,6 +165,8 @@ def _make_results_df(
             "p2_set4_tiebreak": [None],
             "p2_set5_games": [None],
             "p2_set5_tiebreak": [None],
+            "tournament_start_date": [date(2023, 1, 2)],
+            "tournament_end_date": [date(2023, 1, 8)],
             "source_file": ["results_singles.html"],
             "parsed_at": [datetime(2026, 2, 25, 12, 0, 0)],
         }
