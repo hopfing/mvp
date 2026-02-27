@@ -4,7 +4,7 @@ from datetime import date
 
 import polars as pl
 
-from mvp.experimentation.primitives import rolling_sum
+from mvp.experimentation.primitives import rolling_mean, rolling_sum
 
 
 class TestRollingSum:
@@ -110,3 +110,46 @@ class TestRollingSum:
         # Row 2 (A): 1 prior A match (won=1) → 1
         # Row 3 (B): 1 prior B match (won=1) → 1
         assert result["rolling_wins"].to_list() == [0, 0, 1, 1]
+
+
+class TestRollingMean:
+    """Tests for rolling_mean primitive."""
+
+    def test_rolling_mean_basic(self):
+        """Mean values over rolling window."""
+        df = pl.DataFrame({
+            "player_id": ["A", "A", "A", "A"],
+            "effective_match_date": [
+                date(2024, 1, 1),
+                date(2024, 1, 5),
+                date(2024, 1, 10),
+                date(2024, 1, 15),
+            ],
+            "score": [10.0, 20.0, 30.0, 40.0],
+        }).lazy()
+
+        result = df.with_columns(
+            rolling_mean("score", days=30, group_by="player_id").alias("rolling_avg")
+        ).collect()
+
+        # Row 0: no prior matches → null
+        # Row 1: 1 prior match (10) → 10.0
+        # Row 2: 2 prior matches (10, 20) → 15.0
+        # Row 3: 3 prior matches (10, 20, 30) → 20.0
+        assert result["rolling_avg"].to_list() == [None, 10.0, 15.0, 20.0]
+
+    def test_rolling_mean_excludes_current_row(self):
+        """Current row must NOT be included in the mean."""
+        df = pl.DataFrame({
+            "player_id": ["A", "A"],
+            "effective_match_date": [date(2024, 1, 1), date(2024, 1, 2)],
+            "score": [100.0, 200.0],
+        }).lazy()
+
+        result = df.with_columns(
+            rolling_mean("score", days=30, group_by="player_id").alias("rolling_avg")
+        ).collect()
+
+        # Row 0: no prior → null (not 100.0)
+        # Row 1: 1 prior (100) → 100.0 (not 150.0)
+        assert result["rolling_avg"].to_list() == [None, 100.0]

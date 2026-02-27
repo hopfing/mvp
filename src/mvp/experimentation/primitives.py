@@ -40,3 +40,30 @@ def rolling_sum(
         .over(group_by)
         .fill_null(0)
     )
+
+
+def rolling_mean(
+    col: str,
+    days: int,
+    group_by: str | list[str],
+    date_col: str = "effective_match_date",
+) -> pl.Expr:
+    """Mean of column over past N days, excluding current row.
+
+    Args:
+        col: Column to average.
+        days: Window size in days.
+        group_by: Column(s) to group by (e.g., "player_id").
+        date_col: Date column for temporal ordering.
+
+    Returns:
+        Polars expression computing the rolling mean.
+    """
+    if isinstance(group_by, str):
+        group_by = [group_by]
+
+    return (
+        pl.col(col)
+        .rolling_mean_by(by=date_col, window_size=f"{days}d", closed="left")
+        .over(group_by)
+    )
