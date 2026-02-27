@@ -119,7 +119,7 @@ class TestProcessTournaments:
         MockMatchStatsExt,
         MockMatchStatsTx,
     ):
-        """Archive tournaments: results_refresh=False, stats_refresh=False."""
+        """Archive tournaments: results always refresh, stats only when refresh=True."""
         from mvp.atptour.pipeline import _process_tournaments
 
         mock_tournament = MagicMock()
@@ -130,7 +130,7 @@ class TestProcessTournaments:
         _process_tournaments(tournaments, data_root=None, refresh=False)
 
         MockResultsExt.return_value.run.assert_called_once_with(
-            mock_tournament, refresh=False
+            mock_tournament, refresh=True  # Results always refresh
         )
         MockMatchStatsExt.return_value.run.assert_called_once_with(
             mock_tournament, refresh=False

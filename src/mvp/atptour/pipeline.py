@@ -89,15 +89,8 @@ def _process_tournaments(
             ScheduleExtractor(data_root=data_root).run(tournament)
             ScheduleTransformer(tournament, data_root=data_root).run()
 
-            if refresh:
-                results_refresh = True
-                stats_refresh = True
-            elif is_archive:
-                results_refresh = False
-                stats_refresh = False
-            else:
-                results_refresh = True
-                stats_refresh = False
+            results_refresh = True  # Always refresh results
+            stats_refresh = refresh  # Only refresh stats when explicitly requested
 
             ResultsExtractor(data_root=data_root).run(
                 tournament, refresh=results_refresh
