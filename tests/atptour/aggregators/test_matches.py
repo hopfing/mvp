@@ -1,4 +1,4 @@
-"""Tests for Layer 2 cross-tournament aggregation."""
+"""Tests for cross-tournament aggregation."""
 
 from datetime import date, datetime
 from pathlib import Path
@@ -41,8 +41,8 @@ class TestRoundOrder:
 
 
 class TestDCFilter:
-    def test_filter_dc_from_layer1(self):
-        """DC tournaments should be excluded from Layer 1 stack."""
+    def test_filter_dc_from_tournament_matches(self):
+        """DC tournaments should be excluded from tournament matches."""
         from mvp.atptour.aggregators.matches import filter_dc_tournaments
 
         df = pl.DataFrame({
@@ -67,9 +67,9 @@ class TestDCFilter:
 
 
 class TestActivityMapping:
-    def test_map_activity_to_layer2(self):
-        """Activity rows should be mapped to Layer 2 schema with correct column names."""
-        from mvp.atptour.aggregators.matches import map_activity_to_layer2
+    def test_map_activity_to_matches_schema(self):
+        """Activity rows should be mapped to matches schema with correct column names."""
+        from mvp.atptour.aggregators.matches import map_activity_to_matches_schema
 
         act = pl.DataFrame({
             "match_uid": ["2024_1234_SGL_R32_A001_B002"],
@@ -110,7 +110,7 @@ class TestActivityMapping:
             "player_set5_tiebreak": [None],
             "opp_set5_tiebreak": [None],
         })
-        result = map_activity_to_layer2(act)
+        result = map_activity_to_matches_schema(act)
         assert result["won"][0] is True
         assert result["draw_type"][0] == "singles"
         assert result["activity_rank"][0] == 50
@@ -121,7 +121,7 @@ class TestActivityMapping:
 
     def test_map_activity_loss(self):
         """win_loss='L' should map to won=False."""
-        from mvp.atptour.aggregators.matches import map_activity_to_layer2
+        from mvp.atptour.aggregators.matches import map_activity_to_matches_schema
 
         act = pl.DataFrame({
             "match_uid": ["uid1"],
@@ -144,7 +144,7 @@ class TestActivityMapping:
             **{f"player_set{n}_{k}": [None] for n in range(1, 6) for k in ("games", "tiebreak")},
             **{f"opp_set{n}_{k}": [None] for n in range(1, 6) for k in ("games", "tiebreak")},
         })
-        result = map_activity_to_layer2(act)
+        result = map_activity_to_matches_schema(act)
         assert result["won"][0] is False
 
 
@@ -269,26 +269,26 @@ class TestBioJoin:
 class TestValidation:
     def test_clean_data_passes(self):
         """Normal data (1-2 tournaments per week) should produce no warnings."""
-        from mvp.atptour.aggregators.matches import validate_tournament_clusters
+        from mvp.atptour.aggregators.matches import validate_tournament_scheduling
 
         df = pl.DataFrame({
             "player_id": ["A001", "A001", "A001"],
             "tournament_id": ["100", "200", "300"],
-            "tournament_start_date": [date(2024, 1, 1), date(2024, 2, 1), date(2024, 3, 1)],
+            "tournament_end_date": [date(2024, 1, 7), date(2024, 2, 4), date(2024, 3, 3)],
         })
-        warnings = validate_tournament_clusters(df)
+        warnings = validate_tournament_scheduling(df)
         assert len(warnings) == 0
 
-    def test_suspicious_cluster_flagged(self):
-        """3+ tournaments within 7 days should be flagged."""
-        from mvp.atptour.aggregators.matches import validate_tournament_clusters
+    def test_suspicious_scheduling_flagged(self):
+        """3+ tournaments ending within 3 days should be flagged."""
+        from mvp.atptour.aggregators.matches import validate_tournament_scheduling
 
         df = pl.DataFrame({
             "player_id": ["A001"] * 3,
             "tournament_id": ["100", "200", "300"],
-            "tournament_start_date": [date(2024, 1, 1), date(2024, 1, 3), date(2024, 1, 5)],
+            "tournament_end_date": [date(2024, 1, 5), date(2024, 1, 6), date(2024, 1, 7)],
         })
-        warnings = validate_tournament_clusters(df)
+        warnings = validate_tournament_scheduling(df)
         assert len(warnings) == 1
         assert warnings[0]["player_id"] == "A001"
         assert len(warnings[0]["tournament_ids"]) == 3
@@ -296,16 +296,16 @@ class TestValidation:
 
 class TestMatchesAggregator:
     def _create_test_data(self, tmp_path: Path):
-        """Create minimal Layer 1, Activity, Rankings, and Bio data for testing."""
+        """Create minimal tournament matches, Activity, Rankings, and Bio data for testing."""
         data_root = tmp_path / "data"
 
-        # Layer 1: one tournament with 2 matches (4 rows at player-match grain)
+        # Tournament matches: one tournament with 2 matches (4 rows at player-match grain)
         agg_dir = (
             data_root / "aggregate" / "atptour" / "tournaments"
             / "tour" / "339" / "2024"
         )
         agg_dir.mkdir(parents=True)
-        l1 = pl.DataFrame({
+        tournament_matches = pl.DataFrame({
             "match_uid": ["uid1", "uid1", "uid2", "uid2"],
             "player_id": ["A001", "B002", "A001", "C003"],
             "opp_id": ["B002", "A001", "C003", "A001"],
@@ -325,9 +325,11 @@ class TestMatchesAggregator:
         from mvp.atptour.aggregators.tournament_matches import MATCHES_SCHEMA
 
         for col, dtype in MATCHES_SCHEMA.items():
-            if col not in l1.columns:
-                l1 = l1.with_columns(pl.lit(None).cast(dtype).alias(col))
-        l1.write_parquet(agg_dir / "matches.parquet")
+            if col not in tournament_matches.columns:
+                tournament_matches = tournament_matches.with_columns(
+                    pl.lit(None).cast(dtype).alias(col)
+                )
+        tournament_matches.write_parquet(agg_dir / "matches.parquet")
 
         # Activity: one overlapping match + one gap-fill match
         act = pl.DataFrame({
@@ -424,7 +426,7 @@ class TestMatchesAggregator:
         agg = MatchesAggregator(data_root=data_root)
         result = agg.aggregate()
 
-        # 4 Layer 1 rows + 1 gap-fill row = 5 rows
+        # 4 tournament match rows + 1 gap-fill row = 5 rows
         assert len(result) == 5
         assert "round_order" in result.columns
         assert "rankings_rank" in result.columns

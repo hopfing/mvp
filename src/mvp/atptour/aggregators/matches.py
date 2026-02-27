@@ -1,4 +1,4 @@
-"""Layer 2: Cross-tournament aggregation into a single enriched matches dataset."""
+"""Cross-tournament aggregation into a single enriched matches dataset."""
 
 import glob
 import logging
@@ -29,10 +29,7 @@ ROUND_ORDER: dict[str, int] = {
 
 
 def filter_dc_tournaments(df: pl.DataFrame) -> pl.DataFrame:
-    """Exclude Davis Cup tournaments from a Layer 1 stacked DataFrame.
-
-    Filters out rows where event_type starts with 'DC' or circuit is 'team'.
-    """
+    """Exclude Davis Cup and team events from tournament matches."""
     return df.filter(
         ~(
             pl.col("event_type").str.starts_with("DC").fill_null(False)
@@ -48,8 +45,8 @@ def filter_dc_activity(df: pl.DataFrame) -> pl.DataFrame:
     )
 
 
-def map_activity_to_layer2(df: pl.DataFrame) -> pl.DataFrame:
-    """Map Activity columns to Layer 2 schema for gap-fill rows.
+def map_activity_to_matches_schema(df: pl.DataFrame) -> pl.DataFrame:
+    """Map Activity columns to matches schema for gap-fill rows.
 
     Renames rank fields, derives won from win_loss, adds draw_type.
     Does NOT add null columns for stats/overview -- that happens during concat.
@@ -166,8 +163,8 @@ def add_round_order(df: pl.DataFrame) -> pl.DataFrame:
     )
 
 
-def validate_tournament_clusters(
-    df: pl.DataFrame, window_days: int = 7, threshold: int = 3
+def validate_tournament_scheduling(
+    df: pl.DataFrame, window_days: int = 3, threshold: int = 3
 ) -> list[dict]:
     """Flag players with suspiciously many tournaments in a short window.
 
@@ -175,12 +172,12 @@ def validate_tournament_clusters(
     """
     warnings: list[dict] = []
 
-    pts = df.select(["player_id", "tournament_id", "tournament_start_date"]).unique()
-    pts = pts.filter(pl.col("tournament_start_date").is_not_null())
+    pts = df.select(["player_id", "tournament_id", "tournament_end_date"]).unique()
+    pts = pts.filter(pl.col("tournament_end_date").is_not_null())
 
     for pid in pts["player_id"].unique().to_list():
-        player = pts.filter(pl.col("player_id") == pid).sort("tournament_start_date")
-        tourneys = player.select(["tournament_id", "tournament_start_date"]).rows()
+        player = pts.filter(pl.col("player_id") == pid).sort("tournament_end_date")
+        tourneys = player.select(["tournament_id", "tournament_end_date"]).rows()
 
         for i, (tid_i, date_i) in enumerate(tourneys):
             cluster_tids = [tid_i]
@@ -204,30 +201,25 @@ def validate_tournament_clusters(
 
 
 class MatchesAggregator(BaseJob):
-    """Layer 2: Cross-tournament aggregation."""
+    """Cross-tournament aggregation into a single enriched matches dataset."""
 
     def __init__(self, data_root: Path | None = None):
         super().__init__(domain="atptour", data_root=data_root)
 
     def aggregate(self) -> pl.DataFrame:
-        """Run the full Layer 2 aggregation pipeline."""
-        # Step 1: Stack Layer 1
-        l1 = self._stack_layer1()
-        logger.info("Layer 1 stacked: %d rows", len(l1))
+        """Run the full aggregation pipeline."""
+        tournament_matches = self._stack_tournament_matches()
+        logger.info("Tournament matches stacked: %d rows", len(tournament_matches))
 
-        # Step 2: Load and filter Activity
         activity = self._load_activity()
         logger.info("Activity loaded: %d rows", len(activity))
 
-        # Step 3: Activity enrichment (overlapping matches)
-        l1 = self._enrich_from_activity(l1, activity)
+        tournament_matches = self._enrich_from_activity(tournament_matches, activity)
 
-        # Step 4: Activity gap-fill (new matches)
-        gap_fill = self._activity_gap_fill(l1, activity)
+        gap_fill = self._activity_gap_fill(tournament_matches, activity)
         logger.info("Activity gap-fill: %d rows", len(gap_fill))
 
-        # Step 5: Concat
-        combined = pl.concat([l1, gap_fill], how="diagonal_relaxed")
+        combined = pl.concat([tournament_matches, gap_fill], how="diagonal_relaxed")
         logger.info("Combined: %d rows", len(combined))
 
         # Step 6: Rankings enrichment
@@ -250,10 +242,10 @@ class MatchesAggregator(BaseJob):
         )
 
         # Step 9: Validation
-        warnings = validate_tournament_clusters(combined)
+        warnings = validate_tournament_scheduling(combined)
         for w in warnings:
             logger.warning(
-                "Suspicious cluster: player=%s, tournaments=%s, dates=%s",
+                "Suspicious tournament scheduling: player=%s, tournaments=%s, end_dates=%s",
                 w["player_id"],
                 w["tournament_ids"],
                 w["dates"],
@@ -261,8 +253,8 @@ class MatchesAggregator(BaseJob):
 
         return combined
 
-    def _stack_layer1(self) -> pl.DataFrame:
-        """Glob and concat all Layer 1 matches parquets, filtering DC."""
+    def _stack_tournament_matches(self) -> pl.DataFrame:
+        """Glob and concat all per-tournament matches parquets, filtering DC."""
         pattern = str(
             self.data_root
             / "aggregate"
@@ -291,11 +283,11 @@ class MatchesAggregator(BaseJob):
         return act
 
     def _enrich_from_activity(
-        self, l1: pl.DataFrame, activity: pl.DataFrame
+        self, matches: pl.DataFrame, activity: pl.DataFrame
     ) -> pl.DataFrame:
-        """LEFT JOIN Activity rank fields onto overlapping Layer 1 rows."""
+        """LEFT JOIN Activity rank fields onto overlapping tournament matches."""
         if activity.is_empty():
-            return l1.with_columns([
+            return matches.with_columns([
                 pl.lit(None).cast(pl.Int64).alias("activity_rank"),
                 pl.lit(None).cast(pl.Int64).alias("activity_opp_rank"),
                 pl.lit(None).cast(pl.Int64).alias("activity_points"),
@@ -310,11 +302,11 @@ class MatchesAggregator(BaseJob):
             pl.col("tournament_end_date").alias("_act_end_date"),
         ])
 
-        result = l1.join(
+        result = matches.join(
             act_enrichment, on=["match_uid", "player_id"], how="left"
         )
 
-        # Fill tournament dates from Activity where Layer 1 is missing them
+        # Fill tournament dates from Activity where tournament matches are missing them
         if "_act_start_date" in result.columns:
             result = result.with_columns([
                 pl.coalesce([
@@ -330,18 +322,20 @@ class MatchesAggregator(BaseJob):
         return result
 
     def _activity_gap_fill(
-        self, l1: pl.DataFrame, activity: pl.DataFrame
+        self, matches: pl.DataFrame, activity: pl.DataFrame
     ) -> pl.DataFrame:
-        """Get Activity rows not in Layer 1 and map to Layer 2 schema."""
+        """Get Activity rows not in tournament matches and map to matches schema."""
         if activity.is_empty():
             return pl.DataFrame()
-        l1_uids = (
-            set(l1["match_uid"].unique().to_list()) if not l1.is_empty() else set()
+        existing_uids = (
+            set(matches["match_uid"].unique().to_list())
+            if not matches.is_empty()
+            else set()
         )
-        gap = activity.filter(~pl.col("match_uid").is_in(list(l1_uids)))
+        gap = activity.filter(~pl.col("match_uid").is_in(list(existing_uids)))
         if gap.is_empty():
             return pl.DataFrame()
-        return map_activity_to_layer2(gap)
+        return map_activity_to_matches_schema(gap)
 
     def _load_rankings(self) -> pl.DataFrame | None:
         """Load consolidated rankings parquet."""

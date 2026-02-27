@@ -146,8 +146,8 @@ def cmd_live(args) -> None:
     logger.info("Running cross-tournament aggregation")
     MatchesAggregator().run()
 
-    # TODO: feature engineering (Layer 3)
-    # TODO: predict with active model (Layer 5)
+    # TODO: feature engineering
+    # TODO: predict with active model
 
     _report_failures(tournaments, failed, player_result)
 
@@ -176,14 +176,11 @@ def cmd_model(args) -> None:
     logger.info("Running cross-tournament aggregation")
     MatchesAggregator().run()
 
-    # TODO: feature engineering (Layer 3)
-    # TODO: train model (Layer 4) using args.config
-    # TODO: predict (Layer 5)
+    # TODO: feature engineering
+    # TODO: train model using args.config
+    # TODO: predict
     # TODO: update models/active.yaml
 
-    logger.info(
-        "Model pipeline complete (aggregation only — training not yet implemented)"
-    )
 
 
 def _report_failures(
