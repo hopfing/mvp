@@ -97,3 +97,30 @@ def rolling_count(
         .over(group_by)
         .fill_null(0)
     )
+
+
+def cumulative_sum(
+    col: str,
+    group_by: str | list[str],
+    date_col: str = "effective_match_date",
+) -> pl.Expr:
+    """Cumulative sum over all prior rows, excluding current row.
+
+    Args:
+        col: Column to sum.
+        group_by: Column(s) to group by (e.g., "player_id").
+        date_col: Date column for temporal ordering.
+
+    Returns:
+        Polars expression computing the cumulative sum.
+    """
+    if isinstance(group_by, str):
+        group_by = [group_by]
+
+    return (
+        pl.col(col)
+        .cum_sum()
+        .shift(1)
+        .over(group_by, order_by=date_col)
+        .fill_null(0)
+    )
