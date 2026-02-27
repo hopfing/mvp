@@ -67,3 +67,33 @@ def rolling_mean(
         .rolling_mean_by(by=date_col, window_size=f"{days}d", closed="left")
         .over(group_by)
     )
+
+
+def rolling_count(
+    days: int,
+    group_by: str | list[str],
+    date_col: str = "effective_match_date",
+) -> pl.Expr:
+    """Count of rows over past N days, excluding current row.
+
+    Args:
+        days: Window size in days.
+        group_by: Column(s) to group by (e.g., "player_id").
+        date_col: Date column for temporal ordering.
+
+    Returns:
+        Polars expression computing the rolling count.
+    """
+    if isinstance(group_by, str):
+        group_by = [group_by]
+
+    # Use is_not_null().cast(Int64) to create a column expression tied to actual data
+    # pl.lit(1) doesn't work with rolling_*_by since it has no column context
+    return (
+        pl.col(date_col)
+        .is_not_null()
+        .cast(pl.Int64)
+        .rolling_sum_by(by=date_col, window_size=f"{days}d", closed="left")
+        .over(group_by)
+        .fill_null(0)
+    )

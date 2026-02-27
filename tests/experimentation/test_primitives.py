@@ -4,7 +4,7 @@ from datetime import date
 
 import polars as pl
 
-from mvp.experimentation.primitives import rolling_mean, rolling_sum
+from mvp.experimentation.primitives import rolling_count, rolling_mean, rolling_sum
 
 
 class TestRollingSum:
@@ -153,3 +153,49 @@ class TestRollingMean:
         # Row 0: no prior → null (not 100.0)
         # Row 1: 1 prior (100) → 100.0 (not 150.0)
         assert result["rolling_avg"].to_list() == [None, 100.0]
+
+
+class TestRollingCount:
+    """Tests for rolling_count primitive."""
+
+    def test_rolling_count_basic(self):
+        """Count rows over rolling window."""
+        df = pl.DataFrame({
+            "player_id": ["A", "A", "A", "A"],
+            "effective_match_date": [
+                date(2024, 1, 1),
+                date(2024, 1, 5),
+                date(2024, 1, 10),
+                date(2024, 1, 15),
+            ],
+        }).lazy()
+
+        result = df.with_columns(
+            rolling_count(days=30, group_by="player_id").alias("match_count")
+        ).collect()
+
+        # Row 0: no prior matches → 0
+        # Row 1: 1 prior match → 1
+        # Row 2: 2 prior matches → 2
+        # Row 3: 3 prior matches → 3
+        assert result["match_count"].to_list() == [0, 1, 2, 3]
+
+    def test_rolling_count_respects_window(self):
+        """Only count matches within the window period."""
+        df = pl.DataFrame({
+            "player_id": ["A", "A", "A"],
+            "effective_match_date": [
+                date(2024, 1, 1),   # Day 0
+                date(2024, 1, 10),  # Day 9
+                date(2024, 1, 20),  # Day 19
+            ],
+        }).lazy()
+
+        result = df.with_columns(
+            rolling_count(days=7, group_by="player_id").alias("match_count")
+        ).collect()
+
+        # Row 0: no prior → 0
+        # Row 1: day 1 is 9 days before day 10, outside 7-day window → 0
+        # Row 2: day 10 is 10 days before day 20, outside 7-day window → 0
+        assert result["match_count"].to_list() == [0, 0, 0]
