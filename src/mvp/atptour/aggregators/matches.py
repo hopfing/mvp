@@ -163,6 +163,66 @@ def add_round_order(df: pl.DataFrame) -> pl.DataFrame:
     )
 
 
+def add_effective_match_date(df: pl.DataFrame) -> pl.DataFrame:
+    """Add effective_match_date column using schedule data or round-offset estimation.
+
+    For each (tournament_id, year, draw_type) group:
+    - If ALL scheduled_datetime values are non-null, use scheduled_datetime directly.
+    - Otherwise, estimate as tournament_end_date - round_offset days (at midnight),
+      where round_offset is derived by ranking distinct round_order values descending
+      within the group (highest round_order = offset 0).
+    """
+    group_keys = ["tournament_id", "year", "draw_type"]
+
+    # Per-group flag: True if every row in the group has a non-null scheduled_datetime
+    df = df.with_columns(
+        pl.col("scheduled_datetime")
+        .is_not_null()
+        .all()
+        .over(group_keys)
+        .alias("_all_scheduled"),
+    )
+
+    # Compute round offset: rank distinct round_order values descending within group.
+    # Highest round_order gets offset 0, next highest gets 1, etc.
+    df = df.with_columns(
+        pl.col("round_order")
+        .rank(method="dense", descending=True)
+        .over(group_keys)
+        .cast(pl.Int64)
+        .sub(1)
+        .alias("_round_offset"),
+    )
+
+    # Compute effective_match_date
+    df = df.with_columns(
+        pl.when(pl.col("_all_scheduled"))
+        .then(pl.col("scheduled_datetime"))
+        .otherwise(
+            pl.col("tournament_end_date")
+            .cast(pl.Datetime)
+            .dt.offset_by(
+                pl.concat_str(pl.lit("-"), pl.col("_round_offset").cast(pl.Utf8), pl.lit("d"))
+            )
+        )
+        .alias("effective_match_date"),
+    )
+
+    # Validate no nulls
+    null_count = df.filter(pl.col("effective_match_date").is_null()).height
+    if null_count > 0:
+        bad_rows = df.filter(pl.col("effective_match_date").is_null()).select(
+            group_keys + ["round", "round_order", "tournament_end_date", "scheduled_datetime"]
+        )
+        logger.error("Rows with null effective_match_date:\n%s", bad_rows)
+        msg = f"null effective_match_date: {null_count} rows"
+        raise ValueError(msg)
+
+    # Drop temporary columns
+    temp_cols = [c for c in df.columns if c.startswith("_")]
+    return df.drop(temp_cols)
+
+
 def validate_tournament_scheduling(
     df: pl.DataFrame, window_days: int = 3, threshold: int = 3
 ) -> list[dict]:
