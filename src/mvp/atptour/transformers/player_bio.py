@@ -72,10 +72,11 @@ class PlayerBioStager(BaseJob):
         for raw_path in raw_files:
             pid = raw_path.stem
             staged_path = existing.get(pid)
-            if (
-                staged_path is None
-                or raw_path.stat().st_mtime > staged_path.stat().st_mtime
-            ):
+            if staged_path is None:
+                to_process.append(raw_path)
+            elif raw_path.stat().st_mtime > staged_path.stat().st_mtime:
+                to_process.append(raw_path)
+            elif not self.is_schema_current(staged_path, PlayerBioRecord.SCHEMA_HASH):
                 to_process.append(raw_path)
 
         to_process.sort(key=lambda p: p.stem)
@@ -93,7 +94,7 @@ class PlayerBioStager(BaseJob):
                     schema_overrides=polars_schema(PlayerBioRecord),
                 )
                 target = self.build_path("stage", "players", f"{pid}.parquet")
-                self.save_parquet(df, target)
+                self.save_parquet(df, target, schema_hash=PlayerBioRecord.SCHEMA_HASH)
             except Exception as e:
                 logger.warning("Failed to stage bio for %s: %s", pid, e)
                 failed.append((pid, str(e)))

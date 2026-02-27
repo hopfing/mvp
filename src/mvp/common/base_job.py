@@ -101,8 +101,20 @@ class BaseJob:
         logger.info("Read HTML from %s", self._display_path(path))
         return content
 
-    def save_parquet(self, df: pl.DataFrame, path: Path) -> Path | None:
+    def save_parquet(
+        self,
+        df: pl.DataFrame,
+        path: Path,
+        *,
+        schema_hash: str | None = None,
+    ) -> Path | None:
         """Save DataFrame to parquet with schema hash metadata.
+
+        Args:
+            df: DataFrame to save.
+            path: Target path.
+            schema_hash: Pydantic SCHEMA_HASH for drift detection. If provided,
+                stored in metadata for later comparison via is_schema_current().
 
         Returns None if the DataFrame is empty.
         """
@@ -111,15 +123,16 @@ class BaseJob:
             return None
         tmp_path = path.with_suffix(path.suffix + ".tmp")
         path.parent.mkdir(parents=True, exist_ok=True)
+        # Compute polars schema hash for backwards compatibility
         schema_str = json.dumps(
             [(col, str(dtype)) for col, dtype in df.schema.items()]
         )
-        schema_hash = hashlib.md5(schema_str.encode()).hexdigest()[:16]
+        polars_hash = hashlib.md5(schema_str.encode()).hexdigest()[:16]
+        metadata = {"schema_hash": polars_hash}
+        if schema_hash is not None:
+            metadata["pydantic_schema_hash"] = schema_hash
         try:
-            df.write_parquet(
-                tmp_path,
-                metadata={"schema_hash": schema_hash},
-            )
+            df.write_parquet(tmp_path, metadata=metadata)
             tmp_path.replace(path)
         except Exception:
             if tmp_path.exists():
@@ -127,6 +140,31 @@ class BaseJob:
             raise
         logger.info("Saved parquet to %s", self._display_path(path))
         return path
+
+    def is_schema_current(self, path: Path, expected_hash: str) -> bool:
+        """Check if parquet file's schema hash matches expected.
+
+        Returns False if:
+        - File doesn't exist
+        - File has no pydantic_schema_hash metadata
+        - Hash doesn't match expected
+
+        Use this in skip logic to detect schema drift and re-process stale files.
+        """
+        if not path.exists():
+            return False
+        try:
+            import pyarrow.parquet as pq
+
+            meta = pq.read_metadata(path)
+            if meta.metadata is None:
+                return False
+            stored_hash = meta.metadata.get(b"pydantic_schema_hash")
+            if stored_hash is None:
+                return False
+            return stored_hash.decode() == expected_hash
+        except Exception:
+            return False
 
     def list_files(self, directory: Path, pattern: str = "*") -> list[Path]:
         """List files matching a glob pattern, sorted by name."""

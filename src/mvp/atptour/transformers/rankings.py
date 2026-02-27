@@ -57,15 +57,18 @@ class RankingsTransformer(BaseJob):
             ]
 
         stage_dir = self.build_path("stage", "rankings")
-        expected_cols = set(RankingsRecord.model_fields)
-        existing: set[str] = set()
+        existing: dict[str, Path] = {}
         for p in self.list_files(stage_dir, "*.parquet"):
-            if p.stem == "rankings_singles":
-                continue
-            cols = set(pl.read_parquet_schema(p).keys())
-            if cols == expected_cols:
-                existing.add(p.stem)
-        to_process = [f for f in html_files if f.stem not in existing]
+            if p.stem != "rankings_singles":
+                existing[p.stem] = p
+
+        to_process = []
+        for f in html_files:
+            staged_path = existing.get(f.stem)
+            if staged_path is None:
+                to_process.append(f)
+            elif not self.is_schema_current(staged_path, RankingsRecord.SCHEMA_HASH):
+                to_process.append(f)
 
         if not to_process:
             logger.info(
@@ -97,7 +100,9 @@ class RankingsTransformer(BaseJob):
             out_path = self.build_path(
                 "stage", "rankings", f"{html_path.stem}.parquet"
             )
-            result = self.save_parquet(df, out_path)
+            result = self.save_parquet(
+                df, out_path, schema_hash=RankingsRecord.SCHEMA_HASH
+            )
             if result is not None:
                 paths.append(result)
 

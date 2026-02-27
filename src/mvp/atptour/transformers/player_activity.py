@@ -103,21 +103,18 @@ class PlayerActivityStager(BaseJob):
             return []
 
         stage_dir = self.build_path("stage", "activity")
-        expected_cols = set(PlayerActivityRecord.model_fields) | set(
-            PlayerActivityRecord.model_computed_fields
-        )
-        existing: dict[str, Path] = {}
-        for p in self.list_files(stage_dir, "*.parquet"):
-            if set(pl.read_parquet_schema(p).keys()) == expected_cols:
-                existing[p.stem] = p
+        existing = {p.stem: p for p in self.list_files(stage_dir, "*.parquet")}
 
         to_process = []
         for raw_path in raw_files:
             pid = raw_path.stem
             staged_path = existing.get(pid)
-            if (
-                staged_path is None
-                or raw_path.stat().st_mtime > staged_path.stat().st_mtime
+            if staged_path is None:
+                to_process.append(raw_path)
+            elif raw_path.stat().st_mtime > staged_path.stat().st_mtime:
+                to_process.append(raw_path)
+            elif not self.is_schema_current(
+                staged_path, PlayerActivityRecord.SCHEMA_HASH
             ):
                 to_process.append(raw_path)
 
@@ -138,7 +135,9 @@ class PlayerActivityStager(BaseJob):
                     schema_overrides=polars_schema(PlayerActivityRecord),
                 )
                 target = self.build_path("stage", "activity", f"{pid}.parquet")
-                self.save_parquet(df, target)
+                self.save_parquet(
+                    df, target, schema_hash=PlayerActivityRecord.SCHEMA_HASH
+                )
             except Exception as e:
                 logger.warning("Failed to stage activity for %s: %s", pid, e)
                 failed.append((pid, str(e)))

@@ -104,6 +104,44 @@ class TestSaveParquet:
         meta = pq.read_metadata(path)
         assert b"schema_hash" in meta.metadata
 
+    def test_pydantic_schema_hash_in_metadata(self, tmp_path):
+        job = BaseJob(domain="atptour", data_root=tmp_path)
+        df = pl.DataFrame({"a": [1, 2], "b": ["x", "y"]})
+        path = tmp_path / "test.parquet"
+        job.save_parquet(df, path, schema_hash="abc123")
+        import pyarrow.parquet as pq
+
+        meta = pq.read_metadata(path)
+        assert meta.metadata[b"pydantic_schema_hash"] == b"abc123"
+
+
+class TestIsSchemaCurrent:
+    def test_matching_hash_returns_true(self, tmp_path):
+        job = BaseJob(domain="atptour", data_root=tmp_path)
+        df = pl.DataFrame({"a": [1, 2]})
+        path = tmp_path / "test.parquet"
+        job.save_parquet(df, path, schema_hash="expected_hash")
+        assert job.is_schema_current(path, "expected_hash") is True
+
+    def test_mismatched_hash_returns_false(self, tmp_path):
+        job = BaseJob(domain="atptour", data_root=tmp_path)
+        df = pl.DataFrame({"a": [1, 2]})
+        path = tmp_path / "test.parquet"
+        job.save_parquet(df, path, schema_hash="old_hash")
+        assert job.is_schema_current(path, "new_hash") is False
+
+    def test_missing_hash_returns_false(self, tmp_path):
+        job = BaseJob(domain="atptour", data_root=tmp_path)
+        df = pl.DataFrame({"a": [1, 2]})
+        path = tmp_path / "test.parquet"
+        job.save_parquet(df, path)  # No schema_hash provided
+        assert job.is_schema_current(path, "any_hash") is False
+
+    def test_nonexistent_file_returns_false(self, tmp_path):
+        job = BaseJob(domain="atptour", data_root=tmp_path)
+        path = tmp_path / "nonexistent.parquet"
+        assert job.is_schema_current(path, "any_hash") is False
+
 
 class TestSaveHtml:
     def test_save_html(self, tmp_path):
