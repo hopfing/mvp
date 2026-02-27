@@ -124,3 +124,34 @@ def cumulative_sum(
         .over(group_by, order_by=date_col)
         .fill_null(0)
     )
+
+
+def cumulative_mean(
+    col: str,
+    group_by: str | list[str],
+    date_col: str = "effective_match_date",
+) -> pl.Expr:
+    """Cumulative mean over all prior rows, excluding current row.
+
+    Args:
+        col: Column to average.
+        group_by: Column(s) to group by (e.g., "player_id").
+        date_col: Date column for temporal ordering.
+
+    Returns:
+        Polars expression computing the cumulative mean.
+    """
+    if isinstance(group_by, str):
+        group_by = [group_by]
+
+    cum_sum = pl.col(col).cum_sum().shift(1).over(group_by, order_by=date_col)
+    # Use is_not_null().cast(Int64) because pl.lit(1) doesn't work with .over()
+    cum_count = (
+        pl.col(date_col)
+        .is_not_null()
+        .cast(pl.Int64)
+        .cum_sum()
+        .shift(1)
+        .over(group_by, order_by=date_col)
+    )
+    return cum_sum / cum_count
