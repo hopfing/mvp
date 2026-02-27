@@ -604,7 +604,9 @@ class TestTournamentMatchesAggregator:
         """is_time_estimated and court_match_num from Schedule should be in output."""
         data_root = tmp_path / "data"
         _write_schedule_parquet(data_root)
-        agg = TournamentMatchesAggregator(Circuit.tour, "580", 2023, data_root=data_root)
+        agg = TournamentMatchesAggregator(
+            Circuit.tour, "580", 2023, data_root=data_root
+        )
         result = agg.aggregate()
         assert "is_time_estimated" in result.columns
         assert "court_match_num" in result.columns

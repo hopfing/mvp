@@ -202,7 +202,11 @@ def add_effective_match_date(df: pl.DataFrame) -> pl.DataFrame:
             pl.col("tournament_end_date")
             .cast(pl.Datetime)
             .dt.offset_by(
-                pl.concat_str(pl.lit("-"), pl.col("_round_offset").cast(pl.Utf8), pl.lit("d"))
+                pl.concat_str(
+                    pl.lit("-"),
+                    pl.col("_round_offset").cast(pl.Utf8),
+                    pl.lit("d"),
+                )
             )
         )
         .alias("effective_match_date"),
@@ -211,8 +215,11 @@ def add_effective_match_date(df: pl.DataFrame) -> pl.DataFrame:
     # Validate no nulls
     null_count = df.filter(pl.col("effective_match_date").is_null()).height
     if null_count > 0:
-        bad_rows = df.filter(pl.col("effective_match_date").is_null()).select(
-            group_keys + ["round", "round_order", "tournament_end_date", "scheduled_datetime"]
+        bad_rows = df.filter(
+            pl.col("effective_match_date").is_null()
+        ).select(
+            group_keys + ["round", "round_order",
+                          "tournament_end_date", "scheduled_datetime"]
         )
         logger.error("Rows with null effective_match_date:\n%s", bad_rows)
         msg = f"null effective_match_date: {null_count} rows"

@@ -456,7 +456,7 @@ class TestMatchesAggregator:
 
 class TestEffectiveMatchDate:
     def test_estimated_from_round_offsets(self):
-        """Groups without Schedule data get dates estimated from tournament_end_date - round_offset."""
+        """Groups without Schedule data get estimated dates."""
         from mvp.atptour.aggregators.matches import add_effective_match_date
 
         df = pl.DataFrame({
@@ -474,7 +474,9 @@ class TestEffectiveMatchDate:
         # F = offset 0, SF = offset 1, R32 = offset 2
         f_date = result.filter(pl.col("round") == "F")["effective_match_date"][0]
         sf_date = result.filter(pl.col("round") == "SF")["effective_match_date"][0]
-        r32_dates = result.filter(pl.col("round") == "R32")["effective_match_date"].to_list()
+        r32_dates = result.filter(
+            pl.col("round") == "R32"
+        )["effective_match_date"].to_list()
 
         assert f_date == datetime(2024, 3, 10)
         assert sf_date == datetime(2024, 3, 9)
@@ -503,7 +505,7 @@ class TestEffectiveMatchDate:
         assert sf_date == datetime(2024, 3, 9, 19, 30)
 
     def test_partial_schedule_uses_estimated(self):
-        """Groups where some but not all have scheduled_datetime use estimation for all."""
+        """Partial schedule coverage falls back to estimation."""
         from mvp.atptour.aggregators.matches import add_effective_match_date
 
         df = pl.DataFrame({
@@ -523,7 +525,7 @@ class TestEffectiveMatchDate:
         assert sf_date == datetime(2024, 3, 9)
 
     def test_multiple_groups_independent(self):
-        """Different (tournament_id, year, draw_type) groups are computed independently."""
+        """Different tournament groups are computed independently."""
         from mvp.atptour.aggregators.matches import add_effective_match_date
 
         df = pl.DataFrame({
@@ -603,7 +605,7 @@ class TestEffectiveMatchDate:
             add_effective_match_date(df)
 
     def test_null_round_order_raises(self):
-        """Rows with null round_order (unknown round) in estimated groups trigger ValueError."""
+        """Null round_order in estimated groups triggers ValueError."""
         from mvp.atptour.aggregators.matches import add_effective_match_date
 
         df = pl.DataFrame({
@@ -614,7 +616,11 @@ class TestEffectiveMatchDate:
             "round_order": [None],
             "tournament_end_date": [date(2024, 3, 10)],
             "scheduled_datetime": [None],
-        }).cast({"scheduled_datetime": pl.Datetime, "tournament_end_date": pl.Date, "round_order": pl.Int64})
+        }).cast({
+            "scheduled_datetime": pl.Datetime,
+            "tournament_end_date": pl.Date,
+            "round_order": pl.Int64,
+        })
 
         with pytest.raises(ValueError, match="null effective_match_date"):
             add_effective_match_date(df)
@@ -637,7 +643,8 @@ class TestEffectiveMatchDate:
         result = add_effective_match_date(df)
         assert "match_uid" in result.columns
         assert "player_id" in result.columns
-        assert len(result.columns) == len(df.columns) + 1  # only added effective_match_date
+        # only added effective_match_date
+        assert len(result.columns) == len(df.columns) + 1
 
 
 class TestMatchesAggregatorSort:
@@ -652,7 +659,7 @@ class TestMatchesAggregatorSort:
         assert result["effective_match_date"].null_count() == 0
 
     def test_sorted_by_effective_match_date(self, tmp_path):
-        """Output should be sorted by (effective_match_date, draw_type, match_uid, player_id)."""
+        """Output should be sorted by effective_match_date."""
         from mvp.atptour.aggregators.matches import MatchesAggregator
 
         data_root = TestMatchesAggregator()._create_test_data(tmp_path)
