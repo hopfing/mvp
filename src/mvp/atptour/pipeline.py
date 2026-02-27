@@ -2,6 +2,7 @@
 
 import argparse
 import logging
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -36,6 +37,34 @@ logger = logging.getLogger(__name__)
 
 def _current_year() -> int:
     return datetime.now().year
+
+
+@dataclass
+class PlayerDataResult:
+    """Collect failure lists from player data processing."""
+
+    failed_bio_fetch: list[tuple[str, str]] = field(default_factory=list)
+    failed_bio_stage: list[tuple[str, str]] = field(default_factory=list)
+    failed_activity_fetch: list[tuple[str, str]] = field(default_factory=list)
+    failed_activity_stage: list[tuple[str, str]] = field(default_factory=list)
+
+    @property
+    def has_failures(self) -> bool:
+        return bool(
+            self.failed_bio_fetch
+            or self.failed_bio_stage
+            or self.failed_activity_fetch
+            or self.failed_activity_stage
+        )
+
+    @property
+    def all_failures(self) -> list:
+        return (
+            self.failed_bio_fetch
+            + self.failed_bio_stage
+            + self.failed_activity_fetch
+            + self.failed_activity_stage
+        )
 
 
 def parse_args(args: list[str] | None = None) -> argparse.Namespace:
@@ -155,6 +184,53 @@ def _process_tournaments(
     return failed
 
 
+def run_rankings(*, start_year: int, data_root: Path | None = None) -> None:
+    """Extract, transform, and consolidate rankings."""
+    RankingsExtractor(start_year=start_year, data_root=data_root).run()
+    tx = RankingsTransformer(data_root=data_root)
+    tx.run(start_year=start_year)
+    tx.consolidate()
+
+
+def run_player_data(
+    *,
+    run_tids: set[tuple[str, int]],
+    data_root: Path | None = None,
+) -> PlayerDataResult:
+    """Extract and transform player bio + activity data, scoped to run tournaments."""
+    if data_root is None:
+        default_root = Path(__file__).resolve().parents[3] / "data"
+    else:
+        default_root = data_root
+    tournaments_stage_dir = default_root / "stage" / "atptour" / "tournaments"
+
+    all_player_tournaments = get_active_players(tournaments_stage_dir)
+    player_tournaments: dict[str, set[tuple[str, int]]] = {}
+    for pid, tid_years in all_player_tournaments.items():
+        scoped = tid_years & run_tids
+        if scoped:
+            player_tournaments[pid] = scoped
+    player_ids = sorted(player_tournaments.keys())
+
+    result = PlayerDataResult()
+
+    if player_ids:
+        result.failed_bio_fetch = PlayerBioExtractor(data_root=data_root).run(
+            player_ids
+        )
+        result.failed_bio_stage = PlayerBioStager(data_root=data_root).run()
+        PlayerBioTransformer(data_root=data_root).run()
+
+    if player_tournaments:
+        result.failed_activity_fetch = PlayerActivityExtractor(
+            data_root=data_root
+        ).run(player_tournaments)
+        result.failed_activity_stage = PlayerActivityStager(data_root=data_root).run()
+        PlayerActivityTransformer(data_root=data_root).run()
+
+    return result
+
+
 def run_pipeline(
     *,
     data_root: Path | None = None,
@@ -177,9 +253,7 @@ def run_pipeline(
         return
 
     start_year = (year - 1) if year else (_current_year() - 1)
-    RankingsExtractor(start_year=start_year, data_root=data_root).run()
-    RankingsTransformer(data_root=data_root).run(start_year=start_year)
-    RankingsTransformer(data_root=data_root).consolidate()
+    run_rankings(start_year=start_year, data_root=data_root)
 
     discovery = TournamentDiscovery(data_root=data_root)
 
@@ -194,61 +268,22 @@ def run_pipeline(
     logger.info("Processing %d tournaments", len(tournaments))
     failed = _process_tournaments(tournaments, data_root=data_root, refresh=refresh)
 
-    # Player data — scoped to current run
-    if data_root is None:
-        default_root = Path(__file__).resolve().parents[3] / "data"
-    else:
-        default_root = data_root
-    tournaments_stage_dir = default_root / "stage" / "atptour" / "tournaments"
-    all_player_tournaments = get_active_players(tournaments_stage_dir)
     run_tids = {(tid, yr) for tid, yr, _, _ in tournaments}
-    player_tournaments: dict[str, set[tuple[str, int]]] = {}
-    for pid, tid_years in all_player_tournaments.items():
-        scoped = tid_years & run_tids
-        if scoped:
-            player_tournaments[pid] = scoped
-    player_ids = sorted(player_tournaments.keys())
-
-    failed_bio_fetch: list[tuple[str, str]] = []
-    failed_bio_stage: list[tuple[str, str]] = []
-    if player_ids:
-        failed_bio_fetch = PlayerBioExtractor(data_root=data_root).run(player_ids)
-        failed_bio_stage = PlayerBioStager(data_root=data_root).run()
-        PlayerBioTransformer(data_root=data_root).run()
-
-    failed_activity_fetch: list[tuple[str, str]] = []
-    failed_activity_stage: list[tuple[str, str]] = []
-    if player_tournaments:
-        failed_activity_fetch = PlayerActivityExtractor(data_root=data_root).run(
-            player_tournaments
-        )
-        failed_activity_stage = PlayerActivityStager(data_root=data_root).run()
-        PlayerActivityTransformer(data_root=data_root).run()
+    player_result = run_player_data(run_tids=run_tids, data_root=data_root)
 
     # Layer 2: cross-tournament aggregation
     logger.info("Running Layer 2 aggregation")
     MatchesAggregator(data_root=data_root).run()
 
-    _log_summary(
-        tournaments,
-        failed,
-        failed_bio_fetch,
-        failed_bio_stage,
-        failed_activity_fetch,
-        failed_activity_stage,
-    )
+    _log_summary(tournaments, failed, player_result)
 
-    player_failures = (
-        failed_bio_fetch
-        + failed_bio_stage
-        + failed_activity_fetch
-        + failed_activity_stage
-    )
     error_parts = []
     if failed:
         error_parts.append(f"{len(failed)} failed tournament(s)")
-    if player_failures:
-        error_parts.append(f"{len(player_failures)} failed player operation(s)")
+    if player_result.has_failures:
+        error_parts.append(
+            f"{len(player_result.all_failures)} failed player operation(s)"
+        )
     if error_parts:
         raise RuntimeError(
             f"Pipeline finished with {', '.join(error_parts)}"
@@ -258,10 +293,7 @@ def run_pipeline(
 def _log_summary(
     tournaments,
     failed,
-    failed_bio_fetch,
-    failed_bio_stage,
-    failed_activity_fetch,
-    failed_activity_stage,
+    player_result: PlayerDataResult,
 ):
     """Log pipeline summary."""
     logger.info("=" * 60)
@@ -276,10 +308,10 @@ def _log_summary(
         logger.info("All %d tournaments succeeded", len(tournaments))
 
     for label, failures in [
-        ("bio fetch", failed_bio_fetch),
-        ("bio stage", failed_bio_stage),
-        ("activity fetch", failed_activity_fetch),
-        ("activity stage", failed_activity_stage),
+        ("bio fetch", player_result.failed_bio_fetch),
+        ("bio stage", player_result.failed_bio_stage),
+        ("activity fetch", player_result.failed_activity_fetch),
+        ("activity stage", player_result.failed_activity_stage),
     ]:
         if failures:
             logger.error("Player %s failed: %d", label, len(failures))

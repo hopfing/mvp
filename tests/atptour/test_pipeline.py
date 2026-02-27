@@ -495,6 +495,94 @@ class TestProcessTournaments:
 
 
 # ---------------------------------------------------------------------------
+# run_rankings
+# ---------------------------------------------------------------------------
+
+
+class TestRunRankings:
+    @patch("mvp.atptour.pipeline.RankingsTransformer")
+    @patch("mvp.atptour.pipeline.RankingsExtractor")
+    def test_runs_extract_transform_consolidate(self, MockRankingsExt, MockRankingsTx):
+        from mvp.atptour.pipeline import run_rankings
+
+        run_rankings(start_year=2022, data_root=None)
+
+        MockRankingsExt.assert_called_once_with(start_year=2022, data_root=None)
+        MockRankingsExt.return_value.run.assert_called_once()
+        MockRankingsTx.assert_called_once_with(data_root=None)
+        MockRankingsTx.return_value.run.assert_called_once_with(start_year=2022)
+        MockRankingsTx.return_value.consolidate.assert_called_once()
+
+    @patch("mvp.atptour.pipeline.RankingsTransformer")
+    @patch("mvp.atptour.pipeline.RankingsExtractor")
+    def test_passes_data_root(self, MockRankingsExt, MockRankingsTx):
+        from mvp.atptour.pipeline import run_rankings
+
+        data_root = Path("/tmp/test")
+        run_rankings(start_year=2022, data_root=data_root)
+
+        MockRankingsExt.assert_called_once_with(start_year=2022, data_root=data_root)
+        MockRankingsTx.assert_called_once_with(data_root=data_root)
+
+
+# ---------------------------------------------------------------------------
+# run_player_data
+# ---------------------------------------------------------------------------
+
+
+class TestRunPlayerData:
+    @patch("mvp.atptour.pipeline.PlayerActivityTransformer")
+    @patch("mvp.atptour.pipeline.PlayerActivityStager")
+    @patch("mvp.atptour.pipeline.PlayerActivityExtractor")
+    @patch("mvp.atptour.pipeline.PlayerBioTransformer")
+    @patch("mvp.atptour.pipeline.PlayerBioStager")
+    @patch("mvp.atptour.pipeline.PlayerBioExtractor")
+    @patch("mvp.atptour.pipeline.get_active_players")
+    def test_scopes_to_run_tids(
+        self, MockGetPlayers, MockBioExt, MockBioStager, MockBioTx,
+        MockActivityExt, MockActivityStager, MockActivityTx,
+    ):
+        from mvp.atptour.pipeline import run_player_data
+
+        MockGetPlayers.return_value = {
+            "FEDERER_R": {("580", 2023), ("339", 2023)},
+            "NADAL_R": {("339", 2023)},
+        }
+        MockBioExt.return_value.run.return_value = []
+        MockBioStager.return_value.run.return_value = []
+        MockActivityExt.return_value.run.return_value = []
+        MockActivityStager.return_value.run.return_value = []
+
+        run_tids = {("580", 2023)}
+        result = run_player_data(run_tids=run_tids, data_root=None)
+
+        player_ids = MockBioExt.return_value.run.call_args[0][0]
+        assert player_ids == ["FEDERER_R"]
+        assert result.failed_bio_fetch == []
+
+    @patch("mvp.atptour.pipeline.PlayerActivityTransformer")
+    @patch("mvp.atptour.pipeline.PlayerActivityStager")
+    @patch("mvp.atptour.pipeline.PlayerActivityExtractor")
+    @patch("mvp.atptour.pipeline.PlayerBioTransformer")
+    @patch("mvp.atptour.pipeline.PlayerBioStager")
+    @patch("mvp.atptour.pipeline.PlayerBioExtractor")
+    @patch("mvp.atptour.pipeline.get_active_players")
+    def test_skips_when_no_players(
+        self, MockGetPlayers, MockBioExt, MockBioStager, MockBioTx,
+        MockActivityExt, MockActivityStager, MockActivityTx,
+    ):
+        from mvp.atptour.pipeline import run_player_data
+
+        MockGetPlayers.return_value = {}
+
+        result = run_player_data(run_tids={("580", 2023)}, data_root=None)
+
+        MockBioExt.return_value.run.assert_not_called()
+        MockActivityExt.return_value.run.assert_not_called()
+        assert result.has_failures is False
+
+
+# ---------------------------------------------------------------------------
 # run_pipeline
 # ---------------------------------------------------------------------------
 
