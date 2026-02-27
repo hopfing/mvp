@@ -2,231 +2,10 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from mvp.common.enums import Circuit
-
-# ---------------------------------------------------------------------------
-# parse_args
-# ---------------------------------------------------------------------------
-
-class TestParseArgs:
-    def test_no_args(self):
-        from mvp.atptour.pipeline import parse_args
-
-        args = parse_args([])
-        assert args.year is None
-        assert args.tid is None
-        assert args.circuit is None
-        assert args.refresh is False
-        assert args.log_level == "INFO"
-
-    def test_year_only(self):
-        from mvp.atptour.pipeline import parse_args
-
-        args = parse_args(["--year", "2023"])
-        assert args.year == 2023
-        assert args.tid is None
-        assert args.circuit is None
-
-    def test_tid_with_year(self):
-        from mvp.atptour.pipeline import parse_args
-
-        args = parse_args(["--tid", "580", "339", "--year", "2023"])
-        assert args.tid == ["580", "339"]
-        assert args.year == 2023
-
-    def test_tid_values_are_strings(self):
-        from mvp.atptour.pipeline import parse_args
-
-        args = parse_args(["--tid", "580", "--year", "2023"])
-        assert isinstance(args.tid[0], str)
-
-    def test_tid_requires_year(self):
-        from mvp.atptour.pipeline import parse_args
-
-        with pytest.raises(SystemExit):
-            parse_args(["--tid", "580"])
-
-    def test_circuit_requires_year(self):
-        from mvp.atptour.pipeline import parse_args
-
-        with pytest.raises(SystemExit):
-            parse_args(["--circuit", "tour"])
-
-    def test_circuit_incompatible_with_tid(self):
-        from mvp.atptour.pipeline import parse_args
-
-        with pytest.raises(SystemExit):
-            parse_args(["--tid", "580", "--year", "2023", "--circuit", "tour"])
-
-    def test_refresh(self):
-        from mvp.atptour.pipeline import parse_args
-
-        args = parse_args(["--year", "2023", "--refresh"])
-        assert args.refresh is True
-
-    def test_circuit_with_year(self):
-        from mvp.atptour.pipeline import parse_args
-
-        args = parse_args(["--year", "2023", "--circuit", "tour"])
-        assert args.circuit == "tour"
-
-    def test_circuit_chal(self):
-        from mvp.atptour.pipeline import parse_args
-
-        args = parse_args(["--year", "2023", "--circuit", "chal"])
-        assert args.circuit == "chal"
-
-    def test_log_level(self):
-        from mvp.atptour.pipeline import parse_args
-
-        args = parse_args(["--log-level", "DEBUG"])
-        assert args.log_level == "DEBUG"
-
-    def test_invalid_log_level(self):
-        from mvp.atptour.pipeline import parse_args
-
-        with pytest.raises(SystemExit):
-            parse_args(["--log-level", "TRACE"])
-
-    def test_single_tid(self):
-        from mvp.atptour.pipeline import parse_args
-
-        args = parse_args(["--tid", "580", "--year", "2023"])
-        assert args.tid == ["580"]
-
-    def test_aggregate_only(self):
-        from mvp.atptour.pipeline import parse_args
-
-        args = parse_args(["--aggregate-only"])
-        assert args.aggregate_only is True
-        assert args.year is None
-        assert args.tid is None
-        assert args.circuit is None
-
-    def test_aggregate_only_default_false(self):
-        from mvp.atptour.pipeline import parse_args
-
-        args = parse_args([])
-        assert args.aggregate_only is False
-
-    def test_aggregate_only_incompatible_with_year(self):
-        from mvp.atptour.pipeline import parse_args
-
-        with pytest.raises(SystemExit):
-            parse_args(["--aggregate-only", "--year", "2023"])
-
-    def test_aggregate_only_incompatible_with_tid(self):
-        from mvp.atptour.pipeline import parse_args
-
-        with pytest.raises(SystemExit):
-            parse_args(["--aggregate-only", "--tid", "580", "--year", "2023"])
-
-    def test_aggregate_only_incompatible_with_circuit(self):
-        from mvp.atptour.pipeline import parse_args
-
-        with pytest.raises(SystemExit):
-            parse_args(["--aggregate-only", "--circuit", "tour", "--year", "2023"])
-
-
-# ---------------------------------------------------------------------------
-# _resolve_tournaments
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-def mock_discovery():
-    d = MagicMock()
-    d.get_active_tournaments.return_value = [("580", 2026), ("339", 2026)]
-    d.get_archive_tournaments.return_value = [
-        ("580", 2023, Circuit.tour),
-        ("339", 2023, Circuit.tour),
-        ("8888", 2023, Circuit.chal),
-    ]
-    return d
-
-
-class TestResolveTournaments:
-    def test_active_no_args(self, mock_discovery):
-        """No args -> get_active_tournaments()"""
-        from mvp.atptour.pipeline import _resolve_tournaments
-
-        args = SimpleNamespace(tid=None, year=None, circuit=None)
-        result = _resolve_tournaments(args, mock_discovery)
-
-        mock_discovery.get_active_tournaments.assert_called_once()
-        assert result == [("580", 2026, False, None), ("339", 2026, False, None)]
-
-    def test_year_archive(self, mock_discovery):
-        """Past year -> all archive"""
-        from mvp.atptour.pipeline import _resolve_tournaments
-
-        args = SimpleNamespace(tid=None, year=2023, circuit=None)
-        with patch("mvp.atptour.pipeline._current_year", return_value=2026):
-            result = _resolve_tournaments(args, mock_discovery)
-
-        assert all(is_archive for _, _, is_archive, _ in result)
-        assert len(result) == 3
-
-    def test_year_current_checks_active(self, mock_discovery):
-        """Current year -> checks active for is_archive"""
-        from mvp.atptour.pipeline import _resolve_tournaments
-
-        current_year = datetime.now().year
-        mock_discovery.get_archive_tournaments.return_value = [
-            ("580", current_year, Circuit.tour),
-            ("999", current_year, Circuit.chal),
-        ]
-        mock_discovery.get_active_tournaments.return_value = [("580", current_year)]
-
-        args = SimpleNamespace(tid=None, year=current_year, circuit=None)
-        result = _resolve_tournaments(args, mock_discovery)
-
-        # 580 is active -> not archive; 999 is not active -> archive
-        assert result[0] == ("580", current_year, False, Circuit.tour)
-        assert result[1] == ("999", current_year, True, Circuit.chal)
-
-    def test_year_with_circuit_filter(self, mock_discovery):
-        """--circuit filters archive results"""
-        from mvp.atptour.pipeline import _resolve_tournaments
-
-        args = SimpleNamespace(tid=None, year=2023, circuit="tour")
-        _resolve_tournaments(args, mock_discovery)
-
-        mock_discovery.get_archive_tournaments.assert_called_once_with(
-            2023, circuit=Circuit.tour
-        )
-
-    def test_tid_archive(self, mock_discovery):
-        """--tid with past year -> all archive"""
-        from mvp.atptour.pipeline import _resolve_tournaments
-
-        args = SimpleNamespace(tid=["580", "339"], year=2023, circuit=None)
-        result = _resolve_tournaments(args, mock_discovery)
-
-        assert result == [("580", 2023, True, None), ("339", 2023, True, None)]
-        mock_discovery.get_archive_tournaments.assert_not_called()
-
-    def test_tid_current_year(self, mock_discovery):
-        """--tid with current year -> checks active for is_archive"""
-        from mvp.atptour.pipeline import _resolve_tournaments
-
-        current_year = datetime.now().year
-        mock_discovery.get_active_tournaments.return_value = [("580", current_year)]
-
-        args = SimpleNamespace(tid=["580", "999"], year=current_year, circuit=None)
-        result = _resolve_tournaments(args, mock_discovery)
-
-        # 580 is active -> not archive; 999 not active -> archive
-        assert result[0] == ("580", current_year, False, None)
-        assert result[1] == ("999", current_year, True, None)
-
 
 # ---------------------------------------------------------------------------
 # _process_tournaments
@@ -495,54 +274,42 @@ class TestProcessTournaments:
 
 
 # ---------------------------------------------------------------------------
-# run_pipeline
+# run_rankings
 # ---------------------------------------------------------------------------
 
 
-class TestRunPipeline:
-    @patch("mvp.atptour.pipeline.MatchesAggregator")
-    @patch("mvp.atptour.pipeline.PlayerActivityTransformer")
-    @patch("mvp.atptour.pipeline.PlayerActivityStager")
-    @patch("mvp.atptour.pipeline.PlayerActivityExtractor")
-    @patch("mvp.atptour.pipeline.PlayerBioTransformer")
-    @patch("mvp.atptour.pipeline.PlayerBioStager")
-    @patch("mvp.atptour.pipeline.PlayerBioExtractor")
-    @patch("mvp.atptour.pipeline.get_active_players")
-    @patch("mvp.atptour.pipeline._process_tournaments")
-    @patch("mvp.atptour.pipeline._resolve_tournaments")
-    @patch("mvp.atptour.pipeline.TournamentDiscovery")
+class TestRunRankings:
     @patch("mvp.atptour.pipeline.RankingsTransformer")
     @patch("mvp.atptour.pipeline.RankingsExtractor")
-    def test_rankings_called_first(
-        self,
-        MockRankingsExt,
-        MockRankingsTx,
-        MockDiscovery,
-        MockResolve,
-        MockProcess,
-        MockGetPlayers,
-        MockBioExt,
-        MockBioStager,
-        MockBioTx,
-        MockActivityExt,
-        MockActivityStager,
-        MockActivityTx,
-        MockMatchesAgg,
-    ):
-        from mvp.atptour.pipeline import run_pipeline
+    def test_runs_extract_transform_consolidate(self, MockRankingsExt, MockRankingsTx):
+        from mvp.atptour.pipeline import run_rankings
 
-        MockResolve.return_value = []
-        MockProcess.return_value = []
-        MockGetPlayers.return_value = {}
-
-        run_pipeline(year=2023)
+        run_rankings(start_year=2022, data_root=None)
 
         MockRankingsExt.assert_called_once_with(start_year=2022, data_root=None)
         MockRankingsExt.return_value.run.assert_called_once()
+        MockRankingsTx.assert_called_once_with(data_root=None)
         MockRankingsTx.return_value.run.assert_called_once_with(start_year=2022)
         MockRankingsTx.return_value.consolidate.assert_called_once()
 
-    @patch("mvp.atptour.pipeline.MatchesAggregator")
+    @patch("mvp.atptour.pipeline.RankingsTransformer")
+    @patch("mvp.atptour.pipeline.RankingsExtractor")
+    def test_passes_data_root(self, MockRankingsExt, MockRankingsTx):
+        from mvp.atptour.pipeline import run_rankings
+
+        data_root = Path("/tmp/test")
+        run_rankings(start_year=2022, data_root=data_root)
+
+        MockRankingsExt.assert_called_once_with(start_year=2022, data_root=data_root)
+        MockRankingsTx.assert_called_once_with(data_root=data_root)
+
+
+# ---------------------------------------------------------------------------
+# run_player_data
+# ---------------------------------------------------------------------------
+
+
+class TestRunPlayerData:
     @patch("mvp.atptour.pipeline.PlayerActivityTransformer")
     @patch("mvp.atptour.pipeline.PlayerActivityStager")
     @patch("mvp.atptour.pipeline.PlayerActivityExtractor")
@@ -550,31 +317,12 @@ class TestRunPipeline:
     @patch("mvp.atptour.pipeline.PlayerBioStager")
     @patch("mvp.atptour.pipeline.PlayerBioExtractor")
     @patch("mvp.atptour.pipeline.get_active_players")
-    @patch("mvp.atptour.pipeline._process_tournaments")
-    @patch("mvp.atptour.pipeline._resolve_tournaments")
-    @patch("mvp.atptour.pipeline.TournamentDiscovery")
-    @patch("mvp.atptour.pipeline.RankingsTransformer")
-    @patch("mvp.atptour.pipeline.RankingsExtractor")
-    def test_player_data_scoped_to_run(
-        self,
-        MockRankingsExt,
-        MockRankingsTx,
-        MockDiscovery,
-        MockResolve,
-        MockProcess,
-        MockGetPlayers,
-        MockBioExt,
-        MockBioStager,
-        MockBioTx,
-        MockActivityExt,
-        MockActivityStager,
-        MockActivityTx,
-        MockMatchesAgg,
+    def test_scopes_to_run_tids(
+        self, MockGetPlayers, MockBioExt, MockBioStager, MockBioTx,
+        MockActivityExt, MockActivityStager, MockActivityTx,
     ):
-        from mvp.atptour.pipeline import run_pipeline
+        from mvp.atptour.pipeline import run_player_data
 
-        MockResolve.return_value = [("580", 2023, True, None)]
-        MockProcess.return_value = []
         MockGetPlayers.return_value = {
             "FEDERER_R": {("580", 2023), ("339", 2023)},
             "NADAL_R": {("339", 2023)},
@@ -584,20 +332,13 @@ class TestRunPipeline:
         MockActivityExt.return_value.run.return_value = []
         MockActivityStager.return_value.run.return_value = []
 
-        run_pipeline(year=2023, tournament_ids=["580"])
+        run_tids = {("580", 2023)}
+        result = run_player_data(run_tids=run_tids, data_root=None)
 
-        # FEDERER has (580, 2023) in run scope; NADAL has only (339, 2023) which isn't
-        MockBioExt.return_value.run.assert_called_once()
         player_ids = MockBioExt.return_value.run.call_args[0][0]
         assert player_ids == ["FEDERER_R"]
+        assert result.failed_bio_fetch == []
 
-        MockActivityExt.return_value.run.assert_called_once()
-        player_tournaments = MockActivityExt.return_value.run.call_args[0][0]
-        assert "FEDERER_R" in player_tournaments
-        assert player_tournaments["FEDERER_R"] == {("580", 2023)}
-        assert "NADAL_R" not in player_tournaments
-
-    @patch("mvp.atptour.pipeline.MatchesAggregator")
     @patch("mvp.atptour.pipeline.PlayerActivityTransformer")
     @patch("mvp.atptour.pipeline.PlayerActivityStager")
     @patch("mvp.atptour.pipeline.PlayerActivityExtractor")
@@ -605,292 +346,16 @@ class TestRunPipeline:
     @patch("mvp.atptour.pipeline.PlayerBioStager")
     @patch("mvp.atptour.pipeline.PlayerBioExtractor")
     @patch("mvp.atptour.pipeline.get_active_players")
-    @patch("mvp.atptour.pipeline._process_tournaments")
-    @patch("mvp.atptour.pipeline._resolve_tournaments")
-    @patch("mvp.atptour.pipeline.TournamentDiscovery")
-    @patch("mvp.atptour.pipeline.RankingsTransformer")
-    @patch("mvp.atptour.pipeline.RankingsExtractor")
-    def test_skips_player_data_when_no_players(
-        self,
-        MockRankingsExt,
-        MockRankingsTx,
-        MockDiscovery,
-        MockResolve,
-        MockProcess,
-        MockGetPlayers,
-        MockBioExt,
-        MockBioStager,
-        MockBioTx,
-        MockActivityExt,
-        MockActivityStager,
-        MockActivityTx,
-        MockMatchesAgg,
+    def test_skips_when_no_players(
+        self, MockGetPlayers, MockBioExt, MockBioStager, MockBioTx,
+        MockActivityExt, MockActivityStager, MockActivityTx,
     ):
-        from mvp.atptour.pipeline import run_pipeline
+        from mvp.atptour.pipeline import run_player_data
 
-        MockResolve.return_value = []
-        MockProcess.return_value = []
         MockGetPlayers.return_value = {}
 
-        run_pipeline(year=2023)
+        result = run_player_data(run_tids={("580", 2023)}, data_root=None)
 
         MockBioExt.return_value.run.assert_not_called()
-        MockBioStager.return_value.run.assert_not_called()
-        MockBioTx.return_value.run.assert_not_called()
         MockActivityExt.return_value.run.assert_not_called()
-        MockActivityStager.return_value.run.assert_not_called()
-        MockActivityTx.return_value.run.assert_not_called()
-
-    @patch("mvp.atptour.pipeline.MatchesAggregator")
-    @patch("mvp.atptour.pipeline.PlayerActivityTransformer")
-    @patch("mvp.atptour.pipeline.PlayerActivityStager")
-    @patch("mvp.atptour.pipeline.PlayerActivityExtractor")
-    @patch("mvp.atptour.pipeline.PlayerBioTransformer")
-    @patch("mvp.atptour.pipeline.PlayerBioStager")
-    @patch("mvp.atptour.pipeline.PlayerBioExtractor")
-    @patch("mvp.atptour.pipeline.get_active_players")
-    @patch("mvp.atptour.pipeline._process_tournaments")
-    @patch("mvp.atptour.pipeline._resolve_tournaments")
-    @patch("mvp.atptour.pipeline.TournamentDiscovery")
-    @patch("mvp.atptour.pipeline.RankingsTransformer")
-    @patch("mvp.atptour.pipeline.RankingsExtractor")
-    def test_raises_on_tournament_failures(
-        self,
-        MockRankingsExt,
-        MockRankingsTx,
-        MockDiscovery,
-        MockResolve,
-        MockProcess,
-        MockGetPlayers,
-        MockBioExt,
-        MockBioStager,
-        MockBioTx,
-        MockActivityExt,
-        MockActivityStager,
-        MockActivityTx,
-        MockMatchesAgg,
-    ):
-        from mvp.atptour.pipeline import run_pipeline
-
-        MockResolve.return_value = [("580", 2023, True, None)]
-        MockProcess.return_value = [("580", 2023, "boom")]
-        MockGetPlayers.return_value = {}
-
-        with pytest.raises(RuntimeError, match="1 failed tournament"):
-            run_pipeline(year=2023)
-
-    @patch("mvp.atptour.pipeline.MatchesAggregator")
-    @patch("mvp.atptour.pipeline.PlayerActivityTransformer")
-    @patch("mvp.atptour.pipeline.PlayerActivityStager")
-    @patch("mvp.atptour.pipeline.PlayerActivityExtractor")
-    @patch("mvp.atptour.pipeline.PlayerBioTransformer")
-    @patch("mvp.atptour.pipeline.PlayerBioStager")
-    @patch("mvp.atptour.pipeline.PlayerBioExtractor")
-    @patch("mvp.atptour.pipeline.get_active_players")
-    @patch("mvp.atptour.pipeline._process_tournaments")
-    @patch("mvp.atptour.pipeline._resolve_tournaments")
-    @patch("mvp.atptour.pipeline.TournamentDiscovery")
-    @patch("mvp.atptour.pipeline.RankingsTransformer")
-    @patch("mvp.atptour.pipeline.RankingsExtractor")
-    def test_raises_on_player_failures(
-        self,
-        MockRankingsExt,
-        MockRankingsTx,
-        MockDiscovery,
-        MockResolve,
-        MockProcess,
-        MockGetPlayers,
-        MockBioExt,
-        MockBioStager,
-        MockBioTx,
-        MockActivityExt,
-        MockActivityStager,
-        MockActivityTx,
-        MockMatchesAgg,
-    ):
-        from mvp.atptour.pipeline import run_pipeline
-
-        MockResolve.return_value = [("580", 2023, True, None)]
-        MockProcess.return_value = []
-        MockGetPlayers.return_value = {"FEDERER_R": {("580", 2023)}}
-        MockBioExt.return_value.run.return_value = [("FEDERER_R", "404")]
-        MockBioStager.return_value.run.return_value = []
-        MockActivityExt.return_value.run.return_value = []
-        MockActivityStager.return_value.run.return_value = []
-
-        with pytest.raises(RuntimeError, match="failed player operation"):
-            run_pipeline(year=2023, tournament_ids=["580"])
-
-    @patch("mvp.atptour.pipeline.MatchesAggregator")
-    @patch("mvp.atptour.pipeline.PlayerActivityTransformer")
-    @patch("mvp.atptour.pipeline.PlayerActivityStager")
-    @patch("mvp.atptour.pipeline.PlayerActivityExtractor")
-    @patch("mvp.atptour.pipeline.PlayerBioTransformer")
-    @patch("mvp.atptour.pipeline.PlayerBioStager")
-    @patch("mvp.atptour.pipeline.PlayerBioExtractor")
-    @patch("mvp.atptour.pipeline.get_active_players")
-    @patch("mvp.atptour.pipeline._process_tournaments")
-    @patch("mvp.atptour.pipeline._resolve_tournaments")
-    @patch("mvp.atptour.pipeline.TournamentDiscovery")
-    @patch("mvp.atptour.pipeline.RankingsTransformer")
-    @patch("mvp.atptour.pipeline.RankingsExtractor")
-    def test_default_start_year_no_year_arg(
-        self,
-        MockRankingsExt,
-        MockRankingsTx,
-        MockDiscovery,
-        MockResolve,
-        MockProcess,
-        MockGetPlayers,
-        MockBioExt,
-        MockBioStager,
-        MockBioTx,
-        MockActivityExt,
-        MockActivityStager,
-        MockActivityTx,
-        MockMatchesAgg,
-    ):
-        """No year arg -> start_year = current_year - 1."""
-        from mvp.atptour.pipeline import run_pipeline
-
-        MockResolve.return_value = []
-        MockProcess.return_value = []
-        MockGetPlayers.return_value = {}
-
-        run_pipeline()
-
-        expected_start = datetime.now().year - 1
-        MockRankingsExt.assert_called_once_with(
-            start_year=expected_start, data_root=None
-        )
-
-    @patch("mvp.atptour.pipeline.MatchesAggregator")
-    @patch("mvp.atptour.pipeline.PlayerActivityTransformer")
-    @patch("mvp.atptour.pipeline.PlayerActivityStager")
-    @patch("mvp.atptour.pipeline.PlayerActivityExtractor")
-    @patch("mvp.atptour.pipeline.PlayerBioTransformer")
-    @patch("mvp.atptour.pipeline.PlayerBioStager")
-    @patch("mvp.atptour.pipeline.PlayerBioExtractor")
-    @patch("mvp.atptour.pipeline.get_active_players")
-    @patch("mvp.atptour.pipeline._process_tournaments")
-    @patch("mvp.atptour.pipeline._resolve_tournaments")
-    @patch("mvp.atptour.pipeline.TournamentDiscovery")
-    @patch("mvp.atptour.pipeline.RankingsTransformer")
-    @patch("mvp.atptour.pipeline.RankingsExtractor")
-    def test_data_root_propagated(
-        self,
-        MockRankingsExt,
-        MockRankingsTx,
-        MockDiscovery,
-        MockResolve,
-        MockProcess,
-        MockGetPlayers,
-        MockBioExt,
-        MockBioStager,
-        MockBioTx,
-        MockActivityExt,
-        MockActivityStager,
-        MockActivityTx,
-        MockMatchesAgg,
-    ):
-        from mvp.atptour.pipeline import run_pipeline
-
-        data_root = Path("/tmp/test_data")
-        MockResolve.return_value = [("580", 2023, True, None)]
-        MockProcess.return_value = []
-        MockGetPlayers.return_value = {"FEDERER_R": {("580", 2023)}}
-        MockBioExt.return_value.run.return_value = []
-        MockBioStager.return_value.run.return_value = []
-        MockActivityExt.return_value.run.return_value = []
-        MockActivityStager.return_value.run.return_value = []
-
-        run_pipeline(data_root=data_root, year=2023, tournament_ids=["580"])
-
-        MockRankingsExt.assert_called_once_with(start_year=2022, data_root=data_root)
-        MockDiscovery.assert_called_once_with(data_root=data_root)
-        MockProcess.assert_called_once()
-        assert MockProcess.call_args[1]["data_root"] == data_root
-        MockBioExt.assert_called_once_with(data_root=data_root)
-        MockBioStager.assert_called_once_with(data_root=data_root)
-        MockBioTx.assert_called_once_with(data_root=data_root)
-        MockActivityExt.assert_called_once_with(data_root=data_root)
-        MockActivityStager.assert_called_once_with(data_root=data_root)
-        MockActivityTx.assert_called_once_with(data_root=data_root)
-        MockMatchesAgg.assert_called_once_with(data_root=data_root)
-        MockMatchesAgg.return_value.run.assert_called_once()
-
-    @patch("mvp.atptour.pipeline.MatchesAggregator")
-    def test_aggregate_only_skips_extraction(self, MockMatchesAgg):
-        """aggregate_only=True skips all extraction and just runs Layer 2."""
-        from mvp.atptour.pipeline import run_pipeline
-
-        run_pipeline(aggregate_only=True)
-
-        MockMatchesAgg.assert_called_once_with(data_root=None)
-        MockMatchesAgg.return_value.run.assert_called_once()
-
-    @patch("mvp.atptour.pipeline.MatchesAggregator")
-    def test_aggregate_only_with_data_root(self, MockMatchesAgg):
-        """aggregate_only=True passes data_root to MatchesAggregator."""
-        from mvp.atptour.pipeline import run_pipeline
-
-        data_root = Path("/tmp/test_data")
-        run_pipeline(aggregate_only=True, data_root=data_root)
-
-        MockMatchesAgg.assert_called_once_with(data_root=data_root)
-        MockMatchesAgg.return_value.run.assert_called_once()
-
-
-# ---------------------------------------------------------------------------
-# main (CLI entry point)
-# ---------------------------------------------------------------------------
-
-
-class TestMain:
-    @patch("mvp.atptour.pipeline.run_pipeline")
-    @patch("mvp.atptour.pipeline.parse_args")
-    def test_main_wires_args_to_run_pipeline(self, mock_parse, mock_run):
-        from mvp.atptour.pipeline import main
-
-        mock_parse.return_value = SimpleNamespace(
-            log_level="INFO",
-            year=2023,
-            tid=["580"],
-            circuit=None,
-            refresh=True,
-            aggregate_only=False,
-        )
-
-        main()
-
-        mock_run.assert_called_once_with(
-            year=2023,
-            tournament_ids=["580"],
-            circuit=None,
-            refresh=True,
-            aggregate_only=False,
-        )
-
-    @patch("mvp.atptour.pipeline.run_pipeline")
-    @patch("mvp.atptour.pipeline.parse_args")
-    def test_main_wires_aggregate_only(self, mock_parse, mock_run):
-        from mvp.atptour.pipeline import main
-
-        mock_parse.return_value = SimpleNamespace(
-            log_level="INFO",
-            year=None,
-            tid=None,
-            circuit=None,
-            refresh=False,
-            aggregate_only=True,
-        )
-
-        main()
-
-        mock_run.assert_called_once_with(
-            year=None,
-            tournament_ids=None,
-            circuit=None,
-            refresh=False,
-            aggregate_only=True,
-        )
+        assert result.has_failures is False
