@@ -31,6 +31,23 @@ class TestPublicAPI:
         registry = get_registry()
         assert hasattr(registry, "list_features")
 
+    def test_diagnostics_exported(self):
+        """Diagnostics is exported from experimentation module."""
+        from mvp.experimentation import Diagnostics
+
+        diag = Diagnostics()
+        assert hasattr(diag, "compute_all")
+
+    def test_diagnostic_results_exported(self):
+        """DiagnosticResults is exported from experimentation module."""
+        from mvp.experimentation import DiagnosticResults
+
+        result = DiagnosticResults(
+            segments={}, calibration={}, errors={}, temporal={}
+        )
+        assert hasattr(result, "metrics")
+        assert hasattr(result, "to_json")
+
     def test_all_exports_in_dunder_all(self):
         """All public exports are listed in __all__."""
         import mvp.experimentation as exp
@@ -40,6 +57,8 @@ class TestPublicAPI:
             "BaseSplitter",
             "BaseModel",
             "compute_metrics",
+            "DiagnosticResults",
+            "Diagnostics",
             "ExpandingWindowSplitter",
             "ExperimentConfig",
             "ExperimentLogger",

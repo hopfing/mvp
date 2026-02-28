@@ -2,6 +2,7 @@
 
 from mvp.experimentation.config import ExperimentConfig
 from mvp.experimentation.context import FeatureContext
+from mvp.experimentation.diagnostics import DiagnosticResults, Diagnostics
 from mvp.experimentation.engine import FeatureEngine
 from mvp.experimentation.metrics import compute_metrics
 from mvp.experimentation.mlflow_logger import ExperimentLogger
@@ -18,6 +19,8 @@ __all__ = [
     "BaseSplitter",
     "BaseModel",
     "compute_metrics",
+    "DiagnosticResults",
+    "Diagnostics",
     "ExpandingWindowSplitter",
     "ExperimentConfig",
     "ExperimentLogger",
