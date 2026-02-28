@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import polars as pl
 
+from mvp.model.primitives import cumulative_mean, rolling_mean
 from mvp.model.registry import feature
 
 
@@ -62,3 +63,20 @@ def ranking_ratio_capped(cap: float = 3.0) -> pl.Expr:
     """Ranking ratio capped at specified value."""
     ratio = pl.col("player_rankings_rank") / pl.col("opp_rankings_rank")
     return ratio.clip(upper_bound=cap)
+
+
+@feature(
+    name="avg_opp_ranking",
+    params=["days"],
+    description="Average ranking of opponents faced (strength of schedule)",
+    mirror=True,
+)
+def avg_opp_ranking(days: int | None = None) -> pl.Expr:
+    """Average ranking of opponents faced recently.
+
+    Higher means player has faced weaker opponents (worse rankings).
+    Lower means player has faced stronger opponents (better rankings).
+    """
+    if days is None:
+        return cumulative_mean("opp_rankings_rank", group_by="player_id")
+    return rolling_mean("opp_rankings_rank", days=days, group_by="player_id")
