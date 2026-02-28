@@ -214,3 +214,48 @@ class TestDiagnosticsErrorAnalysis:
         assert "match_uid" in error
         assert "tournament_name" in error
         assert "predicted_prob" in error
+
+
+class TestDiagnosticsTemporalStability:
+    """Tests for temporal stability analysis."""
+
+    def test_metrics_by_year(self) -> None:
+        """Computes metrics for each year."""
+        df = pl.DataFrame({
+            "effective_match_date": [
+                "2022-03-15", "2022-06-20",
+                "2023-02-10", "2023-08-15",
+            ],
+        })
+        y_true = np.array([1, 0, 1, 1])
+        y_prob = np.array([0.7, 0.6, 0.8, 0.7])
+
+        diagnostics = Diagnostics()
+        result = diagnostics._temporal_stability(df, y_true, y_prob)
+
+        assert "periods" in result
+        periods = {p["period"]: p for p in result["periods"]}
+        assert "2022" in periods
+        assert "2023" in periods
+        assert periods["2022"]["n_matches"] == 2
+        assert periods["2023"]["n_matches"] == 2
+
+    def test_temporal_drift_calculation(self) -> None:
+        """Temporal drift is max deviation from overall accuracy."""
+        df = pl.DataFrame({
+            "effective_match_date": [
+                "2022-01-01", "2022-01-02",  # 2022: 100% accuracy
+                "2023-01-01", "2023-01-02",  # 2023: 50% accuracy
+            ],
+        })
+        y_true = np.array([1, 1, 1, 0])
+        y_prob = np.array([0.8, 0.8, 0.8, 0.8])  # all predict 1
+
+        diagnostics = Diagnostics()
+        result = diagnostics._temporal_stability(df, y_true, y_prob)
+
+        # Overall accuracy: 75%
+        # 2022 accuracy: 100%, drift = 0.25
+        # 2023 accuracy: 50%, drift = 0.25
+        assert result["overall_accuracy"] == 0.75
+        assert result["temporal_drift"] == 0.25

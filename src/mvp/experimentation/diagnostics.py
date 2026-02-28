@@ -266,6 +266,49 @@ class Diagnostics:
             "calibration_max_error": calibration_max_error,
         }
 
+    def _temporal_stability(
+        self, df: pl.DataFrame, y_true: np.ndarray, y_prob: np.ndarray
+    ) -> dict[str, Any]:
+        """Analyze performance stability across time periods."""
+        # Extract year from effective_match_date
+        if "effective_match_date" not in df.columns:
+            return {
+                "periods": [],
+                "overall_accuracy": 0.0,
+                "temporal_drift": 0.0,
+            }
+
+        dates = df["effective_match_date"].to_list()
+        years = np.array([str(d)[:4] for d in dates])
+
+        # Overall accuracy
+        y_pred = (y_prob >= 0.5).astype(int)
+        overall_accuracy = float(accuracy_score(y_true, y_pred))
+
+        # Metrics per year
+        periods = []
+        drifts = []
+
+        for year in sorted(set(years)):
+            mask = years == year
+            if not mask.any():
+                continue
+
+            year_metrics = _compute_metrics_for_segment(y_true[mask], y_prob[mask])
+            year_metrics["period"] = year
+            periods.append(year_metrics)
+
+            drift = abs(year_metrics["accuracy"] - overall_accuracy)
+            drifts.append(drift)
+
+        temporal_drift = max(drifts) if drifts else 0.0
+
+        return {
+            "periods": periods,
+            "overall_accuracy": overall_accuracy,
+            "temporal_drift": temporal_drift,
+        }
+
 
 @dataclass
 class DiagnosticResults:
