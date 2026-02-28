@@ -4,15 +4,35 @@ Tests all features working together on realistic match data.
 """
 
 from datetime import date
+from importlib import reload
 
 import polars as pl
 import pytest
 
-# Import feature modules to register them
-from mvp.experimentation.features import h2h as h2h_module  # noqa: F401
-from mvp.experimentation.features import ranking as ranking_module  # noqa: F401
-from mvp.experimentation.features import win_rate as win_rate_module  # noqa: F401
 from mvp.experimentation.registry import get_registry
+
+
+@pytest.fixture(scope="module", autouse=True)
+def ensure_features_registered():
+    """Ensure features are registered for all tests in this module.
+
+    The registry may be cleared by other tests, so we need to re-import
+    the feature modules to re-register them.
+    """
+    # Clear and reimport to ensure clean registration
+    registry = get_registry()
+    registry.clear()
+
+    # Import (or reimport) feature modules to trigger registration
+    from mvp.experimentation.features import h2h, ranking, win_rate
+
+    reload(h2h)
+    reload(ranking)
+    reload(win_rate)
+
+    yield
+
+    # Don't clear after - other tests may depend on features
 
 
 @pytest.fixture
@@ -272,6 +292,6 @@ class TestTemporalSafety:
         player_b = result.filter(pl.col("player_id") == "B")
 
         # B's win rates should not be affected by A's wins
-        # B loses first (row 1), then wins (row 4), then loses (row 7), then wins (row 11)
+        # B loses (row 1), wins (row 4), loses (row 7), wins (row 11)
         # Note: actual values depend on match ordering
         assert len(player_b) == 4

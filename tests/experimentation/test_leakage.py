@@ -11,7 +11,6 @@ Leakage prevention is critical for model integrity.
 from datetime import date
 
 import polars as pl
-import pytest
 
 from mvp.experimentation.features import win_rate as win_rate_module  # noqa: F401
 from mvp.experimentation.primitives import (
@@ -292,8 +291,10 @@ class TestNoLeakageAcrossPlayers:
 
         # Player A rows (dates 1, 5, 10): 0, 1, 2
         # Player B rows (dates 3, 8): 0, 0
-        player_a = result.filter(pl.col("player_id") == "A").sort("effective_match_date")
-        player_b = result.filter(pl.col("player_id") == "B").sort("effective_match_date")
+        player_a = result.filter(pl.col("player_id") == "A")
+        player_a = player_a.sort("effective_match_date")
+        player_b = result.filter(pl.col("player_id") == "B")
+        player_b = player_b.sort("effective_match_date")
 
         assert player_a["rolling_wins"].to_list() == [0, 1, 2], (
             "Player A's rolling wins incorrect"
