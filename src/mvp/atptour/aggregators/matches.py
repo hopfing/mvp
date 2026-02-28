@@ -241,16 +241,37 @@ def add_effective_match_date(df: pl.DataFrame) -> pl.DataFrame:
         .alias("_scaled_offset"),
     )
 
-    # Compute effective_match_date
-    df = df.with_columns(
-        pl.when(pl.col("_all_scheduled"))
-        .then(pl.col("scheduled_datetime"))
-        .otherwise(
-            pl.col("tournament_start_date").cast(pl.Datetime)
-            + pl.duration(days=pl.col("_scaled_offset"))
+    # For Grand Slams, qualifying rounds happen before the listed start date.
+    # Q1 (round_order=1) -> start - 3 days, Q2 -> start - 2, Q3 -> start - 1
+    has_event_type = "event_type" in df.columns
+    if has_event_type:
+        is_gs_qualifying = (pl.col("event_type") == "GS") & (pl.col("round_order") <= 3)
+        gs_qual_offset = pl.col("round_order") - 4  # Q1=-3, Q2=-2, Q3=-1
+
+        df = df.with_columns(
+            pl.when(pl.col("_all_scheduled"))
+            .then(pl.col("scheduled_datetime"))
+            .when(is_gs_qualifying)
+            .then(
+                pl.col("tournament_start_date").cast(pl.Datetime)
+                + pl.duration(days=gs_qual_offset)
+            )
+            .otherwise(
+                pl.col("tournament_start_date").cast(pl.Datetime)
+                + pl.duration(days=pl.col("_scaled_offset"))
+            )
+            .alias("effective_match_date"),
         )
-        .alias("effective_match_date"),
-    )
+    else:
+        df = df.with_columns(
+            pl.when(pl.col("_all_scheduled"))
+            .then(pl.col("scheduled_datetime"))
+            .otherwise(
+                pl.col("tournament_start_date").cast(pl.Datetime)
+                + pl.duration(days=pl.col("_scaled_offset"))
+            )
+            .alias("effective_match_date"),
+        )
 
     # Validate no nulls
     bad_rows = df.filter(pl.col("effective_match_date").is_null())
