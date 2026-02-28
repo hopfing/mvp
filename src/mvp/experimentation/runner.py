@@ -9,6 +9,7 @@ import numpy as np
 import polars as pl
 
 from mvp.experimentation.config import ExperimentConfig
+from mvp.experimentation.diagnostics import Diagnostics
 from mvp.experimentation.engine import FeatureEngine
 from mvp.experimentation.metrics import compute_metrics
 from mvp.experimentation.mlflow_logger import ExperimentLogger
@@ -116,6 +117,7 @@ class ExperimentRunner:
 
         # Train and evaluate
         all_metrics: list[dict[str, float]] = []
+        all_predictions: list[dict[str, Any]] = []
 
         with logger.start_run(run_name=self.config.name):
             # Log config as params
@@ -154,6 +156,13 @@ class ExperimentRunner:
                 metrics = compute_metrics(y_test, y_prob)
                 all_metrics.append(metrics)
 
+                # Collect predictions for diagnostics
+                all_predictions.append({
+                    "df": test_df,
+                    "y_true": y_test,
+                    "y_prob": y_prob,
+                })
+
                 # Log fold metrics
                 logger.log_metrics(
                     {f"fold_{fold_idx}_{k}": v for k, v in metrics.items()}
@@ -166,6 +175,23 @@ class ExperimentRunner:
             }
             logger.log_metrics(avg_metrics)
 
+            # Compute diagnostics
+            diagnostics = Diagnostics()
+            diagnostic_results = diagnostics.compute_all(all_predictions)
+
+            # Log diagnostic metrics
+            logger.log_metrics(diagnostic_results.metrics)
+
+            # Log diagnostic JSON artifact
+            import tempfile
+
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".json", delete=False
+            ) as f:
+                f.write(diagnostic_results.to_json())
+                temp_path = f.name
+            logger.log_artifact(temp_path)
+
             run_id = logger.run_id
 
         return {
@@ -174,4 +200,5 @@ class ExperimentRunner:
             "n_folds": len(all_metrics),
             "feature_columns": feature_cols,
             "run_id": run_id,
+            "diagnostics": diagnostic_results,
         }

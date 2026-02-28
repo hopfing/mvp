@@ -89,54 +89,58 @@ class Diagnostics:
 
         # Circuit segment
         result["circuit"] = {}
-        for circuit in ["tour", "chal"]:
-            mask = (df["circuit"] == circuit).to_numpy()
-            if mask.any():
-                result["circuit"][circuit] = _compute_metrics_for_segment(
-                    y_true[mask], y_prob[mask]
-                )
+        if "circuit" in df.columns:
+            for circuit in ["tour", "chal"]:
+                mask = (df["circuit"] == circuit).to_numpy()
+                if mask.any():
+                    result["circuit"][circuit] = _compute_metrics_for_segment(
+                        y_true[mask], y_prob[mask]
+                    )
 
         # Surface segment
         result["surface"] = {}
-        for surface in ["Hard", "Clay", "Grass", "Carpet"]:
-            mask = (df["surface"] == surface).to_numpy()
-            if mask.any():
-                result["surface"][surface] = _compute_metrics_for_segment(
-                    y_true[mask], y_prob[mask]
-                )
+        if "surface" in df.columns:
+            for surface in ["Hard", "Clay", "Grass", "Carpet"]:
+                mask = (df["surface"] == surface).to_numpy()
+                if mask.any():
+                    result["surface"][surface] = _compute_metrics_for_segment(
+                        y_true[mask], y_prob[mask]
+                    )
 
         # Round group segment
-        round_groups = df["round"].map_elements(
-            self._get_round_group, return_dtype=pl.Utf8
-        ).to_numpy()
         result["round_group"] = {}
-        for group in ["Qualifying", "Early", "Late", "Other"]:
-            mask = round_groups == group
-            if mask.any():
-                result["round_group"][group] = _compute_metrics_for_segment(
-                    y_true[mask], y_prob[mask]
-                )
-
-        # Raw rounds (JSON only, not flattened to metrics)
         result["round_raw"] = {}
-        for round_val in df["round"].unique().to_list():
-            mask = (df["round"] == round_val).to_numpy()
-            if mask.any():
-                result["round_raw"][round_val] = _compute_metrics_for_segment(
-                    y_true[mask], y_prob[mask]
-                )
+        if "round" in df.columns:
+            round_groups = df["round"].map_elements(
+                self._get_round_group, return_dtype=pl.Utf8
+            ).to_numpy()
+            for group in ["Qualifying", "Early", "Late", "Other"]:
+                mask = round_groups == group
+                if mask.any():
+                    result["round_group"][group] = _compute_metrics_for_segment(
+                        y_true[mask], y_prob[mask]
+                    )
+
+            # Raw rounds (JSON only, not flattened to metrics)
+            for round_val in df["round"].unique().to_list():
+                mask = (df["round"] == round_val).to_numpy()
+                if mask.any():
+                    result["round_raw"][round_val] = _compute_metrics_for_segment(
+                        y_true[mask], y_prob[mask]
+                    )
 
         # Ranking bucket segment
-        ranking_buckets = np.array([
-            self._get_ranking_bucket(r) for r in df["player_ranking"].to_list()
-        ])
         result["ranking_bucket"] = {}
-        for bucket, _, _ in RANKING_BUCKETS:
-            mask = ranking_buckets == bucket
-            if mask.any():
-                result["ranking_bucket"][bucket] = _compute_metrics_for_segment(
-                    y_true[mask], y_prob[mask]
-                )
+        if "player_ranking" in df.columns:
+            ranking_buckets = np.array([
+                self._get_ranking_bucket(r) for r in df["player_ranking"].to_list()
+            ])
+            for bucket, _, _ in RANKING_BUCKETS:
+                mask = ranking_buckets == bucket
+                if mask.any():
+                    result["ranking_bucket"][bucket] = _compute_metrics_for_segment(
+                        y_true[mask], y_prob[mask]
+                    )
 
         return result
 
