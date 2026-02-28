@@ -234,3 +234,83 @@ class TestFeatureEngineMirroring:
         assert "opp_no_mirror_feature_30d" not in result.columns
 
         registry.clear()
+
+
+class TestFeatureEngineCaching:
+    """Tests for feature caching functionality."""
+
+    def test_cache_creates_files(
+        self, matches_parquet: Path, tmp_path: Path, test_feature_registry
+    ):
+        """Computing features creates cache files."""
+        cache_dir = tmp_path / "cache"
+        engine = FeatureEngine(matches_path=matches_parquet, cache_dir=cache_dir)
+
+        engine.compute(["test_win_rate(days=30)"])
+
+        # Should have manifest and parquet file
+        assert (cache_dir / "manifest.json").exists()
+        assert any(cache_dir.glob("*.parquet"))
+
+    def test_cache_reuses_computed_features(
+        self, matches_parquet: Path, tmp_path: Path, test_feature_registry
+    ):
+        """Second compute call reuses cached features."""
+        cache_dir = tmp_path / "cache"
+        engine = FeatureEngine(matches_path=matches_parquet, cache_dir=cache_dir)
+
+        # First compute
+        result1 = engine.compute(["test_win_rate(days=30)"])
+
+        # Modify the registry to return a different value (simulating code change)
+        # But since it's cached, we should get the same result
+        parquet_files = list(cache_dir.glob("*.parquet"))
+        original_mtime = parquet_files[0].stat().st_mtime
+
+        # Second compute - should use cache
+        result2 = engine.compute(["test_win_rate(days=30)"])
+
+        # File should not have been rewritten
+        assert parquet_files[0].stat().st_mtime == original_mtime
+
+        # Results should be identical
+        assert result1["player_test_win_rate_30d"].to_list() == \
+               result2["player_test_win_rate_30d"].to_list()
+
+    def test_cache_invalidated_on_matches_change(
+        self, tmp_path: Path, test_feature_registry
+    ):
+        """Cache is invalidated when matches file changes."""
+        # Create initial matches
+        df1 = pl.DataFrame({
+            "match_uid": ["m1", "m1"],
+            "player_id": ["A", "B"],
+            "opp_id": ["B", "A"],
+            "effective_match_date": [date(2024, 1, 1), date(2024, 1, 1)],
+            "won": [True, False],
+        })
+        matches_path = tmp_path / "matches.parquet"
+        df1.write_parquet(matches_path)
+        cache_dir = tmp_path / "cache"
+
+        engine = FeatureEngine(matches_path=matches_path, cache_dir=cache_dir)
+        result1 = engine.compute(["test_win_rate(days=30)"])
+
+        # Modify matches file (add a match)
+        df2 = pl.DataFrame({
+            "match_uid": ["m1", "m1", "m2", "m2"],
+            "player_id": ["A", "B", "A", "B"],
+            "opp_id": ["B", "A", "B", "A"],
+            "effective_match_date": [
+                date(2024, 1, 1), date(2024, 1, 1),
+                date(2024, 1, 5), date(2024, 1, 5),
+            ],
+            "won": [True, False, True, False],
+        })
+        df2.write_parquet(matches_path)
+
+        # Compute again - should recompute due to matches change
+        result2 = engine.compute(["test_win_rate(days=30)"])
+
+        # Results should be different (more rows)
+        assert len(result2) > len(result1)

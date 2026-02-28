@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from pathlib import Path
 from typing import Any
@@ -114,6 +116,66 @@ class FeatureEngine:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
         self._registry = get_registry()
+        self._manifest_path = self.cache_dir / "manifest.json"
+        self._manifest: dict[str, Any] = self._load_manifest()
+
+    def _load_manifest(self) -> dict[str, Any]:
+        """Load the cache manifest from disk."""
+        if self._manifest_path.exists():
+            with open(self._manifest_path) as f:
+                return json.load(f)
+        return {"matches_hash": None, "features": {}}
+
+    def _save_manifest(self) -> None:
+        """Save the cache manifest to disk."""
+        with open(self._manifest_path, "w") as f:
+            json.dump(self._manifest, f, indent=2)
+
+    def _compute_matches_hash(self) -> str:
+        """Compute a hash of the matches file for cache invalidation."""
+        # Use file size and modification time for quick hash
+        stat = self.matches_path.stat()
+        content = f"{stat.st_size}:{stat.st_mtime}"
+        return hashlib.md5(content.encode()).hexdigest()
+
+    def _get_cache_path(self, spec: str) -> Path:
+        """Get the cache file path for a feature spec."""
+        # Create a safe filename from the spec
+        safe_name = re.sub(r"[^\w]", "_", spec)
+        return self.cache_dir / f"{safe_name}.parquet"
+
+    def _is_cached(self, spec: str, matches_hash: str) -> bool:
+        """Check if a feature is cached and valid."""
+        if self._manifest.get("matches_hash") != matches_hash:
+            return False
+        if spec not in self._manifest.get("features", {}):
+            return False
+        cache_path = self._get_cache_path(spec)
+        return cache_path.exists()
+
+    def _load_cached_feature(self, spec: str) -> pl.DataFrame:
+        """Load a cached feature from disk."""
+        cache_path = self._get_cache_path(spec)
+        return pl.read_parquet(cache_path)
+
+    def _cache_feature(
+        self, spec: str, df: pl.DataFrame, columns: list[str], matches_hash: str
+    ) -> None:
+        """Cache a computed feature to disk."""
+        cache_path = self._get_cache_path(spec)
+        # Save only the key columns and feature columns
+        key_cols = ["match_uid", "player_id"]
+        df.select(key_cols + columns).write_parquet(cache_path)
+
+        # Update manifest
+        self._manifest["matches_hash"] = matches_hash
+        if "features" not in self._manifest:
+            self._manifest["features"] = {}
+        self._manifest["features"][spec] = {
+            "columns": columns,
+            "path": str(cache_path),
+        }
+        self._save_manifest()
 
     def compute(self, feature_specs: list[str]) -> pl.DataFrame:
         """Compute features for the given feature specifications.
@@ -130,6 +192,9 @@ class FeatureEngine:
         # Load matches data
         df = pl.read_parquet(self.matches_path)
 
+        # Check cache validity
+        matches_hash = self._compute_matches_hash()
+
         # Track columns to mirror
         columns_to_mirror: list[str] = []
 
@@ -142,11 +207,25 @@ class FeatureEngine:
             col_name = self._build_column_name(name, params)
             player_col = f"player_{col_name}"
 
-            # Compute the feature expression
-            expr = feature_def.func(**params)
+            # Check cache first
+            if self._is_cached(spec, matches_hash):
+                # Load from cache and join to df
+                cached = self._load_cached_feature(spec)
+                df = df.join(
+                    cached,
+                    on=["match_uid", "player_id"],
+                    how="left",
+                )
+            else:
+                # Compute the feature expression
+                expr = feature_def.func(**params)
 
-            # Add to DataFrame with player_ prefix
-            df = df.with_columns(expr.alias(player_col))
+                # Add to DataFrame with player_ prefix
+                df = df.with_columns(expr.alias(player_col))
+
+                # Cache the computed feature
+                feature_columns = [player_col]
+                self._cache_feature(spec, df, feature_columns, matches_hash)
 
             # Track for mirroring if enabled
             if feature_def.mirror:
