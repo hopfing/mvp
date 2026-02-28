@@ -59,3 +59,15 @@ class TestModelTraining:
 
         assert probs.shape == (100,)
         assert all(0 <= p <= 1 for p in probs)
+
+    def test_xgboost_predict_before_fit_raises(self):
+        """Calling predict_proba before fit raises RuntimeError."""
+        model = get_model("xgboost", {})
+        with pytest.raises(RuntimeError, match="Model not fitted"):
+            model.predict_proba(np.random.randn(5, 3))
+
+    def test_logistic_predict_before_fit_raises(self):
+        """Calling predict_proba before fit raises RuntimeError."""
+        model = get_model("logistic", {})
+        with pytest.raises(RuntimeError, match="Model not fitted"):
+            model.predict_proba(np.random.randn(5, 3))
