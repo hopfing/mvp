@@ -2,3 +2,6 @@
 /data/
 __pycache__
 .worktrees/
+# MLflow
+mlflow.db
+mlruns/
