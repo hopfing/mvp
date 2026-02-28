@@ -1,0 +1,38 @@
+# Baseline experiment configuration
+# Run with: python -m mvp.experimentation.cli run experiments/baseline.yaml
+
+name: baseline_v1
+description: "Initial baseline with core form and ranking features"
+
+data:
+  date_range:
+    start: "2015-01-01"
+    end: "2025-12-31"
+
+features:
+  include:
+    - win_rate(days=30)
+    - win_rate(days=90)
+    - matches_played(days=30)
+    - ranking_points_diff
+
+validation:
+  type: walk_forward
+  n_splits: 5
+  min_train_size: 50000
+  test_size: 10000
+
+model:
+  type: xgboost
+  params:
+    max_depth: 6
+    n_estimators: 100
+    learning_rate: 0.1
+    random_state: 42
+
+metrics:
+  primary: log_loss
+  secondary:
+    - accuracy
+    - brier_score
+    - roc_auc
