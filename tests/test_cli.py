@@ -117,7 +117,9 @@ class TestCmdLive:
     ):
         from mvp.cli import cmd_live
 
-        mock_discovery.return_value.get_active_tournaments.return_value = [("580", 2026)]
+        mock_discovery.return_value.get_active_tournaments.return_value = [
+            ("580", 2026)
+        ]
         mock_process.return_value = []
         mock_player_data.return_value = MagicMock(has_failures=False)
 
@@ -154,7 +156,7 @@ class TestCmdLive:
         mock_player_data.return_value = MagicMock(has_failures=False)
 
         args = SimpleNamespace(tid="580", refresh=False)
-        result = cmd_live(args)
+        cmd_live(args)
 
         # Should only process the filtered tournament
         call_args = mock_process.call_args[0][0]
@@ -166,7 +168,9 @@ class TestCmdLive:
     def test_live_tid_not_found_raises(self, mock_rankings, mock_discovery):
         from mvp.cli import cmd_live
 
-        mock_discovery.return_value.get_active_tournaments.return_value = [("580", 2026)]
+        mock_discovery.return_value.get_active_tournaments.return_value = [
+            ("580", 2026)
+        ]
 
         args = SimpleNamespace(tid="999", refresh=False)
         with pytest.raises(ValueError, match="not currently active"):
@@ -187,7 +191,9 @@ class TestCmdLive:
     ):
         from mvp.cli import cmd_live
 
-        mock_discovery.return_value.get_active_tournaments.return_value = [("580", 2026)]
+        mock_discovery.return_value.get_active_tournaments.return_value = [
+            ("580", 2026)
+        ]
         mock_process.return_value = [("580", 2026, "boom")]
         mock_player_data.return_value = MagicMock(has_failures=False)
 
