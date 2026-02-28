@@ -216,12 +216,20 @@ def add_effective_match_date(df: pl.DataFrame) -> pl.DataFrame:
         pl.col("_round_offset").max().over(group_keys).alias("_max_offset"),
     )
 
-    # Compute tournament duration in days
-    df = df.with_columns(
-        (pl.col("tournament_end_date") - pl.col("tournament_start_date"))
-        .dt.total_days()
-        .alias("_duration_days"),
-    )
+    # Compute tournament duration in days.
+    # Cap ITF/Challenger to 7 days - historical Activity data sometimes merges
+    # consecutive weeks (e.g., "Mexico F3" + "Mexico F4") into 13-day spans.
+    has_circuit = "circuit" in df.columns
+    raw_duration = (
+        pl.col("tournament_end_date") - pl.col("tournament_start_date")
+    ).dt.total_days()
+
+    if has_circuit:
+        is_itf_chal = pl.col("circuit").is_in(["itf", "chal"])
+        capped_duration = pl.when(is_itf_chal & (raw_duration > 6)).then(6).otherwise(raw_duration)
+        df = df.with_columns(capped_duration.alias("_duration_days"))
+    else:
+        df = df.with_columns(raw_duration.alias("_duration_days"))
 
     # Compute scaled day offset: (round_offset / max_offset) * duration
     # When max_offset is 0 (single round), use 0. Replace 0 with 1 before division
