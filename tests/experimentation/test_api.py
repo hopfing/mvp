@@ -36,5 +36,21 @@ class TestPublicAPI:
         import mvp.experimentation as exp
 
         assert hasattr(exp, "__all__")
-        expected = ["FeatureContext", "FeatureEngine", "feature", "get_registry"]
+        expected = [
+            "BaseSplitter",
+            "BaseModel",
+            "compute_metrics",
+            "ExpandingWindowSplitter",
+            "ExperimentConfig",
+            "ExperimentLogger",
+            "ExperimentRunner",
+            "feature",
+            "FeatureContext",
+            "FeatureEngine",
+            "get_model",
+            "get_registry",
+            "LogisticModel",
+            "WalkForwardSplitter",
+            "XGBoostModel",
+        ]
         assert set(exp.__all__) == set(expected)
