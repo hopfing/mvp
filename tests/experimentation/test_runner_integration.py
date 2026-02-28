@@ -282,3 +282,91 @@ validation:
         # Verify metrics were logged
         assert "accuracy" in run.data.metrics
         assert "log_loss" in run.data.metrics
+
+    def test_runner_produces_diagnostics(
+        self,
+        realistic_matches: Path,
+        tmp_path: Path,
+    ):
+        """Runner produces diagnostics with correct structure."""
+        import mlflow
+
+        from mvp.experimentation.diagnostics import DiagnosticResults
+
+        config_str = """
+name: diagnostics_test
+data:
+  date_range:
+    start: "2024-01-01"
+    end: "2024-12-31"
+features:
+  include:
+    - ranking_points_diff
+model:
+  type: logistic
+validation:
+  type: walk_forward
+  n_splits: 2
+  min_train_size: 100
+  test_size: 50
+"""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(config_str)
+
+        mlflow_dir = tmp_path / "mlruns"
+        mlflow.set_tracking_uri(f"file://{mlflow_dir}")
+
+        runner = ExperimentRunner(
+            config_path=config_path,
+            matches_path=realistic_matches,
+            cache_dir=tmp_path / "cache",
+            mlflow_dir=mlflow_dir,
+        )
+
+        results = runner.run()
+
+        # Verify diagnostics is in results
+        assert "diagnostics" in results
+        diagnostics = results["diagnostics"]
+        assert isinstance(diagnostics, DiagnosticResults)
+
+        # Verify structure has all components
+        assert diagnostics.segments is not None
+        assert diagnostics.calibration is not None
+        assert diagnostics.errors is not None
+        assert diagnostics.temporal is not None
+
+        # Verify calibration has expected keys
+        assert "calibration_error" in diagnostics.calibration
+        assert "calibration_max_error" in diagnostics.calibration
+        assert "buckets" in diagnostics.calibration
+
+        # Verify errors has expected keys
+        assert "summary" in diagnostics.errors
+        assert "error_rate_80plus" in diagnostics.errors
+        assert "high_confidence_errors" in diagnostics.errors
+
+        # Verify temporal has expected keys
+        assert "periods" in diagnostics.temporal
+        assert "temporal_drift" in diagnostics.temporal
+
+        # Verify metrics can be flattened
+        metrics = diagnostics.metrics
+        assert isinstance(metrics, dict)
+        assert "calibration_error" in metrics
+        assert "temporal_drift" in metrics
+
+        # Verify JSON serialization works
+        json_str = diagnostics.to_json()
+        import json
+
+        parsed = json.loads(json_str)
+        assert "segments" in parsed
+        assert "calibration" in parsed
+        assert "errors" in parsed
+        assert "temporal" in parsed
+
+        # Verify MLflow logged diagnostic metrics
+        run = mlflow.get_run(results["run_id"])
+        assert "calibration_error" in run.data.metrics
+        assert "temporal_drift" in run.data.metrics

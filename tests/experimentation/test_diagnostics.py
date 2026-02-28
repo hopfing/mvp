@@ -322,7 +322,9 @@ class TestDiagnosticsComputeAll:
             "surface": ["Hard"] * 4,
             "round": ["R32", "R16", "QF", "SF"],
             "player_ranking": [10, 20, 30, 40],
-            "effective_match_date": ["2023-01-01", "2023-01-02", "2023-01-03", "2023-01-04"],
+            "effective_match_date": [
+                "2023-01-01", "2023-01-02", "2023-01-03", "2023-01-04"
+            ],
             "match_uid": ["m1", "m2", "m3", "m4"],
             "tournament_name": ["T1", "T1", "T1", "T1"],
             "player_name": ["A", "B", "C", "D"],
