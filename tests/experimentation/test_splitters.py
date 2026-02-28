@@ -14,14 +14,16 @@ class TestWalkForwardSplitter:
     @pytest.fixture
     def sample_df(self) -> pl.DataFrame:
         """Create sample DataFrame with 1000 rows."""
-        return pl.DataFrame({
-            "match_uid": [f"M{i}" for i in range(1000)],
-            "effective_match_date": [
-                date(2024, 1, 1) + timedelta(days=i // 10) for i in range(1000)
-            ],
-            "player_id": ["A"] * 1000,
-            "won": [i % 2 == 0 for i in range(1000)],
-        })
+        return pl.DataFrame(
+            {
+                "match_uid": [f"M{i}" for i in range(1000)],
+                "effective_match_date": [
+                    date(2024, 1, 1) + timedelta(days=i // 10) for i in range(1000)
+                ],
+                "player_id": ["A"] * 1000,
+                "won": [i % 2 == 0 for i in range(1000)],
+            }
+        )
 
     def test_generates_n_splits(self, sample_df: pl.DataFrame):
         """Generates correct number of splits."""
@@ -72,14 +74,16 @@ class TestExpandingWindowSplitter:
     @pytest.fixture
     def sample_df(self) -> pl.DataFrame:
         """Create sample DataFrame with 1000 rows."""
-        return pl.DataFrame({
-            "match_uid": [f"M{i}" for i in range(1000)],
-            "effective_match_date": [
-                date(2024, 1, 1) + timedelta(days=i // 10) for i in range(1000)
-            ],
-            "player_id": ["A"] * 1000,
-            "won": [i % 2 == 0 for i in range(1000)],
-        })
+        return pl.DataFrame(
+            {
+                "match_uid": [f"M{i}" for i in range(1000)],
+                "effective_match_date": [
+                    date(2024, 1, 1) + timedelta(days=i // 10) for i in range(1000)
+                ],
+                "player_id": ["A"] * 1000,
+                "won": [i % 2 == 0 for i in range(1000)],
+            }
+        )
 
     def test_train_grows_by_step_size(self, sample_df: pl.DataFrame):
         """Training set grows by step_size each fold."""

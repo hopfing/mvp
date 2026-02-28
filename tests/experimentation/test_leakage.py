@@ -30,22 +30,22 @@ class TestWinRateNoFutureLeakage:
         from mvp.experimentation.features.win_rate import win_rate
 
         # Player A: loses first 3 matches, then wins 3 matches
-        df = pl.DataFrame({
-            "player_id": ["A", "A", "A", "A", "A", "A"],
-            "effective_match_date": [
-                date(2024, 1, 1),   # loss
-                date(2024, 1, 2),   # loss
-                date(2024, 1, 3),   # loss
-                date(2024, 1, 10),  # win
-                date(2024, 1, 11),  # win
-                date(2024, 1, 12),  # win
-            ],
-            "won": [0, 0, 0, 1, 1, 1],
-        }).sort("effective_match_date")
+        df = pl.DataFrame(
+            {
+                "player_id": ["A", "A", "A", "A", "A", "A"],
+                "effective_match_date": [
+                    date(2024, 1, 1),  # loss
+                    date(2024, 1, 2),  # loss
+                    date(2024, 1, 3),  # loss
+                    date(2024, 1, 10),  # win
+                    date(2024, 1, 11),  # win
+                    date(2024, 1, 12),  # win
+                ],
+                "won": [0, 0, 0, 1, 1, 1],
+            }
+        ).sort("effective_match_date")
 
-        result = df.with_columns(
-            win_rate(days=365).alias("win_rate")
-        )
+        result = df.with_columns(win_rate(days=365).alias("win_rate"))
 
         # At row 3 (first win), win_rate should be 0.0 (0/3 from losses)
         # NOT 0.5 (3/6) which would indicate leakage from future wins
@@ -60,20 +60,20 @@ class TestWinRateNoFutureLeakage:
         from mvp.experimentation.features.win_rate import win_rate
 
         # Multiple matches on the same day - only prior day data should count
-        df = pl.DataFrame({
-            "player_id": ["A", "A", "A", "A"],
-            "effective_match_date": [
-                date(2024, 1, 1),   # Day 1: win
-                date(2024, 1, 5),   # Day 5: win
-                date(2024, 1, 5),   # Day 5: loss (same day)
-                date(2024, 1, 5),   # Day 5: loss (same day)
-            ],
-            "won": [1, 1, 0, 0],
-        }).sort("effective_match_date")
+        df = pl.DataFrame(
+            {
+                "player_id": ["A", "A", "A", "A"],
+                "effective_match_date": [
+                    date(2024, 1, 1),  # Day 1: win
+                    date(2024, 1, 5),  # Day 5: win
+                    date(2024, 1, 5),  # Day 5: loss (same day)
+                    date(2024, 1, 5),  # Day 5: loss (same day)
+                ],
+                "won": [1, 1, 0, 0],
+            }
+        ).sort("effective_match_date")
 
-        result = df.with_columns(
-            win_rate(days=365).alias("win_rate")
-        )
+        result = df.with_columns(win_rate(days=365).alias("win_rate"))
 
         # All day-5 matches should see only the day-1 win (win_rate = 1.0)
         # They should NOT see each other's results
@@ -94,17 +94,19 @@ class TestH2HNoCurrentMatchLeakage:
         """Cumulative H2H wins must exclude the current match being predicted."""
         # Simulate H2H: A vs B, tracking A's wins against B
         # Columns represent rows from A's perspective against B
-        df = pl.DataFrame({
-            "player_id": ["A", "A", "A", "A"],
-            "opp_id": ["B", "B", "B", "B"],
-            "effective_match_date": [
-                date(2024, 1, 1),
-                date(2024, 1, 10),
-                date(2024, 1, 20),
-                date(2024, 1, 30),
-            ],
-            "won": [1, 0, 1, 1],  # A wins: match 1, 3, 4
-        }).sort("effective_match_date")
+        df = pl.DataFrame(
+            {
+                "player_id": ["A", "A", "A", "A"],
+                "opp_id": ["B", "B", "B", "B"],
+                "effective_match_date": [
+                    date(2024, 1, 1),
+                    date(2024, 1, 10),
+                    date(2024, 1, 20),
+                    date(2024, 1, 30),
+                ],
+                "won": [1, 0, 1, 1],  # A wins: match 1, 3, 4
+            }
+        ).sort("effective_match_date")
 
         result = df.with_columns(
             cumulative_sum("won", group_by=["player_id", "opp_id"]).alias("h2h_wins")
@@ -124,15 +126,17 @@ class TestH2HNoCurrentMatchLeakage:
 
     def test_cumulative_mean_excludes_current_match(self):
         """Cumulative mean must exclude the current match."""
-        df = pl.DataFrame({
-            "player_id": ["A", "A", "A"],
-            "effective_match_date": [
-                date(2024, 1, 1),
-                date(2024, 1, 10),
-                date(2024, 1, 20),
-            ],
-            "score": [10.0, 20.0, 30.0],
-        }).sort("effective_match_date")
+        df = pl.DataFrame(
+            {
+                "player_id": ["A", "A", "A"],
+                "effective_match_date": [
+                    date(2024, 1, 1),
+                    date(2024, 1, 10),
+                    date(2024, 1, 20),
+                ],
+                "score": [10.0, 20.0, 30.0],
+            }
+        ).sort("effective_match_date")
 
         result = df.with_columns(
             cumulative_mean("score", group_by="player_id").alias("avg_score")
@@ -155,17 +159,19 @@ class TestRollingWindowExcludesFuture:
 
     def test_rolling_sum_excludes_future(self):
         """Rolling sum window must only include past data."""
-        df = pl.DataFrame({
-            "player_id": ["A", "A", "A", "A", "A"],
-            "effective_match_date": [
-                date(2024, 1, 1),
-                date(2024, 1, 5),
-                date(2024, 1, 10),
-                date(2024, 1, 15),
-                date(2024, 1, 20),
-            ],
-            "points": [10, 20, 30, 40, 50],
-        }).sort("effective_match_date")
+        df = pl.DataFrame(
+            {
+                "player_id": ["A", "A", "A", "A", "A"],
+                "effective_match_date": [
+                    date(2024, 1, 1),
+                    date(2024, 1, 5),
+                    date(2024, 1, 10),
+                    date(2024, 1, 15),
+                    date(2024, 1, 20),
+                ],
+                "points": [10, 20, 30, 40, 50],
+            }
+        ).sort("effective_match_date")
 
         result = df.with_columns(
             rolling_sum("points", days=30, group_by="player_id").alias("rolling_points")
@@ -187,15 +193,17 @@ class TestRollingWindowExcludesFuture:
 
     def test_rolling_mean_excludes_future(self):
         """Rolling mean window must only include past data."""
-        df = pl.DataFrame({
-            "player_id": ["A", "A", "A"],
-            "effective_match_date": [
-                date(2024, 1, 1),
-                date(2024, 1, 5),
-                date(2024, 1, 10),
-            ],
-            "score": [100.0, 50.0, 0.0],  # Declining scores
-        }).sort("effective_match_date")
+        df = pl.DataFrame(
+            {
+                "player_id": ["A", "A", "A"],
+                "effective_match_date": [
+                    date(2024, 1, 1),
+                    date(2024, 1, 5),
+                    date(2024, 1, 10),
+                ],
+                "score": [100.0, 50.0, 0.0],  # Declining scores
+            }
+        ).sort("effective_match_date")
 
         result = df.with_columns(
             rolling_mean("score", days=30, group_by="player_id").alias("avg_score")
@@ -214,15 +222,17 @@ class TestRollingWindowExcludesFuture:
 
     def test_rolling_count_excludes_future(self):
         """Rolling count must only count past matches."""
-        df = pl.DataFrame({
-            "player_id": ["A", "A", "A", "A"],
-            "effective_match_date": [
-                date(2024, 1, 1),
-                date(2024, 1, 5),
-                date(2024, 1, 10),
-                date(2024, 1, 15),
-            ],
-        }).sort("effective_match_date")
+        df = pl.DataFrame(
+            {
+                "player_id": ["A", "A", "A", "A"],
+                "effective_match_date": [
+                    date(2024, 1, 1),
+                    date(2024, 1, 5),
+                    date(2024, 1, 10),
+                    date(2024, 1, 15),
+                ],
+            }
+        ).sort("effective_match_date")
 
         result = df.with_columns(
             rolling_count(days=30, group_by="player_id").alias("match_count")
@@ -243,24 +253,26 @@ class TestRollingWindowExcludesFuture:
     def test_rolling_window_boundary_excludes_current_date(self):
         """Rolling window with closed='left' excludes current date."""
         # This is a regression test for the window boundary behavior
-        df = pl.DataFrame({
-            "player_id": ["A", "A", "A"],
-            "effective_match_date": [
-                date(2024, 1, 1),
-                date(2024, 1, 2),
-                date(2024, 1, 2),  # Two matches on same day
-            ],
-            "won": [1, 1, 0],
-        }).sort("effective_match_date")
+        df = pl.DataFrame(
+            {
+                "player_id": ["A", "A", "A"],
+                "effective_match_date": [
+                    date(2024, 1, 1),
+                    date(2024, 1, 2),
+                    date(2024, 1, 2),  # Two matches on same day
+                ],
+                "won": [1, 1, 0],
+            }
+        ).sort("effective_match_date")
 
         result = df.with_columns(
             rolling_sum("won", days=30, group_by="player_id").alias("rolling_wins")
         )
 
         # Both Jan 2 matches should see only Jan 1's win (value=1)
-        jan2_wins = result.filter(
-            pl.col("effective_match_date") == date(2024, 1, 2)
-        )["rolling_wins"].to_list()
+        jan2_wins = result.filter(pl.col("effective_match_date") == date(2024, 1, 2))[
+            "rolling_wins"
+        ].to_list()
 
         assert jan2_wins == [1, 1], (
             f"Expected both Jan 2 matches to see rolling_wins=1, got {jan2_wins}. "
@@ -273,17 +285,19 @@ class TestNoLeakageAcrossPlayers:
 
     def test_rolling_sum_isolated_by_player(self):
         """Player A's history must not affect Player B's features."""
-        df = pl.DataFrame({
-            "player_id": ["A", "A", "A", "B", "B"],
-            "effective_match_date": [
-                date(2024, 1, 1),
-                date(2024, 1, 5),
-                date(2024, 1, 10),
-                date(2024, 1, 3),
-                date(2024, 1, 8),
-            ],
-            "won": [1, 1, 1, 0, 0],
-        }).sort("effective_match_date")
+        df = pl.DataFrame(
+            {
+                "player_id": ["A", "A", "A", "B", "B"],
+                "effective_match_date": [
+                    date(2024, 1, 1),
+                    date(2024, 1, 5),
+                    date(2024, 1, 10),
+                    date(2024, 1, 3),
+                    date(2024, 1, 8),
+                ],
+                "won": [1, 1, 1, 0, 0],
+            }
+        ).sort("effective_match_date")
 
         result = df.with_columns(
             rolling_sum("won", days=30, group_by="player_id").alias("rolling_wins")

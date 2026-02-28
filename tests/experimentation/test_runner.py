@@ -34,19 +34,19 @@ class TestExperimentRunner:
     @pytest.fixture
     def sample_matches(self, tmp_path: Path) -> Path:
         """Create sample matches parquet file."""
-        df = pl.DataFrame({
-            "match_uid": [f"M{i}" for i in range(200)],
-            "player_id": [f"P{i % 10}" for i in range(200)],
-            "opp_id": [f"P{(i + 5) % 10}" for i in range(200)],
-            "effective_match_date": [
-                f"2024-01-{(i % 28) + 1:02d}" for i in range(200)
-            ],
-            "won": [i % 2 == 0 for i in range(200)],
-            "player_ranking_points": [1000 - i for i in range(200)],
-            "opp_ranking_points": [500 + i for i in range(200)],
-        }).with_columns(
-            pl.col("effective_match_date").str.to_datetime()
-        )
+        df = pl.DataFrame(
+            {
+                "match_uid": [f"M{i}" for i in range(200)],
+                "player_id": [f"P{i % 10}" for i in range(200)],
+                "opp_id": [f"P{(i + 5) % 10}" for i in range(200)],
+                "effective_match_date": [
+                    f"2024-01-{(i % 28) + 1:02d}" for i in range(200)
+                ],
+                "won": [i % 2 == 0 for i in range(200)],
+                "player_ranking_points": [1000 - i for i in range(200)],
+                "opp_ranking_points": [500 + i for i in range(200)],
+            }
+        ).with_columns(pl.col("effective_match_date").str.to_datetime())
         path = tmp_path / "matches.parquet"
         df.write_parquet(path)
         return path
@@ -83,9 +83,7 @@ validation:
         )
         assert runner.config.name == "test_experiment"
 
-    def test_runner_init_with_defaults(
-        self, sample_config: Path, sample_matches: Path
-    ):
+    def test_runner_init_with_defaults(self, sample_config: Path, sample_matches: Path):
         """Runner uses default paths when not specified."""
         runner = ExperimentRunner(
             config_path=sample_config,

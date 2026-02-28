@@ -12,9 +12,7 @@ class BaseSplitter(ABC):
     """Base class for data splitters."""
 
     @abstractmethod
-    def split(
-        self, df: pl.DataFrame
-    ) -> Iterator[tuple[list[int], list[int]]]:
+    def split(self, df: pl.DataFrame) -> Iterator[tuple[list[int], list[int]]]:
         """Generate train/test index splits.
 
         Args:
@@ -41,9 +39,7 @@ class WalkForwardSplitter(BaseSplitter):
         self.test_size = test_size
         self.date_col = date_col
 
-    def split(
-        self, df: pl.DataFrame
-    ) -> Iterator[tuple[list[int], list[int]]]:
+    def split(self, df: pl.DataFrame) -> Iterator[tuple[list[int], list[int]]]:
         """Generate walk-forward splits."""
         # Sort by date and get indices
         sorted_df = df.with_row_index("_idx").sort(self.date_col)
@@ -93,9 +89,7 @@ class ExpandingWindowSplitter(BaseSplitter):
         self.step_size = step_size
         self.date_col = date_col
 
-    def split(
-        self, df: pl.DataFrame
-    ) -> Iterator[tuple[list[int], list[int]]]:
+    def split(self, df: pl.DataFrame) -> Iterator[tuple[list[int], list[int]]]:
         """Generate expanding window splits."""
         sorted_df = df.with_row_index("_idx").sort(self.date_col)
         indices = sorted_df["_idx"].to_list()

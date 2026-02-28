@@ -73,12 +73,16 @@ model:
             mock_instance.config.name = "test"
             mock_runner.return_value = mock_instance
 
-            result = main([
-                "run",
-                str(config_path),
-                "--matches", str(matches_path),
-                "--mlflow-dir", str(mlflow_dir),
-            ])
+            result = main(
+                [
+                    "run",
+                    str(config_path),
+                    "--matches",
+                    str(matches_path),
+                    "--mlflow-dir",
+                    str(mlflow_dir),
+                ]
+            )
 
         call_kwargs = mock_runner.call_args.kwargs
         assert call_kwargs["config_path"] == config_path

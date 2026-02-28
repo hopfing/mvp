@@ -86,22 +86,24 @@ class TestParseFeatureSpec:
 @pytest.fixture
 def sample_matches_df():
     """Create sample matches DataFrame for testing."""
-    return pl.DataFrame({
-        "match_uid": ["m1", "m1", "m2", "m2", "m3", "m3", "m4", "m4"],
-        "player_id": ["A", "B", "A", "C", "B", "C", "A", "B"],
-        "opp_id": ["B", "A", "C", "A", "C", "B", "B", "A"],
-        "effective_match_date": [
-            date(2024, 1, 1),
-            date(2024, 1, 1),
-            date(2024, 1, 5),
-            date(2024, 1, 5),
-            date(2024, 1, 10),
-            date(2024, 1, 10),
-            date(2024, 1, 15),
-            date(2024, 1, 15),
-        ],
-        "won": [True, False, True, False, True, False, False, True],
-    })
+    return pl.DataFrame(
+        {
+            "match_uid": ["m1", "m1", "m2", "m2", "m3", "m3", "m4", "m4"],
+            "player_id": ["A", "B", "A", "C", "B", "C", "A", "B"],
+            "opp_id": ["B", "A", "C", "A", "C", "B", "B", "A"],
+            "effective_match_date": [
+                date(2024, 1, 1),
+                date(2024, 1, 1),
+                date(2024, 1, 5),
+                date(2024, 1, 5),
+                date(2024, 1, 10),
+                date(2024, 1, 10),
+                date(2024, 1, 15),
+                date(2024, 1, 15),
+            ],
+            "won": [True, False, True, False, True, False, False, True],
+        }
+    )
 
 
 @pytest.fixture
@@ -121,6 +123,7 @@ def test_feature_registry():
     @feature(name="test_win_rate", params=["days"], mirror=True)
     def test_win_rate(days: int) -> pl.Expr:
         from mvp.experimentation.primitives import rolling_mean
+
         return rolling_mean("won", days=days, group_by="player_id")
 
     yield registry
@@ -213,16 +216,19 @@ class TestFeatureEngineMirroring:
         @feature(name="no_mirror_feature", params=["days"], mirror=False)
         def no_mirror_feature(days: int) -> pl.Expr:
             from mvp.experimentation.primitives import rolling_mean
+
             return rolling_mean("won", days=days, group_by="player_id")
 
         # Create test data
-        df = pl.DataFrame({
-            "match_uid": ["m1", "m1"],
-            "player_id": ["A", "B"],
-            "opp_id": ["B", "A"],
-            "effective_match_date": [date(2024, 1, 1), date(2024, 1, 1)],
-            "won": [True, False],
-        })
+        df = pl.DataFrame(
+            {
+                "match_uid": ["m1", "m1"],
+                "player_id": ["A", "B"],
+                "opp_id": ["B", "A"],
+                "effective_match_date": [date(2024, 1, 1), date(2024, 1, 1)],
+                "won": [True, False],
+            }
+        )
         matches_path = tmp_path / "matches.parquet"
         df.write_parquet(matches_path)
         cache_dir = tmp_path / "cache"
@@ -274,21 +280,25 @@ class TestFeatureEngineCaching:
         assert parquet_files[0].stat().st_mtime == original_mtime
 
         # Results should be identical
-        assert result1["player_test_win_rate_30d"].to_list() == \
-               result2["player_test_win_rate_30d"].to_list()
+        assert (
+            result1["player_test_win_rate_30d"].to_list()
+            == result2["player_test_win_rate_30d"].to_list()
+        )
 
     def test_cache_invalidated_on_matches_change(
         self, tmp_path: Path, test_feature_registry
     ):
         """Cache is invalidated when matches file changes."""
         # Create initial matches
-        df1 = pl.DataFrame({
-            "match_uid": ["m1", "m1"],
-            "player_id": ["A", "B"],
-            "opp_id": ["B", "A"],
-            "effective_match_date": [date(2024, 1, 1), date(2024, 1, 1)],
-            "won": [True, False],
-        })
+        df1 = pl.DataFrame(
+            {
+                "match_uid": ["m1", "m1"],
+                "player_id": ["A", "B"],
+                "opp_id": ["B", "A"],
+                "effective_match_date": [date(2024, 1, 1), date(2024, 1, 1)],
+                "won": [True, False],
+            }
+        )
         matches_path = tmp_path / "matches.parquet"
         df1.write_parquet(matches_path)
         cache_dir = tmp_path / "cache"
@@ -297,16 +307,20 @@ class TestFeatureEngineCaching:
         result1 = engine.compute(["test_win_rate(days=30)"])
 
         # Modify matches file (add a match)
-        df2 = pl.DataFrame({
-            "match_uid": ["m1", "m1", "m2", "m2"],
-            "player_id": ["A", "B", "A", "B"],
-            "opp_id": ["B", "A", "B", "A"],
-            "effective_match_date": [
-                date(2024, 1, 1), date(2024, 1, 1),
-                date(2024, 1, 5), date(2024, 1, 5),
-            ],
-            "won": [True, False, True, False],
-        })
+        df2 = pl.DataFrame(
+            {
+                "match_uid": ["m1", "m1", "m2", "m2"],
+                "player_id": ["A", "B", "A", "B"],
+                "opp_id": ["B", "A", "B", "A"],
+                "effective_match_date": [
+                    date(2024, 1, 1),
+                    date(2024, 1, 1),
+                    date(2024, 1, 5),
+                    date(2024, 1, 5),
+                ],
+                "won": [True, False, True, False],
+            }
+        )
         df2.write_parquet(matches_path)
 
         # Compute again - should recompute due to matches change
@@ -350,16 +364,20 @@ class TestFeatureEngineCoverageReport:
             return pl.lit(None).cast(pl.Float64)
 
         # Create test data
-        df = pl.DataFrame({
-            "match_uid": ["m1", "m1", "m2", "m2"],
-            "player_id": ["A", "B", "A", "B"],
-            "opp_id": ["B", "A", "B", "A"],
-            "effective_match_date": [
-                date(2024, 1, 1), date(2024, 1, 1),
-                date(2024, 1, 5), date(2024, 1, 5),
-            ],
-            "won": [True, False, True, False],
-        })
+        df = pl.DataFrame(
+            {
+                "match_uid": ["m1", "m1", "m2", "m2"],
+                "player_id": ["A", "B", "A", "B"],
+                "opp_id": ["B", "A", "B", "A"],
+                "effective_match_date": [
+                    date(2024, 1, 1),
+                    date(2024, 1, 1),
+                    date(2024, 1, 5),
+                    date(2024, 1, 5),
+                ],
+                "won": [True, False, True, False],
+            }
+        )
         matches_path = tmp_path / "matches.parquet"
         df.write_parquet(matches_path)
         cache_dir = tmp_path / "cache"

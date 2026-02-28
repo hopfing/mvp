@@ -18,16 +18,18 @@ class TestRollingSum:
 
     def test_rolling_sum_basic(self):
         """Sum values over rolling window."""
-        df = pl.DataFrame({
-            "player_id": ["A", "A", "A", "A"],
-            "effective_match_date": [
-                date(2024, 1, 1),
-                date(2024, 1, 5),
-                date(2024, 1, 10),
-                date(2024, 1, 15),
-            ],
-            "won": [1, 0, 1, 1],
-        }).lazy()
+        df = pl.DataFrame(
+            {
+                "player_id": ["A", "A", "A", "A"],
+                "effective_match_date": [
+                    date(2024, 1, 1),
+                    date(2024, 1, 5),
+                    date(2024, 1, 10),
+                    date(2024, 1, 15),
+                ],
+                "won": [1, 0, 1, 1],
+            }
+        ).lazy()
 
         result = df.with_columns(
             rolling_sum("won", days=30, group_by="player_id").alias("rolling_wins")
@@ -41,11 +43,13 @@ class TestRollingSum:
 
     def test_rolling_sum_excludes_current_row(self):
         """Current row must NOT be included in the sum."""
-        df = pl.DataFrame({
-            "player_id": ["A", "A"],
-            "effective_match_date": [date(2024, 1, 1), date(2024, 1, 2)],
-            "won": [1, 1],
-        }).lazy()
+        df = pl.DataFrame(
+            {
+                "player_id": ["A", "A"],
+                "effective_match_date": [date(2024, 1, 1), date(2024, 1, 2)],
+                "won": [1, 1],
+            }
+        ).lazy()
 
         result = df.with_columns(
             rolling_sum("won", days=30, group_by="player_id").alias("rolling_wins")
@@ -57,15 +61,17 @@ class TestRollingSum:
 
     def test_rolling_sum_respects_window_boundary(self):
         """Only include matches within the window period."""
-        df = pl.DataFrame({
-            "player_id": ["A", "A", "A"],
-            "effective_match_date": [
-                date(2024, 1, 1),   # Day 0
-                date(2024, 1, 10),  # Day 9
-                date(2024, 1, 20),  # Day 19
-            ],
-            "won": [1, 1, 1],
-        }).lazy()
+        df = pl.DataFrame(
+            {
+                "player_id": ["A", "A", "A"],
+                "effective_match_date": [
+                    date(2024, 1, 1),  # Day 0
+                    date(2024, 1, 10),  # Day 9
+                    date(2024, 1, 20),  # Day 19
+                ],
+                "won": [1, 1, 1],
+            }
+        ).lazy()
 
         result = df.with_columns(
             rolling_sum("won", days=7, group_by="player_id").alias("rolling_wins")
@@ -78,14 +84,16 @@ class TestRollingSum:
 
     def test_rolling_sum_includes_edge_of_window(self):
         """Match exactly at window boundary is included."""
-        df = pl.DataFrame({
-            "player_id": ["A", "A"],
-            "effective_match_date": [
-                date(2024, 1, 1),
-                date(2024, 1, 8),  # Exactly 7 days later
-            ],
-            "won": [1, 1],
-        }).lazy()
+        df = pl.DataFrame(
+            {
+                "player_id": ["A", "A"],
+                "effective_match_date": [
+                    date(2024, 1, 1),
+                    date(2024, 1, 8),  # Exactly 7 days later
+                ],
+                "won": [1, 1],
+            }
+        ).lazy()
 
         result = df.with_columns(
             rolling_sum("won", days=7, group_by="player_id").alias("rolling_wins")
@@ -96,16 +104,18 @@ class TestRollingSum:
 
     def test_rolling_sum_isolates_players(self):
         """Each player's rolling sum is independent."""
-        df = pl.DataFrame({
-            "player_id": ["A", "B", "A", "B"],
-            "effective_match_date": [
-                date(2024, 1, 1),
-                date(2024, 1, 2),
-                date(2024, 1, 3),
-                date(2024, 1, 4),
-            ],
-            "won": [1, 1, 1, 0],
-        }).lazy()
+        df = pl.DataFrame(
+            {
+                "player_id": ["A", "B", "A", "B"],
+                "effective_match_date": [
+                    date(2024, 1, 1),
+                    date(2024, 1, 2),
+                    date(2024, 1, 3),
+                    date(2024, 1, 4),
+                ],
+                "won": [1, 1, 1, 0],
+            }
+        ).lazy()
 
         result = df.with_columns(
             rolling_sum("won", days=30, group_by="player_id").alias("rolling_wins")
@@ -123,16 +133,18 @@ class TestRollingMean:
 
     def test_rolling_mean_basic(self):
         """Mean values over rolling window."""
-        df = pl.DataFrame({
-            "player_id": ["A", "A", "A", "A"],
-            "effective_match_date": [
-                date(2024, 1, 1),
-                date(2024, 1, 5),
-                date(2024, 1, 10),
-                date(2024, 1, 15),
-            ],
-            "score": [10.0, 20.0, 30.0, 40.0],
-        }).lazy()
+        df = pl.DataFrame(
+            {
+                "player_id": ["A", "A", "A", "A"],
+                "effective_match_date": [
+                    date(2024, 1, 1),
+                    date(2024, 1, 5),
+                    date(2024, 1, 10),
+                    date(2024, 1, 15),
+                ],
+                "score": [10.0, 20.0, 30.0, 40.0],
+            }
+        ).lazy()
 
         result = df.with_columns(
             rolling_mean("score", days=30, group_by="player_id").alias("rolling_avg")
@@ -146,11 +158,13 @@ class TestRollingMean:
 
     def test_rolling_mean_excludes_current_row(self):
         """Current row must NOT be included in the mean."""
-        df = pl.DataFrame({
-            "player_id": ["A", "A"],
-            "effective_match_date": [date(2024, 1, 1), date(2024, 1, 2)],
-            "score": [100.0, 200.0],
-        }).lazy()
+        df = pl.DataFrame(
+            {
+                "player_id": ["A", "A"],
+                "effective_match_date": [date(2024, 1, 1), date(2024, 1, 2)],
+                "score": [100.0, 200.0],
+            }
+        ).lazy()
 
         result = df.with_columns(
             rolling_mean("score", days=30, group_by="player_id").alias("rolling_avg")
@@ -166,15 +180,17 @@ class TestRollingCount:
 
     def test_rolling_count_basic(self):
         """Count rows over rolling window."""
-        df = pl.DataFrame({
-            "player_id": ["A", "A", "A", "A"],
-            "effective_match_date": [
-                date(2024, 1, 1),
-                date(2024, 1, 5),
-                date(2024, 1, 10),
-                date(2024, 1, 15),
-            ],
-        }).lazy()
+        df = pl.DataFrame(
+            {
+                "player_id": ["A", "A", "A", "A"],
+                "effective_match_date": [
+                    date(2024, 1, 1),
+                    date(2024, 1, 5),
+                    date(2024, 1, 10),
+                    date(2024, 1, 15),
+                ],
+            }
+        ).lazy()
 
         result = df.with_columns(
             rolling_count(days=30, group_by="player_id").alias("match_count")
@@ -188,14 +204,16 @@ class TestRollingCount:
 
     def test_rolling_count_respects_window(self):
         """Only count matches within the window period."""
-        df = pl.DataFrame({
-            "player_id": ["A", "A", "A"],
-            "effective_match_date": [
-                date(2024, 1, 1),   # Day 0
-                date(2024, 1, 10),  # Day 9
-                date(2024, 1, 20),  # Day 19
-            ],
-        }).lazy()
+        df = pl.DataFrame(
+            {
+                "player_id": ["A", "A", "A"],
+                "effective_match_date": [
+                    date(2024, 1, 1),  # Day 0
+                    date(2024, 1, 10),  # Day 9
+                    date(2024, 1, 20),  # Day 19
+                ],
+            }
+        ).lazy()
 
         result = df.with_columns(
             rolling_count(days=7, group_by="player_id").alias("match_count")
@@ -212,16 +230,18 @@ class TestCumulativeSum:
 
     def test_cumulative_sum_basic(self):
         """Sum values over all prior rows."""
-        df = pl.DataFrame({
-            "player_id": ["A", "A", "A", "A"],
-            "effective_match_date": [
-                date(2024, 1, 1),
-                date(2024, 1, 5),
-                date(2024, 1, 10),
-                date(2024, 1, 15),
-            ],
-            "won": [1, 0, 1, 1],
-        }).lazy()
+        df = pl.DataFrame(
+            {
+                "player_id": ["A", "A", "A", "A"],
+                "effective_match_date": [
+                    date(2024, 1, 1),
+                    date(2024, 1, 5),
+                    date(2024, 1, 10),
+                    date(2024, 1, 15),
+                ],
+                "won": [1, 0, 1, 1],
+            }
+        ).lazy()
 
         result = df.with_columns(
             cumulative_sum("won", group_by="player_id").alias("total_wins")
@@ -235,11 +255,13 @@ class TestCumulativeSum:
 
     def test_cumulative_sum_excludes_current_row(self):
         """Current row must NOT be included in the sum."""
-        df = pl.DataFrame({
-            "player_id": ["A", "A"],
-            "effective_match_date": [date(2024, 1, 1), date(2024, 1, 2)],
-            "won": [1, 1],
-        }).lazy()
+        df = pl.DataFrame(
+            {
+                "player_id": ["A", "A"],
+                "effective_match_date": [date(2024, 1, 1), date(2024, 1, 2)],
+                "won": [1, 1],
+            }
+        ).lazy()
 
         result = df.with_columns(
             cumulative_sum("won", group_by="player_id").alias("total_wins")
@@ -251,16 +273,18 @@ class TestCumulativeSum:
 
     def test_cumulative_sum_groups_by_matchup(self):
         """Cumulative sum respects group_by columns."""
-        df = pl.DataFrame({
-            "player_id": ["A", "B", "A", "B"],
-            "effective_match_date": [
-                date(2024, 1, 1),
-                date(2024, 1, 2),
-                date(2024, 1, 3),
-                date(2024, 1, 4),
-            ],
-            "won": [1, 1, 1, 0],
-        }).lazy()
+        df = pl.DataFrame(
+            {
+                "player_id": ["A", "B", "A", "B"],
+                "effective_match_date": [
+                    date(2024, 1, 1),
+                    date(2024, 1, 2),
+                    date(2024, 1, 3),
+                    date(2024, 1, 4),
+                ],
+                "won": [1, 1, 1, 0],
+            }
+        ).lazy()
 
         result = df.with_columns(
             cumulative_sum("won", group_by="player_id").alias("total_wins")
@@ -278,16 +302,18 @@ class TestCumulativeMean:
 
     def test_cumulative_mean_basic(self):
         """Mean values over all prior rows."""
-        df = pl.DataFrame({
-            "player_id": ["A", "A", "A", "A"],
-            "effective_match_date": [
-                date(2024, 1, 1),
-                date(2024, 1, 5),
-                date(2024, 1, 10),
-                date(2024, 1, 15),
-            ],
-            "score": [10.0, 20.0, 30.0, 40.0],
-        }).lazy()
+        df = pl.DataFrame(
+            {
+                "player_id": ["A", "A", "A", "A"],
+                "effective_match_date": [
+                    date(2024, 1, 1),
+                    date(2024, 1, 5),
+                    date(2024, 1, 10),
+                    date(2024, 1, 15),
+                ],
+                "score": [10.0, 20.0, 30.0, 40.0],
+            }
+        ).lazy()
 
         result = df.with_columns(
             cumulative_mean("score", group_by="player_id").alias("avg_score")

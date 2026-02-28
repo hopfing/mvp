@@ -42,35 +42,59 @@ def sample_matches_df() -> pl.DataFrame:
     Simulates matches between 4 players (A, B, C, D) over a month.
     Includes columns that would come from matches.parquet.
     """
-    return pl.DataFrame({
-        "match_id": [f"M{i:03d}" for i in range(1, 13)],
-        "player_id": ["A", "B", "A", "C", "B", "D", "A", "B", "C", "D", "A", "B"],
-        "opp_id": ["B", "A", "C", "A", "D", "B", "B", "A", "D", "C", "C", "D"],
-        "effective_match_date": [
-            # Week 1
-            date(2024, 1, 1),   # A vs B: A wins
-            date(2024, 1, 1),   # B vs A: B loses (mirror)
-            date(2024, 1, 3),   # A vs C: A wins
-            date(2024, 1, 3),   # C vs A: C loses (mirror)
-            # Week 2
-            date(2024, 1, 8),   # B vs D: B wins
-            date(2024, 1, 8),   # D vs B: D loses (mirror)
-            date(2024, 1, 10),  # A vs B: A wins again
-            date(2024, 1, 10),  # B vs A: B loses again (mirror)
-            # Week 3
-            date(2024, 1, 15),  # C vs D: C wins
-            date(2024, 1, 15),  # D vs C: D loses (mirror)
-            date(2024, 1, 17),  # A vs C: A wins
-            date(2024, 1, 17),  # B vs D: B wins
-        ],
-        "won": [1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 1],
-        "player_ranking_points": [
-            1000, 800, 1050, 600, 850, 500, 1100, 750, 650, 450, 1150, 900
-        ],
-        "opp_ranking_points": [
-            800, 1000, 600, 1050, 500, 850, 750, 1100, 450, 650, 650, 500
-        ],
-    }).sort("effective_match_date")
+    return pl.DataFrame(
+        {
+            "match_id": [f"M{i:03d}" for i in range(1, 13)],
+            "player_id": ["A", "B", "A", "C", "B", "D", "A", "B", "C", "D", "A", "B"],
+            "opp_id": ["B", "A", "C", "A", "D", "B", "B", "A", "D", "C", "C", "D"],
+            "effective_match_date": [
+                # Week 1
+                date(2024, 1, 1),  # A vs B: A wins
+                date(2024, 1, 1),  # B vs A: B loses (mirror)
+                date(2024, 1, 3),  # A vs C: A wins
+                date(2024, 1, 3),  # C vs A: C loses (mirror)
+                # Week 2
+                date(2024, 1, 8),  # B vs D: B wins
+                date(2024, 1, 8),  # D vs B: D loses (mirror)
+                date(2024, 1, 10),  # A vs B: A wins again
+                date(2024, 1, 10),  # B vs A: B loses again (mirror)
+                # Week 3
+                date(2024, 1, 15),  # C vs D: C wins
+                date(2024, 1, 15),  # D vs C: D loses (mirror)
+                date(2024, 1, 17),  # A vs C: A wins
+                date(2024, 1, 17),  # B vs D: B wins
+            ],
+            "won": [1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 1],
+            "player_ranking_points": [
+                1000,
+                800,
+                1050,
+                600,
+                850,
+                500,
+                1100,
+                750,
+                650,
+                450,
+                1150,
+                900,
+            ],
+            "opp_ranking_points": [
+                800,
+                1000,
+                600,
+                1050,
+                500,
+                850,
+                750,
+                1100,
+                450,
+                650,
+                650,
+                500,
+            ],
+        }
+    ).sort("effective_match_date")
 
 
 class TestAllFeaturesIntegration:
@@ -130,16 +154,12 @@ class TestAllFeaturesIntegration:
         """h2h_wins computes correctly on sample data."""
         from mvp.experimentation.features.h2h import h2h_wins
 
-        result = sample_matches_df.with_columns(
-            h2h_wins().alias("h2h_wins_vs_opp")
-        )
+        result = sample_matches_df.with_columns(h2h_wins().alias("h2h_wins_vs_opp"))
 
         # A vs B matches (rows 0, 6): A wins both
         # Row 0 (Jan 1, A vs B): no prior H2H -> 0
         # Row 6 (Jan 10, A vs B): 1 prior win -> 1
-        a_vs_b = result.filter(
-            (pl.col("player_id") == "A") & (pl.col("opp_id") == "B")
-        )
+        a_vs_b = result.filter((pl.col("player_id") == "A") & (pl.col("opp_id") == "B"))
         h2h = a_vs_b["h2h_wins_vs_opp"].to_list()
         assert h2h == [0, 1]
 
@@ -162,12 +182,14 @@ class TestAllFeaturesIntegration:
         from mvp.experimentation.features.ranking import ranking_points_diff
         from mvp.experimentation.features.win_rate import matches_played, win_rate
 
-        result = sample_matches_df.with_columns([
-            win_rate(days=30).alias("player_win_rate_30d"),
-            matches_played(days=30).alias("matches_30d"),
-            h2h_wins().alias("h2h_wins_vs_opp"),
-            ranking_points_diff().alias("ranking_diff"),
-        ])
+        result = sample_matches_df.with_columns(
+            [
+                win_rate(days=30).alias("player_win_rate_30d"),
+                matches_played(days=30).alias("matches_30d"),
+                h2h_wins().alias("h2h_wins_vs_opp"),
+                ranking_points_diff().alias("ranking_diff"),
+            ]
+        )
 
         # All columns should exist
         assert "player_win_rate_30d" in result.columns
@@ -183,15 +205,15 @@ class TestAllFeaturesIntegration:
         from mvp.experimentation.features.win_rate import win_rate, win_rate_diff
 
         # First compute win_rate for player and opponent
-        df_with_wr = sample_matches_df.with_columns([
-            win_rate(days=30).alias("player_win_rate_30d"),
-        ])
+        df_with_wr = sample_matches_df.with_columns(
+            [
+                win_rate(days=30).alias("player_win_rate_30d"),
+            ]
+        )
 
         # Simulate opponent's win_rate (in real system this would be mirrored)
         # For now just add a placeholder
-        df_with_both = df_with_wr.with_columns(
-            pl.lit(0.5).alias("opp_win_rate_30d")
-        )
+        df_with_both = df_with_wr.with_columns(pl.lit(0.5).alias("opp_win_rate_30d"))
 
         # Now win_rate_diff should work
         result = df_with_both.with_columns(
@@ -204,19 +226,19 @@ class TestAllFeaturesIntegration:
         """Features handle null/missing values gracefully."""
         from mvp.experimentation.features.win_rate import win_rate
 
-        df = pl.DataFrame({
-            "player_id": ["A", "A", "A"],
-            "effective_match_date": [
-                date(2024, 1, 1),
-                date(2024, 1, 5),
-                date(2024, 1, 10),
-            ],
-            "won": [1, None, 0],  # Middle value is null
-        }).sort("effective_match_date")
+        df = pl.DataFrame(
+            {
+                "player_id": ["A", "A", "A"],
+                "effective_match_date": [
+                    date(2024, 1, 1),
+                    date(2024, 1, 5),
+                    date(2024, 1, 10),
+                ],
+                "won": [1, None, 0],  # Middle value is null
+            }
+        ).sort("effective_match_date")
 
-        result = df.with_columns(
-            win_rate(days=30).alias("win_rate")
-        )
+        result = df.with_columns(win_rate(days=30).alias("win_rate"))
 
         # Should not crash, null is propagated through rolling_mean
         assert len(result) == 3
@@ -266,9 +288,7 @@ class TestTemporalSafety:
         """Features compute differently based on temporal position."""
         from mvp.experimentation.features.win_rate import win_rate
 
-        result = sample_matches_df.with_columns(
-            win_rate(days=30).alias("win_rate")
-        )
+        result = sample_matches_df.with_columns(win_rate(days=30).alias("win_rate"))
 
         # For player A, win_rate should increase over time (all wins)
         player_a = result.filter(pl.col("player_id") == "A")
@@ -284,9 +304,7 @@ class TestTemporalSafety:
         """Each player's features are computed independently."""
         from mvp.experimentation.features.win_rate import win_rate
 
-        result = sample_matches_df.with_columns(
-            win_rate(days=30).alias("win_rate")
-        )
+        result = sample_matches_df.with_columns(win_rate(days=30).alias("win_rate"))
 
         # Player B always loses against A, wins against D
         player_b = result.filter(pl.col("player_id") == "B")

@@ -44,9 +44,7 @@ class ExperimentLogger:
         """
         mlflow.log_params(params)
 
-    def log_metrics(
-        self, metrics: dict[str, float], step: int | None = None
-    ) -> None:
+    def log_metrics(self, metrics: dict[str, float], step: int | None = None) -> None:
         """Log metrics.
 
         Args:

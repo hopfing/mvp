@@ -32,20 +32,20 @@ class TestH2HWinsFeature:
         from mvp.experimentation.features.h2h import h2h_wins
 
         # Player A plays opponent B three times, winning 1st and 3rd
-        df = pl.DataFrame({
-            "player_id": ["A", "A", "A"],
-            "opp_id": ["B", "B", "B"],
-            "effective_match_date": [
-                date(2024, 1, 1),
-                date(2024, 1, 10),
-                date(2024, 1, 20),
-            ],
-            "won": [1, 0, 1],
-        }).lazy()
+        df = pl.DataFrame(
+            {
+                "player_id": ["A", "A", "A"],
+                "opp_id": ["B", "B", "B"],
+                "effective_match_date": [
+                    date(2024, 1, 1),
+                    date(2024, 1, 10),
+                    date(2024, 1, 20),
+                ],
+                "won": [1, 0, 1],
+            }
+        ).lazy()
 
-        result = df.with_columns(
-            h2h_wins().alias("h2h_wins")
-        ).collect()
+        result = df.with_columns(h2h_wins().alias("h2h_wins")).collect()
 
         # Row 0: no prior matches vs B -> 0
         # Row 1: 1 prior match vs B (won=1) -> 1
@@ -57,20 +57,20 @@ class TestH2HWinsFeature:
         from mvp.experimentation.features.h2h import h2h_wins
 
         # Player A plays B twice, then C once
-        df = pl.DataFrame({
-            "player_id": ["A", "A", "A"],
-            "opp_id": ["B", "B", "C"],
-            "effective_match_date": [
-                date(2024, 1, 1),
-                date(2024, 1, 10),
-                date(2024, 1, 20),
-            ],
-            "won": [1, 1, 1],
-        }).lazy()
+        df = pl.DataFrame(
+            {
+                "player_id": ["A", "A", "A"],
+                "opp_id": ["B", "B", "C"],
+                "effective_match_date": [
+                    date(2024, 1, 1),
+                    date(2024, 1, 10),
+                    date(2024, 1, 20),
+                ],
+                "won": [1, 1, 1],
+            }
+        ).lazy()
 
-        result = df.with_columns(
-            h2h_wins().alias("h2h_wins")
-        ).collect()
+        result = df.with_columns(h2h_wins().alias("h2h_wins")).collect()
 
         # Row 0 (A vs B): no prior -> 0
         # Row 1 (A vs B): 1 prior A vs B match (won=1) -> 1

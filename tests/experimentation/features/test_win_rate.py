@@ -32,20 +32,20 @@ class TestWinRateFeature:
         """win_rate computes rolling mean of won column."""
         from mvp.experimentation.features.win_rate import win_rate
 
-        df = pl.DataFrame({
-            "player_id": ["A", "A", "A", "A"],
-            "effective_match_date": [
-                date(2024, 1, 1),
-                date(2024, 1, 5),
-                date(2024, 1, 10),
-                date(2024, 1, 15),
-            ],
-            "won": [1, 0, 1, 1],
-        }).lazy()
+        df = pl.DataFrame(
+            {
+                "player_id": ["A", "A", "A", "A"],
+                "effective_match_date": [
+                    date(2024, 1, 1),
+                    date(2024, 1, 5),
+                    date(2024, 1, 10),
+                    date(2024, 1, 15),
+                ],
+                "won": [1, 0, 1, 1],
+            }
+        ).lazy()
 
-        result = df.with_columns(
-            win_rate(days=30).alias("win_rate")
-        ).collect()
+        result = df.with_columns(win_rate(days=30).alias("win_rate")).collect()
 
         # Row 0: no prior matches -> null
         # Row 1: 1 prior match (won=1) -> 1.0
@@ -72,15 +72,17 @@ class TestMatchesPlayedFeature:
         """matches_played computes rolling count."""
         from mvp.experimentation.features.win_rate import matches_played
 
-        df = pl.DataFrame({
-            "player_id": ["A", "A", "A", "A"],
-            "effective_match_date": [
-                date(2024, 1, 1),
-                date(2024, 1, 5),
-                date(2024, 1, 10),
-                date(2024, 1, 15),
-            ],
-        }).lazy()
+        df = pl.DataFrame(
+            {
+                "player_id": ["A", "A", "A", "A"],
+                "effective_match_date": [
+                    date(2024, 1, 1),
+                    date(2024, 1, 5),
+                    date(2024, 1, 10),
+                    date(2024, 1, 15),
+                ],
+            }
+        ).lazy()
 
         result = df.with_columns(
             matches_played(days=30).alias("matches_played")
@@ -109,10 +111,12 @@ class TestWinRateDiffFeature:
         """win_rate_diff computes player_win_rate - opp_win_rate."""
         from mvp.experimentation.features.win_rate import win_rate_diff
 
-        df = pl.DataFrame({
-            "player_win_rate_30d": [0.8, 0.6, 0.5],
-            "opp_win_rate_30d": [0.4, 0.6, 0.7],
-        }).lazy()
+        df = pl.DataFrame(
+            {
+                "player_win_rate_30d": [0.8, 0.6, 0.5],
+                "opp_win_rate_30d": [0.4, 0.6, 0.7],
+            }
+        ).lazy()
 
         result = df.with_columns(
             win_rate_diff(days=30).alias("win_rate_diff")

@@ -311,7 +311,8 @@ class FeatureEngine:
 
         # Find all feature columns (player_* and opp_*)
         feature_cols = [
-            col for col in df.columns
+            col
+            for col in df.columns
             if col.startswith("player_") or col.startswith("opp_")
         ]
 

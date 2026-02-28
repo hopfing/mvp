@@ -29,10 +29,12 @@ class TestRankingPointsDiffFeature:
         """ranking_points_diff computes player_ranking_points - opp_ranking_points."""
         from mvp.experimentation.features.ranking import ranking_points_diff
 
-        df = pl.DataFrame({
-            "player_ranking_points": [1000, 500, 800],
-            "opp_ranking_points": [500, 500, 1200],
-        }).lazy()
+        df = pl.DataFrame(
+            {
+                "player_ranking_points": [1000, 500, 800],
+                "opp_ranking_points": [500, 500, 1200],
+            }
+        ).lazy()
 
         result = df.with_columns(
             ranking_points_diff().alias("ranking_points_diff")
@@ -47,10 +49,12 @@ class TestRankingPointsDiffFeature:
         """ranking_points_diff handles null values gracefully."""
         from mvp.experimentation.features.ranking import ranking_points_diff
 
-        df = pl.DataFrame({
-            "player_ranking_points": [1000, None, 800],
-            "opp_ranking_points": [500, 500, None],
-        }).lazy()
+        df = pl.DataFrame(
+            {
+                "player_ranking_points": [1000, None, 800],
+                "opp_ranking_points": [500, 500, None],
+            }
+        ).lazy()
 
         result = df.with_columns(
             ranking_points_diff().alias("ranking_points_diff")

@@ -117,13 +117,7 @@ def cumulative_sum(
     if isinstance(group_by, str):
         group_by = [group_by]
 
-    return (
-        pl.col(col)
-        .cum_sum()
-        .shift(1)
-        .over(group_by, order_by=date_col)
-        .fill_null(0)
-    )
+    return pl.col(col).cum_sum().shift(1).over(group_by, order_by=date_col).fill_null(0)
 
 
 def cumulative_mean(

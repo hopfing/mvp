@@ -31,17 +31,19 @@ class TestSvcFirstWinPctFeature:
         """svc_first_win_pct computes rolling percentage of first serve points won."""
         from mvp.experimentation.features.serve import svc_first_win_pct
 
-        df = pl.DataFrame({
-            "player_id": ["A", "A", "A", "A"],
-            "effective_match_date": [
-                date(2024, 1, 1),
-                date(2024, 1, 5),
-                date(2024, 1, 10),
-                date(2024, 1, 15),
-            ],
-            "svc_first_serve_pts_won": [30, 40, 35, 45],
-            "svc_first_serve_pts_played": [40, 50, 50, 60],
-        }).lazy()
+        df = pl.DataFrame(
+            {
+                "player_id": ["A", "A", "A", "A"],
+                "effective_match_date": [
+                    date(2024, 1, 1),
+                    date(2024, 1, 5),
+                    date(2024, 1, 10),
+                    date(2024, 1, 15),
+                ],
+                "svc_first_serve_pts_won": [30, 40, 35, 45],
+                "svc_first_serve_pts_played": [40, 50, 50, 60],
+            }
+        ).lazy()
 
         result = df.with_columns(
             svc_first_win_pct(days=30).alias("svc_first_win_pct")
@@ -60,16 +62,18 @@ class TestSvcFirstWinPctFeature:
         """svc_first_win_pct only includes data within window period."""
         from mvp.experimentation.features.serve import svc_first_win_pct
 
-        df = pl.DataFrame({
-            "player_id": ["A", "A", "A"],
-            "effective_match_date": [
-                date(2024, 1, 1),   # Day 0
-                date(2024, 1, 10),  # Day 9
-                date(2024, 1, 20),  # Day 19
-            ],
-            "svc_first_serve_pts_won": [30, 40, 50],
-            "svc_first_serve_pts_played": [40, 50, 60],
-        }).lazy()
+        df = pl.DataFrame(
+            {
+                "player_id": ["A", "A", "A"],
+                "effective_match_date": [
+                    date(2024, 1, 1),  # Day 0
+                    date(2024, 1, 10),  # Day 9
+                    date(2024, 1, 20),  # Day 19
+                ],
+                "svc_first_serve_pts_won": [30, 40, 50],
+                "svc_first_serve_pts_played": [40, 50, 60],
+            }
+        ).lazy()
 
         # Use a 7-day window
         result = df.with_columns(
