@@ -1,10 +1,13 @@
 """Tests for the Feature Engine."""
 
+from datetime import date
 from pathlib import Path
 
+import polars as pl
 import pytest
 
 from mvp.experimentation.engine import FeatureEngine, parse_feature_spec
+from mvp.experimentation.registry import feature, get_registry
 
 
 class TestFeatureEngineInit:
@@ -78,3 +81,85 @@ class TestParseFeatureSpec:
         """Unclosed parentheses raises ValueError."""
         with pytest.raises(ValueError, match="Invalid feature spec"):
             parse_feature_spec("win_rate(days=30")
+
+
+@pytest.fixture
+def sample_matches_df():
+    """Create sample matches DataFrame for testing."""
+    return pl.DataFrame({
+        "match_uid": ["m1", "m1", "m2", "m2", "m3", "m3", "m4", "m4"],
+        "player_id": ["A", "B", "A", "C", "B", "C", "A", "B"],
+        "opp_id": ["B", "A", "C", "A", "C", "B", "B", "A"],
+        "effective_match_date": [
+            date(2024, 1, 1),
+            date(2024, 1, 1),
+            date(2024, 1, 5),
+            date(2024, 1, 5),
+            date(2024, 1, 10),
+            date(2024, 1, 10),
+            date(2024, 1, 15),
+            date(2024, 1, 15),
+        ],
+        "won": [True, False, True, False, True, False, False, True],
+    })
+
+
+@pytest.fixture
+def matches_parquet(tmp_path: Path, sample_matches_df):
+    """Write sample matches to parquet and return path."""
+    path = tmp_path / "matches.parquet"
+    sample_matches_df.write_parquet(path)
+    return path
+
+
+@pytest.fixture
+def test_feature_registry():
+    """Clear and populate registry with test feature."""
+    registry = get_registry()
+    registry.clear()
+
+    @feature(name="test_win_rate", params=["days"], mirror=True)
+    def test_win_rate(days: int) -> pl.Expr:
+        from mvp.experimentation.primitives import rolling_mean
+        return rolling_mean("won", days=days, group_by="player_id")
+
+    yield registry
+    registry.clear()
+
+
+class TestFeatureEngineCompute:
+    """Tests for FeatureEngine.compute() method."""
+
+    def test_compute_single_feature(
+        self, matches_parquet: Path, tmp_path: Path, test_feature_registry
+    ):
+        """Compute a single feature from a spec."""
+        cache_dir = tmp_path / "cache"
+        engine = FeatureEngine(matches_path=matches_parquet, cache_dir=cache_dir)
+
+        result = engine.compute(["test_win_rate(days=30)"])
+
+        # Should have the feature column
+        assert "player_test_win_rate_30d" in result.columns
+
+        # Player A: row 0 has no prior, row 2 has 1 win/1 match = 1.0,
+        # row 6 has 2 wins/2 matches = 1.0
+        a_rows = result.filter(pl.col("player_id") == "A").sort("effective_match_date")
+        win_rates = a_rows["player_test_win_rate_30d"].to_list()
+
+        # First match: no prior data
+        assert win_rates[0] is None
+        # Second match (day 5): 1 prior win
+        assert win_rates[1] == 1.0
+        # Third match (day 15): 2 prior wins, 2 matches
+        assert win_rates[2] == 1.0
+
+    def test_compute_unknown_feature_raises(
+        self, matches_parquet: Path, tmp_path: Path, test_feature_registry
+    ):
+        """Computing unknown feature raises KeyError."""
+        cache_dir = tmp_path / "cache"
+        engine = FeatureEngine(matches_path=matches_parquet, cache_dir=cache_dir)
+
+        with pytest.raises(KeyError, match="not found"):
+            engine.compute(["unknown_feature(days=30)"])
