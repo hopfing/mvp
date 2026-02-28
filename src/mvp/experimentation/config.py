@@ -45,6 +45,26 @@ class ModelConfig(BaseModel):
     params: dict[str, Any] | None = None
 
 
+class ValidationConfig(BaseModel):
+    """Validation strategy configuration."""
+
+    type: Literal["walk_forward", "expanding_window"] = "walk_forward"
+    # For walk_forward
+    n_splits: int = 5
+    min_train_size: int = 50000
+    test_size: int = 10000
+    # For expanding_window
+    initial_train_size: int | None = None
+    step_size: int | None = None
+
+
+class MetricsConfig(BaseModel):
+    """Metrics configuration."""
+
+    primary: str = "log_loss"
+    secondary: list[str] = ["accuracy", "brier_score", "roc_auc"]
+
+
 class ExperimentConfig(BaseModel):
     """Complete experiment configuration."""
 
@@ -53,6 +73,8 @@ class ExperimentConfig(BaseModel):
     data: DataConfig
     features: FeaturesConfig
     model: ModelConfig
+    validation: ValidationConfig = ValidationConfig()
+    metrics: MetricsConfig = MetricsConfig()
 
     @classmethod
     def from_yaml(cls, yaml_str: str) -> ExperimentConfig:
