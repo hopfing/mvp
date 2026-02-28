@@ -234,7 +234,7 @@ class FeatureDiscovery:
             max_features=self.config.discovery.max_features,
         )
 
-        result = selector.run()
+        result = selector.run(verbose=self.verbose)
 
         self._log(f"Selected {len(result.selected_features)} features")
         for step in result.history:

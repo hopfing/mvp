@@ -72,7 +72,7 @@ class FeatureSelector:
             return float("inf")
         return float("-inf")
 
-    def forward_selection(self) -> SelectionResult:
+    def forward_selection(self, verbose: bool = False) -> SelectionResult:
         """Select features by iteratively adding the best one.
 
         Starts with empty set, adds feature that improves metric most,
@@ -86,11 +86,20 @@ class FeatureSelector:
         best_metric = self._worst_value()
 
         while remaining and len(selected) < self.max_features:
+            round_num = len(selected) + 1
+            if verbose:
+                print(f"\n=== Round {round_num}/{self.max_features} | Testing {len(remaining)} candidates | Best so far: {best_metric:.4f} ===")
+
             best_feature = None
             best_feature_metric = best_metric
+            tested = 0
 
             # Try adding each remaining feature
             for feature in remaining:
+                tested += 1
+                if verbose and tested % 25 == 0:
+                    print(f"  Progress: {tested}/{len(remaining)}")
+
                 candidate = selected + [feature]
                 try:
                     metric = self.scorer(candidate)
@@ -249,14 +258,14 @@ class FeatureSelector:
             final_metric=final_metric,
         )
 
-    def run(self) -> SelectionResult:
+    def run(self, verbose: bool = False) -> SelectionResult:
         """Run feature selection using configured method.
 
         Returns:
             SelectionResult with selected features and history.
         """
         if self.method == "forward":
-            return self.forward_selection()
+            return self.forward_selection(verbose=verbose)
         elif self.method == "recursive":
             return self.recursive_elimination()
         elif self.method == "threshold":

@@ -91,7 +91,7 @@ class Diagnostics:
         result["circuit"] = {}
         if "circuit" in df.columns:
             for circuit in ["tour", "chal"]:
-                mask = (df["circuit"] == circuit).to_numpy()
+                mask = (df["circuit"] == circuit).fill_null(False).to_numpy()
                 if mask.any():
                     result["circuit"][circuit] = _compute_metrics_for_segment(
                         y_true[mask], y_prob[mask]
@@ -101,7 +101,7 @@ class Diagnostics:
         result["surface"] = {}
         if "surface" in df.columns:
             for surface in ["Hard", "Clay", "Grass", "Carpet"]:
-                mask = (df["surface"] == surface).to_numpy()
+                mask = (df["surface"] == surface).fill_null(False).to_numpy()
                 if mask.any():
                     result["surface"][surface] = _compute_metrics_for_segment(
                         y_true[mask], y_prob[mask]
@@ -111,7 +111,7 @@ class Diagnostics:
         result["round_group"] = {}
         result["round_raw"] = {}
         if "round" in df.columns:
-            round_groups = df["round"].map_elements(
+            round_groups = df["round"].fill_null("").map_elements(
                 self._get_round_group, return_dtype=pl.Utf8
             ).to_numpy()
             for group in ["Qualifying", "Early", "Late", "Other"]:
@@ -123,7 +123,7 @@ class Diagnostics:
 
             # Raw rounds (JSON only, not flattened to metrics)
             for round_val in df["round"].unique().to_list():
-                mask = (df["round"] == round_val).to_numpy()
+                mask = (df["round"] == round_val).fill_null(False).to_numpy()
                 if mask.any():
                     result["round_raw"][round_val] = _compute_metrics_for_segment(
                         y_true[mask], y_prob[mask]

@@ -5,23 +5,23 @@ name: discovery_example
 
 data:
   date_range:
-    start: "2021-01-01"
+    start: "2015-01-01"
     end: "2025-12-31"
+  filters:
+    draw_type: "singles"
 
 discovery:
-  importance_method: permutation
+  importance_method: shap
   selection_method: forward
   sweep_params: true
   segment_analysis: true
-  metric: calibration_error
+  metric: log_loss
   direction: minimize
+  min_features: 5
+  max_features: 20
 
 model:
   type: xgboost
-  params:
-    n_estimators: 100
-    max_depth: 6
-    learning_rate: 0.1
 
 validation:
   type: walk_forward
