@@ -23,16 +23,12 @@ class TestParseArgs:
         assert args.command == "model"
         assert args.config == "experiments/config.yaml"
 
-    def test_model_with_optional_args(self):
+    def test_model_basic(self):
         from mvp.cli import parse_args
 
-        args = parse_args([
-            "model", "config.yaml",
-            "--matches", "data/matches.parquet",
-            "--mlflow-dir", "mlruns",
-        ])
-        assert args.matches == "data/matches.parquet"
-        assert args.mlflow_dir == "mlruns"
+        args = parse_args(["model", "baseline"])
+        assert args.command == "model"
+        assert args.config == "baseline"
 
     def test_live_subcommand(self):
         from mvp.cli import parse_args

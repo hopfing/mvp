@@ -353,6 +353,51 @@ def add_effective_match_date(df: pl.DataFrame) -> pl.DataFrame:
     return df.drop(temp_cols)
 
 
+def add_partner_workload_rows(df: pl.DataFrame) -> pl.DataFrame:
+    """Add rows for doubles partners so workload features count their appearances.
+
+    For each doubles match row where player_partner_id is not null, creates
+    a corresponding row with player_id = player_partner_id. These rows have
+    null stats (since individual stats aren't available for partners) but
+    preserve the match metadata for workload counting.
+
+    This ensures matches_played(days=30) counts doubles appearances for
+    players who appear as partners, not just as the primary player_id.
+    """
+    # Get doubles rows with partners
+    doubles_with_partner = df.filter(
+        (pl.col("draw_type") == "doubles")
+        & pl.col("player_partner_id").is_not_null()
+    )
+
+    if doubles_with_partner.is_empty():
+        return df
+
+    # Columns to keep from original (match metadata, no stats)
+    metadata_cols = [
+        "match_uid", "tournament_id", "year", "circuit", "draw_type",
+        "round", "round_order", "surface", "indoor", "event_type",
+        "tournament_start_date", "tournament_end_date",
+        "effective_match_date", "won",
+    ]
+
+    # Keep only columns that exist
+    keep_cols = [c for c in metadata_cols if c in df.columns]
+
+    # Create partner rows: swap player_id with player_partner_id
+    partner_rows = doubles_with_partner.select(
+        keep_cols + ["player_partner_id", "player_id", "opp_partner_id", "opp_id"]
+    ).rename({
+        "player_partner_id": "player_id",
+        "player_id": "player_partner_id",
+        "opp_partner_id": "opp_id",
+        "opp_id": "opp_partner_id",
+    })
+
+    # Concat with diagonal_relaxed to handle missing columns (they become null)
+    return pl.concat([df, partner_rows], how="diagonal_relaxed")
+
+
 def validate_tournament_scheduling(df: pl.DataFrame) -> list[dict]:
     """Flag players with impossible scheduling patterns.
 
@@ -484,12 +529,17 @@ class MatchesAggregator(BaseJob):
         combined = fill_tournament_fields(combined)
         combined = add_round_order(combined)
         combined = add_effective_match_date(combined)
+
+        # Step 9: Add partner rows for doubles workload tracking
+        combined = add_partner_workload_rows(combined)
+        logger.info("After partner expansion: %d rows", len(combined))
+
         combined = combined.sort(
             ["effective_match_date", "draw_type", "match_uid", "player_id"],
             nulls_last=True,
         )
 
-        # Step 9: Validation
+        # Step 10: Validation
         warnings = validate_tournament_scheduling(combined)
         for w in warnings:
             if w["type"] == "same_day":

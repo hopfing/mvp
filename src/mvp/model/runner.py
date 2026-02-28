@@ -96,6 +96,13 @@ class ExperimentRunner:
             & (pl.col("effective_match_date") <= self.config.data.date_range.end)
         )
 
+        # Apply additional filters (e.g., draw_type: "singles")
+        # These are applied AFTER feature computation so workload features
+        # include doubles appearances before filtering to singles-only
+        if self.config.data.filters:
+            for col, value in self.config.data.filters.items():
+                df = df.filter(pl.col(col) == value)
+
         # Get feature columns from config
         feature_cols = get_feature_columns(self.config.features.include)
 
