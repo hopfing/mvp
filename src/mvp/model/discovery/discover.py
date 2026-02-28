@@ -49,12 +49,12 @@ def get_all_feature_specs() -> list[str]:
     - All-time variant (no params)
     - Windowed variants for each standard window size
 
-    The engine expects player_/opp_ prefixed specs.
+    For mirrorable features (mirror=True), generates both player_* and opp_* versions.
+    For diff-style features (mirror=False), only generates player_* version.
 
     Returns:
-        List of feature specs like ["player_win_rate", "player_win_rate(days=30)", ...].
+        List of feature specs like ["player_win_rate", "opp_win_rate", ...].
     """
-    # Standard window sizes to try for time-based features
     DAY_WINDOWS = [7, 14, 30, 60, 90, 180, 365]
 
     registry = get_registry()
@@ -64,16 +64,20 @@ def get_all_feature_specs() -> list[str]:
     for name in feature_names:
         feature_def = registry.get(name)
 
+        # Determine which prefixes to use
+        # mirror=True: both player and opp (base features like win_rate)
+        # mirror=False: player only (diff features that already combine both)
+        prefixes = ["player", "opp"] if feature_def.mirror else ["player"]
+
         if not feature_def.params:
-            # No params - just add the feature
-            specs.append(f"player_{name}")
+            for prefix in prefixes:
+                specs.append(f"{prefix}_{name}")
         elif "days" in feature_def.params and len(feature_def.params) == 1:
-            # Days param - generate all-time + windowed variants
-            specs.append(f"player_{name}")  # All-time (days=None)
-            for days in DAY_WINDOWS:
-                specs.append(f"player_{name}(days={days})")
+            for prefix in prefixes:
+                specs.append(f"{prefix}_{name}")  # All-time (days=None)
+                for days in DAY_WINDOWS:
+                    specs.append(f"{prefix}_{name}(days={days})")
         else:
-            # Other/mixed params - use sensible defaults
             default_params = {}
             for param in feature_def.params:
                 if param == "days":
@@ -82,9 +86,11 @@ def get_all_feature_specs() -> list[str]:
                     default_params["min_matches"] = 3
             if default_params:
                 params_str = ", ".join(f"{k}={v}" for k, v in default_params.items())
-                specs.append(f"player_{name}({params_str})")
+                for prefix in prefixes:
+                    specs.append(f"{prefix}_{name}({params_str})")
             else:
-                specs.append(f"player_{name}")
+                for prefix in prefixes:
+                    specs.append(f"{prefix}_{name}")
 
     return specs
 
