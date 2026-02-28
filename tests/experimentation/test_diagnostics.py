@@ -116,3 +116,48 @@ class TestDiagnosticsSegmentAnalysis:
         assert result["ranking_bucket"]["51-100"]["n_matches"] == 1
         assert result["ranking_bucket"]["101-200"]["n_matches"] == 1
         assert result["ranking_bucket"]["201+"]["n_matches"] == 1
+
+
+class TestDiagnosticsCalibration:
+    """Tests for calibration analysis."""
+
+    def test_calibration_buckets_use_actual_mean(self) -> None:
+        """Calibration uses actual mean predicted prob, not midpoint."""
+        # All predictions in 0.50-0.55 bucket, clustered at 0.51
+        y_prob = np.array([0.51, 0.51, 0.52, 0.51, 0.52])
+        y_true = np.array([1, 0, 1, 1, 0])  # 60% actual
+
+        diagnostics = Diagnostics()
+        result = diagnostics._calibration(y_true, y_prob)
+
+        bucket = result["buckets"][0]
+        assert bucket["range"] == [0.50, 0.55]
+        assert 0.51 <= bucket["predicted_mean"] <= 0.52  # actual mean, not 0.525
+        assert bucket["actual"] == 0.6
+        assert bucket["n"] == 5
+
+    def test_calibration_error_calculation(self) -> None:
+        """Calibration error is weighted mean of bucket errors."""
+        # Two buckets with known errors
+        y_prob = np.array([0.52, 0.52, 0.72, 0.72])  # 2 in each bucket
+        y_true = np.array([1, 0, 1, 1])  # 50% and 100% actual
+
+        diagnostics = Diagnostics()
+        result = diagnostics._calibration(y_true, y_prob)
+
+        # Bucket 1: predicted ~0.52, actual 0.50, error ~0.02
+        # Bucket 2: predicted ~0.72, actual 1.00, error ~0.28
+        # Weighted mean: (2*0.02 + 2*0.28) / 4 = 0.15
+        assert "calibration_error" in result
+        assert 0.10 <= result["calibration_error"] <= 0.20
+
+    def test_only_analyzes_probs_above_50(self) -> None:
+        """Only probabilities >= 0.50 are analyzed."""
+        y_prob = np.array([0.45, 0.55, 0.65])
+        y_true = np.array([0, 1, 1])
+
+        diagnostics = Diagnostics()
+        result = diagnostics._calibration(y_true, y_prob)
+
+        total_n = sum(b["n"] for b in result["buckets"])
+        assert total_n == 2  # Only 0.55 and 0.65, not 0.45
