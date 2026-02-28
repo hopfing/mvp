@@ -297,4 +297,4 @@ class TestSchemaVersioning:
         int(SCHEMA_HASH, 16)
 
     def test_class_level_schema_version(self):
-        assert PlayerActivityRecord.SCHEMA_VERSION == "1.0.0"
+        assert PlayerActivityRecord.SCHEMA_VERSION == "1.0.1"
