@@ -65,7 +65,7 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         "config", type=str, help="Config name or path (e.g., 'discover' or 'discover.yaml')"
     )
     exp_parser.add_argument(
-        "--save", type=str, default=None, help="Save recommended config to path"
+        "--output", "-o", type=str, default=None, help="Output path for recommended config"
     )
     exp_parser.add_argument(
         "--verbose", "-v", action="store_true", help="Print progress"
@@ -129,10 +129,12 @@ def cmd_experiment(args: argparse.Namespace) -> int:
 
     result = discovery.run()
 
-    if args.save and result.selected_features:
+    if result.selected_features:
+        output_path = args.output or "models/discovered.yaml"
         discovery._last_result = result
-        discovery.save_config(args.save)
-        print(f"Saved recommended config to: {args.save}")
+        discovery.save_config(output_path)
+        print(f"\nSaved config to: {output_path}")
+        print(f"Run with: python -m mvp model discovered")
 
     return 0
 
