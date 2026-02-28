@@ -125,9 +125,13 @@ class FeatureEngine:
             DataFrame with match data and computed feature columns.
             Feature columns are prefixed with "player_" and suffixed with
             parameter values (e.g., "player_win_rate_30d").
+            Features with mirror=True also get "opp_*" columns via self-join.
         """
         # Load matches data
         df = pl.read_parquet(self.matches_path)
+
+        # Track columns to mirror
+        columns_to_mirror: list[str] = []
 
         # Compute each feature
         for spec in feature_specs:
@@ -136,12 +140,56 @@ class FeatureEngine:
 
             # Build column name from params
             col_name = self._build_column_name(name, params)
+            player_col = f"player_{col_name}"
 
             # Compute the feature expression
             expr = feature_def.func(**params)
 
             # Add to DataFrame with player_ prefix
-            df = df.with_columns(expr.alias(f"player_{col_name}"))
+            df = df.with_columns(expr.alias(player_col))
+
+            # Track for mirroring if enabled
+            if feature_def.mirror:
+                columns_to_mirror.append(player_col)
+
+        # Mirror columns to create opp_* versions
+        if columns_to_mirror:
+            df = self._mirror_features(df, columns_to_mirror)
+
+        return df
+
+    def _mirror_features(
+        self, df: pl.DataFrame, player_columns: list[str]
+    ) -> pl.DataFrame:
+        """Create opp_* columns by self-joining on match_uid.
+
+        For each player_* column, creates an opp_* column containing the
+        opponent's value of that feature within the same match.
+
+        Args:
+            df: DataFrame with player_* feature columns.
+            player_columns: List of player_* column names to mirror.
+
+        Returns:
+            DataFrame with additional opp_* columns.
+        """
+        # Create lookup table: for each (match_uid, player_id), get the feature values
+        # We'll join this back using opp_id to get opponent's features
+        lookup_cols = ["match_uid", "player_id"] + player_columns
+        lookup = df.select(lookup_cols)
+
+        # Rename player_* to opp_* and player_id to a join key
+        rename_map = {col: f"opp_{col[7:]}" for col in player_columns}
+        rename_map["player_id"] = "_opp_lookup_id"
+        lookup = lookup.rename(rename_map)
+
+        # Join on match_uid and opp_id = _opp_lookup_id
+        df = df.join(
+            lookup,
+            left_on=["match_uid", "opp_id"],
+            right_on=["match_uid", "_opp_lookup_id"],
+            how="left",
+        )
 
         return df
 

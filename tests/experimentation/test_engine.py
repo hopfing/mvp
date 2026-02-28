@@ -163,3 +163,74 @@ class TestFeatureEngineCompute:
 
         with pytest.raises(KeyError, match="not found"):
             engine.compute(["unknown_feature(days=30)"])
+
+
+class TestFeatureEngineMirroring:
+    """Tests for opponent mirroring functionality."""
+
+    def test_mirror_creates_opp_column(
+        self, matches_parquet: Path, tmp_path: Path, test_feature_registry
+    ):
+        """Mirroring creates opp_* column from player_* via match_uid join."""
+        cache_dir = tmp_path / "cache"
+        engine = FeatureEngine(matches_path=matches_parquet, cache_dir=cache_dir)
+
+        result = engine.compute(["test_win_rate(days=30)"])
+
+        # Should have both player_ and opp_ columns
+        assert "player_test_win_rate_30d" in result.columns
+        assert "opp_test_win_rate_30d" in result.columns
+
+    def test_mirror_values_are_correct(
+        self, matches_parquet: Path, tmp_path: Path, test_feature_registry
+    ):
+        """Opponent feature value matches player's value from same match."""
+        cache_dir = tmp_path / "cache"
+        engine = FeatureEngine(matches_path=matches_parquet, cache_dir=cache_dir)
+
+        result = engine.compute(["test_win_rate(days=30)"])
+
+        # For match m4 (A vs B on day 15):
+        # - A's row should have opp_test_win_rate_30d = B's player_test_win_rate_30d
+        # - B's row should have opp_test_win_rate_30d = A's player_test_win_rate_30d
+        m4_a = result.filter(
+            (pl.col("match_uid") == "m4") & (pl.col("player_id") == "A")
+        )
+        m4_b = result.filter(
+            (pl.col("match_uid") == "m4") & (pl.col("player_id") == "B")
+        )
+
+        # A's opp_* should equal B's player_*
+        assert m4_a["opp_test_win_rate_30d"][0] == m4_b["player_test_win_rate_30d"][0]
+        # B's opp_* should equal A's player_*
+        assert m4_b["opp_test_win_rate_30d"][0] == m4_a["player_test_win_rate_30d"][0]
+
+    def test_no_mirror_when_disabled(self, tmp_path: Path):
+        """Features with mirror=False don't get opp_* columns."""
+        registry = get_registry()
+        registry.clear()
+
+        @feature(name="no_mirror_feature", params=["days"], mirror=False)
+        def no_mirror_feature(days: int) -> pl.Expr:
+            from mvp.experimentation.primitives import rolling_mean
+            return rolling_mean("won", days=days, group_by="player_id")
+
+        # Create test data
+        df = pl.DataFrame({
+            "match_uid": ["m1", "m1"],
+            "player_id": ["A", "B"],
+            "opp_id": ["B", "A"],
+            "effective_match_date": [date(2024, 1, 1), date(2024, 1, 1)],
+            "won": [True, False],
+        })
+        matches_path = tmp_path / "matches.parquet"
+        df.write_parquet(matches_path)
+        cache_dir = tmp_path / "cache"
+
+        engine = FeatureEngine(matches_path=matches_path, cache_dir=cache_dir)
+        result = engine.compute(["no_mirror_feature(days=30)"])
+
+        assert "player_no_mirror_feature_30d" in result.columns
+        assert "opp_no_mirror_feature_30d" not in result.columns
+
+        registry.clear()
