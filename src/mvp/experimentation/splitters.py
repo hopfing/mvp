@@ -78,3 +78,38 @@ class WalkForwardSplitter(BaseSplitter):
             test_idx = indices[test_start:test_end]
 
             yield train_idx, test_idx
+
+
+class ExpandingWindowSplitter(BaseSplitter):
+    """Expanding window validation where training grows by fixed step."""
+
+    def __init__(
+        self,
+        initial_train_size: int,
+        step_size: int,
+        date_col: str = "effective_match_date",
+    ) -> None:
+        self.initial_train_size = initial_train_size
+        self.step_size = step_size
+        self.date_col = date_col
+
+    def split(
+        self, df: pl.DataFrame
+    ) -> Iterator[tuple[list[int], list[int]]]:
+        """Generate expanding window splits."""
+        sorted_df = df.with_row_index("_idx").sort(self.date_col)
+        indices = sorted_df["_idx"].to_list()
+
+        n_total = len(indices)
+        train_end = self.initial_train_size
+
+        while train_end + self.step_size <= n_total:
+            test_start = train_end
+            test_end = train_end + self.step_size
+
+            train_idx = indices[:train_end]
+            test_idx = indices[test_start:test_end]
+
+            yield train_idx, test_idx
+
+            train_end += self.step_size
