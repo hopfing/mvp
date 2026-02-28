@@ -314,3 +314,64 @@ class TestFeatureEngineCaching:
 
         # Results should be different (more rows)
         assert len(result2) > len(result1)
+
+
+class TestFeatureEngineCoverageReport:
+    """Tests for coverage_report() method."""
+
+    def test_coverage_report_returns_stats(
+        self, matches_parquet: Path, tmp_path: Path, test_feature_registry
+    ):
+        """Coverage report returns statistics about computed features."""
+        cache_dir = tmp_path / "cache"
+        engine = FeatureEngine(matches_path=matches_parquet, cache_dir=cache_dir)
+
+        result = engine.compute(["test_win_rate(days=30)"])
+        report = engine.coverage_report(result)
+
+        # Should have entries for each feature column
+        assert "player_test_win_rate_30d" in report
+        assert "opp_test_win_rate_30d" in report
+
+        # Each entry should have null_count and null_pct
+        player_stats = report["player_test_win_rate_30d"]
+        assert "null_count" in player_stats
+        assert "null_pct" in player_stats
+        assert "total_rows" in player_stats
+
+    def test_coverage_report_computes_correct_stats(self, tmp_path: Path):
+        """Coverage report computes correct null statistics."""
+        registry = get_registry()
+        registry.clear()
+
+        @feature(name="simple_feature", params=[], mirror=False)
+        def simple_feature() -> pl.Expr:
+            # Return a column that has some nulls
+            return pl.lit(None).cast(pl.Float64)
+
+        # Create test data
+        df = pl.DataFrame({
+            "match_uid": ["m1", "m1", "m2", "m2"],
+            "player_id": ["A", "B", "A", "B"],
+            "opp_id": ["B", "A", "B", "A"],
+            "effective_match_date": [
+                date(2024, 1, 1), date(2024, 1, 1),
+                date(2024, 1, 5), date(2024, 1, 5),
+            ],
+            "won": [True, False, True, False],
+        })
+        matches_path = tmp_path / "matches.parquet"
+        df.write_parquet(matches_path)
+        cache_dir = tmp_path / "cache"
+
+        engine = FeatureEngine(matches_path=matches_path, cache_dir=cache_dir)
+        result = engine.compute(["simple_feature"])
+        report = engine.coverage_report(result)
+
+        # All values should be null
+        stats = report["player_simple_feature"]
+        assert stats["null_count"] == 4
+        assert stats["null_pct"] == 100.0
+        assert stats["total_rows"] == 4
+
+        registry.clear()

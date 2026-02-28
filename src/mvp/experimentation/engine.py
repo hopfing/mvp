@@ -289,3 +289,39 @@ class FeatureEngine:
         # Generic fallback: join param values with underscores
         suffix = "_".join(str(v) for v in params.values())
         return f"{name}_{suffix}"
+
+    def coverage_report(self, df: pl.DataFrame) -> dict[str, dict[str, Any]]:
+        """Generate a coverage report for computed features.
+
+        Analyzes the computed feature columns (player_* and opp_*) and reports
+        null statistics for each.
+
+        Args:
+            df: DataFrame with computed feature columns.
+
+        Returns:
+            Dictionary mapping column names to statistics:
+            - null_count: Number of null values
+            - null_pct: Percentage of null values (0-100)
+            - total_rows: Total number of rows
+        """
+        report: dict[str, dict[str, Any]] = {}
+        total_rows = len(df)
+
+        # Find all feature columns (player_* and opp_*)
+        feature_cols = [
+            col for col in df.columns
+            if col.startswith("player_") or col.startswith("opp_")
+        ]
+
+        for col in feature_cols:
+            null_count = df[col].null_count()
+            null_pct = (null_count / total_rows * 100) if total_rows > 0 else 0.0
+
+            report[col] = {
+                "null_count": null_count,
+                "null_pct": round(null_pct, 2),
+                "total_rows": total_rows,
+            }
+
+        return report
