@@ -259,3 +259,106 @@ class TestDiagnosticsTemporalStability:
         # 2023 accuracy: 50%, drift = 0.25
         assert result["overall_accuracy"] == 0.75
         assert result["temporal_drift"] == 0.25
+
+
+class TestDiagnosticsComputeAll:
+    """Tests for compute_all orchestration."""
+
+    def test_compute_all_combines_folds(self) -> None:
+        """compute_all aggregates predictions from multiple folds."""
+        fold1_df = pl.DataFrame({
+            "circuit": ["tour", "tour"],
+            "surface": ["Hard", "Clay"],
+            "round": ["R32", "R16"],
+            "player_ranking": [10, 50],
+            "effective_match_date": ["2023-01-01", "2023-01-02"],
+            "match_uid": ["m1", "m2"],
+            "tournament_name": ["T1", "T2"],
+            "player_name": ["A", "C"],
+            "opp_name": ["B", "D"],
+        })
+        fold2_df = pl.DataFrame({
+            "circuit": ["chal", "chal"],
+            "surface": ["Hard", "Hard"],
+            "round": ["R32", "QF"],
+            "player_ranking": [100, 200],
+            "effective_match_date": ["2023-02-01", "2023-02-02"],
+            "match_uid": ["m3", "m4"],
+            "tournament_name": ["T3", "T4"],
+            "player_name": ["E", "G"],
+            "opp_name": ["F", "H"],
+        })
+
+        predictions = [
+            {
+                "df": fold1_df,
+                "y_true": np.array([1, 0]),
+                "y_prob": np.array([0.7, 0.6]),
+            },
+            {
+                "df": fold2_df,
+                "y_true": np.array([1, 1]),
+                "y_prob": np.array([0.8, 0.75]),
+            },
+        ]
+
+        diagnostics = Diagnostics()
+        result = diagnostics.compute_all(predictions)
+
+        # Verify result is DiagnosticResults
+        assert isinstance(result, DiagnosticResults)
+
+        # Verify segments include data from both folds
+        assert "circuit" in result.segments
+        assert "tour" in result.segments["circuit"]
+        assert "chal" in result.segments["circuit"]
+        assert result.segments["circuit"]["tour"]["n_matches"] == 2
+        assert result.segments["circuit"]["chal"]["n_matches"] == 2
+
+    def test_compute_all_returns_complete_diagnostics(self) -> None:
+        """compute_all returns all diagnostic components."""
+        df = pl.DataFrame({
+            "circuit": ["tour"] * 4,
+            "surface": ["Hard"] * 4,
+            "round": ["R32", "R16", "QF", "SF"],
+            "player_ranking": [10, 20, 30, 40],
+            "effective_match_date": ["2023-01-01", "2023-01-02", "2023-01-03", "2023-01-04"],
+            "match_uid": ["m1", "m2", "m3", "m4"],
+            "tournament_name": ["T1", "T1", "T1", "T1"],
+            "player_name": ["A", "B", "C", "D"],
+            "opp_name": ["X", "Y", "Z", "W"],
+        })
+
+        predictions = [
+            {
+                "df": df,
+                "y_true": np.array([1, 0, 1, 1]),
+                "y_prob": np.array([0.7, 0.6, 0.8, 0.75]),
+            },
+        ]
+
+        diagnostics = Diagnostics()
+        result = diagnostics.compute_all(predictions)
+
+        # All components should be present
+        assert result.segments is not None
+        assert result.calibration is not None
+        assert result.errors is not None
+        assert result.temporal is not None
+
+        # Verify metrics can be generated
+        metrics = result.metrics
+        assert isinstance(metrics, dict)
+        assert len(metrics) > 0
+
+    def test_compute_all_empty_predictions_list(self) -> None:
+        """compute_all handles empty predictions list gracefully."""
+        diagnostics = Diagnostics()
+        result = diagnostics.compute_all([])
+
+        assert isinstance(result, DiagnosticResults)
+        # Empty results should still have structure
+        assert result.segments == {}
+        assert result.calibration is not None
+        assert result.errors is not None
+        assert result.temporal is not None

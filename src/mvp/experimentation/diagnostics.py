@@ -309,6 +309,52 @@ class Diagnostics:
             "temporal_drift": temporal_drift,
         }
 
+    def compute_all(
+        self, predictions: list[dict[str, Any]]
+    ) -> DiagnosticResults:
+        """Compute all diagnostics on aggregated predictions.
+
+        Args:
+            predictions: List of dicts with keys "df", "y_true", "y_prob"
+                for each fold.
+
+        Returns:
+            DiagnosticResults with all computed diagnostics.
+        """
+        if not predictions:
+            return DiagnosticResults(
+                segments={},
+                calibration=self._calibration(np.array([]), np.array([])),
+                errors=self._error_analysis(
+                    pl.DataFrame(), np.array([]), np.array([])
+                ),
+                temporal=self._temporal_stability(
+                    pl.DataFrame(), np.array([]), np.array([])
+                ),
+            )
+
+        dfs = [p["df"] for p in predictions]
+        y_trues = [p["y_true"] for p in predictions]
+        y_probs = [p["y_prob"] for p in predictions]
+
+        combined_df = pl.concat(dfs)
+        combined_y_true = np.concatenate(y_trues)
+        combined_y_prob = np.concatenate(y_probs)
+
+        segments = self._segment_metrics(combined_df, combined_y_true, combined_y_prob)
+        calibration = self._calibration(combined_y_true, combined_y_prob)
+        errors = self._error_analysis(combined_df, combined_y_true, combined_y_prob)
+        temporal = self._temporal_stability(
+            combined_df, combined_y_true, combined_y_prob
+        )
+
+        return DiagnosticResults(
+            segments=segments,
+            calibration=calibration,
+            errors=errors,
+            temporal=temporal,
+        )
+
 
 @dataclass
 class DiagnosticResults:
