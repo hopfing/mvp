@@ -1,16 +1,16 @@
 """Player activity staged schema."""
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import ClassVar
 
-from pydantic import BaseModel, computed_field, field_validator
+from pydantic import BaseModel, computed_field, field_validator, model_validator
 
 from mvp.atptour.mappings import create_match_uid, map_player_id, normalize_round
 from mvp.atptour.schema_helpers import empty_to_none, parse_indoor
 from mvp.common.enums import ActivityEventType, Circuit, Round
 from mvp.common.schema_hash import compute_schema_hash
 
-SCHEMA_VERSION = "1.0.0"
+SCHEMA_VERSION = "1.0.1"
 
 
 def _parse_tournament_date(v) -> date | None:
@@ -128,6 +128,19 @@ class PlayerActivityRecord(BaseModel):
         if v is not None and v not in ("W", "L"):
             raise ValueError(f"win_loss must be 'W', 'L', or None, got '{v}'")
         return v
+
+    @model_validator(mode="after")
+    def _fix_invalid_end_date(self):
+        """Fix obviously invalid tournament_end_date (year < 1900).
+
+        Estimates end_date as start_date + 6 days if start_date is valid.
+        """
+        if self.tournament_end_date and self.tournament_end_date.year < 1900:
+            if self.tournament_start_date:
+                self.tournament_end_date = self.tournament_start_date + timedelta(days=6)
+            else:
+                self.tournament_end_date = None
+        return self
 
     @computed_field
     @property

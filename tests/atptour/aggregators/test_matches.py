@@ -269,30 +269,56 @@ class TestBioJoin:
 
 class TestValidation:
     def test_clean_data_passes(self):
-        """Normal data (1-2 tournaments per week) should produce no warnings."""
+        """Normal data (separate days per tournament) should produce no warnings."""
         from mvp.atptour.aggregators.matches import validate_tournament_scheduling
+        from datetime import datetime
 
         df = pl.DataFrame({
             "player_id": ["A001", "A001", "A001"],
             "tournament_id": ["100", "200", "300"],
-            "tournament_end_date": [date(2024, 1, 7), date(2024, 2, 4), date(2024, 3, 3)],
+            "effective_match_date": [
+                datetime(2024, 1, 7),
+                datetime(2024, 2, 4),
+                datetime(2024, 3, 3),
+            ],
         })
         warnings = validate_tournament_scheduling(df)
         assert len(warnings) == 0
 
-    def test_suspicious_scheduling_flagged(self):
-        """3+ tournaments ending within 3 days should be flagged."""
+    def test_same_day_different_tournaments_flagged(self):
+        """Player in 2 tournaments on same day should be flagged."""
         from mvp.atptour.aggregators.matches import validate_tournament_scheduling
+        from datetime import datetime
 
         df = pl.DataFrame({
-            "player_id": ["A001"] * 3,
-            "tournament_id": ["100", "200", "300"],
-            "tournament_end_date": [date(2024, 1, 5), date(2024, 1, 6), date(2024, 1, 7)],
+            "player_id": ["A001", "A001"],
+            "tournament_id": ["100", "200"],
+            "effective_match_date": [datetime(2024, 1, 5), datetime(2024, 1, 5)],
         })
         warnings = validate_tournament_scheduling(df)
         assert len(warnings) == 1
+        assert warnings[0]["type"] == "same_day"
         assert warnings[0]["player_id"] == "A001"
-        assert len(warnings[0]["tournament_ids"]) == 3
+        assert set(warnings[0]["tournament_ids"]) == {"100", "200"}
+
+    def test_interleaved_tournaments_flagged(self):
+        """A, B, A pattern within 7 days should be flagged."""
+        from mvp.atptour.aggregators.matches import validate_tournament_scheduling
+        from datetime import datetime
+
+        df = pl.DataFrame({
+            "player_id": ["A001", "A001", "A001"],
+            "tournament_id": ["100", "200", "100"],
+            "effective_match_date": [
+                datetime(2024, 1, 1),
+                datetime(2024, 1, 3),
+                datetime(2024, 1, 5),
+            ],
+        })
+        warnings = validate_tournament_scheduling(df)
+        assert len(warnings) == 1
+        assert warnings[0]["type"] == "interleaved"
+        assert warnings[0]["player_id"] == "A001"
 
 
 class TestMatchesAggregator:
@@ -599,6 +625,8 @@ class TestEffectiveMatchDate:
             "round_order": [12],
             "tournament_end_date": [None],
             "scheduled_datetime": [None],
+            "circuit": ["tour"],
+            "match_uid": ["test_match"],
         }).cast({"scheduled_datetime": pl.Datetime, "tournament_end_date": pl.Date})
 
         with pytest.raises(ValueError, match="null effective_match_date"):
@@ -616,6 +644,8 @@ class TestEffectiveMatchDate:
             "round_order": [None],
             "tournament_end_date": [date(2024, 3, 10)],
             "scheduled_datetime": [None],
+            "circuit": ["tour"],
+            "match_uid": ["test_match"],
         }).cast({
             "scheduled_datetime": pl.Datetime,
             "tournament_end_date": pl.Date,

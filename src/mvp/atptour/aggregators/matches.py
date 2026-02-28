@@ -153,6 +153,23 @@ def join_player_bio(matches: pl.DataFrame, bio: pl.DataFrame) -> pl.DataFrame:
     return result
 
 
+def fill_tournament_dates(df: pl.DataFrame) -> pl.DataFrame:
+    """Fill tournament_start_date and tournament_end_date within each tournament.
+
+    If any row in a tournament has a date, all rows get that date.
+    Only tournaments with ALL nulls remain null.
+    """
+    group_keys = ["tournament_id", "year"]
+    return df.with_columns([
+        pl.col("tournament_start_date")
+        .fill_null(pl.col("tournament_start_date").max().over(group_keys))
+        .alias("tournament_start_date"),
+        pl.col("tournament_end_date")
+        .fill_null(pl.col("tournament_end_date").max().over(group_keys))
+        .alias("tournament_end_date"),
+    ])
+
+
 def add_round_order(df: pl.DataFrame) -> pl.DataFrame:
     """Add round_order column from the round column using ROUND_ORDER mapping."""
     return df.with_columns(
@@ -264,39 +281,93 @@ def add_effective_match_date(df: pl.DataFrame) -> pl.DataFrame:
     return df.drop(temp_cols)
 
 
-def validate_tournament_scheduling(
-    df: pl.DataFrame, window_days: int = 3, threshold: int = 3
-) -> list[dict]:
-    """Flag players with suspiciously many tournaments in a short window.
+def validate_tournament_scheduling(df: pl.DataFrame) -> list[dict]:
+    """Flag players with impossible scheduling patterns.
 
-    Returns a list of warning dicts with player_id, tournament_ids, and dates.
+    Detects:
+    1. Same effective_match_date, different tournaments
+    2. Interleaved tournaments (A, B, A pattern within a short window)
+
+    Returns a list of warning dicts describing the conflicts.
     """
     warnings: list[dict] = []
 
-    pts = df.select(["player_id", "tournament_id", "tournament_end_date"]).unique()
-    pts = pts.filter(pl.col("tournament_end_date").is_not_null())
+    # Get player-match-date-tournament combinations
+    matches = (
+        df.filter(pl.col("effective_match_date").is_not_null())
+        .select(["player_id", "tournament_id", "effective_match_date"])
+        .unique()
+        .sort(["player_id", "effective_match_date"])
+    )
 
-    for pid in pts["player_id"].unique().to_list():
-        player = pts.filter(pl.col("player_id") == pid).sort("tournament_end_date")
-        tourneys = player.select(["tournament_id", "tournament_end_date"]).rows()
+    # Check for invalid dates (year < 1 causes Python conversion errors)
+    bad_dates = df.filter(pl.col("effective_match_date").dt.year() < 1)
+    if bad_dates.height > 0:
+        logger.error(
+            "Found %d rows with invalid effective_match_date (year < 1):",
+            bad_dates.height,
+        )
+        # Use Polars to extract without Python date conversion
+        sample = bad_dates.head(20).with_columns(
+            pl.col("effective_match_date").cast(pl.Utf8).alias("date_str")
+        )
+        for pid, tid, yr, date_str in zip(
+            sample["player_id"].to_list(),
+            sample["tournament_id"].to_list(),
+            sample["year"].to_list(),
+            sample["date_str"].to_list(),
+        ):
+            logger.error(
+                "  player=%s, tournament=%s, year=%s, date=%s", pid, tid, yr, date_str
+            )
+        return warnings  # Skip validation, can't process bad dates
 
-        for i, (tid_i, date_i) in enumerate(tourneys):
-            cluster_tids = [tid_i]
-            cluster_dates = [date_i]
-            for j in range(i + 1, len(tourneys)):
-                tid_j, date_j = tourneys[j]
-                if (date_j - date_i).days <= window_days:
-                    cluster_tids.append(tid_j)
-                    cluster_dates.append(date_j)
-                else:
-                    break
-            if len(cluster_tids) >= threshold:
+    # Check 1: Same day, different tournaments
+    same_day = (
+        matches.group_by(["player_id", "effective_match_date"])
+        .agg(pl.col("tournament_id").n_unique().alias("n_tournaments"))
+        .filter(pl.col("n_tournaments") > 1)
+    )
+    for row in same_day.iter_rows(named=True):
+        tids = (
+            matches.filter(
+                (pl.col("player_id") == row["player_id"])
+                & (pl.col("effective_match_date") == row["effective_match_date"])
+            )["tournament_id"]
+            .unique()
+            .to_list()
+        )
+        warnings.append({
+            "type": "same_day",
+            "player_id": row["player_id"],
+            "date": row["effective_match_date"],
+            "tournament_ids": tids,
+        })
+
+    # Check 2: Interleaved tournaments (A on day N, B on day N+1, A on day N+2)
+    for pid in matches["player_id"].unique().to_list():
+        player_matches = (
+            matches.filter(pl.col("player_id") == pid)
+            .sort("effective_match_date")
+            .select(["tournament_id", "effective_match_date"])
+            .rows()
+        )
+        if len(player_matches) < 3:
+            continue
+
+        for i in range(len(player_matches) - 2):
+            tid_a, date_a = player_matches[i]
+            tid_b, date_b = player_matches[i + 1]
+            tid_c, date_c = player_matches[i + 2]
+
+            # A, B, A pattern within 7 days
+            if tid_a == tid_c and tid_a != tid_b and (date_c - date_a).days <= 7:
                 warnings.append({
+                    "type": "interleaved",
                     "player_id": pid,
-                    "tournament_ids": cluster_tids,
-                    "dates": cluster_dates,
+                    "pattern": [(tid_a, date_a), (tid_b, date_b), (tid_c, date_c)],
                 })
-                break  # One warning per player is enough
+                break  # One warning per player
 
     return warnings
 
@@ -335,7 +406,9 @@ class MatchesAggregator(BaseJob):
             combined = join_player_bio(combined, bio)
             logger.info("Bio joined")
 
-        # Step 8: Round order + effective match date + sort
+        # Step 8: Fill tournament dates within each tournament, then compute
+        # effective match date. Any row in a tournament can provide the date.
+        combined = fill_tournament_dates(combined)
         combined = add_round_order(combined)
         combined = add_effective_match_date(combined)
         combined = combined.sort(
@@ -346,12 +419,20 @@ class MatchesAggregator(BaseJob):
         # Step 9: Validation
         warnings = validate_tournament_scheduling(combined)
         for w in warnings:
-            logger.warning(
-                "Suspicious tournament scheduling: player=%s, tournaments=%s, end_dates=%s",
-                w["player_id"],
-                w["tournament_ids"],
-                w["dates"],
-            )
+            if w["type"] == "same_day":
+                logger.warning(
+                    "Impossible scheduling: player %s in %d tournaments on %s: %s",
+                    w["player_id"],
+                    len(w["tournament_ids"]),
+                    w["date"],
+                    w["tournament_ids"],
+                )
+            elif w["type"] == "interleaved":
+                logger.warning(
+                    "Interleaved tournaments for player %s: %s",
+                    w["player_id"],
+                    w["pattern"],
+                )
 
         return combined
 
