@@ -176,3 +176,31 @@ def cumulative_mean(
         .over(group_by, order_by=date_col)
     )
     return cum_sum / cum_count
+
+
+def ratio_feature(
+    numerator_col: str,
+    denominator_col: str,
+    days: int | None = None,
+    group_by: str | list[str] = "player_id",
+) -> pl.Expr:
+    """Ratio of two columns (windowed or all-time).
+
+    Computes sum(numerator) / sum(denominator) with null when denominator is 0.
+
+    Args:
+        numerator_col: Column for the numerator.
+        denominator_col: Column for the denominator.
+        days: Window size in days. If None, uses all-time cumulative.
+        group_by: Column(s) to group by.
+
+    Returns:
+        Polars expression computing the ratio.
+    """
+    if days is None:
+        num = cumulative_sum(numerator_col, group_by=group_by)
+        denom = cumulative_sum(denominator_col, group_by=group_by)
+    else:
+        num = rolling_sum(numerator_col, days=days, group_by=group_by)
+        denom = rolling_sum(denominator_col, days=days, group_by=group_by)
+    return pl.when(denom > 0).then(num / denom).otherwise(None)

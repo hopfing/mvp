@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import polars as pl
 
-from mvp.model.primitives import cumulative_sum, rolling_sum
+from mvp.model.primitives import ratio_feature
 from mvp.model.registry import feature
 
 
@@ -15,22 +15,49 @@ from mvp.model.registry import feature
     mirror=True,
 )
 def svc_first_win_pct(days: int | None = None) -> pl.Expr:
-    """First serve points won percentage.
+    """First serve points won percentage."""
+    return ratio_feature("svc_first_serve_pts_won", "svc_first_serve_pts_played", days)
 
-    Computes sum(svc_first_serve_pts_won) / sum(svc_first_serve_pts_played)
-    over the window (or all-time if days is None).
 
-    Args:
-        days: Window size in days. If None, uses all-time cumulative.
+@feature(
+    name="svc_second_win_pct",
+    params=["days"],
+    description="Second serve points won percentage (windowed or all-time)",
+    mirror=True,
+)
+def svc_second_win_pct(days: int | None = None) -> pl.Expr:
+    """Second serve points won percentage."""
+    return ratio_feature("svc_second_serve_pts_won", "svc_second_serve_pts_played", days)
 
-    Returns:
-        Polars expression computing the first serve win percentage.
-    """
-    if days is None:
-        won = cumulative_sum("svc_first_serve_pts_won", group_by="player_id")
-        played = cumulative_sum("svc_first_serve_pts_played", group_by="player_id")
-    else:
-        won = rolling_sum("svc_first_serve_pts_won", days=days, group_by="player_id")
-        played = rolling_sum("svc_first_serve_pts_played", days=days, group_by="player_id")
-    # Use when to avoid division by zero, returning null when no data
-    return pl.when(played > 0).then(won / played).otherwise(None)
+
+@feature(
+    name="ace_rate",
+    params=["days"],
+    description="Aces per serve point (windowed or all-time)",
+    mirror=True,
+)
+def ace_rate(days: int | None = None) -> pl.Expr:
+    """Aces per serve point."""
+    return ratio_feature("svc_aces", "svc_first_serve_pts_played", days)
+
+
+@feature(
+    name="df_rate",
+    params=["days"],
+    description="Double faults per serve point (windowed or all-time)",
+    mirror=True,
+)
+def df_rate(days: int | None = None) -> pl.Expr:
+    """Double faults per serve point."""
+    return ratio_feature("svc_double_faults", "svc_first_serve_pts_played", days)
+
+
+@feature(
+    name="bp_save_pct",
+    params=["days"],
+    description="Break points saved percentage (windowed or all-time)",
+    mirror=True,
+)
+def bp_save_pct(days: int | None = None) -> pl.Expr:
+    """Break points saved percentage."""
+    return ratio_feature("svc_bp_saved", "svc_bp_faced", days)

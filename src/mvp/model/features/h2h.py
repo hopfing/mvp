@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import polars as pl
 
-from mvp.model.primitives import cumulative_sum, rolling_sum
+from mvp.model.primitives import (
+    cumulative_count,
+    cumulative_sum,
+    rolling_count,
+    rolling_sum,
+)
 from mvp.model.registry import feature
 
 
@@ -28,3 +33,21 @@ def h2h_wins(days: int | None = None) -> pl.Expr:
     if days is None:
         return cumulative_sum("won", group_by=["player_id", "opp_id"])
     return rolling_sum("won", days=days, group_by=["player_id", "opp_id"])
+
+
+@feature(
+    name="h2h_win_pct",
+    params=["days"],
+    description="Win percentage against specific opponent (windowed or all-time)",
+    mirror=True,
+)
+def h2h_win_pct(days: int | None = None) -> pl.Expr:
+    """Win percentage against specific opponent."""
+    group_by = ["player_id", "opp_id"]
+    if days is None:
+        wins = cumulative_sum("won", group_by=group_by)
+        matches = cumulative_count(group_by=group_by)
+    else:
+        wins = rolling_sum("won", days=days, group_by=group_by)
+        matches = rolling_count(days=days, group_by=group_by)
+    return pl.when(matches > 0).then(wins / matches).otherwise(None)

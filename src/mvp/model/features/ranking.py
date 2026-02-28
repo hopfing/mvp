@@ -22,3 +22,43 @@ def ranking_points_diff() -> pl.Expr:
         Polars expression computing player_rankings_points - opp_rankings_points.
     """
     return pl.col("player_rankings_points") - pl.col("opp_rankings_points")
+
+
+@feature(
+    name="ranking_rank_diff",
+    params=[],
+    description="Difference between player and opponent ranking (lower is better)",
+    mirror=False,
+)
+def ranking_rank_diff() -> pl.Expr:
+    """Difference in rankings (player_rank - opp_rank).
+
+    Negative means player is ranked higher (better).
+    """
+    return pl.col("player_rankings_rank") - pl.col("opp_rankings_rank")
+
+
+@feature(
+    name="ranking_ratio",
+    params=[],
+    description="Ratio of player rank to opponent rank",
+    mirror=False,
+)
+def ranking_ratio() -> pl.Expr:
+    """Ratio of rankings (player_rank / opp_rank).
+
+    < 1 means player is ranked higher (better).
+    """
+    return pl.col("player_rankings_rank") / pl.col("opp_rankings_rank")
+
+
+@feature(
+    name="ranking_ratio_capped",
+    params=["cap"],
+    description="Ranking ratio capped at specified value (reduces outlier influence)",
+    mirror=False,
+)
+def ranking_ratio_capped(cap: float = 3.0) -> pl.Expr:
+    """Ranking ratio capped at specified value."""
+    ratio = pl.col("player_rankings_rank") / pl.col("opp_rankings_rank")
+    return ratio.clip(upper_bound=cap)
