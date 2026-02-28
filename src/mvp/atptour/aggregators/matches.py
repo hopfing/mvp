@@ -170,6 +170,26 @@ def fill_tournament_dates(df: pl.DataFrame) -> pl.DataFrame:
     ])
 
 
+def fill_tournament_fields(df: pl.DataFrame) -> pl.DataFrame:
+    """Fill tournament-level fields within each tournament group.
+
+    For surface, indoor, event_type: if any row in a tournament has a value,
+    propagate it to all rows. Only tournaments with ALL nulls remain null.
+    """
+    group_keys = ["tournament_id", "year"]
+    return df.with_columns([
+        pl.col("surface")
+        .fill_null(pl.col("surface").drop_nulls().first().over(group_keys))
+        .alias("surface"),
+        pl.col("indoor")
+        .fill_null(pl.col("indoor").drop_nulls().first().over(group_keys))
+        .alias("indoor"),
+        pl.col("event_type")
+        .fill_null(pl.col("event_type").drop_nulls().first().over(group_keys))
+        .alias("event_type"),
+    ])
+
+
 def add_round_order(df: pl.DataFrame) -> pl.DataFrame:
     """Add round_order column from the round column using ROUND_ORDER mapping."""
     return df.with_columns(
@@ -458,9 +478,10 @@ class MatchesAggregator(BaseJob):
             combined = join_player_bio(combined, bio)
             logger.info("Bio joined")
 
-        # Step 8: Fill tournament dates within each tournament, then compute
-        # effective match date. Any row in a tournament can provide the date.
+        # Step 8: Fill tournament-level fields within each tournament, then compute
+        # effective match date. Any row in a tournament can provide the values.
         combined = fill_tournament_dates(combined)
+        combined = fill_tournament_fields(combined)
         combined = add_round_order(combined)
         combined = add_effective_match_date(combined)
         combined = combined.sort(
@@ -520,7 +541,11 @@ class MatchesAggregator(BaseJob):
     def _enrich_from_activity(
         self, matches: pl.DataFrame, activity: pl.DataFrame
     ) -> pl.DataFrame:
-        """LEFT JOIN Activity rank fields onto overlapping tournament matches."""
+        """LEFT JOIN Activity fields onto overlapping tournament matches.
+
+        Enriches rank fields AND tournament-level fields (surface, indoor, etc.)
+        that may be missing from per-tournament matches but present in activity.
+        """
         if activity.is_empty():
             return matches.with_columns([
                 pl.lit(None).cast(pl.Int64).alias("activity_rank"),
@@ -535,13 +560,16 @@ class MatchesAggregator(BaseJob):
             pl.col("points").alias("activity_points"),
             pl.col("tournament_start_date").alias("_act_start_date"),
             pl.col("tournament_end_date").alias("_act_end_date"),
+            pl.col("surface").alias("_act_surface"),
+            pl.col("indoor").alias("_act_indoor"),
+            pl.col("event_type").alias("_act_event_type"),
         ])
 
         result = matches.join(
             act_enrichment, on=["match_uid", "player_id"], how="left"
         )
 
-        # Fill tournament dates from Activity where tournament matches are missing them
+        # Fill fields from Activity where tournament matches are missing them
         if "_act_start_date" in result.columns:
             result = result.with_columns([
                 pl.coalesce([
@@ -552,7 +580,22 @@ class MatchesAggregator(BaseJob):
                     pl.col("tournament_end_date"),
                     pl.col("_act_end_date"),
                 ]).alias("tournament_end_date"),
-            ]).drop(["_act_start_date", "_act_end_date"])
+                pl.coalesce([
+                    pl.col("surface"),
+                    pl.col("_act_surface"),
+                ]).alias("surface"),
+                pl.coalesce([
+                    pl.col("indoor"),
+                    pl.col("_act_indoor"),
+                ]).alias("indoor"),
+                pl.coalesce([
+                    pl.col("event_type"),
+                    pl.col("_act_event_type"),
+                ]).alias("event_type"),
+            ]).drop([
+                "_act_start_date", "_act_end_date",
+                "_act_surface", "_act_indoor", "_act_event_type",
+            ])
 
         return result
 
