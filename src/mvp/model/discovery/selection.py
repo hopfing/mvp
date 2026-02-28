@@ -78,6 +78,8 @@ class FeatureSelector:
         Starts with empty set, adds feature that improves metric most,
         repeats until no improvement.
         """
+        from tqdm import tqdm
+
         selected: list[str] = []
         remaining = set(self.all_features)
         history: list[dict[str, Any]] = []
@@ -87,19 +89,20 @@ class FeatureSelector:
 
         while remaining and len(selected) < self.max_features:
             round_num = len(selected) + 1
-            if verbose:
-                print(f"\n=== Round {round_num}/{self.max_features} | Testing {len(remaining)} candidates | Best so far: {best_metric:.4f} ===")
-
             best_feature = None
             best_feature_metric = best_metric
-            tested = 0
 
             # Try adding each remaining feature
-            for feature in remaining:
-                tested += 1
-                if verbose and tested % 25 == 0:
-                    print(f"  Progress: {tested}/{len(remaining)}")
+            feature_iter = remaining
+            if verbose:
+                feature_iter = tqdm(
+                    remaining,
+                    desc=f"Round {round_num}/{self.max_features}",
+                    leave=False,
+                    ncols=80,
+                )
 
+            for feature in feature_iter:
                 candidate = selected + [feature]
                 try:
                     metric = self.scorer(candidate)
@@ -109,6 +112,8 @@ class FeatureSelector:
                 if self._is_better(metric, best_feature_metric):
                     best_feature = feature
                     best_feature_metric = metric
+                    if verbose and hasattr(feature_iter, "set_postfix"):
+                        feature_iter.set_postfix(best=f"{best_feature_metric:.4f}")
 
             # If no improvement, stop
             if best_feature is None or not self._is_better(
@@ -126,6 +131,9 @@ class FeatureSelector:
             selected.append(best_feature)
             remaining.remove(best_feature)
             best_metric = best_feature_metric
+
+            if verbose:
+                print(f"  + {best_feature} -> {best_metric:.4f}")
 
             history.append({
                 "step": len(history) + 1,

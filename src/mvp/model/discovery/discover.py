@@ -173,10 +173,7 @@ class FeatureDiscovery:
 
             try:
                 result = self._run_experiment(features)
-                score = result["metrics"].get(target_metric, float("inf"))
-                if self.verbose:
-                    self._log(f"    Scored {features[0] if len(features) == 1 else f'{len(features)} features'}: {target_metric}={score:.4f}")
-                return score
+                return result["metrics"].get(target_metric, float("inf"))
             except Exception as e:
                 if self.verbose:
                     self._log(f"    FAILED {features}: {e}")
