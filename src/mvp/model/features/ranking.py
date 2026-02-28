@@ -16,10 +16,9 @@ from mvp.model.registry import feature
 def ranking_points_diff() -> pl.Expr:
     """Difference between player and opponent ranking points.
 
-    Uses pre-existing player_ranking_points and opp_ranking_points columns
-    from the matches.parquet data.
+    Uses player_rankings_points and opp_rankings_points from matches.parquet.
 
     Returns:
-        Polars expression computing player_ranking_points - opp_ranking_points.
+        Polars expression computing player_rankings_points - opp_rankings_points.
     """
-    return pl.col("player_ranking_points") - pl.col("opp_ranking_points")
+    return pl.col("player_rankings_points") - pl.col("opp_rankings_points")

@@ -65,7 +65,7 @@ def sample_matches_df() -> pl.DataFrame:
                 date(2024, 1, 17),  # B vs D: B wins
             ],
             "won": [1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 1],
-            "player_ranking_points": [
+            "player_rankings_points": [
                 1000,
                 800,
                 1050,
@@ -79,7 +79,7 @@ def sample_matches_df() -> pl.DataFrame:
                 1150,
                 900,
             ],
-            "opp_ranking_points": [
+            "opp_rankings_points": [
                 800,
                 1000,
                 600,

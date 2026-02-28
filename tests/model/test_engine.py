@@ -36,51 +36,86 @@ class TestFeatureEngineInit:
 class TestParseFeatureSpec:
     """Tests for parse_feature_spec function."""
 
-    def test_simple_feature_no_params(self):
-        """Parse feature with no parameters."""
-        name, params = parse_feature_spec("win_rate")
-        assert name == "win_rate"
+    def test_player_feature_no_params(self):
+        """Parse player feature with no parameters."""
+        prefix, base_name, full_name, params = parse_feature_spec("player_win_rate")
+        assert prefix == "player"
+        assert base_name == "win_rate"
+        assert full_name == "player_win_rate"
+        assert params == {}
+
+    def test_opp_feature_no_params(self):
+        """Parse opp feature with no parameters."""
+        prefix, base_name, full_name, params = parse_feature_spec("opp_win_rate")
+        assert prefix == "opp"
+        assert base_name == "win_rate"
+        assert full_name == "opp_win_rate"
         assert params == {}
 
     def test_feature_with_single_param(self):
         """Parse feature with one parameter."""
-        name, params = parse_feature_spec("win_rate(days=30)")
-        assert name == "win_rate"
+        prefix, base_name, full_name, params = parse_feature_spec(
+            "player_win_rate(days=30)"
+        )
+        assert prefix == "player"
+        assert base_name == "win_rate"
+        assert full_name == "player_win_rate"
         assert params == {"days": 30}
 
     def test_feature_with_multiple_params(self):
         """Parse feature with multiple parameters."""
-        name, params = parse_feature_spec("weighted_avg(days=90, decay=0.95)")
-        assert name == "weighted_avg"
+        prefix, base_name, full_name, params = parse_feature_spec(
+            "player_weighted_avg(days=90, decay=0.95)"
+        )
+        assert prefix == "player"
+        assert base_name == "weighted_avg"
+        assert full_name == "player_weighted_avg"
         assert params == {"days": 90, "decay": 0.95}
 
     def test_feature_with_string_param(self):
         """Parse feature with string parameter."""
-        name, params = parse_feature_spec("surface_win_rate(surface='clay')")
-        assert name == "surface_win_rate"
+        prefix, base_name, full_name, params = parse_feature_spec(
+            "player_surface_win_rate(surface='clay')"
+        )
+        assert prefix == "player"
+        assert base_name == "surface_win_rate"
+        assert full_name == "player_surface_win_rate"
         assert params == {"surface": "clay"}
 
     def test_feature_with_double_quoted_string(self):
         """Parse feature with double-quoted string parameter."""
-        name, params = parse_feature_spec('surface_win_rate(surface="clay")')
-        assert name == "surface_win_rate"
+        prefix, base_name, full_name, params = parse_feature_spec(
+            'opp_surface_win_rate(surface="clay")'
+        )
+        assert prefix == "opp"
+        assert base_name == "surface_win_rate"
+        assert full_name == "opp_surface_win_rate"
         assert params == {"surface": "clay"}
 
     def test_feature_with_spaces(self):
         """Parse feature with spaces around values."""
-        name, params = parse_feature_spec("win_rate( days = 30 )")
-        assert name == "win_rate"
+        prefix, base_name, full_name, params = parse_feature_spec(
+            "player_win_rate( days = 30 )"
+        )
+        assert prefix == "player"
+        assert base_name == "win_rate"
+        assert full_name == "player_win_rate"
         assert params == {"days": 30}
 
     def test_invalid_spec_raises(self):
         """Invalid spec raises ValueError."""
         with pytest.raises(ValueError, match="Invalid feature spec"):
-            parse_feature_spec("win_rate(days=)")
+            parse_feature_spec("player_win_rate(days=)")
 
     def test_unclosed_parens_raises(self):
         """Unclosed parentheses raises ValueError."""
         with pytest.raises(ValueError, match="Invalid feature spec"):
-            parse_feature_spec("win_rate(days=30")
+            parse_feature_spec("player_win_rate(days=30")
+
+    def test_missing_prefix_raises(self):
+        """Feature spec without player_/opp_ prefix raises ValueError."""
+        with pytest.raises(ValueError, match="must start with 'player_' or 'opp_'"):
+            parse_feature_spec("win_rate(days=30)")
 
 
 @pytest.fixture
@@ -140,7 +175,7 @@ class TestFeatureEngineCompute:
         cache_dir = tmp_path / "cache"
         engine = FeatureEngine(matches_path=matches_parquet, cache_dir=cache_dir)
 
-        result = engine.compute(["test_win_rate(days=30)"])
+        result = engine.compute(["player_test_win_rate(days=30)"])
 
         # Should have the feature column
         assert "player_test_win_rate_30d" in result.columns
@@ -165,7 +200,7 @@ class TestFeatureEngineCompute:
         engine = FeatureEngine(matches_path=matches_parquet, cache_dir=cache_dir)
 
         with pytest.raises(KeyError, match="not found"):
-            engine.compute(["unknown_feature(days=30)"])
+            engine.compute(["player_unknown_feature(days=30)"])
 
 
 class TestFeatureEngineMirroring:
@@ -178,7 +213,11 @@ class TestFeatureEngineMirroring:
         cache_dir = tmp_path / "cache"
         engine = FeatureEngine(matches_path=matches_parquet, cache_dir=cache_dir)
 
-        result = engine.compute(["test_win_rate(days=30)"])
+        # Request both player and opp versions
+        result = engine.compute([
+            "player_test_win_rate(days=30)",
+            "opp_test_win_rate(days=30)",
+        ])
 
         # Should have both player_ and opp_ columns
         assert "player_test_win_rate_30d" in result.columns
@@ -191,7 +230,11 @@ class TestFeatureEngineMirroring:
         cache_dir = tmp_path / "cache"
         engine = FeatureEngine(matches_path=matches_parquet, cache_dir=cache_dir)
 
-        result = engine.compute(["test_win_rate(days=30)"])
+        # Request both player and opp versions
+        result = engine.compute([
+            "player_test_win_rate(days=30)",
+            "opp_test_win_rate(days=30)",
+        ])
 
         # For match m4 (A vs B on day 15):
         # - A's row should have opp_test_win_rate_30d = B's player_test_win_rate_30d
@@ -208,17 +251,8 @@ class TestFeatureEngineMirroring:
         # B's opp_* should equal A's player_*
         assert m4_b["opp_test_win_rate_30d"][0] == m4_a["player_test_win_rate_30d"][0]
 
-    def test_no_mirror_when_disabled(self, tmp_path: Path):
-        """Features with mirror=False don't get opp_* columns."""
-        registry = get_registry()
-        registry.clear()
-
-        @feature(name="no_mirror_feature", params=["days"], mirror=False)
-        def no_mirror_feature(days: int) -> pl.Expr:
-            from mvp.model.primitives import rolling_mean
-
-            return rolling_mean("won", days=days, group_by="player_id")
-
+    def test_no_mirror_when_not_requested(self, tmp_path: Path, test_feature_registry):
+        """Requesting only player_* doesn't create opp_* columns."""
         # Create test data
         df = pl.DataFrame(
             {
@@ -234,12 +268,11 @@ class TestFeatureEngineMirroring:
         cache_dir = tmp_path / "cache"
 
         engine = FeatureEngine(matches_path=matches_path, cache_dir=cache_dir)
-        result = engine.compute(["no_mirror_feature(days=30)"])
+        # Only request player_ version, not opp_
+        result = engine.compute(["player_test_win_rate(days=30)"])
 
-        assert "player_no_mirror_feature_30d" in result.columns
-        assert "opp_no_mirror_feature_30d" not in result.columns
-
-        registry.clear()
+        assert "player_test_win_rate_30d" in result.columns
+        assert "opp_test_win_rate_30d" not in result.columns
 
 
 class TestFeatureEngineCaching:
@@ -252,7 +285,7 @@ class TestFeatureEngineCaching:
         cache_dir = tmp_path / "cache"
         engine = FeatureEngine(matches_path=matches_parquet, cache_dir=cache_dir)
 
-        engine.compute(["test_win_rate(days=30)"])
+        engine.compute(["player_test_win_rate(days=30)"])
 
         # Should have manifest and parquet file
         assert (cache_dir / "manifest.json").exists()
@@ -266,7 +299,7 @@ class TestFeatureEngineCaching:
         engine = FeatureEngine(matches_path=matches_parquet, cache_dir=cache_dir)
 
         # First compute
-        result1 = engine.compute(["test_win_rate(days=30)"])
+        result1 = engine.compute(["player_test_win_rate(days=30)"])
 
         # Modify the registry to return a different value (simulating code change)
         # But since it's cached, we should get the same result
@@ -274,7 +307,7 @@ class TestFeatureEngineCaching:
         original_mtime = parquet_files[0].stat().st_mtime
 
         # Second compute - should use cache
-        result2 = engine.compute(["test_win_rate(days=30)"])
+        result2 = engine.compute(["player_test_win_rate(days=30)"])
 
         # File should not have been rewritten
         assert parquet_files[0].stat().st_mtime == original_mtime
@@ -304,7 +337,7 @@ class TestFeatureEngineCaching:
         cache_dir = tmp_path / "cache"
 
         engine = FeatureEngine(matches_path=matches_path, cache_dir=cache_dir)
-        result1 = engine.compute(["test_win_rate(days=30)"])
+        result1 = engine.compute(["player_test_win_rate(days=30)"])
 
         # Modify matches file (add a match)
         df2 = pl.DataFrame(
@@ -324,7 +357,7 @@ class TestFeatureEngineCaching:
         df2.write_parquet(matches_path)
 
         # Compute again - should recompute due to matches change
-        result2 = engine.compute(["test_win_rate(days=30)"])
+        result2 = engine.compute(["player_test_win_rate(days=30)"])
 
         # Results should be different (more rows)
         assert len(result2) > len(result1)
@@ -340,7 +373,10 @@ class TestFeatureEngineCoverageReport:
         cache_dir = tmp_path / "cache"
         engine = FeatureEngine(matches_path=matches_parquet, cache_dir=cache_dir)
 
-        result = engine.compute(["test_win_rate(days=30)"])
+        result = engine.compute([
+            "player_test_win_rate(days=30)",
+            "opp_test_win_rate(days=30)",
+        ])
         report = engine.coverage_report(result)
 
         # Should have entries for each feature column
@@ -383,7 +419,7 @@ class TestFeatureEngineCoverageReport:
         cache_dir = tmp_path / "cache"
 
         engine = FeatureEngine(matches_path=matches_path, cache_dir=cache_dir)
-        result = engine.compute(["simple_feature"])
+        result = engine.compute(["player_simple_feature"])
         report = engine.coverage_report(result)
 
         # All values should be null

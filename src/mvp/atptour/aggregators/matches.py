@@ -88,9 +88,9 @@ def join_rankings(matches: pl.DataFrame, rankings: pl.DataFrame) -> pl.DataFrame
     # Player rankings
     player_rnk = rnk.rename({
         "player_id": "_rnk_pid",
-        "rank": "rankings_rank",
-        "points": "rankings_points",
-        "tournaments_played": "rankings_tournaments_played",
+        "rank": "player_rankings_rank",
+        "points": "player_rankings_points",
+        "tournaments_played": "player_rankings_tournaments_played",
     })
     result = matches.sort("tournament_start_date").join_asof(
         player_rnk,
@@ -104,9 +104,9 @@ def join_rankings(matches: pl.DataFrame, rankings: pl.DataFrame) -> pl.DataFrame
     # Opponent rankings
     opp_rnk = rnk.rename({
         "player_id": "_rnk_pid",
-        "rank": "rankings_opp_rank",
-        "points": "rankings_opp_points",
-        "tournaments_played": "rankings_opp_tournaments_played",
+        "rank": "opp_rankings_rank",
+        "points": "opp_rankings_points",
+        "tournaments_played": "opp_rankings_tournaments_played",
     })
     result = result.sort("tournament_start_date").join_asof(
         opp_rnk,

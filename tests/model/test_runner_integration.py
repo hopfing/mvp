@@ -57,8 +57,8 @@ class TestRunnerIntegration:
                     "opp_id": f"P{(i + 10) % 20:02d}",
                     "effective_match_date": match_date,
                     "won": won,
-                    "player_ranking_points": 1000 - player_rank * 4,
-                    "opp_ranking_points": 1000 - opp_rank * 4,
+                    "player_rankings_points": 1000 - player_rank * 4,
+                    "opp_rankings_points": 1000 - opp_rank * 4,
                 }
             )
 
@@ -70,8 +70,8 @@ class TestRunnerIntegration:
                     "opp_id": f"P{i % 20:02d}",
                     "effective_match_date": match_date,
                     "won": not won,
-                    "player_ranking_points": 1000 - opp_rank * 4,
-                    "opp_ranking_points": 1000 - player_rank * 4,
+                    "player_rankings_points": 1000 - opp_rank * 4,
+                    "opp_rankings_points": 1000 - player_rank * 4,
                 }
             )
 
@@ -97,7 +97,7 @@ data:
     end: "2024-12-31"
 features:
   include:
-    - ranking_points_diff
+    - player_ranking_points_diff
 model:
   type: logistic
   params:
@@ -155,7 +155,7 @@ data:
     end: "2024-12-31"
 features:
   include:
-    - ranking_points_diff
+    - player_ranking_points_diff
 model:
   type: xgboost
   params:
@@ -202,7 +202,7 @@ data:
     end: "2024-12-31"
 features:
   include:
-    - ranking_points_diff
+    - player_ranking_points_diff
 model:
   type: logistic
 validation:
@@ -246,7 +246,7 @@ data:
     end: "2024-12-31"
 features:
   include:
-    - ranking_points_diff
+    - player_ranking_points_diff
 model:
   type: logistic
 validation:
@@ -301,7 +301,7 @@ data:
     end: "2024-12-31"
 features:
   include:
-    - ranking_points_diff
+    - player_ranking_points_diff
 model:
   type: logistic
 validation:

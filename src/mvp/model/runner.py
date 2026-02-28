@@ -10,7 +10,7 @@ import polars as pl
 
 from mvp.model.config import ExperimentConfig
 from mvp.model.diagnostics import Diagnostics
-from mvp.model.engine import FeatureEngine
+from mvp.model.engine import FeatureEngine, get_feature_columns
 from mvp.model.metrics import compute_metrics
 from mvp.model.mlflow_logger import ExperimentLogger
 from mvp.model.models import get_model
@@ -72,16 +72,6 @@ class ExperimentRunner:
         else:
             raise ValueError(f"Unknown validation type: {val.type}")
 
-    def _get_feature_columns(self, df: pl.DataFrame) -> list[str]:
-        """Get feature column names from DataFrame."""
-        exclude_prefixes = ("match_uid", "player_id", "opp_id", "tournament")
-        return [
-            col
-            for col in df.columns
-            if (col.startswith("player_") or col.startswith("opp_"))
-            and not any(col.startswith(p) for p in exclude_prefixes)
-        ]
-
     def run(self) -> dict[str, Any]:
         """Execute the experiment.
 
@@ -106,8 +96,8 @@ class ExperimentRunner:
             & (pl.col("effective_match_date") <= self.config.data.date_range.end)
         )
 
-        # Get feature columns
-        feature_cols = self._get_feature_columns(df)
+        # Get feature columns from config
+        feature_cols = get_feature_columns(self.config.features.include)
 
         if not feature_cols:
             raise ValueError("No feature columns found after computing features")
@@ -134,9 +124,13 @@ class ExperimentRunner:
                 train_df = df[train_idx]
                 test_df = df[test_idx]
 
-                X_train = train_df.select(feature_cols).to_numpy()
+                X_train = train_df.select(
+                    pl.col(c).cast(pl.Float64) for c in feature_cols
+                ).to_numpy()
                 y_train = train_df["won"].to_numpy().astype(int)
-                X_test = test_df.select(feature_cols).to_numpy()
+                X_test = test_df.select(
+                    pl.col(c).cast(pl.Float64) for c in feature_cols
+                ).to_numpy()
                 y_test = test_df["won"].to_numpy().astype(int)
 
                 # Handle missing values with median imputation

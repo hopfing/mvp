@@ -54,11 +54,15 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
 
 def cmd_model(args: argparse.Namespace) -> int:
     """Run model training from config."""
+    from mvp.atptour.aggregators.matches import MatchesAggregator
     from mvp.model.runner import ExperimentRunner
 
     config_path = Path(args.config)
     if not config_path.exists():
         raise FileNotFoundError(f"Config file not found: {config_path}")
+
+    logger.info("Rebuilding matches.parquet")
+    MatchesAggregator().run()
 
     matches_path = Path(args.matches) if args.matches else None
     mlflow_dir = Path(args.mlflow_dir) if args.mlflow_dir else None

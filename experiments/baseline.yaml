@@ -1,5 +1,5 @@
 # Baseline experiment configuration
-# Run with: python -m mvp.model.cli run experiments/baseline.yaml
+# Run with: python -m mvp model experiments/baseline.yaml
 
 name: baseline_v1
 description: "Initial baseline with core form and ranking features"
@@ -11,10 +11,12 @@ data:
 
 features:
   include:
-    - win_rate(days=30)
-    - win_rate(days=90)
-    - matches_played(days=30)
-    - ranking_points_diff
+    - player_win_rate(days=30)
+    - player_win_rate(days=90)
+    - opp_win_rate(days=30)
+    - opp_win_rate(days=90)
+    - player_matches_played(days=30)
+    - player_ranking_points_diff
 
 validation:
   type: walk_forward

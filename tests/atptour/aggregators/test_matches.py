@@ -168,9 +168,9 @@ class TestRankingsJoin:
         })
         result = join_rankings(matches, rankings)
         # First match: tournament_start 3/4, should pick 3/4 snapshot (rank=9)
-        assert result.filter(pl.col("opp_id") == "B002")["rankings_rank"][0] == 9
+        assert result.filter(pl.col("opp_id") == "B002")["player_rankings_rank"][0] == 9
         # Opponent B002 should have rank 20
-        assert result.filter(pl.col("opp_id") == "B002")["rankings_opp_rank"][0] == 20
+        assert result.filter(pl.col("opp_id") == "B002")["opp_rankings_rank"][0] == 20
 
     def test_no_ranking_date_in_output(self):
         """join_rankings should not leak ranking_date columns into output."""
@@ -208,7 +208,7 @@ class TestRankingsJoin:
             "tournaments_played": [5],
         })
         result = join_rankings(matches, rankings)
-        assert result["rankings_rank"][0] is None
+        assert result["player_rankings_rank"][0] is None
 
 
 class TestBioJoin:
@@ -456,7 +456,7 @@ class TestMatchesAggregator:
         # 4 tournament match rows + 1 gap-fill row = 5 rows
         assert len(result) == 5
         assert "round_order" in result.columns
-        assert "rankings_rank" in result.columns
+        assert "player_rankings_rank" in result.columns
         assert "player_first_name" in result.columns
 
         # Verify gap-fill row
@@ -471,7 +471,7 @@ class TestMatchesAggregator:
         assert a001_r32["activity_rank"][0] == 50
 
         # Verify Rankings enrichment
-        assert a001_r32["rankings_rank"][0] == 10
+        assert a001_r32["player_rankings_rank"][0] == 10
 
         # Verify Bio enrichment
         assert a001_r32["player_first_name"][0] == "Alice"

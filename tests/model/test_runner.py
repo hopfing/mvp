@@ -43,8 +43,8 @@ class TestExperimentRunner:
                     f"2024-01-{(i % 28) + 1:02d}" for i in range(200)
                 ],
                 "won": [i % 2 == 0 for i in range(200)],
-                "player_ranking_points": [1000 - i for i in range(200)],
-                "opp_ranking_points": [500 + i for i in range(200)],
+                "player_rankings_points": [1000 - i for i in range(200)],
+                "opp_rankings_points": [500 + i for i in range(200)],
             }
         ).with_columns(pl.col("effective_match_date").str.to_datetime())
         path = tmp_path / "matches.parquet"
@@ -62,7 +62,7 @@ data:
     end: "2024-12-31"
 features:
   include:
-    - ranking_points_diff
+    - player_ranking_points_diff
 model:
   type: logistic
 validation:

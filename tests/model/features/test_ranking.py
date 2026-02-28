@@ -26,13 +26,13 @@ class TestRankingPointsDiffFeature:
         assert feat.mirror is False  # Diff features don't mirror
 
     def test_ranking_points_diff_computes_difference(self):
-        """ranking_points_diff computes player_ranking_points - opp_ranking_points."""
+        """ranking_points_diff computes player_rankings_points - opp_rankings_points."""
         from mvp.model.features.ranking import ranking_points_diff
 
         df = pl.DataFrame(
             {
-                "player_ranking_points": [1000, 500, 800],
-                "opp_ranking_points": [500, 500, 1200],
+                "player_rankings_points": [1000, 500, 800],
+                "opp_rankings_points": [500, 500, 1200],
             }
         ).lazy()
 
@@ -51,8 +51,8 @@ class TestRankingPointsDiffFeature:
 
         df = pl.DataFrame(
             {
-                "player_ranking_points": [1000, None, 800],
-                "opp_ranking_points": [500, 500, None],
+                "player_rankings_points": [1000, None, 800],
+                "opp_rankings_points": [500, 500, None],
             }
         ).lazy()
 

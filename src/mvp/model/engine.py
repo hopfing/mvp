@@ -14,56 +14,71 @@ import mvp.model.features  # noqa: F401 - triggers feature registration
 from mvp.model.registry import get_registry
 
 
-def parse_feature_spec(spec: str) -> tuple[str, dict[str, Any]]:
-    """Parse a feature specification string into name and parameters.
+def parse_feature_spec(spec: str) -> tuple[str, str, str, dict[str, Any]]:
+    """Parse a feature specification string into prefix, base name, full name, and parameters.
 
     Args:
-        spec: Feature spec like "win_rate" or "win_rate(days=30)".
+        spec: Feature spec like "player_win_rate(days=30)" or "opp_win_rate(days=30)".
 
     Returns:
-        Tuple of (feature_name, params_dict).
+        Tuple of (prefix, base_name, full_name, params_dict).
+        - prefix: "player" or "opp"
+        - base_name: Feature name without prefix (e.g., "win_rate")
+        - full_name: Full feature name with prefix (e.g., "player_win_rate")
+        - params_dict: Parameter dictionary
 
     Raises:
-        ValueError: If the spec is malformed.
+        ValueError: If the spec is malformed or missing player_/opp_ prefix.
 
     Examples:
-        >>> parse_feature_spec("win_rate")
-        ("win_rate", {})
-        >>> parse_feature_spec("win_rate(days=30)")
-        ("win_rate", {"days": 30})
+        >>> parse_feature_spec("player_win_rate(days=30)")
+        ("player", "win_rate", "player_win_rate", {"days": 30})
+        >>> parse_feature_spec("opp_win_rate(days=30)")
+        ("opp", "win_rate", "opp_win_rate", {"days": 30})
     """
     spec = spec.strip()
 
-    # Simple case: no parameters
+    # Extract full name and params
     if "(" not in spec:
-        return spec, {}
-
-    # Extract name and params
-    match = re.match(r"^(\w+)\((.+)\)$", spec)
-    if not match:
-        raise ValueError(f"Invalid feature spec: {spec}")
-
-    name = match.group(1)
-    params_str = match.group(2)
-
-    # Parse parameters
-    params: dict[str, Any] = {}
-    for param in params_str.split(","):
-        param = param.strip()
-        if "=" not in param:
+        full_name = spec
+        params: dict[str, Any] = {}
+    else:
+        match = re.match(r"^(\w+)\((.+)\)$", spec)
+        if not match:
             raise ValueError(f"Invalid feature spec: {spec}")
 
-        key, value = param.split("=", 1)
-        key = key.strip()
-        value = value.strip()
+        full_name = match.group(1)
+        params_str = match.group(2)
 
-        if not key or not value:
-            raise ValueError(f"Invalid feature spec: {spec}")
+        # Parse parameters
+        params = {}
+        for param in params_str.split(","):
+            param = param.strip()
+            if "=" not in param:
+                raise ValueError(f"Invalid feature spec: {spec}")
 
-        # Parse value type
-        params[key] = _parse_value(value)
+            key, value = param.split("=", 1)
+            key = key.strip()
+            value = value.strip()
 
-    return name, params
+            if not key or not value:
+                raise ValueError(f"Invalid feature spec: {spec}")
+
+            params[key] = _parse_value(value)
+
+    # Extract prefix and base name
+    if full_name.startswith("player_"):
+        prefix = "player"
+        base_name = full_name[7:]  # len("player_") = 7
+    elif full_name.startswith("opp_"):
+        prefix = "opp"
+        base_name = full_name[4:]  # len("opp_") = 4
+    else:
+        raise ValueError(
+            f"Feature spec must start with 'player_' or 'opp_': {spec}"
+        )
+
+    return prefix, base_name, full_name, params
 
 
 def _parse_value(value: str) -> Any:
@@ -94,6 +109,46 @@ def _parse_value(value: str) -> Any:
 
     # Return as string if nothing else matches
     return value
+
+
+def build_column_name(name: str, params: dict[str, Any]) -> str:
+    """Build column name from feature name and parameters.
+
+    Args:
+        name: Feature name with prefix (e.g., "player_win_rate").
+        params: Parameter dict (e.g., {"days": 30}).
+
+    Returns:
+        Column name (e.g., "player_win_rate_30d").
+
+    Examples:
+        >>> build_column_name("player_win_rate", {"days": 30})
+        "player_win_rate_30d"
+        >>> build_column_name("player_ranking_points_diff", {})
+        "player_ranking_points_diff"
+    """
+    if not params:
+        return name
+    if "days" in params:
+        return f"{name}_{params['days']}d"
+    return f"{name}_{'_'.join(str(v) for v in params.values())}"
+
+
+def get_feature_columns(feature_specs: list[str]) -> list[str]:
+    """Get feature column names for a list of feature specs.
+
+    Args:
+        feature_specs: List of specs like ["player_win_rate(days=30)"].
+
+    Returns:
+        List of column names.
+    """
+    cols = []
+    for spec in feature_specs:
+        _prefix, _base, full_name, params = parse_feature_spec(spec)
+        col_name = build_column_name(full_name, params)
+        cols.append(col_name)
+    return cols
 
 
 class FeatureEngine:
@@ -182,13 +237,11 @@ class FeatureEngine:
         """Compute features for the given feature specifications.
 
         Args:
-            feature_specs: List of feature specs like ["win_rate(days=30)"].
+            feature_specs: List of feature specs like ["player_win_rate(days=30)"].
+                Each spec must start with "player_" or "opp_".
 
         Returns:
             DataFrame with match data and computed feature columns.
-            Feature columns are prefixed with "player_" and suffixed with
-            parameter values (e.g., "player_win_rate_30d").
-            Features with mirror=True also get "opp_*" columns via self-join.
         """
         # Load matches data
         df = pl.read_parquet(self.matches_path)
@@ -196,45 +249,79 @@ class FeatureEngine:
         # Check cache validity
         matches_hash = self._compute_matches_hash()
 
-        # Track columns to mirror
-        columns_to_mirror: list[str] = []
+        # Track which player_* columns we've computed (needed for mirroring)
+        computed_player_cols: set[str] = set()
+        # Track which opp_* columns we need to mirror
+        opp_cols_to_mirror: list[tuple[str, str]] = []  # (player_col, opp_col)
 
-        # Compute each feature
+        # First pass: compute all player_* features and identify opp_* needs
         for spec in feature_specs:
-            name, params = parse_feature_spec(spec)
-            feature_def = self._registry.get(name)
+            prefix, base_name, full_name, params = parse_feature_spec(spec)
+            feature_def = self._registry.get(base_name)
 
-            # Build column name from params
-            col_name = self._build_column_name(name, params)
-            player_col = f"player_{col_name}"
+            # Build column name from full_name and params
+            col_name = build_column_name(full_name, params)
 
-            # Check cache first
-            if self._is_cached(spec, matches_hash):
-                # Load from cache and join to df
-                cached = self._load_cached_feature(spec)
-                df = df.join(
-                    cached,
-                    on=["match_uid", "player_id"],
-                    how="left",
-                )
-            else:
-                # Compute the feature expression
-                expr = feature_def.func(**params)
+            if prefix == "player":
+                player_col = col_name
+                # Compute if not already done
+                if player_col not in computed_player_cols:
+                    # Build the internal spec for caching (uses base name)
+                    cache_spec = f"player_{base_name}"
+                    if params:
+                        param_str = ",".join(f"{k}={v}" for k, v in params.items())
+                        cache_spec = f"player_{base_name}({param_str})"
 
-                # Add to DataFrame with player_ prefix
-                df = df.with_columns(expr.alias(player_col))
+                    if self._is_cached(cache_spec, matches_hash):
+                        cached = self._load_cached_feature(cache_spec)
+                        df = df.join(
+                            cached,
+                            on=["match_uid", "player_id"],
+                            how="left",
+                        )
+                    else:
+                        expr = feature_def.func(**params)
+                        df = df.with_columns(expr.alias(player_col))
+                        self._cache_feature(
+                            cache_spec, df, [player_col], matches_hash
+                        )
+                    computed_player_cols.add(player_col)
 
-                # Cache the computed feature
-                feature_columns = [player_col]
-                self._cache_feature(spec, df, feature_columns, matches_hash)
+            elif prefix == "opp":
+                # We need the player version first, then mirror
+                player_col = f"player_{base_name}"
+                if params:
+                    player_col = build_column_name(f"player_{base_name}", params)
+                opp_col = col_name
+                opp_cols_to_mirror.append((player_col, opp_col))
 
-            # Track for mirroring if enabled
-            if feature_def.mirror:
-                columns_to_mirror.append(player_col)
+                # Compute player version if not already done
+                if player_col not in computed_player_cols:
+                    cache_spec = f"player_{base_name}"
+                    if params:
+                        param_str = ",".join(f"{k}={v}" for k, v in params.items())
+                        cache_spec = f"player_{base_name}({param_str})"
 
-        # Mirror columns to create opp_* versions
-        if columns_to_mirror:
-            df = self._mirror_features(df, columns_to_mirror)
+                    if self._is_cached(cache_spec, matches_hash):
+                        cached = self._load_cached_feature(cache_spec)
+                        df = df.join(
+                            cached,
+                            on=["match_uid", "player_id"],
+                            how="left",
+                        )
+                    else:
+                        expr = feature_def.func(**params)
+                        df = df.with_columns(expr.alias(player_col))
+                        self._cache_feature(
+                            cache_spec, df, [player_col], matches_hash
+                        )
+                    computed_player_cols.add(player_col)
+
+        # Second pass: mirror to create opp_* columns
+        if opp_cols_to_mirror:
+            # Get unique player columns that need mirroring
+            player_cols_for_mirror = list({p for p, _ in opp_cols_to_mirror})
+            df = self._mirror_features(df, player_cols_for_mirror)
 
         return df
 
@@ -272,24 +359,6 @@ class FeatureEngine:
         )
 
         return df
-
-    def _build_column_name(self, name: str, params: dict[str, Any]) -> str:
-        """Build column name from feature name and parameters.
-
-        Examples:
-            win_rate + {days: 30} -> "win_rate_30d"
-            h2h_wins + {days: 90} -> "h2h_wins_90d"
-        """
-        if not params:
-            return name
-
-        # For now, support "days" parameter with "d" suffix
-        if "days" in params:
-            return f"{name}_{params['days']}d"
-
-        # Generic fallback: join param values with underscores
-        suffix = "_".join(str(v) for v in params.values())
-        return f"{name}_{suffix}"
 
     def coverage_report(self, df: pl.DataFrame) -> dict[str, dict[str, Any]]:
         """Generate a coverage report for computed features.
