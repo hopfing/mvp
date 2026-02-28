@@ -32,151 +32,81 @@ def _tiebreaks_won() -> pl.Expr:
 
 @feature(
     name="tiebreak_win_rate",
-    params=["days"],
-    description="Tiebreak win percentage",
+    params=[],
+    description="Tiebreak win percentage (all-time)",
     mirror=True,
 )
-def tiebreak_win_rate(days: int | None = None) -> pl.Expr:
+def tiebreak_win_rate() -> pl.Expr:
     """Percentage of tiebreaks won."""
     won_expr = _tiebreaks_won()
     played_expr = _tiebreaks_played()
-
-    if days is None:
-        won = won_expr.cum_sum().shift(1).over("player_id", order_by=DATE_COL).fill_null(0)
-        played = played_expr.cum_sum().shift(1).over("player_id", order_by=DATE_COL).fill_null(0)
-    else:
-        won = (
-            won_expr
-            .rolling_sum_by(DATE_COL, window_size=f"{days}d", closed="left")
-            .over("player_id")
-            .fill_null(0)
-        )
-        played = (
-            played_expr
-            .rolling_sum_by(DATE_COL, window_size=f"{days}d", closed="left")
-            .over("player_id")
-            .fill_null(0)
-        )
+    won = won_expr.cum_sum().shift(1).over("player_id", order_by=DATE_COL).fill_null(0)
+    played = played_expr.cum_sum().shift(1).over("player_id", order_by=DATE_COL).fill_null(0)
     return pl.when(played > 0).then(won / played).otherwise(None)
 
 
 @feature(
     name="tiebreak_win_rate_diff",
-    params=["days"],
+    params=[],
     description="Player tiebreak win rate minus opponent tiebreak win rate",
     depends_on=["tiebreak_win_rate"],
     mirror=False,
 )
-def tiebreak_win_rate_diff(days: int | None = None) -> pl.Expr:
+def tiebreak_win_rate_diff() -> pl.Expr:
     """Tiebreak win rate difference."""
-    if days is None:
-        return pl.col("player_tiebreak_win_rate") - pl.col("opp_tiebreak_win_rate")
-    return pl.col(f"player_tiebreak_win_rate_{days}d") - pl.col(f"opp_tiebreak_win_rate_{days}d")
+    return pl.col("player_tiebreak_win_rate") - pl.col("opp_tiebreak_win_rate")
 
 
 @feature(
     name="tiebreak_pct",
-    params=["days"],
-    description="Percentage of sets that go to tiebreak",
+    params=[],
+    description="Percentage of sets that go to tiebreak (all-time)",
     mirror=True,
 )
-def tiebreak_pct(days: int | None = None) -> pl.Expr:
+def tiebreak_pct() -> pl.Expr:
     """How often player's sets go to tiebreak."""
     played_expr = _tiebreaks_played()
-
-    if days is None:
-        tiebreaks = played_expr.cum_sum().shift(1).over("player_id", order_by=DATE_COL).fill_null(0)
-        sets = pl.col("sets_played").cum_sum().shift(1).over("player_id", order_by=DATE_COL).fill_null(0)
-    else:
-        tiebreaks = (
-            played_expr
-            .rolling_sum_by(DATE_COL, window_size=f"{days}d", closed="left")
-            .over("player_id")
-            .fill_null(0)
-        )
-        sets = (
-            pl.col("sets_played")
-            .rolling_sum_by(DATE_COL, window_size=f"{days}d", closed="left")
-            .over("player_id")
-            .fill_null(0)
-        )
+    tiebreaks = played_expr.cum_sum().shift(1).over("player_id", order_by=DATE_COL).fill_null(0)
+    sets = pl.col("sets_played").cum_sum().shift(1).over("player_id", order_by=DATE_COL).fill_null(0)
     return pl.when(sets > 0).then(tiebreaks / sets).otherwise(None)
 
 
 @feature(
     name="tiebreaks_played",
-    params=["days"],
-    description="Total tiebreaks played (clutch situation volume)",
+    params=[],
+    description="Total tiebreaks played (all-time, clutch situation volume)",
     mirror=True,
 )
-def tiebreaks_played(days: int | None = None) -> pl.Expr:
+def tiebreaks_played() -> pl.Expr:
     """Volume of tiebreaks played - measures clutch experience."""
     played_expr = _tiebreaks_played()
-
-    if days is None:
-        return played_expr.cum_sum().shift(1).over("player_id", order_by=DATE_COL).fill_null(0)
-    return (
-        played_expr
-        .rolling_sum_by(DATE_COL, window_size=f"{days}d", closed="left")
-        .over("player_id")
-        .fill_null(0)
-    )
+    return played_expr.cum_sum().shift(1).over("player_id", order_by=DATE_COL).fill_null(0)
 
 
 @feature(
     name="deciding_set_rate",
-    params=["days"],
-    description="How often matches go to deciding set",
+    params=[],
+    description="How often matches go to deciding set (all-time)",
     mirror=True,
 )
-def deciding_set_rate(days: int | None = None) -> pl.Expr:
+def deciding_set_rate() -> pl.Expr:
     """Rate of matches going to deciding set (3rd in best-of-3, 5th in best-of-5)."""
     deciding = (pl.col("sets_played") == pl.col("number_of_sets")).cast(pl.Int64)
-
-    if days is None:
-        deciding_sum = deciding.cum_sum().shift(1).over("player_id", order_by=DATE_COL).fill_null(0)
-        total = pl.lit(1).cum_sum().shift(1).over("player_id", order_by=DATE_COL).fill_null(0)
-    else:
-        deciding_sum = (
-            deciding
-            .rolling_sum_by(DATE_COL, window_size=f"{days}d", closed="left")
-            .over("player_id")
-            .fill_null(0)
-        )
-        total = (
-            pl.lit(1)
-            .rolling_sum_by(DATE_COL, window_size=f"{days}d", closed="left")
-            .over("player_id")
-            .fill_null(0)
-        )
+    deciding_sum = deciding.cum_sum().shift(1).over("player_id", order_by=DATE_COL).fill_null(0)
+    total = pl.lit(1).cum_sum().shift(1).over("player_id", order_by=DATE_COL).fill_null(0)
     return pl.when(total > 0).then(deciding_sum / total).otherwise(None)
 
 
 @feature(
     name="deciding_set_win_rate",
-    params=["days"],
-    description="Win rate in deciding sets",
+    params=[],
+    description="Win rate in deciding sets (all-time)",
     mirror=True,
 )
-def deciding_set_win_rate(days: int | None = None) -> pl.Expr:
+def deciding_set_win_rate() -> pl.Expr:
     """Win rate when match goes to deciding set."""
     deciding = (pl.col("sets_played") == pl.col("number_of_sets")).cast(pl.Int64)
     deciding_won = deciding * pl.col("won").cast(pl.Int64)
-
-    if days is None:
-        wins = deciding_won.cum_sum().shift(1).over("player_id", order_by=DATE_COL).fill_null(0)
-        played = deciding.cum_sum().shift(1).over("player_id", order_by=DATE_COL).fill_null(0)
-    else:
-        wins = (
-            deciding_won
-            .rolling_sum_by(DATE_COL, window_size=f"{days}d", closed="left")
-            .over("player_id")
-            .fill_null(0)
-        )
-        played = (
-            deciding
-            .rolling_sum_by(DATE_COL, window_size=f"{days}d", closed="left")
-            .over("player_id")
-            .fill_null(0)
-        )
+    wins = deciding_won.cum_sum().shift(1).over("player_id", order_by=DATE_COL).fill_null(0)
+    played = deciding.cum_sum().shift(1).over("player_id", order_by=DATE_COL).fill_null(0)
     return pl.when(played > 0).then(wins / played).otherwise(None)
