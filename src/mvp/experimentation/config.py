@@ -29,7 +29,7 @@ class DataConfig(BaseModel):
     """Data selection configuration."""
 
     date_range: DateRange
-    filters: dict[str, Any] | None = None
+    filters: dict[str, Any] | None = None  # Applied in Phase 3 (Diagnostics)
 
 
 class FeaturesConfig(BaseModel):
