@@ -1,4 +1,4 @@
-"""CLI entry point with subcommands: live, backfill, model."""
+"""CLI entry point for atptour backfill operations."""
 
 from __future__ import annotations
 
@@ -6,7 +6,6 @@ import argparse
 import logging
 from datetime import datetime
 
-from mvp.atptour.aggregators.matches import MatchesAggregator
 from mvp.atptour.discovery import TournamentDiscovery
 from mvp.atptour.pipeline import (
     PlayerDataResult,
@@ -24,10 +23,10 @@ def _current_year() -> int:
 
 
 def parse_args(args: list[str] | None = None) -> argparse.Namespace:
-    """Parse CLI arguments with subcommands."""
+    """Parse CLI arguments for backfill subcommand."""
     parser = argparse.ArgumentParser(
         prog="python -m mvp.atptour",
-        description="ATP Tour data pipeline",
+        description="ATP Tour data pipeline - backfill operations",
     )
     parser.add_argument(
         "--log-level",
@@ -37,17 +36,6 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    # live
-    live_parser = subparsers.add_parser(
-        "live", help="Run live pipeline for active tournaments"
-    )
-    live_parser.add_argument(
-        "--tid", type=str, metavar="TID", help="Target a single active tournament"
-    )
-    live_parser.add_argument(
-        "--refresh", action="store_true", help="Force re-extraction of all data"
-    )
-
     # backfill
     backfill_parser = subparsers.add_parser(
         "backfill", help="Process historical tournaments"
@@ -55,14 +43,6 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
     backfill_parser.add_argument("--year", type=int, required=True, metavar="YEAR")
     backfill_parser.add_argument("--tid", nargs="+", type=str, metavar="TID")
     backfill_parser.add_argument("--circuit", choices=["tour", "chal"])
-
-    # model
-    model_parser = subparsers.add_parser(
-        "model", help="Train model and generate predictions"
-    )
-    model_parser.add_argument(
-        "--config", type=str, metavar="CONFIG", help="Experiment config file"
-    )
 
     parsed = parser.parse_args(args)
 
@@ -82,28 +62,8 @@ def main() -> None:
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    if args.command == "live":
-        cmd_live(args)
-    elif args.command == "backfill":
+    if args.command == "backfill":
         cmd_backfill(args)
-    elif args.command == "model":
-        cmd_model(args)
-
-
-def _resolve_active_tournaments(
-    *,
-    tid: str | None = None,
-) -> list[tuple[str, int, bool, Circuit | None]]:
-    """Discover active tournaments from live API, optionally filtering to one tid."""
-    discovery = TournamentDiscovery()
-    pairs = discovery.get_active_tournaments()
-
-    if tid is not None:
-        pairs = [(t, y) for t, y in pairs if t == tid]
-        if not pairs:
-            raise ValueError(f"Tournament {tid} is not currently active")
-
-    return [(t, year, False, None) for t, year in pairs]
 
 
 def _resolve_backfill_tournaments(
@@ -130,28 +90,6 @@ def _resolve_backfill_tournaments(
     return [(t, y, t not in active_tids, c) for t, y, c in triples]
 
 
-def cmd_live(args) -> None:
-    """Live pipeline: extract active tournaments, aggregate, features, predict."""
-    current_year = _current_year()
-    run_rankings(start_year=current_year - 1)
-
-    tournaments = _resolve_active_tournaments(tid=args.tid)
-    logger.info("Processing %d active tournaments", len(tournaments))
-
-    failed = _process_tournaments(tournaments, data_root=None, refresh=args.refresh)
-
-    run_tids = {(tid, yr) for tid, yr, _, _ in tournaments}
-    player_result = run_player_data(run_tids=run_tids)
-
-    logger.info("Running cross-tournament aggregation")
-    MatchesAggregator().run()
-
-    # TODO: feature engineering
-    # TODO: predict with active model
-
-    _report_failures(tournaments, failed, player_result)
-
-
 def cmd_backfill(args) -> None:
     """Historical backfill: extract, stage, per-tournament aggregate."""
     run_rankings(start_year=args.year - 1)
@@ -169,18 +107,6 @@ def cmd_backfill(args) -> None:
     player_result = run_player_data(run_tids=run_tids)
 
     _report_failures(tournaments, failed, player_result)
-
-
-def cmd_model(args) -> None:
-    """Model pipeline: aggregate, features, train, predict."""
-    logger.info("Running cross-tournament aggregation")
-    MatchesAggregator().run()
-
-    # TODO: feature engineering
-    # TODO: train model using args.config
-    # TODO: predict
-    # TODO: update models/active.yaml
-
 
 
 def _report_failures(
