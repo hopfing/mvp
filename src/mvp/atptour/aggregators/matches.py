@@ -183,13 +183,13 @@ def add_round_order(df: pl.DataFrame) -> pl.DataFrame:
 def add_effective_match_date(df: pl.DataFrame) -> pl.DataFrame:
     """Add effective_match_date column using schedule data or round-offset estimation.
 
-    For each (tournament_id, year, draw_type) group:
+    For each (tournament_id, year) group:
     - If ALL scheduled_datetime values are non-null, use scheduled_datetime directly.
-    - Otherwise, estimate as tournament_end_date - round_offset days (at midnight),
-      where round_offset is derived by ranking distinct round_order values descending
-      within the group (highest round_order = offset 0).
+    - Otherwise, estimate by scaling round position across the tournament duration.
+      Early rounds (Q1, R128) are placed near tournament_start_date, late rounds (F)
+      near tournament_end_date. This handles both short Challengers and 2-week Slams.
     """
-    group_keys = ["tournament_id", "year", "draw_type"]
+    group_keys = ["tournament_id", "year"]
 
     # Per-group flag: True if every row in the group has a non-null scheduled_datetime
     df = df.with_columns(
@@ -200,15 +200,45 @@ def add_effective_match_date(df: pl.DataFrame) -> pl.DataFrame:
         .alias("_all_scheduled"),
     )
 
-    # Compute round offset: rank distinct round_order values descending within group.
-    # Highest round_order gets offset 0, next highest gets 1, etc.
+    # Compute round offset: rank round_order ascending within group.
+    # Lowest round_order (Q1) gets offset 0, highest (F) gets max.
     df = df.with_columns(
         pl.col("round_order")
-        .rank(method="dense", descending=True)
+        .rank(method="dense", descending=False)
         .over(group_keys)
         .cast(pl.Int64)
         .sub(1)
         .alias("_round_offset"),
+    )
+
+    # Get max offset per group (for scaling)
+    df = df.with_columns(
+        pl.col("_round_offset").max().over(group_keys).alias("_max_offset"),
+    )
+
+    # Compute tournament duration in days
+    df = df.with_columns(
+        (pl.col("tournament_end_date") - pl.col("tournament_start_date"))
+        .dt.total_days()
+        .alias("_duration_days"),
+    )
+
+    # Compute scaled day offset: (round_offset / max_offset) * duration
+    # When max_offset is 0 (single round), use 0. Replace 0 with 1 before division
+    # to avoid NaN, since the result will be masked anyway.
+    df = df.with_columns(
+        pl.when(pl.col("_max_offset") > 0)
+        .then(
+            (
+                pl.col("_round_offset")
+                * pl.col("_duration_days")
+                / pl.col("_max_offset").replace(0, 1)
+            )
+            .round()
+            .cast(pl.Int64)
+        )
+        .otherwise(0)
+        .alias("_scaled_offset"),
     )
 
     # Compute effective_match_date
@@ -216,15 +246,8 @@ def add_effective_match_date(df: pl.DataFrame) -> pl.DataFrame:
         pl.when(pl.col("_all_scheduled"))
         .then(pl.col("scheduled_datetime"))
         .otherwise(
-            pl.col("tournament_end_date")
-            .cast(pl.Datetime)
-            .dt.offset_by(
-                pl.concat_str(
-                    pl.lit("-"),
-                    pl.col("_round_offset").cast(pl.Utf8),
-                    pl.lit("d"),
-                )
-            )
+            pl.col("tournament_start_date").cast(pl.Datetime)
+            + pl.duration(days=pl.col("_scaled_offset"))
         )
         .alias("effective_match_date"),
     )
@@ -239,7 +262,7 @@ def add_effective_match_date(df: pl.DataFrame) -> pl.DataFrame:
             .group_by(["tournament_id", "year", "circuit"])
             .agg([
                 pl.len().alias("count"),
-                pl.col("tournament_end_date").is_null().sum().alias("null_end_date"),
+                pl.col("tournament_start_date").is_null().sum().alias("null_start_date"),
                 pl.col("round_order").is_null().sum().alias("null_round_order"),
             ])
             .sort(["year", "tournament_id"])
@@ -250,22 +273,22 @@ def add_effective_match_date(df: pl.DataFrame) -> pl.DataFrame:
             summary.height,
         )
         logger.error("Affected tournaments (tournament_id, year, circuit, count, "
-                     "null_end_date, null_round_order):")
+                     "null_start_date, null_round_order):")
         for row in summary.iter_rows(named=True):
             logger.error(
-                "  %s/%s (%s): %d matches, %d missing end_date, %d missing round_order",
+                "  %s/%s (%s): %d matches, %d missing start_date, %d missing round_order",
                 row["tournament_id"],
                 row["year"],
                 row["circuit"],
                 row["count"],
-                row["null_end_date"],
+                row["null_start_date"],
                 row["null_round_order"],
             )
 
         # Log sample of actual bad rows (limited to 20)
         detail_cols = group_keys + [
             "match_uid", "round", "round_order",
-            "tournament_end_date", "scheduled_datetime",
+            "tournament_start_date", "scheduled_datetime",
         ]
         sample_rows = bad_rows.select(detail_cols).head(20)
         logger.debug("Sample rows with null effective_match_date:\n%s", sample_rows)

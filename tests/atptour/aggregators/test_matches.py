@@ -482,22 +482,30 @@ class TestMatchesAggregator:
 
 class TestEffectiveMatchDate:
     def test_estimated_from_round_offsets(self):
-        """Groups without Schedule data get estimated dates."""
+        """Groups without Schedule data get estimated dates via scaled offset."""
         from mvp.atptour.aggregators.matches import add_effective_match_date
 
+        # Tournament Mar 8-10 (2 day duration)
+        # Rounds: R32 (order 7), SF (order 10), F (order 12)
+        # Offsets after rank: R32=0, SF=1, F=2; max=2
+        # Scaled: R32=0, SF=1, F=2 days from start
         df = pl.DataFrame({
             "tournament_id": ["T1"] * 4,
             "year": [2024] * 4,
             "draw_type": ["singles"] * 4,
             "round": ["F", "SF", "R32", "R32"],
             "round_order": [12, 10, 7, 7],
+            "tournament_start_date": [date(2024, 3, 8)] * 4,
             "tournament_end_date": [date(2024, 3, 10)] * 4,
             "scheduled_datetime": [None] * 4,
-        }).cast({"scheduled_datetime": pl.Datetime, "tournament_end_date": pl.Date})
+        }).cast({
+            "scheduled_datetime": pl.Datetime,
+            "tournament_start_date": pl.Date,
+            "tournament_end_date": pl.Date,
+        })
         result = add_effective_match_date(df)
         assert "effective_match_date" in result.columns
 
-        # F = offset 0, SF = offset 1, R32 = offset 2
         f_date = result.filter(pl.col("round") == "F")["effective_match_date"][0]
         sf_date = result.filter(pl.col("round") == "SF")["effective_match_date"][0]
         r32_dates = result.filter(
@@ -518,6 +526,7 @@ class TestEffectiveMatchDate:
             "draw_type": ["singles"] * 2,
             "round": ["F", "SF"],
             "round_order": [12, 10],
+            "tournament_start_date": [date(2024, 3, 8)] * 2,
             "tournament_end_date": [date(2024, 3, 10)] * 2,
             "scheduled_datetime": [
                 datetime(2024, 3, 10, 14, 0),
@@ -534,21 +543,24 @@ class TestEffectiveMatchDate:
         """Partial schedule coverage falls back to estimation."""
         from mvp.atptour.aggregators.matches import add_effective_match_date
 
+        # 2 rounds, duration=2, max_offset=1
+        # SF offset=0 -> start+0=Mar 8, F offset=1 -> start+2=Mar 10
         df = pl.DataFrame({
             "tournament_id": ["T1"] * 2,
             "year": [2024] * 2,
             "draw_type": ["singles"] * 2,
             "round": ["F", "SF"],
             "round_order": [12, 10],
+            "tournament_start_date": [date(2024, 3, 8)] * 2,
             "tournament_end_date": [date(2024, 3, 10)] * 2,
             "scheduled_datetime": [datetime(2024, 3, 10, 14, 0), None],
         })
         result = add_effective_match_date(df)
         f_date = result.filter(pl.col("round") == "F")["effective_match_date"][0]
         sf_date = result.filter(pl.col("round") == "SF")["effective_match_date"][0]
-        # Both estimated, not using the real schedule datetime
+        # Both estimated: SF=start, F=start+2
         assert f_date == datetime(2024, 3, 10)
-        assert sf_date == datetime(2024, 3, 9)
+        assert sf_date == datetime(2024, 3, 8)
 
     def test_multiple_groups_independent(self):
         """Different tournament groups are computed independently."""
@@ -560,12 +572,20 @@ class TestEffectiveMatchDate:
             "draw_type": ["singles", "singles", "singles", "singles"],
             "round": ["F", "SF", "F", "QF"],
             "round_order": [12, 10, 12, 9],
+            "tournament_start_date": [
+                date(2024, 3, 8), date(2024, 3, 8),
+                date(2024, 6, 13), date(2024, 6, 13),
+            ],
             "tournament_end_date": [
                 date(2024, 3, 10), date(2024, 3, 10),
                 date(2024, 6, 15), date(2024, 6, 15),
             ],
             "scheduled_datetime": [None] * 4,
-        }).cast({"scheduled_datetime": pl.Datetime, "tournament_end_date": pl.Date})
+        }).cast({
+            "scheduled_datetime": pl.Datetime,
+            "tournament_start_date": pl.Date,
+            "tournament_end_date": pl.Date,
+        })
         result = add_effective_match_date(df)
 
         t1_f = result.filter(
@@ -580,10 +600,10 @@ class TestEffectiveMatchDate:
 
         assert t1_f == datetime(2024, 3, 10)
         assert t2_f == datetime(2024, 6, 15)
-        assert t2_qf == datetime(2024, 6, 14)
+        assert t2_qf == datetime(2024, 6, 13)
 
-    def test_singles_and_doubles_separate_groups(self):
-        """Singles and doubles in the same tournament are separate groups."""
+    def test_singles_and_doubles_share_scaling(self):
+        """Singles and doubles share tournament-wide round scaling."""
         from mvp.atptour.aggregators.matches import add_effective_match_date
 
         df = pl.DataFrame({
@@ -592,6 +612,7 @@ class TestEffectiveMatchDate:
             "draw_type": ["singles", "singles", "doubles", "doubles"],
             "round": ["F", "SF", "F", "SF"],
             "round_order": [12, 10, 12, 10],
+            "tournament_start_date": [date(2024, 3, 8)] * 4,
             "tournament_end_date": [date(2024, 3, 10)] * 4,
             "scheduled_datetime": [
                 datetime(2024, 3, 10, 14, 0),
@@ -608,13 +629,13 @@ class TestEffectiveMatchDate:
             (pl.col("draw_type") == "doubles") & (pl.col("round") == "F")
         )["effective_match_date"][0]
 
-        # Singles: 100% schedule coverage -> use scheduled_datetime
-        assert sgl_f == datetime(2024, 3, 10, 14, 0)
-        # Doubles: 0% schedule coverage -> estimated
+        # Tournament has partial schedule coverage -> all use estimation
+        # Both F rounds get end date
+        assert sgl_f == datetime(2024, 3, 10)
         assert dbl_f == datetime(2024, 3, 10)
 
-    def test_null_tournament_end_date_raises(self):
-        """Rows with null tournament_end_date in estimated groups trigger ValueError."""
+    def test_null_tournament_dates_raises(self):
+        """Rows with null tournament dates in estimated groups trigger ValueError."""
         from mvp.atptour.aggregators.matches import add_effective_match_date
 
         df = pl.DataFrame({
@@ -623,17 +644,22 @@ class TestEffectiveMatchDate:
             "draw_type": ["singles"],
             "round": ["F"],
             "round_order": [12],
+            "tournament_start_date": [None],
             "tournament_end_date": [None],
             "scheduled_datetime": [None],
             "circuit": ["tour"],
             "match_uid": ["test_match"],
-        }).cast({"scheduled_datetime": pl.Datetime, "tournament_end_date": pl.Date})
+        }).cast({
+            "scheduled_datetime": pl.Datetime,
+            "tournament_start_date": pl.Date,
+            "tournament_end_date": pl.Date,
+        })
 
         with pytest.raises(ValueError, match="null effective_match_date"):
             add_effective_match_date(df)
 
-    def test_null_round_order_raises(self):
-        """Null round_order in estimated groups triggers ValueError."""
+    def test_null_round_order_uses_start_date(self):
+        """Null round_order defaults to start_date (offset 0)."""
         from mvp.atptour.aggregators.matches import add_effective_match_date
 
         df = pl.DataFrame({
@@ -642,18 +668,21 @@ class TestEffectiveMatchDate:
             "draw_type": ["singles"],
             "round": ["UNKNOWN"],
             "round_order": [None],
+            "tournament_start_date": [date(2024, 3, 8)],
             "tournament_end_date": [date(2024, 3, 10)],
             "scheduled_datetime": [None],
             "circuit": ["tour"],
             "match_uid": ["test_match"],
         }).cast({
             "scheduled_datetime": pl.Datetime,
+            "tournament_start_date": pl.Date,
             "tournament_end_date": pl.Date,
             "round_order": pl.Int64,
         })
 
-        with pytest.raises(ValueError, match="null effective_match_date"):
-            add_effective_match_date(df)
+        result = add_effective_match_date(df)
+        # With null round_order, max_offset check fails, defaults to offset 0
+        assert result["effective_match_date"][0] == datetime(2024, 3, 8)
 
     def test_preserves_existing_columns(self):
         """Function should not drop any existing columns."""
@@ -665,11 +694,16 @@ class TestEffectiveMatchDate:
             "draw_type": ["singles"],
             "round": ["F"],
             "round_order": [12],
+            "tournament_start_date": [date(2024, 3, 8)],
             "tournament_end_date": [date(2024, 3, 10)],
             "scheduled_datetime": [None],
             "match_uid": ["uid1"],
             "player_id": ["A001"],
-        }).cast({"scheduled_datetime": pl.Datetime, "tournament_end_date": pl.Date})
+        }).cast({
+            "scheduled_datetime": pl.Datetime,
+            "tournament_start_date": pl.Date,
+            "tournament_end_date": pl.Date,
+        })
         result = add_effective_match_date(df)
         assert "match_uid" in result.columns
         assert "player_id" in result.columns

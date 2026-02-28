@@ -1184,6 +1184,42 @@ class TestParseTournamentDates:
         assert start == date(2022, 1, 4)
         assert end == date(2022, 1, 9)
 
+    def test_parses_cross_month(self):
+        """Parses '18 Jan - 1 Feb, 2026' cross-month format."""
+        from datetime import date
+
+        from bs4 import BeautifulSoup
+
+        html = """
+        <div class="date-location">
+          <span>Melbourne, Australia</span>
+          |
+          <span>18 Jan - 1 Feb, 2026</span>
+        </div>
+        """
+        soup = BeautifulSoup(html, "lxml")
+        start, end = ResultsParser()._parse_tournament_dates(soup)
+        assert start == date(2026, 1, 18)
+        assert end == date(2026, 2, 1)
+
+    def test_parses_cross_year(self):
+        """Parses '28 Dec - 3 Jan, 2022' cross-year format (year applies to end)."""
+        from datetime import date
+
+        from bs4 import BeautifulSoup
+
+        html = """
+        <div class="date-location">
+          <span>City</span>
+          |
+          <span>28 Dec - 3 Jan, 2022</span>
+        </div>
+        """
+        soup = BeautifulSoup(html, "lxml")
+        start, end = ResultsParser()._parse_tournament_dates(soup)
+        assert start == date(2021, 12, 28)
+        assert end == date(2022, 1, 3)
+
     def test_missing_date_location_returns_none(self):
         """Missing date-location div returns (None, None)."""
         from bs4 import BeautifulSoup

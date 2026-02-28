@@ -19,8 +19,14 @@ _MONTH_MAP = {
     "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
 }
 
-_DATE_RANGE_RE = re.compile(
+# Same-month: "2-8 May, 2022" or single day "8 May, 2022"
+_DATE_RANGE_SAME_MONTH_RE = re.compile(
     r"(\d{1,2})(?:\s*-\s*(\d{1,2}))?\s+([A-Za-z]{3}),?\s+(\d{4})"
+)
+
+# Cross-month: "18 Jan - 1 Feb, 2026" or "28 Dec - 3 Jan, 2022"
+_DATE_RANGE_CROSS_MONTH_RE = re.compile(
+    r"(\d{1,2})\s+([A-Za-z]{3})\s*-\s*(\d{1,2})\s+([A-Za-z]{3}),?\s+(\d{4})"
 )
 
 
@@ -208,7 +214,11 @@ class ResultsParser:
     ) -> tuple[date | None, date | None]:
         """Extract tournament start and end dates from date-location div.
 
-        Parses formats like "2-8 May, 2022" or "28 Dec - 3 Jan, 2022".
+        Parses formats:
+        - Same-month: "2-8 May, 2022" or "8 May, 2022"
+        - Cross-month: "18 Jan - 1 Feb, 2026"
+        - Cross-year: "28 Dec - 3 Jan, 2022" (year applies to end date)
+
         Returns (start_date, end_date), either may be None if parsing fails.
 
         Note: Some pages have template placeholders ({{tournament.FormattedDate}})
@@ -223,28 +233,53 @@ class ResultsParser:
             if not date_text or "{{" in date_text:
                 continue
 
-            match = _DATE_RANGE_RE.search(date_text)
-            if not match:
-                logger.warning("Could not parse tournament date: %s", date_text)
-                continue
+            # Try cross-month pattern first (more specific)
+            match = _DATE_RANGE_CROSS_MONTH_RE.search(date_text)
+            if match:
+                start_day = int(match.group(1))
+                start_month_str = match.group(2).lower()
+                end_day = int(match.group(3))
+                end_month_str = match.group(4).lower()
+                year = int(match.group(5))
 
-            start_day = int(match.group(1))
-            end_day = int(match.group(2)) if match.group(2) else start_day
-            month_str = match.group(3).lower()
-            year = int(match.group(4))
+                start_month = _MONTH_MAP.get(start_month_str)
+                end_month = _MONTH_MAP.get(end_month_str)
+                if start_month is None or end_month is None:
+                    logger.warning("Unknown month in tournament date: %s", date_text)
+                    continue
 
-            month = _MONTH_MAP.get(month_str)
-            if month is None:
-                logger.warning("Unknown month in tournament date: %s", month_str)
-                continue
+                try:
+                    # Year in text applies to end date; start may be previous year
+                    start_year = year - 1 if start_month > end_month else year
+                    start_date = date(start_year, start_month, start_day)
+                    end_date = date(year, end_month, end_day)
+                    return start_date, end_date
+                except ValueError as e:
+                    logger.warning("Invalid tournament date: %s (%s)", date_text, e)
+                    continue
 
-            try:
-                start_date = date(year, month, start_day)
-                end_date = date(year, month, end_day)
-                return start_date, end_date
-            except ValueError as e:
-                logger.warning("Invalid tournament date: %s (%s)", date_text, e)
-                continue
+            # Try same-month pattern
+            match = _DATE_RANGE_SAME_MONTH_RE.search(date_text)
+            if match:
+                start_day = int(match.group(1))
+                end_day = int(match.group(2)) if match.group(2) else start_day
+                month_str = match.group(3).lower()
+                year = int(match.group(4))
+
+                month = _MONTH_MAP.get(month_str)
+                if month is None:
+                    logger.warning("Unknown month in tournament date: %s", month_str)
+                    continue
+
+                try:
+                    start_date = date(year, month, start_day)
+                    end_date = date(year, month, end_day)
+                    return start_date, end_date
+                except ValueError as e:
+                    logger.warning("Invalid tournament date: %s (%s)", date_text, e)
+                    continue
+
+            logger.warning("Could not parse tournament date: %s", date_text)
 
         return None, None
 
