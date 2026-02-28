@@ -1,5 +1,6 @@
 """Tests for experiment runner."""
 
+import importlib
 from pathlib import Path
 
 import polars as pl
@@ -10,6 +11,25 @@ from mvp.experimentation.runner import ExperimentRunner
 
 class TestExperimentRunner:
     """Tests for ExperimentRunner."""
+
+    @pytest.fixture(autouse=True)
+    def ensure_features_registered(self):
+        """Ensure features are registered before each test.
+
+        Other tests may clear the registry, so we clear it and reload
+        the feature modules to re-run the @feature decorators.
+        """
+        import mvp.experimentation.features.h2h
+        import mvp.experimentation.features.ranking
+        import mvp.experimentation.features.serve
+        import mvp.experimentation.features.win_rate
+        from mvp.experimentation.registry import get_registry
+
+        get_registry().clear()
+        importlib.reload(mvp.experimentation.features.h2h)
+        importlib.reload(mvp.experimentation.features.ranking)
+        importlib.reload(mvp.experimentation.features.serve)
+        importlib.reload(mvp.experimentation.features.win_rate)
 
     @pytest.fixture
     def sample_matches(self, tmp_path: Path) -> Path:
@@ -22,8 +42,8 @@ class TestExperimentRunner:
                 f"2024-01-{(i % 28) + 1:02d}" for i in range(200)
             ],
             "won": [i % 2 == 0 for i in range(200)],
-            "rankings_points": [1000 - i for i in range(200)],
-            "rankings_opp_points": [500 + i for i in range(200)],
+            "player_ranking_points": [1000 - i for i in range(200)],
+            "opp_ranking_points": [500 + i for i in range(200)],
         }).with_columns(
             pl.col("effective_match_date").str.to_datetime()
         )
@@ -106,3 +126,30 @@ validation:
         assert runner.engine is not None
         assert runner.engine.matches_path == sample_matches
         assert runner.engine.cache_dir == cache_dir
+
+    def test_runner_run(
+        self,
+        sample_config: Path,
+        sample_matches: Path,
+        tmp_path: Path,
+    ):
+        """Runner executes full pipeline."""
+        import mlflow
+
+        mlflow_dir = tmp_path / "mlruns"
+        mlflow.set_tracking_uri(f"file://{mlflow_dir}")
+
+        runner = ExperimentRunner(
+            config_path=sample_config,
+            matches_path=sample_matches,
+            cache_dir=tmp_path / "cache",
+            mlflow_dir=mlflow_dir,
+        )
+        results = runner.run()
+
+        assert "metrics" in results
+        assert "accuracy" in results["metrics"]
+        assert "log_loss" in results["metrics"]
+        assert 0 <= results["metrics"]["accuracy"] <= 1
+        assert results["n_folds"] == 2
+        assert "run_id" in results

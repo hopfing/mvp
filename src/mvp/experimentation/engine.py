@@ -10,6 +10,7 @@ from typing import Any
 
 import polars as pl
 
+import mvp.experimentation.features  # noqa: F401 - triggers feature registration
 from mvp.experimentation.registry import get_registry
 
 
