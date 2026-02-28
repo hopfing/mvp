@@ -24,7 +24,7 @@ class TestH2HWinsFeature:
         registry = get_registry()
         feat = registry.get("h2h_wins")
         assert feat.name == "h2h_wins"
-        assert feat.params == []
+        assert feat.params == ["days"]
         assert feat.mirror is True
 
     def test_h2h_wins_computes_cumulative_sum(self):

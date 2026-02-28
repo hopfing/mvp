@@ -233,6 +233,50 @@ class FeatureEngine:
         }
         self._save_manifest()
 
+    def _resolve_dependencies(self, feature_specs: list[str]) -> list[str]:
+        """Resolve feature dependencies and return ordered list.
+
+        Ensures that if feature A depends on feature B, B is computed first.
+        Dependencies inherit the same parameters (e.g., days) from the dependent.
+
+        For diff-style features that need both player and opponent versions,
+        dependencies are added for both prefixes.
+
+        Args:
+            feature_specs: List of feature specs.
+
+        Returns:
+            Ordered list with dependencies before dependents.
+        """
+        result = []
+        seen = set()
+
+        def add_with_deps(spec: str) -> None:
+            if spec in seen:
+                return
+            seen.add(spec)
+
+            prefix, base_name, full_name, params = parse_feature_spec(spec)
+            feature_def = self._registry.get(base_name)
+
+            # Recursively add dependencies first
+            # Add BOTH player_ and opp_ versions since diff features need both
+            for dep_name in feature_def.depends_on:
+                for dep_prefix in ["player", "opp"]:
+                    if params:
+                        param_str = ", ".join(f"{k}={v}" for k, v in params.items())
+                        dep_spec = f"{dep_prefix}_{dep_name}({param_str})"
+                    else:
+                        dep_spec = f"{dep_prefix}_{dep_name}"
+                    add_with_deps(dep_spec)
+
+            result.append(spec)
+
+        for spec in feature_specs:
+            add_with_deps(spec)
+
+        return result
+
     def compute(self, feature_specs: list[str]) -> pl.DataFrame:
         """Compute features for the given feature specifications.
 
@@ -243,6 +287,21 @@ class FeatureEngine:
         Returns:
             DataFrame with match data and computed feature columns.
         """
+        # Resolve dependencies first
+        feature_specs = self._resolve_dependencies(feature_specs)
+
+        # Separate base features from derived features (those with depends_on)
+        # Derived features need opp_* columns from mirroring, so must come later
+        base_specs = []
+        derived_specs = []
+        for spec in feature_specs:
+            prefix, base_name, full_name, params = parse_feature_spec(spec)
+            feature_def = self._registry.get(base_name)
+            if feature_def.depends_on:
+                derived_specs.append(spec)
+            else:
+                base_specs.append(spec)
+
         # Load matches data
         df = pl.read_parquet(self.matches_path)
 
@@ -254,8 +313,8 @@ class FeatureEngine:
         # Track which opp_* columns we need to mirror
         opp_cols_to_mirror: list[tuple[str, str]] = []  # (player_col, opp_col)
 
-        # First pass: compute all player_* features and identify opp_* needs
-        for spec in feature_specs:
+        # Phase 1: compute all base player_* features and identify opp_* needs
+        for spec in base_specs:
             prefix, base_name, full_name, params = parse_feature_spec(spec)
             feature_def = self._registry.get(base_name)
 
@@ -317,11 +376,35 @@ class FeatureEngine:
                         )
                     computed_player_cols.add(player_col)
 
-        # Second pass: mirror to create opp_* columns
+        # Phase 2: mirror to create opp_* columns (BEFORE derived features)
         if opp_cols_to_mirror:
-            # Get unique player columns that need mirroring
             player_cols_for_mirror = list({p for p, _ in opp_cols_to_mirror})
             df = self._mirror_features(df, player_cols_for_mirror)
+
+        # Phase 3: compute derived features (those with depends_on)
+        for spec in derived_specs:
+            prefix, base_name, full_name, params = parse_feature_spec(spec)
+            feature_def = self._registry.get(base_name)
+            col_name = build_column_name(full_name, params)
+
+            if prefix == "player" and col_name not in computed_player_cols:
+                cache_spec = f"player_{base_name}"
+                if params:
+                    param_str = ",".join(f"{k}={v}" for k, v in params.items())
+                    cache_spec = f"player_{base_name}({param_str})"
+
+                if self._is_cached(cache_spec, matches_hash):
+                    cached = self._load_cached_feature(cache_spec)
+                    df = df.join(
+                        cached,
+                        on=["match_uid", "player_id"],
+                        how="left",
+                    )
+                else:
+                    expr = feature_def.func(**params)
+                    df = df.with_columns(expr.alias(col_name))
+                    self._cache_feature(cache_spec, df, [col_name], matches_hash)
+                computed_player_cols.add(col_name)
 
         return df
 

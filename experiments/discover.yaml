@@ -1,0 +1,30 @@
+# Discovery configuration
+# Run: python -m mvp experiment discover --verbose
+
+name: discovery_example
+
+data:
+  date_range:
+    start: "2021-01-01"
+    end: "2025-12-31"
+
+discovery:
+  importance_method: permutation
+  selection_method: forward
+  sweep_params: true
+  segment_analysis: true
+  metric: calibration_error
+  direction: minimize
+
+model:
+  type: xgboost
+  params:
+    n_estimators: 100
+    max_depth: 6
+    learning_rate: 0.1
+
+validation:
+  type: walk_forward
+  n_splits: 3
+  min_train_size: 30000
+  test_size: 5000

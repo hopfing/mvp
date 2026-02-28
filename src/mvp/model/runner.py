@@ -176,6 +176,9 @@ class ExperimentRunner:
             # Log diagnostic metrics
             logger.log_metrics(diagnostic_results.metrics)
 
+            # Merge diagnostic metrics (calibration_error, etc.) into avg_metrics
+            avg_metrics.update(diagnostic_results.metrics)
+
             # Log diagnostic JSON artifact
             import tempfile
 

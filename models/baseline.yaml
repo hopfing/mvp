@@ -1,5 +1,5 @@
-# Baseline experiment configuration
-# Run with: python -m mvp model experiments/baseline.yaml
+# Baseline model configuration
+# Run with: python -m mvp model baseline
 
 name: baseline_v1
 description: "Initial baseline with core form and ranking features"
