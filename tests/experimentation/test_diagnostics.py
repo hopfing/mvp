@@ -161,3 +161,56 @@ class TestDiagnosticsCalibration:
 
         total_n = sum(b["n"] for b in result["buckets"])
         assert total_n == 2  # Only 0.55 and 0.65, not 0.45
+
+
+class TestDiagnosticsErrorAnalysis:
+    """Tests for error analysis."""
+
+    def test_error_rate_by_confidence_tier(self) -> None:
+        """Computes error rates for each confidence tier."""
+        # 10 predictions at various confidence levels (all predict 1)
+        y_prob = np.array([0.55, 0.62, 0.65, 0.72, 0.75, 0.78, 0.82, 0.85, 0.91, 0.95])
+        y_true = np.array([1, 0, 1, 1, 0, 1, 0, 1, 1, 0])  # some wrong
+
+        df = pl.DataFrame({
+            "match_uid": [f"m{i}" for i in range(10)],
+            "tournament_name": ["Test"] * 10,
+            "round": ["R32"] * 10,
+            "player_name": ["A"] * 10,
+            "opp_name": ["B"] * 10,
+            "effective_match_date": ["2023-01-01"] * 10,
+        })
+
+        diagnostics = Diagnostics()
+        result = diagnostics._error_analysis(df, y_true, y_prob)
+
+        assert "summary" in result
+        assert "60plus" in result["summary"]
+        assert "70plus" in result["summary"]
+        assert "80plus" in result["summary"]
+        assert "90plus" in result["summary"]
+
+    def test_high_confidence_errors_includes_match_details(self) -> None:
+        """80%+ errors include match-level details."""
+        y_prob = np.array([0.85, 0.90])
+        y_true = np.array([0, 0])  # both wrong
+
+        df = pl.DataFrame({
+            "match_uid": ["uid1", "uid2"],
+            "tournament_name": ["Monte Carlo", "Rome"],
+            "round": ["R32", "QF"],
+            "player_name": ["Player A", "Player C"],
+            "opp_name": ["Player B", "Player D"],
+            "effective_match_date": ["2023-04-15", "2023-05-10"],
+        })
+
+        diagnostics = Diagnostics()
+        result = diagnostics._error_analysis(df, y_true, y_prob)
+
+        assert "high_confidence_errors" in result
+        assert len(result["high_confidence_errors"]) == 2
+
+        error = result["high_confidence_errors"][0]
+        assert "match_uid" in error
+        assert "tournament_name" in error
+        assert "predicted_prob" in error

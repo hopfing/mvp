@@ -140,6 +140,64 @@ class Diagnostics:
 
         return result
 
+    def _error_analysis(
+        self, df: pl.DataFrame, y_true: np.ndarray, y_prob: np.ndarray
+    ) -> dict[str, Any]:
+        """Analyze high-confidence errors."""
+        y_pred = (y_prob >= 0.5).astype(int)
+        is_error = y_pred != y_true
+
+        # Confidence tiers
+        tiers = [
+            ("60plus", 0.60),
+            ("70plus", 0.70),
+            ("80plus", 0.80),
+            ("90plus", 0.90),
+        ]
+
+        summary = {}
+        for name, threshold in tiers:
+            tier_mask = y_prob >= threshold
+            tier_total = int(tier_mask.sum())
+            tier_errors = int((tier_mask & is_error).sum())
+            error_rate = tier_errors / tier_total if tier_total > 0 else 0.0
+
+            summary[name] = {
+                "total": tier_total,
+                "errors": tier_errors,
+                "error_rate": error_rate,
+            }
+
+        # High-confidence errors (80%+) with match details
+        high_conf_error_mask = (y_prob >= 0.80) & is_error
+        high_conf_errors = []
+
+        if high_conf_error_mask.any():
+            error_indices = np.where(high_conf_error_mask)[0]
+            error_df = df[error_indices.tolist()]
+
+            for i, idx in enumerate(error_indices):
+                row = error_df.row(i, named=True)
+                high_conf_errors.append({
+                    "match_uid": row.get("match_uid", ""),
+                    "tournament_name": row.get("tournament_name", ""),
+                    "round": row.get("round", ""),
+                    "player_name": row.get("player_name", ""),
+                    "opp_name": row.get("opp_name", ""),
+                    "predicted_prob": float(y_prob[idx]),
+                    "effective_match_date": str(row.get("effective_match_date", "")),
+                })
+
+        return {
+            "summary": summary,
+            "high_confidence_errors": high_conf_errors,
+            "error_rate_60plus": summary["60plus"]["error_rate"],
+            "error_rate_70plus": summary["70plus"]["error_rate"],
+            "error_rate_80plus": summary["80plus"]["error_rate"],
+            "error_rate_90plus": summary["90plus"]["error_rate"],
+            "error_count_80plus": summary["80plus"]["errors"],
+        }
+
     def _calibration(
         self, y_true: np.ndarray, y_prob: np.ndarray
     ) -> dict[str, Any]:
