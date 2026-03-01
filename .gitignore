@@ -5,3 +5,7 @@ __pycache__
 # MLflow
 mlflow.db
 mlruns/
+
+# Experiment configs (iterative/exploratory)
+experiments/
+models/
