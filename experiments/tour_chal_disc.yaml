@@ -1,0 +1,30 @@
+# Discovery configuration
+# Run: python -m mvp experiment discover --verbose
+
+name: tour_chal_disc_20260301
+
+data:
+  date_range:
+    start: "2015-01-01"
+    end: "2025-12-31"
+  filters:
+    draw_type: "singles"
+    circuit: ["tour", "chal"]
+
+discovery:
+  selection_method: forward
+  sweep_params: true
+  segment_analysis: true
+  metric: brier_score
+  direction: minimize
+  min_features: 5
+  max_features: 15
+
+model:
+  type: xgboost
+
+validation:
+  type: walk_forward
+  n_splits: 5
+  min_train_size: 30000
+  test_size: 10000

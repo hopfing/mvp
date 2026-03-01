@@ -12,6 +12,7 @@ from mvp.model.runner import ExperimentRunner
 from mvp.model.splitters import (
     BaseSplitter,
     ExpandingWindowSplitter,
+    SlidingWindowSplitter,
     WalkForwardSplitter,
 )
 
@@ -31,6 +32,7 @@ __all__ = [
     "get_model",
     "get_registry",
     "LogisticModel",
+    "SlidingWindowSplitter",
     "WalkForwardSplitter",
     "XGBoostModel",
 ]

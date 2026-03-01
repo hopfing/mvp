@@ -1,7 +1,7 @@
 # Discovery configuration
 # Run: python -m mvp experiment discover --verbose
 
-name: atp_discovery_5_10_01
+name: tour_chal_disc_20260301
 
 data:
   date_range:
@@ -9,13 +9,13 @@ data:
     end: "2025-12-31"
   filters:
     draw_type: "singles"
-    circuit: "tour"
+    circuit: ["tour", "chal"]
 
 discovery:
   selection_method: forward
   sweep_params: true
   segment_analysis: true
-  metric: log_loss
+  metric: brier_score
   direction: minimize
   min_features: 5
   max_features: 15

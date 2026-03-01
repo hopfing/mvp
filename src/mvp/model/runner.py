@@ -21,7 +21,7 @@ from mvp.model.models import get_model
 from mvp.model.splitters import (
     BaseSplitter,
     ExpandingWindowSplitter,
-    WalkForwardSplitter,
+    SlidingWindowSplitter,
 )
 
 
@@ -59,18 +59,28 @@ class ExperimentRunner:
         """Get the appropriate splitter for validation strategy."""
         val = self.config.validation
         if val.type == "walk_forward":
-            return WalkForwardSplitter(
+            # n_splits mode of ExpandingWindowSplitter
+            return ExpandingWindowSplitter(
                 n_splits=val.n_splits,
                 min_train_size=val.min_train_size,
                 test_size=val.test_size,
             )
         elif val.type == "expanding_window":
+            # step_size mode of ExpandingWindowSplitter
             if val.initial_train_size is None or val.step_size is None:
                 raise ValueError(
                     "expanding_window requires initial_train_size and step_size"
                 )
             return ExpandingWindowSplitter(
                 initial_train_size=val.initial_train_size,
+                step_size=val.step_size,
+            )
+        elif val.type == "sliding_window":
+            if val.train_size is None:
+                raise ValueError("sliding_window requires train_size")
+            return SlidingWindowSplitter(
+                train_size=val.train_size,
+                test_size=val.test_size,
                 step_size=val.step_size,
             )
         else:

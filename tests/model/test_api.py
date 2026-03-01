@@ -69,6 +69,7 @@ class TestPublicAPI:
             "get_model",
             "get_registry",
             "LogisticModel",
+            "SlidingWindowSplitter",
             "WalkForwardSplitter",
             "XGBoostModel",
         ]
