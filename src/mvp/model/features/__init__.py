@@ -7,6 +7,7 @@ which registers the features via decorators.
 # Import all feature modules to trigger registration
 from mvp.model.features import (
     context,
+    elo,
     h2h,
     matchup,
     points,
@@ -23,6 +24,7 @@ from mvp.model.registry import get_registry
 __all__ = [
     "get_registry",
     "context",
+    "elo",
     "h2h",
     "matchup",
     "points",
