@@ -105,7 +105,10 @@ class ExperimentRunner:
         # include doubles appearances before filtering to singles-only
         if self.config.data.filters:
             for col, value in self.config.data.filters.items():
-                df = df.filter(pl.col(col) == value)
+                if isinstance(value, list):
+                    df = df.filter(pl.col(col).is_in(value))
+                else:
+                    df = df.filter(pl.col(col) == value)
 
         # Get feature columns from config
         feature_cols = get_feature_columns(self.config.features.include)
