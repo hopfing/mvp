@@ -3,6 +3,7 @@ from mvp.atptour.elo.ratings import (
     expected_score,
     get_k_factor,
     update_elo,
+    update_surface_adj,
 )
 
-__all__ = ["PlayerRating", "expected_score", "get_k_factor", "update_elo"]
+__all__ = ["PlayerRating", "expected_score", "get_k_factor", "update_elo", "update_surface_adj"]

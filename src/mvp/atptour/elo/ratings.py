@@ -93,3 +93,28 @@ def update_elo(
     outcome = 1.0 if won else 0.0
 
     return player.elo + k * (outcome - expected)
+
+
+def update_surface_adj(
+    player: PlayerRating,
+    opponent: PlayerRating,
+    won: bool,
+    surface: str,
+    k: float,
+) -> float:
+    """Calculate new surface adjustment after a match.
+
+    Returns the new adjustment value for the given surface.
+    Returns 0.0 for unknown surfaces.
+    """
+    if surface not in ("Hard", "Clay", "Grass"):
+        return 0.0
+
+    player_effective = player.effective_surface_elo(surface)
+    opponent_effective = opponent.effective_surface_elo(surface)
+
+    expected = expected_score(player_effective, opponent_effective)
+    outcome = 1.0 if won else 0.0
+
+    current_adj = player.get_surface_adj(surface)
+    return current_adj + k * (outcome - expected)

@@ -211,3 +211,40 @@ class TestUpdateElo:
             update_elo(player, opponent, won=True, k=32.0, surface="Clay") - 1500.0
         )
         assert gain_no_surface > gain_clay  # Upset gives more points
+
+
+class TestUpdateSurfaceAdj:
+    """Test update_surface_adj calculation."""
+
+    def test_clay_specialist_gains_on_clay_win(self):
+        from mvp.atptour.elo.ratings import update_surface_adj
+
+        player = PlayerRating(elo=1600.0, clay_adj=50.0)
+        opponent = PlayerRating(elo=1600.0, clay_adj=0.0)
+        new_adj = update_surface_adj(player, opponent, won=True, surface="Clay", k=16.0)
+        assert new_adj > 50.0
+
+    def test_clay_specialist_loses_on_hard(self):
+        from mvp.atptour.elo.ratings import update_surface_adj
+
+        player = PlayerRating(elo=1600.0, hard_adj=-20.0)
+        opponent = PlayerRating(elo=1600.0)
+        new_adj = update_surface_adj(player, opponent, won=False, surface="Hard", k=16.0)
+        assert new_adj < -20.0
+
+    def test_unknown_surface_returns_zero(self):
+        from mvp.atptour.elo.ratings import update_surface_adj
+
+        player = PlayerRating()
+        opponent = PlayerRating()
+        new_adj = update_surface_adj(player, opponent, won=True, surface="Carpet", k=16.0)
+        assert new_adj == 0.0
+
+    def test_all_surfaces_work(self):
+        from mvp.atptour.elo.ratings import update_surface_adj
+
+        player = PlayerRating()
+        opponent = PlayerRating()
+        for surface in ["Hard", "Clay", "Grass"]:
+            adj = update_surface_adj(player, opponent, won=True, surface=surface, k=16.0)
+            assert adj > 0.0  # Win from even position should increase adj
