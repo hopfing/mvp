@@ -63,3 +63,33 @@ def get_k_factor(player: PlayerRating, round_name: str) -> float:
     k *= importance
 
     return k
+
+
+def expected_score(player_elo: float, opponent_elo: float) -> float:
+    """Calculate expected score (win probability) using Elo formula."""
+    return 1.0 / (1.0 + 10.0 ** ((opponent_elo - player_elo) / 400.0))
+
+
+def update_elo(
+    player: PlayerRating,
+    opponent: PlayerRating,
+    won: bool,
+    k: float,
+    surface: str | None = None,
+) -> float:
+    """Calculate new Elo after a match.
+
+    If surface is provided, uses effective surface Elo for calculation.
+    Returns the new overall Elo value.
+    """
+    if surface:
+        player_elo = player.effective_surface_elo(surface)
+        opponent_elo = opponent.effective_surface_elo(surface)
+    else:
+        player_elo = player.elo
+        opponent_elo = opponent.elo
+
+    expected = expected_score(player_elo, opponent_elo)
+    outcome = 1.0 if won else 0.0
+
+    return player.elo + k * (outcome - expected)

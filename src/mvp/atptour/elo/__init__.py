@@ -1,3 +1,8 @@
-from mvp.atptour.elo.ratings import PlayerRating, get_k_factor
+from mvp.atptour.elo.ratings import (
+    PlayerRating,
+    expected_score,
+    get_k_factor,
+    update_elo,
+)
 
-__all__ = ["PlayerRating", "get_k_factor"]
+__all__ = ["PlayerRating", "expected_score", "get_k_factor", "update_elo"]

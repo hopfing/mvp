@@ -7,7 +7,12 @@ from mvp.atptour.elo.constants import (
     HIGH_RD_K_MULT,
     NEW_PLAYER_K_MULT,
 )
-from mvp.atptour.elo.ratings import PlayerRating, get_k_factor
+from mvp.atptour.elo.ratings import (
+    PlayerRating,
+    expected_score,
+    get_k_factor,
+    update_elo,
+)
 
 
 class TestPlayerRatingDefaults:
@@ -155,3 +160,54 @@ class TestKFactor:
         player = PlayerRating(match_count=30, rd=200.0)
         k = get_k_factor(player, "UNKNOWN")
         assert k == BASE_K
+
+
+class TestExpectedScore:
+    """Test expected_score calculation."""
+
+    def test_equal_ratings(self):
+        assert expected_score(1500, 1500) == 0.5
+
+    def test_higher_rating_favored(self):
+        exp = expected_score(1700, 1500)
+        assert 0.75 < exp < 0.77  # ~76% for 200 point diff
+
+    def test_lower_rating_underdog(self):
+        exp = expected_score(1500, 1700)
+        assert 0.23 < exp < 0.25
+
+
+class TestUpdateElo:
+    """Test update_elo calculation."""
+
+    def test_winner_gains_points(self):
+        player = PlayerRating(elo=1500.0, rd=100.0, match_count=50)
+        opponent = PlayerRating(elo=1500.0)
+        new_elo = update_elo(player, opponent, won=True, k=32.0)
+        assert new_elo > 1500.0
+
+    def test_loser_loses_points(self):
+        player = PlayerRating(elo=1500.0, rd=100.0, match_count=50)
+        opponent = PlayerRating(elo=1500.0)
+        new_elo = update_elo(player, opponent, won=False, k=32.0)
+        assert new_elo < 1500.0
+
+    def test_upset_larger_swing(self):
+        # Underdog wins - should gain more than favorite winning
+        underdog = PlayerRating(elo=1400.0)
+        favorite = PlayerRating(elo=1600.0)
+        underdog_win_gain = update_elo(underdog, favorite, won=True, k=32.0) - 1400.0
+        favorite_win_gain = update_elo(favorite, underdog, won=True, k=32.0) - 1600.0
+        assert underdog_win_gain > favorite_win_gain
+
+    def test_surface_elo_used_when_provided(self):
+        # Player has clay advantage
+        player = PlayerRating(elo=1500.0, clay_adj=100.0)
+        opponent = PlayerRating(elo=1600.0)
+        # Without surface: player is underdog
+        # With clay: player has 1600 vs 1600 - even match
+        gain_no_surface = update_elo(player, opponent, won=True, k=32.0) - 1500.0
+        gain_clay = (
+            update_elo(player, opponent, won=True, k=32.0, surface="Clay") - 1500.0
+        )
+        assert gain_no_surface > gain_clay  # Upset gives more points
