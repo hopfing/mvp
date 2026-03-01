@@ -1,3 +1,4 @@
+import math
 from dataclasses import dataclass
 from datetime import date
 
@@ -15,6 +16,10 @@ from mvp.atptour.elo.constants import (
     RD_GROWTH_PER_DAY,
     RETURN_BASELINE,
     ROUND_IMPORTANCE,
+    SEED_ELO_MAX,
+    SEED_ELO_MIN,
+    SEED_RANK_COEFF,
+    SEED_UNRANKED,
     SERVE_BASELINE,
     SERVE_RETURN_SCALE,
 )
@@ -180,3 +185,29 @@ def update_return_elo(
     baseline = RETURN_BASELINE.get(surface, 0.38)
     diff = return_pct - baseline
     return current_elo + k * diff * SERVE_RETURN_SCALE
+
+
+def initialize_player(ranking: int | None) -> PlayerRating:
+    """Initialize a new player's rating, optionally seeded from ranking.
+
+    Mapping: #1 -> ~2400, #100 -> ~1800, #500 -> ~1400, unranked -> 1300
+    """
+    if ranking is not None:
+        elo = SEED_ELO_MAX - math.sqrt(ranking) * SEED_RANK_COEFF
+        elo = max(SEED_ELO_MIN, min(SEED_ELO_MAX, elo))
+    else:
+        elo = SEED_UNRANKED
+
+    return PlayerRating(
+        elo=elo,
+        rd=DEFAULT_RD,
+        hard_adj=0.0,
+        clay_adj=0.0,
+        grass_adj=0.0,
+        serve_elo=DEFAULT_ELO,
+        serve_rd=DEFAULT_RD,
+        return_elo=DEFAULT_ELO,
+        return_rd=DEFAULT_RD,
+        match_count=0,
+        last_match_date=None,
+    )

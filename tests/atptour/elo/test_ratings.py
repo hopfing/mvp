@@ -335,3 +335,54 @@ class TestUpdateReturnElo:
     def test_missing_stats_unchanged(self):
         new_elo = update_return_elo(1500.0, None, "Hard", 16.0)
         assert new_elo == 1500.0
+
+
+class TestInitializePlayer:
+    """Test initialize_player function for seeding from ATP ranking."""
+
+    def test_ranked_player_seeded_from_ranking(self):
+        from mvp.atptour.elo.ratings import initialize_player
+
+        rating = initialize_player(ranking=50)
+        assert rating.elo > 1500.0  # better than default
+        assert rating.elo < 2400.0  # not top Elo
+
+    def test_top_player_high_elo(self):
+        from mvp.atptour.elo.ratings import initialize_player
+
+        rating = initialize_player(ranking=1)
+        assert rating.elo > 2300.0
+
+    def test_low_ranked_player_low_elo(self):
+        from mvp.atptour.elo.ratings import initialize_player
+
+        rating = initialize_player(ranking=500)
+        assert rating.elo < 1600.0  # well below top players
+        assert rating.elo >= 1200.0  # minimum
+
+    def test_unranked_player_default(self):
+        from mvp.atptour.elo.ratings import initialize_player
+
+        rating = initialize_player(ranking=None)
+        assert rating.elo == 1300.0
+
+    def test_new_player_high_rd(self):
+        from mvp.atptour.elo.ratings import initialize_player
+
+        rating = initialize_player(ranking=100)
+        assert rating.rd == 350.0
+
+    def test_surface_adj_zero(self):
+        from mvp.atptour.elo.ratings import initialize_player
+
+        rating = initialize_player(ranking=100)
+        assert rating.hard_adj == 0.0
+        assert rating.clay_adj == 0.0
+        assert rating.grass_adj == 0.0
+
+    def test_serve_return_default(self):
+        from mvp.atptour.elo.ratings import initialize_player
+
+        rating = initialize_player(ranking=100)
+        assert rating.serve_elo == 1500.0
+        assert rating.return_elo == 1500.0
