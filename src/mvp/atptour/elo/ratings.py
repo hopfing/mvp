@@ -13,7 +13,10 @@ from mvp.atptour.elo.constants import (
     NEW_PLAYER_THRESHOLD,
     RD_DECAY_FACTOR,
     RD_GROWTH_PER_DAY,
+    RETURN_BASELINE,
     ROUND_IMPORTANCE,
+    SERVE_BASELINE,
+    SERVE_RETURN_SCALE,
 )
 
 
@@ -141,3 +144,39 @@ def apply_inactivity_rd(
     days_inactive = (current_match_date - last_match_date).days
     new_rd = current_rd + days_inactive * RD_GROWTH_PER_DAY
     return min(MAX_RD, new_rd)
+
+
+def update_serve_elo(
+    current_elo: float,
+    serve_pct: float | None,
+    surface: str,
+    k: float,
+) -> float:
+    """Update serve Elo based on serve points won percentage.
+
+    Returns unchanged elo if serve_pct is None.
+    """
+    if serve_pct is None:
+        return current_elo
+
+    baseline = SERVE_BASELINE.get(surface, 0.62)
+    diff = serve_pct - baseline
+    return current_elo + k * diff * SERVE_RETURN_SCALE
+
+
+def update_return_elo(
+    current_elo: float,
+    return_pct: float | None,
+    surface: str,
+    k: float,
+) -> float:
+    """Update return Elo based on return points won percentage.
+
+    Returns unchanged elo if return_pct is None.
+    """
+    if return_pct is None:
+        return current_elo
+
+    baseline = RETURN_BASELINE.get(surface, 0.38)
+    diff = return_pct - baseline
+    return current_elo + k * diff * SERVE_RETURN_SCALE

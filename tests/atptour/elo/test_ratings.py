@@ -15,6 +15,8 @@ from mvp.atptour.elo.ratings import (
     get_k_factor,
     update_elo,
     update_rd,
+    update_return_elo,
+    update_serve_elo,
 )
 
 
@@ -290,3 +292,46 @@ class TestApplyInactivityRD:
     def test_no_last_date_returns_unchanged(self):
         new_rd = apply_inactivity_rd(200.0, None, date(2024, 1, 1))
         assert new_rd == 200.0
+
+
+class TestUpdateServeElo:
+    """Test serve Elo update based on serve points won percentage."""
+
+    def test_above_baseline_increases(self):
+        # 0.70 serve % on Hard (baseline 0.62) should increase
+        new_elo = update_serve_elo(1500.0, 0.70, "Hard", 16.0)
+        assert new_elo > 1500.0
+
+    def test_below_baseline_decreases(self):
+        # 0.55 serve % on Hard (baseline 0.62) should decrease
+        new_elo = update_serve_elo(1500.0, 0.55, "Hard", 16.0)
+        assert new_elo < 1500.0
+
+    def test_missing_stats_unchanged(self):
+        new_elo = update_serve_elo(1500.0, None, "Hard", 16.0)
+        assert new_elo == 1500.0
+
+    def test_clay_baseline_different(self):
+        # Same serve % should have different effect on clay (baseline 0.60) vs hard (0.62)
+        hard_elo = update_serve_elo(1500.0, 0.62, "Hard", 16.0)
+        clay_elo = update_serve_elo(1500.0, 0.62, "Clay", 16.0)
+        assert hard_elo == 1500.0  # at baseline
+        assert clay_elo > 1500.0  # above clay baseline
+
+
+class TestUpdateReturnElo:
+    """Test return Elo update based on return points won percentage."""
+
+    def test_above_baseline_increases(self):
+        # 0.45 return % on Hard (baseline 0.38) should increase
+        new_elo = update_return_elo(1500.0, 0.45, "Hard", 16.0)
+        assert new_elo > 1500.0
+
+    def test_below_baseline_decreases(self):
+        # 0.30 return % on Hard (baseline 0.38) should decrease
+        new_elo = update_return_elo(1500.0, 0.30, "Hard", 16.0)
+        assert new_elo < 1500.0
+
+    def test_missing_stats_unchanged(self):
+        new_elo = update_return_elo(1500.0, None, "Hard", 16.0)
+        assert new_elo == 1500.0
