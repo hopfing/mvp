@@ -1,3 +1,4 @@
+from mvp.atptour.elo.compute import ELO_COLUMNS, compute_elo_ratings
 from mvp.atptour.elo.ratings import (
     PlayerRating,
     apply_inactivity_rd,
@@ -12,8 +13,10 @@ from mvp.atptour.elo.ratings import (
 )
 
 __all__ = [
+    "ELO_COLUMNS",
     "PlayerRating",
     "apply_inactivity_rd",
+    "compute_elo_ratings",
     "expected_score",
     "get_k_factor",
     "initialize_player",
