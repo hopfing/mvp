@@ -459,6 +459,27 @@ class TestExplodeMatchStats:
             assert row_b[name].item() == i + 100, f"BBBB {name} wrong"
 
 
+class TestExplodeMatchStatsOppColumns:
+    """Test that opponent stats are included in explosion."""
+
+    def test_opp_stat_columns_present(self):
+        """Exploded output should include opp_ prefixed stat columns."""
+        result = explode_match_stats(_make_match_stats_df())
+        for name in _ALL_STAT_NAMES:
+            assert f"opp_{name}" in result.columns, f"Missing opp column: opp_{name}"
+
+    def test_opp_stat_values_correct(self):
+        """Opponent stats should have opponent's values, not player's."""
+        result = explode_match_stats(_make_match_stats_df())
+        row_a = result.filter(pl.col("player_id") == "AAAA")
+        row_b = result.filter(pl.col("player_id") == "BBBB")
+        # AAAA was p1 (stats = i+10), opponent was p2 (stats = i+100)
+        # So AAAA's opp_* columns should have p2's values (i+100)
+        for i, name in enumerate(_ALL_STAT_NAMES):
+            assert row_a[f"opp_{name}"].item() == i + 100, f"AAAA opp_{name} wrong"
+            assert row_b[f"opp_{name}"].item() == i + 10, f"BBBB opp_{name} wrong"
+
+
 # ---------------------------------------------------------------------------
 # explode_schedule tests
 # ---------------------------------------------------------------------------

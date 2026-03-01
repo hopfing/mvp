@@ -178,8 +178,10 @@ def explode_match_stats(df: pl.DataFrame) -> pl.DataFrame:
         p2_renames[f"p2_{field}"] = f"player_{field}"
         p2_renames[f"p1_{field}"] = f"opp_{field}"
     for stat in _ALL_STATS:
-        p1_renames[f"p1_{stat}"] = stat
-        p2_renames[f"p2_{stat}"] = stat
+        p1_renames[f"p1_{stat}"] = stat           # player's own stats
+        p1_renames[f"p2_{stat}"] = f"opp_{stat}"  # opponent's stats
+        p2_renames[f"p2_{stat}"] = stat           # player's own stats
+        p2_renames[f"p1_{stat}"] = f"opp_{stat}"  # opponent's stats
 
     # Determine columns to select for each perspective
     p1_select_cols = _MS_SHARED_COLS + list(p1_renames.keys())
