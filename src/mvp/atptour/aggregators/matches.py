@@ -6,6 +6,7 @@ from pathlib import Path
 
 import polars as pl
 
+from mvp.atptour.elo import compute_elo_ratings
 from mvp.common.base_job import BaseJob
 
 logger = logging.getLogger(__name__)
@@ -529,6 +530,14 @@ class MatchesAggregator(BaseJob):
         combined = fill_tournament_fields(combined)
         combined = add_round_order(combined)
         combined = add_effective_match_date(combined)
+
+        # Compute Elo ratings for singles matches only
+        singles = combined.filter(pl.col("draw_type") == "singles")
+        if not singles.is_empty():
+            singles = compute_elo_ratings(singles)
+            # Rejoin with non-singles rows
+            non_singles = combined.filter(pl.col("draw_type") != "singles")
+            combined = pl.concat([singles, non_singles], how="diagonal_relaxed")
 
         # Step 9: Add partner rows for doubles workload tracking
         combined = add_partner_workload_rows(combined)
