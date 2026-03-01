@@ -1,7 +1,13 @@
 from datetime import date
 
-from mvp.atptour.elo.constants import DEFAULT_ELO, DEFAULT_RD
-from mvp.atptour.elo.ratings import PlayerRating
+from mvp.atptour.elo.constants import (
+    BASE_K,
+    DEFAULT_ELO,
+    DEFAULT_RD,
+    HIGH_RD_K_MULT,
+    NEW_PLAYER_K_MULT,
+)
+from mvp.atptour.elo.ratings import PlayerRating, get_k_factor
 
 
 class TestPlayerRatingDefaults:
@@ -102,3 +108,50 @@ class TestPlayerRatingCustomValues:
         assert rating.return_rd == 175.0
         assert rating.match_count == 50
         assert rating.last_match_date == date(2026, 1, 15)
+
+
+class TestKFactor:
+    """Test dynamic K-factor calculation."""
+
+    def test_base_k_for_established_player(self):
+        """Established player (match_count >= 30, rd <= 200, R32) gets base K."""
+        player = PlayerRating(match_count=30, rd=200.0)
+        k = get_k_factor(player, "R32")
+        assert k == BASE_K
+
+    def test_new_player_multiplier(self):
+        """New player (match_count < 30) gets 1.5x multiplier."""
+        player = PlayerRating(match_count=29, rd=200.0)
+        k = get_k_factor(player, "R32")
+        assert k == BASE_K * NEW_PLAYER_K_MULT
+
+    def test_high_rd_multiplier(self):
+        """High RD (rd > 200) gets 1.2x multiplier."""
+        player = PlayerRating(match_count=30, rd=201.0)
+        k = get_k_factor(player, "R32")
+        assert k == BASE_K * HIGH_RD_K_MULT
+
+    def test_finals_importance(self):
+        """Finals gets 1.3x multiplier."""
+        player = PlayerRating(match_count=30, rd=200.0)
+        k = get_k_factor(player, "F")
+        assert k == BASE_K * 1.3
+
+    def test_qualifying_importance(self):
+        """Qualifying rounds get 0.85x multiplier."""
+        player = PlayerRating(match_count=30, rd=200.0)
+        k = get_k_factor(player, "Q1")
+        assert k == BASE_K * 0.85
+
+    def test_combined_multipliers(self):
+        """New player + high RD + finals combines all multipliers."""
+        player = PlayerRating(match_count=10, rd=250.0)
+        k = get_k_factor(player, "F")
+        expected = BASE_K * NEW_PLAYER_K_MULT * HIGH_RD_K_MULT * 1.3
+        assert k == expected
+
+    def test_unknown_round_uses_default_importance(self):
+        """Unknown round name uses default importance of 1.0."""
+        player = PlayerRating(match_count=30, rd=200.0)
+        k = get_k_factor(player, "UNKNOWN")
+        assert k == BASE_K

@@ -1,7 +1,16 @@
 from dataclasses import dataclass
 from datetime import date
 
-from mvp.atptour.elo.constants import DEFAULT_ELO, DEFAULT_RD
+from mvp.atptour.elo.constants import (
+    BASE_K,
+    DEFAULT_ELO,
+    DEFAULT_RD,
+    HIGH_RD_K_MULT,
+    HIGH_RD_THRESHOLD,
+    NEW_PLAYER_K_MULT,
+    NEW_PLAYER_THRESHOLD,
+    ROUND_IMPORTANCE,
+)
 
 
 @dataclass
@@ -35,3 +44,22 @@ class PlayerRating:
     def effective_surface_elo(self, surface: str) -> float:
         """Return overall Elo plus surface adjustment."""
         return self.elo + self.get_surface_adj(surface)
+
+
+def get_k_factor(player: PlayerRating, round_name: str) -> float:
+    """Calculate dynamic K-factor based on player state and match importance."""
+    k = BASE_K
+
+    # New player multiplier
+    if player.match_count < NEW_PLAYER_THRESHOLD:
+        k *= NEW_PLAYER_K_MULT
+
+    # High uncertainty multiplier
+    if player.rd > HIGH_RD_THRESHOLD:
+        k *= HIGH_RD_K_MULT
+
+    # Match importance multiplier
+    importance = ROUND_IMPORTANCE.get(round_name, 1.0)
+    k *= importance
+
+    return k
