@@ -7,8 +7,12 @@ from mvp.atptour.elo.constants import (
     DEFAULT_RD,
     HIGH_RD_K_MULT,
     HIGH_RD_THRESHOLD,
+    MAX_RD,
+    MIN_RD,
     NEW_PLAYER_K_MULT,
     NEW_PLAYER_THRESHOLD,
+    RD_DECAY_FACTOR,
+    RD_GROWTH_PER_DAY,
     ROUND_IMPORTANCE,
 )
 
@@ -118,3 +122,22 @@ def update_surface_adj(
 
     current_adj = player.get_surface_adj(surface)
     return current_adj + k * (outcome - expected)
+
+
+def update_rd(current_rd: float) -> float:
+    """Decrease RD after a match (we learned something)."""
+    return max(MIN_RD, current_rd * RD_DECAY_FACTOR)
+
+
+def apply_inactivity_rd(
+    current_rd: float,
+    last_match_date: date | None,
+    current_match_date: date,
+) -> float:
+    """Increase RD based on inactivity period."""
+    if last_match_date is None:
+        return current_rd
+
+    days_inactive = (current_match_date - last_match_date).days
+    new_rd = current_rd + days_inactive * RD_GROWTH_PER_DAY
+    return min(MAX_RD, new_rd)

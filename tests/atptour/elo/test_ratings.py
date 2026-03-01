@@ -5,13 +5,16 @@ from mvp.atptour.elo.constants import (
     DEFAULT_ELO,
     DEFAULT_RD,
     HIGH_RD_K_MULT,
+    MIN_RD,
     NEW_PLAYER_K_MULT,
 )
 from mvp.atptour.elo.ratings import (
     PlayerRating,
+    apply_inactivity_rd,
     expected_score,
     get_k_factor,
     update_elo,
+    update_rd,
 )
 
 
@@ -248,3 +251,42 @@ class TestUpdateSurfaceAdj:
         for surface in ["Hard", "Clay", "Grass"]:
             adj = update_surface_adj(player, opponent, won=True, surface=surface, k=16.0)
             assert adj > 0.0  # Win from even position should increase adj
+
+
+class TestUpdateRD:
+    """Test update_rd calculation."""
+
+    def test_rd_decreases_after_match(self):
+        new_rd = update_rd(200.0)
+        assert new_rd < 200.0
+        assert new_rd == 200.0 * 0.95
+
+    def test_rd_has_minimum(self):
+        new_rd = update_rd(50.0)
+        assert new_rd == MIN_RD  # can't go below minimum
+
+    def test_rd_respects_minimum_on_decay(self):
+        new_rd = update_rd(52.0)
+        # 52.0 * 0.95 = 49.4, but clamped to MIN_RD (50)
+        assert new_rd == MIN_RD
+
+
+class TestApplyInactivityRD:
+    """Test apply_inactivity_rd calculation."""
+
+    def test_rd_increases_with_inactivity(self):
+        last_date = date(2024, 1, 1)
+        current_date = date(2024, 2, 1)  # 31 days later
+        new_rd = apply_inactivity_rd(100.0, last_date, current_date)
+        assert new_rd > 100.0
+        assert new_rd == 100.0 + 31 * 0.5
+
+    def test_rd_has_maximum(self):
+        last_date = date(2022, 1, 1)
+        current_date = date(2024, 1, 1)  # 730 days later (100 + 730*0.5 = 465 > 350)
+        new_rd = apply_inactivity_rd(100.0, last_date, current_date)
+        assert new_rd == 350.0  # capped at max
+
+    def test_no_last_date_returns_unchanged(self):
+        new_rd = apply_inactivity_rd(200.0, None, date(2024, 1, 1))
+        assert new_rd == 200.0
