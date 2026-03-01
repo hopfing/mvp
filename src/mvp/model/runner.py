@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import polars as pl
+
+# Suppress numpy warnings about all-NaN slices during median imputation
+warnings.filterwarnings("ignore", message="All-NaN slice encountered")
 
 from mvp.model.config import ExperimentConfig
 from mvp.model.diagnostics import Diagnostics
