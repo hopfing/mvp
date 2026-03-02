@@ -189,3 +189,94 @@ def surface_consistency() -> pl.Expr:
     mean_adj = (hard + clay + grass) / 3
     variance = ((hard - mean_adj) ** 2 + (clay - mean_adj) ** 2 + (grass - mean_adj) ** 2) / 3
     return variance.sqrt()
+
+
+# Style dimension features
+
+
+@feature(
+    name="first_serve_power_diff",
+    params=[],
+    description="First serve power difference (player - opponent)",
+    mirror=False,
+)
+def first_serve_power_diff() -> pl.Expr:
+    """First serve power difference."""
+    return pl.col("player_first_serve_power") - pl.col("opp_first_serve_power")
+
+
+@feature(
+    name="second_serve_reliability_diff",
+    params=[],
+    description="Second serve reliability difference (player - opponent)",
+    mirror=False,
+)
+def second_serve_reliability_diff() -> pl.Expr:
+    """Second serve reliability difference."""
+    return pl.col("player_second_serve_reliability") - pl.col("opp_second_serve_reliability")
+
+
+@feature(
+    name="ace_resistance_diff",
+    params=[],
+    description="Ace resistance difference (player - opponent)",
+    mirror=False,
+)
+def ace_resistance_diff() -> pl.Expr:
+    """Ace resistance difference."""
+    return pl.col("player_ace_resistance") - pl.col("opp_ace_resistance")
+
+
+@feature(
+    name="serve_clutch_diff",
+    params=[],
+    description="Serve clutch difference (player - opponent)",
+    mirror=False,
+)
+def serve_clutch_diff() -> pl.Expr:
+    """Serve clutch (BP save rate) difference."""
+    return pl.col("player_serve_clutch") - pl.col("opp_serve_clutch")
+
+
+@feature(
+    name="return_clutch_diff",
+    params=[],
+    description="Return clutch difference (player - opponent)",
+    mirror=False,
+)
+def return_clutch_diff() -> pl.Expr:
+    """Return clutch (BP conversion) difference."""
+    return pl.col("player_return_clutch") - pl.col("opp_return_clutch")
+
+
+@feature(
+    name="tb_clutch_diff",
+    params=[],
+    description="Tiebreak clutch difference (player - opponent)",
+    mirror=False,
+)
+def tb_clutch_diff() -> pl.Expr:
+    """Tiebreak clutch difference."""
+    return pl.col("player_tb_clutch") - pl.col("opp_tb_clutch")
+
+
+@feature(
+    name="overall_clutch_diff",
+    params=[],
+    description="Overall clutch difference (player - opponent)",
+    mirror=False,
+)
+def overall_clutch_diff() -> pl.Expr:
+    """Overall clutch difference."""
+    return pl.col("player_overall_clutch") - pl.col("opp_overall_clutch")
+
+
+@feature(
+    name="indoor_adj_diff",
+    params=[],
+    description="Indoor adjustment difference (player - opponent)",
+    mirror=False,
+)
+def indoor_adj_diff() -> pl.Expr:
+    """Indoor venue adjustment difference."""
+    return pl.col("player_indoor_adj") - pl.col("opp_indoor_adj")

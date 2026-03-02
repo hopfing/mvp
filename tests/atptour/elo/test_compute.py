@@ -4,7 +4,7 @@ from datetime import date
 
 import polars as pl
 
-from mvp.atptour.elo.compute import ELO_COLUMNS, compute_elo_ratings
+from mvp.atptour.elo.compute import ELO_COLUMNS, STYLE_COLUMNS, compute_elo_ratings
 
 
 class TestComputeEloRatings:
@@ -91,3 +91,96 @@ class TestComputeEloRatings:
         assert a_row["player_elo"][0] == b_row["opp_elo"][0]
         # B's player_elo should match A's opp_elo (both are B's rating)
         assert b_row["player_elo"][0] == a_row["opp_elo"][0]
+
+
+class TestStyleDimensionColumns:
+    """Test that style dimension columns are added."""
+
+    def test_style_columns_exist(self):
+        df = pl.DataFrame(
+            {
+                "match_uid": ["m1", "m1"],
+                "player_id": ["A", "B"],
+                "opp_id": ["B", "A"],
+                "won": [True, False],
+                "surface": ["Hard", "Hard"],
+                "round": ["F", "F"],
+                "indoor": [False, False],
+                "effective_match_date": [date(2024, 1, 1), date(2024, 1, 1)],
+                "player_rankings_rank": [10, 20],
+                "opp_rankings_rank": [20, 10],
+                "pts_service_pts_won": [50, 40],
+                "pts_service_pts_played": [80, 80],
+                "pts_return_pts_won": [40, 30],
+                "pts_return_pts_played": [80, 80],
+                "svc_aces": [8, 5],
+                "opp_svc_aces": [5, 8],
+                "svc_first_serve_pts_won": [40, 35],
+                "svc_double_faults": [2, 3],
+                "svc_second_serve_pts_played": [30, 35],
+                "svc_bp_saved": [5, 3],
+                "svc_bp_faced": [8, 6],
+                "ret_bp_converted": [3, 2],
+                "ret_bp_opportunities": [6, 8],
+                "ret_first_serve_pts_played": [60, 55],
+                "ret_first_serve_pts_won": [20, 18],
+                "player_set1_tiebreak": [None, None],
+                "opp_set1_tiebreak": [None, None],
+                "player_set2_tiebreak": [None, None],
+                "opp_set2_tiebreak": [None, None],
+                "player_set3_tiebreak": [None, None],
+                "opp_set3_tiebreak": [None, None],
+                "player_set4_tiebreak": [None, None],
+                "opp_set4_tiebreak": [None, None],
+                "player_set5_tiebreak": [None, None],
+                "opp_set5_tiebreak": [None, None],
+            }
+        )
+        result = compute_elo_ratings(df)
+        for col in STYLE_COLUMNS:
+            assert col in result.columns, f"Missing column: {col}"
+
+    def test_style_columns_have_values(self):
+        df = pl.DataFrame(
+            {
+                "match_uid": ["m1", "m1"],
+                "player_id": ["A", "B"],
+                "opp_id": ["B", "A"],
+                "won": [True, False],
+                "surface": ["Hard", "Hard"],
+                "round": ["F", "F"],
+                "indoor": [False, False],
+                "effective_match_date": [date(2024, 1, 1), date(2024, 1, 1)],
+                "player_rankings_rank": [10, 20],
+                "opp_rankings_rank": [20, 10],
+                "pts_service_pts_won": [50, 40],
+                "pts_service_pts_played": [80, 80],
+                "pts_return_pts_won": [40, 30],
+                "pts_return_pts_played": [80, 80],
+                "svc_aces": [8, 5],
+                "opp_svc_aces": [5, 8],
+                "svc_first_serve_pts_won": [40, 35],
+                "svc_double_faults": [2, 3],
+                "svc_second_serve_pts_played": [30, 35],
+                "svc_bp_saved": [5, 3],
+                "svc_bp_faced": [8, 6],
+                "ret_bp_converted": [3, 2],
+                "ret_bp_opportunities": [6, 8],
+                "ret_first_serve_pts_played": [60, 55],
+                "ret_first_serve_pts_won": [20, 18],
+                "player_set1_tiebreak": [7, 5],
+                "opp_set1_tiebreak": [5, 7],
+                "player_set2_tiebreak": [None, None],
+                "opp_set2_tiebreak": [None, None],
+                "player_set3_tiebreak": [None, None],
+                "opp_set3_tiebreak": [None, None],
+                "player_set4_tiebreak": [None, None],
+                "opp_set4_tiebreak": [None, None],
+                "player_set5_tiebreak": [None, None],
+                "opp_set5_tiebreak": [None, None],
+            }
+        )
+        result = compute_elo_ratings(df)
+        # All style columns should have non-null values (initial 1500.0)
+        for col in STYLE_COLUMNS:
+            assert result[col].null_count() == 0, f"Column {col} has nulls"

@@ -199,6 +199,11 @@ def _parse_schedule_html(
             p2_id, p2_name, p2_country, p2_seed_entry, p2_is_dbl = (
                 _extract_player_info(opponent_div)
             )
+
+            # Skip matches without ATP profile links (e.g., WTA players)
+            if not p1_id or not p2_id:
+                continue
+
             is_doubles = p1_is_dbl or p2_is_dbl
             draw_type = DrawType.doubles if is_doubles else DrawType.singles
 
