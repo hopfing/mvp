@@ -15,6 +15,7 @@ from mvp.atptour.extractors.rankings import RankingsExtractor
 from mvp.atptour.extractors.results import ResultsExtractor
 from mvp.atptour.extractors.schedule import ScheduleExtractor
 from mvp.atptour.pipeline_utils import get_active_players
+from mvp.atptour.transformers.match_beats import MatchBeatsTransformer
 from mvp.atptour.transformers.match_stats import MatchStatsTransformer
 from mvp.atptour.transformers.overview import OverviewTransformer
 from mvp.atptour.transformers.player_activity import (
@@ -102,10 +103,11 @@ def _process_tournaments(
             )
             MatchStatsTransformer(tournament, data_root=data_root).run()
 
-            # MatchBeats extraction (2022+ only, handled internally)
+            # MatchBeats extraction + transformation (2022+ only, handled internally)
             MatchBeatsExtractor(data_root=data_root).run(
                 tournament, refresh=stats_refresh
             )
+            MatchBeatsTransformer(tournament, data_root=data_root).run()
 
             TournamentMatchesAggregator(
                 circuit=tournament.circuit,
