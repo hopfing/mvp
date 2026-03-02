@@ -9,13 +9,13 @@ from mvp.model.registry import feature
 
 
 @feature(
-    name="indoor_win_rate",
+    name="indoor_win_pct",
     params=["days"],
-    description="Win rate on indoor courts",
+    description="Win percentage on indoor courts",
     mirror=True,
 )
-def indoor_win_rate(days: int | None = None) -> pl.Expr:
-    """Win rate on indoor courts."""
+def indoor_win_pct(days: int | None = None) -> pl.Expr:
+    """Win percentage on indoor courts."""
     group_by = ["player_id", "indoor"]
     if days is None:
         wins = cumulative_sum("won", group_by=group_by)
@@ -27,27 +27,27 @@ def indoor_win_rate(days: int | None = None) -> pl.Expr:
 
 
 @feature(
-    name="indoor_win_rate_diff",
+    name="indoor_win_pct_diff",
     params=["days"],
-    description="Player indoor win rate minus opponent indoor win rate",
-    depends_on=["indoor_win_rate"],
+    description="Player indoor win pct minus opponent indoor win pct",
+    depends_on=["indoor_win_pct"],
     mirror=False,
 )
-def indoor_win_rate_diff(days: int | None = None) -> pl.Expr:
-    """Indoor win rate difference."""
+def indoor_win_pct_diff(days: int | None = None) -> pl.Expr:
+    """Indoor win percentage difference."""
     if days is None:
-        return pl.col("player_indoor_win_rate") - pl.col("opp_indoor_win_rate")
-    return pl.col(f"player_indoor_win_rate_{days}d") - pl.col(f"opp_indoor_win_rate_{days}d")
+        return pl.col("player_indoor_win_pct") - pl.col("opp_indoor_win_pct")
+    return pl.col(f"player_indoor_win_pct_{days}d") - pl.col(f"opp_indoor_win_pct_{days}d")
 
 
 @feature(
-    name="circuit_win_rate",
+    name="circuit_win_pct",
     params=["days"],
-    description="Win rate on current circuit (tour vs challenger)",
+    description="Win percentage on current circuit (tour vs challenger)",
     mirror=True,
 )
-def circuit_win_rate(days: int | None = None) -> pl.Expr:
-    """Win rate on the current circuit."""
+def circuit_win_pct(days: int | None = None) -> pl.Expr:
+    """Win percentage on the current circuit."""
     group_by = ["player_id", "circuit"]
     if days is None:
         wins = cumulative_sum("won", group_by=group_by)
@@ -59,17 +59,17 @@ def circuit_win_rate(days: int | None = None) -> pl.Expr:
 
 
 @feature(
-    name="circuit_win_rate_diff",
+    name="circuit_win_pct_diff",
     params=["days"],
-    description="Player circuit win rate minus opponent circuit win rate",
-    depends_on=["circuit_win_rate"],
+    description="Player circuit win pct minus opponent circuit win pct",
+    depends_on=["circuit_win_pct"],
     mirror=False,
 )
-def circuit_win_rate_diff(days: int | None = None) -> pl.Expr:
-    """Circuit win rate difference."""
+def circuit_win_pct_diff(days: int | None = None) -> pl.Expr:
+    """Circuit win percentage difference."""
     if days is None:
-        return pl.col("player_circuit_win_rate") - pl.col("opp_circuit_win_rate")
-    return pl.col(f"player_circuit_win_rate_{days}d") - pl.col(f"opp_circuit_win_rate_{days}d")
+        return pl.col("player_circuit_win_pct") - pl.col("opp_circuit_win_pct")
+    return pl.col(f"player_circuit_win_pct_{days}d") - pl.col(f"opp_circuit_win_pct_{days}d")
 
 
 @feature(
