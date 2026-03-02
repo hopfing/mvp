@@ -4,7 +4,13 @@ Handles AES-CBC decryption of MatchBeats API responses.
 Key is derived from the lastModified timestamp in the response.
 """
 
+import base64
+import json
 from datetime import UTC, datetime
+
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives import padding
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 
 def _int_to_base36(n: int) -> str:
@@ -62,3 +68,50 @@ def derive_key(last_modified_ms: int) -> str:
         combined = combined[:14]
 
     return "#" + combined + "$"
+
+
+def decrypt_response(encrypted: str, last_modified_ms: int) -> dict:
+    """Decrypt AES-CBC-PKCS7 encrypted MatchBeats response.
+
+    Args:
+        encrypted: Base64-encoded encrypted string from API
+        last_modified_ms: Unix timestamp in milliseconds for key derivation
+
+    Returns:
+        Parsed JSON dict
+
+    Raises:
+        ValueError: If decryption or JSON parsing fails
+    """
+    key = derive_key(last_modified_ms)
+    key_bytes = key.encode("utf-8")
+    iv_bytes = key.upper().encode("utf-8")
+
+    try:
+        encrypted_bytes = base64.b64decode(encrypted)
+    except Exception as e:
+        raise ValueError(f"Invalid base64: {e}") from e
+
+    cipher = Cipher(
+        algorithms.AES(key_bytes),
+        modes.CBC(iv_bytes),
+        backend=default_backend(),
+    )
+    decryptor = cipher.decryptor()
+
+    try:
+        padded = decryptor.update(encrypted_bytes) + decryptor.finalize()
+    except Exception as e:
+        raise ValueError(f"Decryption failed: {e}") from e
+
+    # Remove PKCS7 padding
+    unpadder = padding.PKCS7(128).unpadder()
+    try:
+        decrypted = unpadder.update(padded) + unpadder.finalize()
+    except Exception as e:
+        raise ValueError(f"Invalid padding: {e}") from e
+
+    try:
+        return json.loads(decrypted.decode("utf-8"))
+    except Exception as e:
+        raise ValueError(f"Invalid JSON: {e}") from e

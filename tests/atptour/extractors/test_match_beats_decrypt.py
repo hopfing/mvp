@@ -1,6 +1,10 @@
 """Tests for MatchBeats decryption utilities."""
 
-from mvp.atptour.extractors.match_beats_decrypt import derive_key
+import base64
+
+import pytest
+
+from mvp.atptour.extractors.match_beats_decrypt import decrypt_response, derive_key
 
 
 class TestDeriveKey:
@@ -23,3 +27,19 @@ class TestDeriveKey:
         assert len(key) == 16
         assert key[0] == "#"
         assert key[-1] == "$"
+
+
+class TestDecryptResponse:
+    """Tests for decrypt_response function."""
+
+    def test_decrypt_response_invalid_base64(self):
+        """Invalid base64 should raise ValueError."""
+        with pytest.raises(ValueError, match="Invalid base64"):
+            decrypt_response("not-valid-base64!!!", 1677609600000)
+
+    def test_decrypt_response_invalid_padding(self):
+        """Valid base64 but invalid AES data should raise ValueError."""
+        # Valid base64 but not valid AES encrypted data
+        invalid_data = base64.b64encode(b"short").decode()
+        with pytest.raises(ValueError):
+            decrypt_response(invalid_data, 1677609600000)
