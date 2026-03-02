@@ -29,7 +29,7 @@ class TestFeatureDiscovery:
             "win_rate_diff",
             "h2h_wins",
             "ranking_points_diff",
-            "svc_first_win_pct",
+            "svc_first_serve_win_pct",
         ]
 
         for feat_name in expected_features:
