@@ -131,6 +131,7 @@ class ExperimentRunner:
 
         # Train and evaluate
         all_metrics: list[dict[str, float]] = []
+        all_train_metrics: list[dict[str, float]] = []
         all_predictions: list[dict[str, Any]] = []
 
         with logger.start_run(run_name=self.config.name):
@@ -169,10 +170,15 @@ class ExperimentRunner:
                 )
                 model.fit(X_train, y_train)
 
-                # Predict and evaluate
+                # Predict and evaluate on test
                 y_prob = model.predict_proba(X_test)
                 metrics = compute_metrics(y_test, y_prob)
                 all_metrics.append(metrics)
+
+                # Predict and evaluate on train (for overfitting detection)
+                y_prob_train = model.predict_proba(X_train)
+                train_metrics = compute_metrics(y_train, y_prob_train)
+                all_train_metrics.append(train_metrics)
 
                 # Collect predictions for diagnostics
                 all_predictions.append({
@@ -191,7 +197,12 @@ class ExperimentRunner:
                 k: float(np.mean([m[k] for m in all_metrics]))
                 for k in all_metrics[0].keys()
             }
+            avg_train_metrics = {
+                k: float(np.mean([m[k] for m in all_train_metrics]))
+                for k in all_train_metrics[0].keys()
+            }
             logger.log_metrics(avg_metrics)
+            logger.log_metrics({f"train_{k}": v for k, v in avg_train_metrics.items()})
 
             # Compute diagnostics
             diagnostics = Diagnostics()
@@ -217,6 +228,7 @@ class ExperimentRunner:
 
         return {
             "metrics": avg_metrics,
+            "train_metrics": avg_train_metrics,
             "fold_metrics": all_metrics,
             "n_folds": len(all_metrics),
             "feature_columns": feature_cols,

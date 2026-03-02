@@ -6,8 +6,85 @@ import argparse
 import logging
 import sys
 from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+def print_run_summary(results: dict[str, Any], name: str | None = None) -> None:
+    """Print formatted summary of experiment results."""
+    metrics = results.get("metrics", {})
+    train_metrics = results.get("train_metrics", {})
+    diagnostics = results.get("diagnostics")
+
+    # Header
+    print("\n" + "=" * 70)
+    title = name or "RESULTS"
+    print(f"{title:^70}")
+    print("=" * 70)
+
+    # Train vs Test metrics
+    test_acc = metrics.get("accuracy", 0)
+    test_auc = metrics.get("roc_auc", 0)
+    test_ll = metrics.get("log_loss", 0)
+
+    if train_metrics:
+        train_acc = train_metrics.get("accuracy", 0)
+        train_auc = train_metrics.get("roc_auc", 0)
+        train_ll = train_metrics.get("log_loss", 0)
+        print(f"\n{'':8} {'Accuracy':>10} {'AUC':>10} {'Log Loss':>10}")
+        print(f"{'Train':8} {train_acc:>10.1%} {train_auc:>10.3f} {train_ll:>10.3f}")
+        print(f"{'Test':8} {test_acc:>10.1%} {test_auc:>10.3f} {test_ll:>10.3f}")
+    else:
+        print(f"\nTest: {test_acc:.1%} acc | {test_auc:.3f} AUC | {test_ll:.3f} log_loss")
+
+
+    if not diagnostics:
+        print(f"\nMLflow run: {results.get('run_id', 'N/A')}")
+        print("=" * 70 + "\n")
+        return
+
+    # Segments with multiple metrics
+    segments = diagnostics.segments
+    if segments:
+        print("\nSegments:")
+        for seg_type in ["circuit", "surface", "round_group"]:
+            if seg_type not in segments:
+                continue
+            print(f"  {seg_type}:")
+            for name, seg_metrics in segments[seg_type].items():
+                acc = seg_metrics.get('accuracy', 0)
+                auc = seg_metrics.get('roc_auc', 0)
+                ll = seg_metrics.get('log_loss', 0)
+                n = seg_metrics.get('n_matches', 0)
+                print(f"    {name:12} {acc:5.1%} acc | {auc:.3f} AUC | {ll:.3f} log_loss | n={n:,}")
+
+    # Calibration buckets table
+    cal_data = diagnostics.calibration
+    if cal_data and cal_data.get("buckets"):
+        buckets = cal_data["buckets"]
+        worst_err = max(b["error"] for b in buckets)
+        print(f"\nCalibration ({cal_data['calibration_error']:.1%} mean error):")
+        for b in buckets:
+            low, high = b["range"]
+            marker = " <- worst" if b["error"] == worst_err else ""
+            print(f"  {low:.0%}-{high:.0%}  pred={b['predicted_mean']:.1%}  "
+                  f"actual={b['actual']:.1%}  err={b['error']:.1%}  n={b['n']:,}{marker}")
+
+    # High-confidence errors
+    errors = diagnostics.errors
+    if errors and "summary" in errors:
+        e80 = errors["summary"].get("80plus", {})
+        if e80.get("total", 0) > 0:
+            print(f"High-conf errors: {e80['error_rate']:.1%} of {e80['total']:,} predictions at 80%+ were wrong")
+
+    # Temporal
+    temporal = diagnostics.temporal
+    if temporal and temporal.get("temporal_drift", 0) > 0:
+        print(f"Temporal drift: ±{temporal['temporal_drift']:.1%} from average")
+
+    print(f"\nMLflow run: {results.get('run_id', 'N/A')}")
+    print("=" * 70 + "\n")
 
 # Default directories for each command
 MODEL_DIR = Path("models")
@@ -100,12 +177,7 @@ def cmd_model(args: argparse.Namespace) -> int:
     runner = ExperimentRunner(config_path=config_path)
     results = runner.run()
 
-    print(f"Experiment completed: {runner.config.name}")
-    print(f"Run ID: {results['run_id']}")
-    print(f"Folds: {results['n_folds']}")
-    print("Metrics:")
-    for name, value in results["metrics"].items():
-        print(f"  {name}: {value:.4f}")
+    print_run_summary(results, name=runner.config.name)
 
     return 0
 

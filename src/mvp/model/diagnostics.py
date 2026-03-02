@@ -90,7 +90,7 @@ class Diagnostics:
         # Circuit segment
         result["circuit"] = {}
         if "circuit" in df.columns:
-            for circuit in ["tour", "chal"]:
+            for circuit in df["circuit"].drop_nulls().unique().sort().to_list():
                 mask = (df["circuit"] == circuit).fill_null(False).to_numpy()
                 if mask.any():
                     result["circuit"][circuit] = _compute_metrics_for_segment(
@@ -100,7 +100,7 @@ class Diagnostics:
         # Surface segment
         result["surface"] = {}
         if "surface" in df.columns:
-            for surface in ["Hard", "Clay", "Grass", "Carpet"]:
+            for surface in df["surface"].drop_nulls().unique().sort().to_list():
                 mask = (df["surface"] == surface).fill_null(False).to_numpy()
                 if mask.any():
                     result["surface"][surface] = _compute_metrics_for_segment(
