@@ -38,6 +38,15 @@ class PlayerRating:
     serve_rd: float = DEFAULT_RD
     return_elo: float = DEFAULT_ELO
     return_rd: float = DEFAULT_RD
+    # Style dimensions
+    first_serve_power: float = DEFAULT_ELO
+    second_serve_reliability: float = DEFAULT_ELO
+    ace_resistance: float = DEFAULT_ELO
+    serve_clutch: float = DEFAULT_ELO
+    return_clutch: float = DEFAULT_ELO
+    tb_clutch: float = DEFAULT_ELO
+    overall_clutch: float = DEFAULT_ELO
+    indoor_adj: float = 0.0
     match_count: int = 0
     last_match_date: date | None = None
 
@@ -208,6 +217,14 @@ def initialize_player(ranking: int | None) -> PlayerRating:
         serve_rd=DEFAULT_RD,
         return_elo=DEFAULT_ELO,
         return_rd=DEFAULT_RD,
+        first_serve_power=DEFAULT_ELO,
+        second_serve_reliability=DEFAULT_ELO,
+        ace_resistance=DEFAULT_ELO,
+        serve_clutch=DEFAULT_ELO,
+        return_clutch=DEFAULT_ELO,
+        tb_clutch=DEFAULT_ELO,
+        overall_clutch=DEFAULT_ELO,
+        indoor_adj=0.0,
         match_count=0,
         last_match_date=None,
     )

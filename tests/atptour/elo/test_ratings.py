@@ -386,3 +386,87 @@ class TestInitializePlayer:
         rating = initialize_player(ranking=100)
         assert rating.serve_elo == 1500.0
         assert rating.return_elo == 1500.0
+
+
+class TestStyleDimensionConstants:
+    """Test style dimension constants are defined."""
+
+    def test_first_serve_power_baseline_exists(self):
+        from mvp.atptour.elo.constants import FIRST_SERVE_POWER_BASELINE
+
+        assert isinstance(FIRST_SERVE_POWER_BASELINE, dict)
+        assert "Hard" in FIRST_SERVE_POWER_BASELINE
+
+    def test_second_serve_reliability_baseline_exists(self):
+        from mvp.atptour.elo.constants import SECOND_SERVE_RELIABILITY_BASELINE
+
+        assert isinstance(SECOND_SERVE_RELIABILITY_BASELINE, dict)
+
+    def test_serve_clutch_baseline_exists(self):
+        from mvp.atptour.elo.constants import SERVE_CLUTCH_BASELINE
+
+        assert isinstance(SERVE_CLUTCH_BASELINE, dict)
+
+    def test_return_clutch_baseline_exists(self):
+        from mvp.atptour.elo.constants import RETURN_CLUTCH_BASELINE
+
+        assert isinstance(RETURN_CLUTCH_BASELINE, dict)
+
+    def test_tb_clutch_baseline_exists(self):
+        from mvp.atptour.elo.constants import TB_CLUTCH_BASELINE
+
+        assert isinstance(TB_CLUTCH_BASELINE, float)
+
+    def test_ace_resistance_baseline_exists(self):
+        from mvp.atptour.elo.constants import ACE_RESISTANCE_BASELINE
+
+        assert isinstance(ACE_RESISTANCE_BASELINE, dict)
+        assert "Hard" in ACE_RESISTANCE_BASELINE
+
+    def test_style_k_mult_exists(self):
+        from mvp.atptour.elo.constants import STYLE_K_MULT
+
+        assert isinstance(STYLE_K_MULT, float)
+
+    def test_style_scale_exists(self):
+        from mvp.atptour.elo.constants import STYLE_SCALE
+
+        assert isinstance(STYLE_SCALE, float)
+
+
+class TestPlayerRatingStyleDimensions:
+    """Test style dimension fields on PlayerRating."""
+
+    def test_default_style_dimensions(self):
+        from mvp.atptour.elo.constants import DEFAULT_ELO
+        from mvp.atptour.elo.ratings import PlayerRating
+
+        rating = PlayerRating()
+        assert rating.first_serve_power == DEFAULT_ELO
+        assert rating.second_serve_reliability == DEFAULT_ELO
+        assert rating.ace_resistance == DEFAULT_ELO
+        assert rating.serve_clutch == DEFAULT_ELO
+        assert rating.return_clutch == DEFAULT_ELO
+        assert rating.tb_clutch == DEFAULT_ELO
+        assert rating.overall_clutch == DEFAULT_ELO
+        assert rating.indoor_adj == 0.0
+
+    def test_custom_style_dimensions(self):
+        from mvp.atptour.elo.ratings import PlayerRating
+
+        rating = PlayerRating(
+            first_serve_power=1600.0,
+            second_serve_reliability=1550.0,
+            ace_resistance=1570.0,
+            serve_clutch=1580.0,
+            return_clutch=1520.0,
+            tb_clutch=1540.0,
+            indoor_adj=25.0,
+        )
+        assert rating.first_serve_power == 1600.0
+        assert rating.second_serve_reliability == 1550.0
+        assert rating.ace_resistance == 1570.0
+        assert rating.serve_clutch == 1580.0
+        assert rating.return_clutch == 1520.0
+        assert rating.tb_clutch == 1540.0
+        assert rating.indoor_adj == 25.0

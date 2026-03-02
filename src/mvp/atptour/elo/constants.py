@@ -48,3 +48,26 @@ SEED_ELO_MAX = 2400.0
 SEED_ELO_MIN = 1200.0
 SEED_UNRANKED = 1300.0
 SEED_RANK_COEFF = 40.0
+
+# Style dimension baselines (calculated from historical data)
+# First serve power = aces / first_serve_pts_won
+FIRST_SERVE_POWER_BASELINE = {"Hard": 0.176, "Clay": 0.110, "Grass": 0.198}
+
+# Second serve reliability = 1 - (DFs / second_serve_pts_played)
+SECOND_SERVE_RELIABILITY_BASELINE = {"Hard": 0.893, "Clay": 0.895, "Grass": 0.896}
+
+# Ace resistance = 1 - (opp_aces / return_first_serve_pts_lost)
+ACE_RESISTANCE_BASELINE = {"Hard": 0.824, "Clay": 0.890, "Grass": 0.802}
+
+# Serve clutch = bp_saved / bp_faced
+SERVE_CLUTCH_BASELINE = {"Hard": 0.597, "Clay": 0.575, "Grass": 0.627}
+
+# Return clutch = bp_converted / bp_opportunities
+RETURN_CLUTCH_BASELINE = {"Hard": 0.404, "Clay": 0.425, "Grass": 0.373}
+
+# TB clutch = tiebreak win rate (zero-sum, surface-agnostic)
+TB_CLUTCH_BASELINE = 0.50
+
+# Style dimension update settings
+STYLE_K_MULT = 0.3  # More conservative than serve/return (0.4)
+STYLE_SCALE = 300.0  # Smaller scale than serve/return (400)
