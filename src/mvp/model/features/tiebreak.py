@@ -31,12 +31,12 @@ def _tiebreaks_won() -> pl.Expr:
 
 
 @feature(
-    name="tiebreak_win_rate",
+    name="tiebreak_win_pct",
     params=[],
     description="Tiebreak win percentage (all-time)",
     mirror=True,
 )
-def tiebreak_win_rate() -> pl.Expr:
+def tiebreak_win_pct() -> pl.Expr:
     """Percentage of tiebreaks won."""
     won_expr = _tiebreaks_won()
     played_expr = _tiebreaks_played()
@@ -46,15 +46,15 @@ def tiebreak_win_rate() -> pl.Expr:
 
 
 @feature(
-    name="tiebreak_win_rate_diff",
+    name="tiebreak_win_pct_diff",
     params=[],
-    description="Player tiebreak win rate minus opponent tiebreak win rate",
-    depends_on=["tiebreak_win_rate"],
+    description="Player tiebreak win pct minus opponent tiebreak win pct",
+    depends_on=["tiebreak_win_pct"],
     mirror=False,
 )
-def tiebreak_win_rate_diff() -> pl.Expr:
-    """Tiebreak win rate difference."""
-    return pl.col("player_tiebreak_win_rate") - pl.col("opp_tiebreak_win_rate")
+def tiebreak_win_pct_diff() -> pl.Expr:
+    """Tiebreak win percentage difference."""
+    return pl.col("player_tiebreak_win_pct") - pl.col("opp_tiebreak_win_pct")
 
 
 @feature(
@@ -84,13 +84,13 @@ def tiebreaks_played() -> pl.Expr:
 
 
 @feature(
-    name="deciding_set_rate",
+    name="deciding_set_pct",
     params=[],
     description="How often matches go to deciding set (all-time)",
     mirror=True,
 )
-def deciding_set_rate() -> pl.Expr:
-    """Rate of matches going to deciding set (3rd in best-of-3, 5th in best-of-5)."""
+def deciding_set_pct() -> pl.Expr:
+    """Percentage of matches going to deciding set (3rd in best-of-3, 5th in best-of-5)."""
     deciding = (pl.col("sets_played") == pl.col("number_of_sets")).cast(pl.Int64)
     deciding_sum = deciding.cum_sum().shift(1).over("player_id", order_by=DATE_COL).fill_null(0)
     total = pl.lit(1).cum_sum().shift(1).over("player_id", order_by=DATE_COL).fill_null(0)
@@ -98,13 +98,13 @@ def deciding_set_rate() -> pl.Expr:
 
 
 @feature(
-    name="deciding_set_win_rate",
+    name="deciding_set_win_pct",
     params=[],
-    description="Win rate in deciding sets (all-time)",
+    description="Win percentage in deciding sets (all-time)",
     mirror=True,
 )
-def deciding_set_win_rate() -> pl.Expr:
-    """Win rate when match goes to deciding set."""
+def deciding_set_win_pct() -> pl.Expr:
+    """Win percentage when match goes to deciding set."""
     deciding = (pl.col("sets_played") == pl.col("number_of_sets")).cast(pl.Int64)
     deciding_won = deciding * pl.col("won").cast(pl.Int64)
     wins = deciding_won.cum_sum().shift(1).over("player_id", order_by=DATE_COL).fill_null(0)
