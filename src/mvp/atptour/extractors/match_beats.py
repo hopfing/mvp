@@ -11,7 +11,9 @@ from mvp.common.base_extractor import BaseExtractor
 
 logger = logging.getLogger(__name__)
 
-MATCHBEATS_BASE = "https://itp-atp-sls.infosys-platforms.com/prod/api/match-beats/data"
+API_BASE = "https://itp-atp-sls.infosys-platforms.com/prod/api"
+MATCHBEATS_STATUS = f"{API_BASE}/match-beats/status"
+MATCHBEATS_DATA = f"{API_BASE}/match-beats/data"
 
 
 class MatchBeatsExtractor(BaseExtractor):
@@ -53,48 +55,30 @@ class MatchBeatsExtractor(BaseExtractor):
         failed = 0
 
         for match_id in to_fetch:
-            url = self._build_url(
-                year=tournament.year,
-                event_id=tournament.tournament_id,
-                match_id=match_id,
-            )
+            mid = match_id.upper()
 
-            try:
-                response = self.session.get(url, timeout=30)
-                response.raise_for_status()
-            except requests.RequestException as e:
-                logger.warning(
-                    "MatchBeats request failed for %s match %s: %s",
-                    tournament.logging_id,
-                    match_id,
-                    e,
-                )
-                failed += 1
+            # Check status first to see if data is available
+            status = self._get_match_status(
+                tournament.year, tournament.tournament_id, mid
+            )
+            if status is None:
+                skipped += 1
                 continue
 
-            try:
-                response_json = response.json()
-                last_modified = response_json.get("lastModified")
-                encrypted = response_json.get("response")
-
-                if not last_modified or not encrypted:
-                    logger.debug(
-                        "Missing lastModified or response for %s match %s",
-                        tournament.logging_id,
-                        match_id,
-                    )
-                    skipped += 1
-                    continue
-
-                data = decrypt_response(encrypted, last_modified)
-
-            except (ValueError, KeyError) as e:
-                logger.warning(
-                    "MatchBeats decrypt failed for %s match %s: %s",
+            if not status.get("matchCenter", {}).get("matchBeats", False):
+                logger.debug(
+                    "MatchBeats not available for %s match %s",
                     tournament.logging_id,
-                    match_id,
-                    e,
+                    mid,
                 )
+                skipped += 1
+                continue
+
+            # Fetch the actual data
+            data = self._fetch_match_data(
+                tournament.year, tournament.tournament_id, mid
+            )
+            if data is None:
                 failed += 1
                 continue
 
@@ -102,13 +86,13 @@ class MatchBeatsExtractor(BaseExtractor):
                 logger.debug(
                     "Skipping stub data for %s match %s",
                     tournament.logging_id,
-                    match_id,
+                    mid,
                 )
                 skipped += 1
                 continue
 
             target = self.build_path(
-                "raw", tournament.path, f"match_beats/{match_id.upper()}.json"
+                "raw", tournament.path, f"match_beats/{mid}.json"
             )
             self.save_json(data, target)
             saved += 1
@@ -138,7 +122,41 @@ class MatchBeatsExtractor(BaseExtractor):
         )
         return codes
 
-    def _build_url(self, year: int, event_id: str, match_id: str) -> str:
-        """Build MatchBeats API URL with uppercase match ID."""
-        mid = match_id.upper()
-        return f"{MATCHBEATS_BASE}/year/{year}/eventId/{event_id}/matchId/{mid}"
+    def _get_match_status(
+        self, year: int, event_id: str, match_id: str
+    ) -> dict | None:
+        """Fetch match status to check data availability."""
+        url = f"{MATCHBEATS_STATUS}/year/{year}/eventId/{event_id}/matchId/{match_id}"
+        try:
+            response = self.session.get(url, timeout=30)
+            response.raise_for_status()
+            response_json = response.json()
+
+            last_modified = response_json.get("lastModified")
+            encrypted = response_json.get("response")
+            if not last_modified or not encrypted:
+                return None
+
+            return decrypt_response(encrypted, last_modified)
+        except (requests.RequestException, ValueError, KeyError):
+            return None
+
+    def _fetch_match_data(
+        self, year: int, event_id: str, match_id: str
+    ) -> dict | None:
+        """Fetch and decrypt match beats data."""
+        url = f"{MATCHBEATS_DATA}/year/{year}/eventId/{event_id}/matchId/{match_id}"
+        try:
+            response = self.session.get(url, timeout=30)
+            response.raise_for_status()
+            response_json = response.json()
+
+            last_modified = response_json.get("lastModified")
+            encrypted = response_json.get("response")
+            if not last_modified or not encrypted:
+                return None
+
+            return decrypt_response(encrypted, last_modified)
+        except (requests.RequestException, ValueError, KeyError) as e:
+            logger.warning("MatchBeats fetch failed: %s", e)
+            return None

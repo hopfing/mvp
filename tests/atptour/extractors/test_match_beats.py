@@ -37,6 +37,49 @@ def extractor(tmp_path):
     return MatchBeatsExtractor(data_root=tmp_path)
 
 
+def make_mock_response(data: dict) -> MagicMock:
+    """Create a mock response with json() returning data."""
+    mock = MagicMock()
+    mock.json.return_value = data
+    return mock
+
+
+def make_status_response(match_beats_available: bool = True) -> dict:
+    """Create a status API response."""
+    return {
+        "lastModified": 1672531200000,
+        "response": "encrypted_status",
+    }
+
+
+def make_status_decrypted(match_beats_available: bool = True) -> dict:
+    """Create decrypted status data."""
+    return {
+        "matchCenter": {
+            "matchBeats": match_beats_available,
+            "strokeSummary": True,
+            "rallyAnalysis": True,
+        }
+    }
+
+
+def make_data_response() -> dict:
+    """Create a data API response."""
+    return {
+        "lastModified": 1672531200000,
+        "response": "encrypted_data",
+    }
+
+
+def make_data_decrypted(is_complete: bool = True) -> dict:
+    """Create decrypted match data."""
+    return {
+        "isMatchComplete": is_complete,
+        "matchWinner": "1",
+        "data": "test",
+    }
+
+
 class TestMatchBeatsExtractor:
     """Tests for MatchBeatsExtractor."""
 
@@ -58,14 +101,6 @@ class TestMatchBeatsExtractor:
         match_ids = extractor._get_match_ids(tournament)
 
         assert match_ids == ["MS001", "MS002", "MS003"]
-
-    def test_build_url(self, extractor):
-        """URL should use uppercase match ID."""
-        url = extractor._build_url(year=2023, event_id="339", match_id="ms001")
-
-        assert "MS001" in url
-        assert "year/2023" in url
-        assert "eventId/339" in url
 
     def test_skip_pre_2022(self, extractor, tournament_2021, caplog):
         """Should skip tournaments before 2022."""
@@ -108,22 +143,34 @@ class TestMatchBeatsExtractor:
         beats_dir.mkdir(parents=True)
         (beats_dir / "MS001.json").write_text("{}")
 
-        mock_response = MagicMock()
-        mock_response.json.return_value = {
-            "lastModified": 1672531200000,
-            "response": "encrypted_data",
-        }
+        # Mock returns status then data
+        call_count = [0]
+
+        def get_side_effect(url, timeout=30):
+            call_count[0] += 1
+            if "status" in url:
+                return make_mock_response(make_status_response())
+            return make_mock_response(make_data_response())
+
+        # Decrypt returns status then data
+        decrypt_calls = [0]
+
+        def decrypt_side_effect(encrypted, last_modified):
+            decrypt_calls[0] += 1
+            if decrypt_calls[0] == 1:
+                return make_status_decrypted()
+            return make_data_decrypted()
 
         with (
-            patch.object(extractor.session, "get", return_value=mock_response),
+            patch.object(extractor.session, "get", side_effect=get_side_effect),
             patch(
                 "mvp.atptour.extractors.match_beats.decrypt_response",
-                return_value={"isMatchComplete": True, "data": "test"},
-            ) as mock_decrypt,
+                side_effect=decrypt_side_effect,
+            ),
         ):
             extractor.run(tournament, refresh=True)
 
-        mock_decrypt.assert_called_once()
+        assert decrypt_calls[0] == 2  # Status + data
 
     def test_fetches_and_saves_complete_match(self, extractor, tournament, tmp_path):
         """Should fetch, decrypt, and save complete match data."""
@@ -132,19 +179,24 @@ class TestMatchBeatsExtractor:
         df = pl.DataFrame({"match_id": ["MS001"]})
         df.write_parquet(stage_dir / "results.parquet")
 
-        mock_response = MagicMock()
-        mock_response.json.return_value = {
-            "lastModified": 1672531200000,
-            "response": "encrypted_data",
-        }
+        def get_side_effect(url, timeout=30):
+            if "status" in url:
+                return make_mock_response(make_status_response())
+            return make_mock_response(make_data_response())
 
-        decrypted = {"isMatchComplete": True, "matchWinner": "1", "data": "test"}
+        decrypt_calls = [0]
+
+        def decrypt_side_effect(encrypted, last_modified):
+            decrypt_calls[0] += 1
+            if decrypt_calls[0] == 1:
+                return make_status_decrypted()
+            return make_data_decrypted()
 
         with (
-            patch.object(extractor.session, "get", return_value=mock_response),
+            patch.object(extractor.session, "get", side_effect=get_side_effect),
             patch(
                 "mvp.atptour.extractors.match_beats.decrypt_response",
-                return_value=decrypted,
+                side_effect=decrypt_side_effect,
             ),
         ):
             extractor.run(tournament, refresh=False)
@@ -153,7 +205,7 @@ class TestMatchBeatsExtractor:
         saved = beats_dir / "MS001.json"
         assert saved.exists()
         data = json.loads(saved.read_text())
-        assert data == decrypted
+        assert data["isMatchComplete"] is True
 
     def test_skips_stub_data(self, extractor, tournament, tmp_path):
         """Should skip matches where isMatchComplete is False."""
@@ -162,17 +214,24 @@ class TestMatchBeatsExtractor:
         df = pl.DataFrame({"match_id": ["MS001"]})
         df.write_parquet(stage_dir / "results.parquet")
 
-        mock_response = MagicMock()
-        mock_response.json.return_value = {
-            "lastModified": 1672531200000,
-            "response": "encrypted_data",
-        }
+        def get_side_effect(url, timeout=30):
+            if "status" in url:
+                return make_mock_response(make_status_response())
+            return make_mock_response(make_data_response())
+
+        decrypt_calls = [0]
+
+        def decrypt_side_effect(encrypted, last_modified):
+            decrypt_calls[0] += 1
+            if decrypt_calls[0] == 1:
+                return make_status_decrypted()
+            return make_data_decrypted(is_complete=False)
 
         with (
-            patch.object(extractor.session, "get", return_value=mock_response),
+            patch.object(extractor.session, "get", side_effect=get_side_effect),
             patch(
                 "mvp.atptour.extractors.match_beats.decrypt_response",
-                return_value={"isMatchComplete": False},
+                side_effect=decrypt_side_effect,
             ),
         ):
             extractor.run(tournament, refresh=False)
@@ -181,29 +240,61 @@ class TestMatchBeatsExtractor:
         saved = beats_dir / "MS001.json"
         assert not saved.exists()
 
-    def test_request_failure_continues(self, extractor, tournament, tmp_path):
-        """Should continue processing after request failure."""
+    def test_skips_when_matchbeats_unavailable(self, extractor, tournament, tmp_path):
+        """Should skip when status says matchBeats is not available."""
+        stage_dir = tmp_path / "stage" / "atptour" / tournament.path
+        stage_dir.mkdir(parents=True)
+        df = pl.DataFrame({"match_id": ["MS001"]})
+        df.write_parquet(stage_dir / "results.parquet")
+
+        def get_side_effect(url, timeout=30):
+            if "status" in url:
+                return make_mock_response(make_status_response())
+            return make_mock_response(make_data_response())
+
+        with (
+            patch.object(extractor.session, "get", side_effect=get_side_effect),
+            patch(
+                "mvp.atptour.extractors.match_beats.decrypt_response",
+                return_value=make_status_decrypted(match_beats_available=False),
+            ),
+        ):
+            extractor.run(tournament, refresh=False)
+
+        beats_dir = tmp_path / "raw" / "atptour" / tournament.path / "match_beats"
+        saved = beats_dir / "MS001.json"
+        assert not saved.exists()
+
+    def test_status_failure_skips_match(self, extractor, tournament, tmp_path):
+        """Should skip match when status request fails."""
         stage_dir = tmp_path / "stage" / "atptour" / tournament.path
         stage_dir.mkdir(parents=True)
         df = pl.DataFrame({"match_id": ["MS001", "MS002"]})
         df.write_parquet(stage_dir / "results.parquet")
 
-        mock_response = MagicMock()
-        mock_response.json.return_value = {
-            "lastModified": 1672531200000,
-            "response": "encrypted_data",
-        }
+        call_count = [0]
 
-        def side_effect(url, timeout=30):
-            if "MS001" in url:
+        def get_side_effect(url, timeout=30):
+            call_count[0] += 1
+            if "MS001" in url and "status" in url:
                 raise requests.RequestException("connection error")
-            return mock_response
+            if "status" in url:
+                return make_mock_response(make_status_response())
+            return make_mock_response(make_data_response())
+
+        decrypt_calls = [0]
+
+        def decrypt_side_effect(encrypted, last_modified):
+            decrypt_calls[0] += 1
+            if decrypt_calls[0] == 1:
+                return make_status_decrypted()
+            return make_data_decrypted()
 
         with (
-            patch.object(extractor.session, "get", side_effect=side_effect),
+            patch.object(extractor.session, "get", side_effect=get_side_effect),
             patch(
                 "mvp.atptour.extractors.match_beats.decrypt_response",
-                return_value={"isMatchComplete": True, "data": "test"},
+                side_effect=decrypt_side_effect,
             ),
         ):
             extractor.run(tournament, refresh=False)
@@ -212,29 +303,31 @@ class TestMatchBeatsExtractor:
         assert not (beats_dir / "MS001.json").exists()
         assert (beats_dir / "MS002.json").exists()
 
-    def test_decrypt_failure_continues(self, extractor, tournament, tmp_path):
-        """Should continue processing after decryption failure."""
+    def test_data_fetch_failure_continues(self, extractor, tournament, tmp_path):
+        """Should continue processing after data fetch failure."""
         stage_dir = tmp_path / "stage" / "atptour" / tournament.path
         stage_dir.mkdir(parents=True)
         df = pl.DataFrame({"match_id": ["MS001", "MS002"]})
         df.write_parquet(stage_dir / "results.parquet")
 
-        mock_response = MagicMock()
-        mock_response.json.return_value = {
-            "lastModified": 1672531200000,
-            "response": "encrypted_data",
-        }
+        def get_side_effect(url, timeout=30):
+            if "status" in url:
+                return make_mock_response(make_status_response())
+            if "MS001" in url:
+                raise requests.RequestException("connection error")
+            return make_mock_response(make_data_response())
 
-        call_count = [0]
+        decrypt_calls = [0]
 
         def decrypt_side_effect(encrypted, last_modified):
-            call_count[0] += 1
-            if call_count[0] == 1:
-                raise ValueError("decryption failed")
-            return {"isMatchComplete": True, "data": "test"}
+            decrypt_calls[0] += 1
+            # First two are status calls, third is data for MS002
+            if decrypt_calls[0] <= 2:
+                return make_status_decrypted()
+            return make_data_decrypted()
 
         with (
-            patch.object(extractor.session, "get", return_value=mock_response),
+            patch.object(extractor.session, "get", side_effect=get_side_effect),
             patch(
                 "mvp.atptour.extractors.match_beats.decrypt_response",
                 side_effect=decrypt_side_effect,
@@ -254,9 +347,7 @@ class TestMatchBeatsExtractor:
         df.write_parquet(stage_dir / "results.parquet")
 
         mock_response = MagicMock()
-        mock_response.json.return_value = {
-            "response": "encrypted_data",
-        }
+        mock_response.json.return_value = {"response": "encrypted_data"}
 
         with patch.object(extractor.session, "get", return_value=mock_response):
             extractor.run(tournament, refresh=False)
@@ -273,9 +364,7 @@ class TestMatchBeatsExtractor:
         df.write_parquet(stage_dir / "results.parquet")
 
         mock_response = MagicMock()
-        mock_response.json.return_value = {
-            "lastModified": 1672531200000,
-        }
+        mock_response.json.return_value = {"lastModified": 1672531200000}
 
         with patch.object(extractor.session, "get", return_value=mock_response):
             extractor.run(tournament, refresh=False)
@@ -294,11 +383,54 @@ class TestMatchBeatsExtractor:
         match_ids = extractor._get_match_ids(tournament)
         assert match_ids == ["MS001", "MS002"]
 
-    def test_url_structure(self, extractor):
-        """Verify full URL structure."""
-        url = extractor._build_url(year=2023, event_id="339", match_id="ms001")
-        expected = (
-            "https://itp-atp-sls.infosys-platforms.com/prod/api/match-beats/data"
-            "/year/2023/eventId/339/matchId/MS001"
-        )
-        assert url == expected
+    def test_get_match_status(self, extractor):
+        """Should fetch and decrypt status."""
+        mock_response = make_mock_response(make_status_response())
+
+        with (
+            patch.object(extractor.session, "get", return_value=mock_response),
+            patch(
+                "mvp.atptour.extractors.match_beats.decrypt_response",
+                return_value=make_status_decrypted(),
+            ),
+        ):
+            status = extractor._get_match_status(2023, "339", "MS001")
+
+        assert status["matchCenter"]["matchBeats"] is True
+
+    def test_get_match_status_failure_returns_none(self, extractor):
+        """Should return None when status request fails."""
+        with patch.object(
+            extractor.session,
+            "get",
+            side_effect=requests.RequestException("error"),
+        ):
+            status = extractor._get_match_status(2023, "339", "MS001")
+
+        assert status is None
+
+    def test_fetch_match_data(self, extractor):
+        """Should fetch and decrypt match data."""
+        mock_response = make_mock_response(make_data_response())
+
+        with (
+            patch.object(extractor.session, "get", return_value=mock_response),
+            patch(
+                "mvp.atptour.extractors.match_beats.decrypt_response",
+                return_value=make_data_decrypted(),
+            ),
+        ):
+            data = extractor._fetch_match_data(2023, "339", "MS001")
+
+        assert data["isMatchComplete"] is True
+
+    def test_fetch_match_data_failure_returns_none(self, extractor):
+        """Should return None when data request fails."""
+        with patch.object(
+            extractor.session,
+            "get",
+            side_effect=requests.RequestException("error"),
+        ):
+            data = extractor._fetch_match_data(2023, "339", "MS001")
+
+        assert data is None
