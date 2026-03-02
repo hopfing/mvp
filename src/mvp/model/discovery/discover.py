@@ -166,9 +166,10 @@ class FeatureDiscovery:
             yaml.dump(config_dict, f, default_flow_style=False)
             return Path(f.name)
 
-    def _run_experiment(self, features: list[str]) -> dict[str, Any]:
+    def _run_experiment(
+        self, features: list[str], log_to_mlflow: bool = False, run_name: str | None = None
+    ) -> dict[str, Any]:
         """Run experiment with given features."""
-        from mvp.model.config import ExperimentConfig
         from mvp.model.runner import ExperimentRunner
 
         temp_path = self._create_temp_config(features)
@@ -179,6 +180,9 @@ class FeatureDiscovery:
                 matches_path=self.matches_path,
                 cache_dir=self.cache_dir,
                 mlflow_dir=self.mlflow_dir,
+                workflow="discovery",
+                run_name=run_name or self.config.name,
+                log_to_mlflow=log_to_mlflow,
             )
             result = runner.run()
             self._experiment_count += 1
@@ -415,8 +419,8 @@ class FeatureDiscovery:
         if self.config.discovery.segment_analysis:
             segment_importance = self.run_segment_analysis(final_features)
 
-        # Get final metric
-        final_result = self._run_experiment(final_features)
+        # Get final metric (this one logs to MLflow)
+        final_result = self._run_experiment(final_features, log_to_mlflow=True)
         final_metric = final_result["metrics"].get(
             self.config.discovery.metric, 0.0
         )

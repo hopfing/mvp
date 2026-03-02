@@ -34,6 +34,9 @@ class ExperimentRunner:
         matches_path: Path | str | None = None,
         cache_dir: Path | str | None = None,
         mlflow_dir: Path | str | None = None,
+        workflow: str = "training",
+        run_name: str | None = None,
+        log_to_mlflow: bool = True,
     ) -> None:
         """Initialize runner.
 
@@ -42,6 +45,9 @@ class ExperimentRunner:
             matches_path: Path to matches.parquet.
             cache_dir: Optional cache directory for features.
             mlflow_dir: Optional MLflow tracking directory.
+            workflow: MLflow experiment name ("training" or "discovery").
+            run_name: Override for MLflow run name. Defaults to config name.
+            log_to_mlflow: Whether to log to MLflow. Set False for intermediate runs.
         """
         self.config = ExperimentConfig.from_file(str(config_path))
         self.matches_path = Path(
@@ -49,6 +55,9 @@ class ExperimentRunner:
         )
         self.cache_dir = Path(cache_dir or "data/features/cache")
         self.mlflow_dir = Path(mlflow_dir) if mlflow_dir else None
+        self.workflow = workflow
+        self.run_name = run_name or self.config.name
+        self.log_to_mlflow = log_to_mlflow
 
         self.engine = FeatureEngine(
             matches_path=self.matches_path,
@@ -94,12 +103,13 @@ class ExperimentRunner:
         """
         import mlflow
 
-        if self.mlflow_dir:
-            # Use forward slashes for file URI on all platforms
-            mlflow_uri = f"file:///{str(self.mlflow_dir).replace(chr(92), '/')}"
-            mlflow.set_tracking_uri(mlflow_uri)
-
-        logger = ExperimentLogger(experiment_name=self.config.name)
+        if self.log_to_mlflow:
+            if self.mlflow_dir:
+                mlflow_uri = f"file:///{str(self.mlflow_dir).replace(chr(92), '/')}"
+                mlflow.set_tracking_uri(mlflow_uri)
+            logger = ExperimentLogger(experiment_name=self.workflow)
+        else:
+            logger = None
 
         # Compute features
         df = self.engine.compute(self.config.features.include)
@@ -134,17 +144,17 @@ class ExperimentRunner:
         all_train_metrics: list[dict[str, float]] = []
         all_predictions: list[dict[str, Any]] = []
 
-        with logger.start_run(run_name=self.config.name):
-            # Log config as params
-            logger.log_params(
-                {
-                    "model_type": self.config.model.type,
-                    "validation_type": self.config.validation.type,
-                    "n_features": len(feature_cols),
-                    "n_splits": self.config.validation.n_splits,
-                }
-            )
+        run_context = logger.start_run(run_name=self.run_name) if logger else None
+        if run_context:
+            run_context.__enter__()
+            logger.log_params({
+                "model_type": self.config.model.type,
+                "validation_type": self.config.validation.type,
+                "n_features": len(feature_cols),
+                "n_splits": self.config.validation.n_splits,
+            })
 
+        try:
             for fold_idx, (train_idx, test_idx) in enumerate(splitter.split(df)):
                 train_df = df[train_idx]
                 test_df = df[test_idx]
@@ -188,9 +198,10 @@ class ExperimentRunner:
                 })
 
                 # Log fold metrics
-                logger.log_metrics(
-                    {f"fold_{fold_idx}_{k}": v for k, v in metrics.items()}
-                )
+                if logger:
+                    logger.log_metrics(
+                        {f"fold_{fold_idx}_{k}": v for k, v in metrics.items()}
+                    )
 
             # Average metrics across folds
             avg_metrics = {
@@ -201,30 +212,33 @@ class ExperimentRunner:
                 k: float(np.mean([m[k] for m in all_train_metrics]))
                 for k in all_train_metrics[0].keys()
             }
-            logger.log_metrics(avg_metrics)
-            logger.log_metrics({f"train_{k}": v for k, v in avg_train_metrics.items()})
 
             # Compute diagnostics
             diagnostics = Diagnostics()
             diagnostic_results = diagnostics.compute_all(all_predictions)
 
-            # Log diagnostic metrics
-            logger.log_metrics(diagnostic_results.metrics)
-
             # Merge diagnostic metrics (calibration_error, etc.) into avg_metrics
             avg_metrics.update(diagnostic_results.metrics)
 
-            # Log diagnostic JSON artifact
-            import tempfile
+            run_id = None
+            if logger:
+                logger.log_metrics(avg_metrics)
+                logger.log_metrics({f"train_{k}": v for k, v in avg_train_metrics.items()})
+                logger.log_metrics(diagnostic_results.metrics)
 
-            with tempfile.NamedTemporaryFile(
-                mode="w", suffix=".json", delete=False
-            ) as f:
-                f.write(diagnostic_results.to_json())
-                temp_path = f.name
-            logger.log_artifact(temp_path)
+                # Log diagnostic JSON artifact
+                import tempfile
+                with tempfile.NamedTemporaryFile(
+                    mode="w", suffix=".json", delete=False
+                ) as f:
+                    f.write(diagnostic_results.to_json())
+                    temp_path = f.name
+                logger.log_artifact(temp_path)
+                run_id = logger.run_id
 
-            run_id = logger.run_id
+        finally:
+            if run_context:
+                run_context.__exit__(None, None, None)
 
         return {
             "metrics": avg_metrics,

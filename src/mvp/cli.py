@@ -142,7 +142,8 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         "config", type=str, help="Config name or path (e.g., 'discover' or 'discover.yaml')"
     )
     exp_parser.add_argument(
-        "--output", "-o", type=str, default=None, help="Output path for recommended config"
+        "--output", "-o", type=str, required=True,
+        help="Output filename for discovered config (saved to models/)"
     )
     exp_parser.add_argument(
         "--verbose", "-v", action="store_true", help="Print progress"
@@ -191,6 +192,12 @@ def cmd_experiment(args: argparse.Namespace) -> int:
     if not config_path.exists():
         raise FileNotFoundError(f"Config file not found: {args.config} (tried {config_path})")
 
+    # Normalize output path: always in models/, add .yaml if needed
+    output_name = args.output
+    if not output_name.endswith(".yaml"):
+        output_name = f"{output_name}.yaml"
+    output_path = MODEL_DIR / output_name
+
     logger.info("Rebuilding matches.parquet")
     MatchesAggregator().run()
 
@@ -202,11 +209,12 @@ def cmd_experiment(args: argparse.Namespace) -> int:
     result = discovery.run()
 
     if result.selected_features:
-        output_path = args.output or "models/discovered.yaml"
         discovery._last_result = result
         discovery.save_config(output_path)
         print(f"\nSaved config to: {output_path}")
-        print(f"Run with: python -m mvp model discovered")
+        print(f"Run with: python -m mvp model {output_path.stem}")
+    else:
+        print("\nNo features selected - no config saved")
 
     return 0
 
