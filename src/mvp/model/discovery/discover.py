@@ -51,9 +51,10 @@ def get_all_feature_specs() -> list[str]:
 
     For mirrorable features (mirror=True), generates both player_* and opp_* versions.
     For diff-style features (mirror=False), only generates player_* version.
+    For match-level features (match_level=True), generates unprefixed version.
 
     Returns:
-        List of feature specs like ["player_win_rate", "opp_win_rate", ...].
+        List of feature specs like ["player_win_rate", "opp_win_rate", "is_clay", ...].
     """
     DAY_WINDOWS = [7, 14, 30, 60, 90, 180, 365]
 
@@ -63,6 +64,28 @@ def get_all_feature_specs() -> list[str]:
     specs = []
     for name in feature_names:
         feature_def = registry.get(name)
+
+        # Match-level features have no prefix
+        if feature_def.match_level:
+            if not feature_def.params:
+                specs.append(name)
+            elif "days" in feature_def.params and len(feature_def.params) == 1:
+                specs.append(name)  # All-time
+                for days in DAY_WINDOWS:
+                    specs.append(f"{name}(days={days})")
+            else:
+                default_params = {}
+                for param in feature_def.params:
+                    if param == "days":
+                        default_params["days"] = 30
+                    elif param == "min_matches":
+                        default_params["min_matches"] = 3
+                if default_params:
+                    params_str = ", ".join(f"{k}={v}" for k, v in default_params.items())
+                    specs.append(f"{name}({params_str})")
+                else:
+                    specs.append(name)
+            continue
 
         # Determine which prefixes to use
         # mirror=True: both player and opp (base features like win_rate)

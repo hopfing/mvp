@@ -112,10 +112,21 @@ class TestParseFeatureSpec:
         with pytest.raises(ValueError, match="Invalid feature spec"):
             parse_feature_spec("player_win_rate(days=30")
 
-    def test_missing_prefix_raises(self):
-        """Feature spec without player_/opp_ prefix raises ValueError."""
-        with pytest.raises(ValueError, match="must start with 'player_' or 'opp_'"):
-            parse_feature_spec("win_rate(days=30)")
+    def test_unprefixed_feature_for_match_level(self):
+        """Feature spec without prefix returns None for prefix (match-level feature)."""
+        prefix, base, full, params = parse_feature_spec("is_clay")
+        assert prefix is None
+        assert base == "is_clay"
+        assert full == "is_clay"
+        assert params == {}
+
+    def test_unprefixed_feature_with_params(self):
+        """Unprefixed feature with params parses correctly."""
+        prefix, base, full, params = parse_feature_spec("some_feature(days=30)")
+        assert prefix is None
+        assert base == "some_feature"
+        assert full == "some_feature"
+        assert params == {"days": 30}
 
 
 @pytest.fixture

@@ -22,6 +22,7 @@ class FeatureDef:
     description: str = ""
     depends_on: list[str] = field(default_factory=list)
     mirror: bool = True  # Whether to generate opp_* column
+    match_level: bool = False  # Whether this is a match-level feature (no prefix)
 
 
 class FeatureRegistry:
@@ -69,6 +70,7 @@ def feature(
     description: str = "",
     depends_on: list[str] | None = None,
     mirror: bool = True,
+    match_level: bool = False,
 ) -> Callable[[Callable[..., pl.Expr]], Callable[..., pl.Expr]]:
     """Decorator to register a feature function.
 
@@ -78,6 +80,7 @@ def feature(
         description: Human-readable description.
         depends_on: Names of features that must be computed first.
         mirror: Whether to auto-generate opp_* column (default True).
+        match_level: Whether this is a match-level feature with no prefix (default False).
 
     Returns:
         Decorator function.
@@ -91,6 +94,7 @@ def feature(
             description=description,
             depends_on=depends_on or [],
             mirror=mirror,
+            match_level=match_level,
         )
         get_registry().register(feature_def)
         return func

@@ -14,27 +14,30 @@ import mvp.model.features  # noqa: F401 - triggers feature registration
 from mvp.model.registry import get_registry
 
 
-def parse_feature_spec(spec: str) -> tuple[str, str, str, dict[str, Any]]:
+def parse_feature_spec(spec: str) -> tuple[str | None, str, str, dict[str, Any]]:
     """Parse a feature specification string into prefix, base name, full name, and parameters.
 
     Args:
-        spec: Feature spec like "player_win_rate(days=30)" or "opp_win_rate(days=30)".
+        spec: Feature spec like "player_win_rate(days=30)", "opp_win_rate(days=30)",
+              or "is_clay" (for match-level features).
 
     Returns:
         Tuple of (prefix, base_name, full_name, params_dict).
-        - prefix: "player" or "opp"
+        - prefix: "player", "opp", or None (for match-level features)
         - base_name: Feature name without prefix (e.g., "win_rate")
-        - full_name: Full feature name with prefix (e.g., "player_win_rate")
+        - full_name: Full feature name (e.g., "player_win_rate" or "is_clay")
         - params_dict: Parameter dictionary
 
     Raises:
-        ValueError: If the spec is malformed or missing player_/opp_ prefix.
+        ValueError: If the spec is malformed.
 
     Examples:
         >>> parse_feature_spec("player_win_rate(days=30)")
         ("player", "win_rate", "player_win_rate", {"days": 30})
         >>> parse_feature_spec("opp_win_rate(days=30)")
         ("opp", "win_rate", "opp_win_rate", {"days": 30})
+        >>> parse_feature_spec("is_clay")
+        (None, "is_clay", "is_clay", {})
     """
     spec = spec.strip()
 
@@ -68,15 +71,15 @@ def parse_feature_spec(spec: str) -> tuple[str, str, str, dict[str, Any]]:
 
     # Extract prefix and base name
     if full_name.startswith("player_"):
-        prefix = "player"
+        prefix: str | None = "player"
         base_name = full_name[7:]  # len("player_") = 7
     elif full_name.startswith("opp_"):
         prefix = "opp"
         base_name = full_name[4:]  # len("opp_") = 4
     else:
-        raise ValueError(
-            f"Feature spec must start with 'player_' or 'opp_': {spec}"
-        )
+        # Match-level feature (no prefix)
+        prefix = None
+        base_name = full_name
 
     return prefix, base_name, full_name, params
 
@@ -138,7 +141,7 @@ def get_feature_columns(feature_specs: list[str]) -> list[str]:
     """Get feature column names for a list of feature specs.
 
     Args:
-        feature_specs: List of specs like ["player_win_rate(days=30)"].
+        feature_specs: List of specs like ["player_win_rate(days=30)", "is_clay"].
 
     Returns:
         List of column names.
@@ -282,7 +285,7 @@ class FeatureEngine:
 
         Args:
             feature_specs: List of feature specs like ["player_win_rate(days=30)"].
-                Each spec must start with "player_" or "opp_".
+                Specs can start with "player_", "opp_", or have no prefix (match-level).
 
         Returns:
             DataFrame with match data and computed feature columns.
@@ -290,14 +293,19 @@ class FeatureEngine:
         # Resolve dependencies first
         feature_specs = self._resolve_dependencies(feature_specs)
 
-        # Separate base features from derived features (those with depends_on)
-        # Derived features need opp_* columns from mirroring, so must come later
+        # Separate features into categories:
+        # - match_level_specs: no prefix, computed directly
+        # - base_specs: player/opp prefixed, no depends_on
+        # - derived_specs: player/opp prefixed, has depends_on
+        match_level_specs = []
         base_specs = []
         derived_specs = []
         for spec in feature_specs:
             prefix, base_name, full_name, params = parse_feature_spec(spec)
             feature_def = self._registry.get(base_name)
-            if feature_def.depends_on:
+            if prefix is None:
+                match_level_specs.append(spec)
+            elif feature_def.depends_on:
                 derived_specs.append(spec)
             else:
                 base_specs.append(spec)
@@ -307,6 +315,32 @@ class FeatureEngine:
 
         # Check cache validity
         matches_hash = self._compute_matches_hash()
+
+        # Phase 0: compute match-level features (no prefix)
+        computed_match_level: set[str] = set()
+        for spec in match_level_specs:
+            _prefix, base_name, full_name, params = parse_feature_spec(spec)
+            col_name = build_column_name(full_name, params)
+
+            if col_name not in computed_match_level:
+                feature_def = self._registry.get(base_name)
+                cache_spec = base_name
+                if params:
+                    param_str = ",".join(f"{k}={v}" for k, v in params.items())
+                    cache_spec = f"{base_name}({param_str})"
+
+                if self._is_cached(cache_spec, matches_hash):
+                    cached = self._load_cached_feature(cache_spec)
+                    df = df.join(
+                        cached,
+                        on=["match_uid", "player_id"],
+                        how="left",
+                    )
+                else:
+                    expr = feature_def.func(**params)
+                    df = df.with_columns(expr.alias(col_name))
+                    self._cache_feature(cache_spec, df, [col_name], matches_hash)
+                computed_match_level.add(col_name)
 
         # Track which player_* columns we've computed (needed for mirroring)
         computed_player_cols: set[str] = set()

@@ -118,3 +118,83 @@ def neither_seeded() -> pl.Expr:
     return (
         pl.col("player_seed").is_null() & pl.col("opp_seed").is_null()
     ).cast(pl.Float64)
+
+
+# Match-level features (no player/opp prefix)
+
+
+@feature(
+    name="is_tour",
+    params=[],
+    description="1 if match is on ATP Tour, 0 otherwise",
+    match_level=True,
+)
+def is_tour() -> pl.Expr:
+    """Whether match is on ATP Tour circuit."""
+    return (pl.col("circuit") == "tour").cast(pl.Float64)
+
+
+@feature(
+    name="is_chal",
+    params=[],
+    description="1 if match is on Challenger circuit, 0 otherwise",
+    match_level=True,
+)
+def is_chal() -> pl.Expr:
+    """Whether match is on Challenger circuit."""
+    return (pl.col("circuit") == "chal").cast(pl.Float64)
+
+
+@feature(
+    name="is_itf",
+    params=[],
+    description="1 if match is on ITF circuit, 0 otherwise",
+    match_level=True,
+)
+def is_itf() -> pl.Expr:
+    """Whether match is on ITF circuit."""
+    return (pl.col("circuit") == "itf").cast(pl.Float64)
+
+
+@feature(
+    name="is_hard",
+    params=[],
+    description="1 if match is on hard court, 0 otherwise",
+    match_level=True,
+)
+def is_hard() -> pl.Expr:
+    """Whether match is on hard court."""
+    return (pl.col("surface") == "Hard").cast(pl.Float64)
+
+
+@feature(
+    name="is_clay",
+    params=[],
+    description="1 if match is on clay court, 0 otherwise",
+    match_level=True,
+)
+def is_clay() -> pl.Expr:
+    """Whether match is on clay court."""
+    return (pl.col("surface") == "Clay").cast(pl.Float64)
+
+
+@feature(
+    name="is_grass",
+    params=[],
+    description="1 if match is on grass court, 0 otherwise",
+    match_level=True,
+)
+def is_grass() -> pl.Expr:
+    """Whether match is on grass court."""
+    return (pl.col("surface") == "Grass").cast(pl.Float64)
+
+
+@feature(
+    name="is_indoor",
+    params=[],
+    description="1 if match is indoors, 0 otherwise",
+    match_level=True,
+)
+def is_indoor() -> pl.Expr:
+    """Whether match is played indoors."""
+    return pl.col("indoor").cast(pl.Float64)
