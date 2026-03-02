@@ -60,9 +60,9 @@ def ranking_ratio() -> pl.Expr:
     mirror=False,
 )
 def ranking_ratio_capped(cap: float = 3.0) -> pl.Expr:
-    """Ranking ratio capped at specified value."""
+    """Ranking ratio capped symmetrically at [1/cap, cap]."""
     ratio = pl.col("player_rankings_rank") / pl.col("opp_rankings_rank")
-    return ratio.clip(upper_bound=cap)
+    return ratio.clip(lower_bound=1/cap, upper_bound=cap)
 
 
 @feature(
