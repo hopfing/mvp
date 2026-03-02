@@ -14,16 +14,16 @@ from mvp.model.registry import feature
 
 
 @feature(
-    name="surface_win_rate",
+    name="surface_win_pct",
     params=["days"],
-    description="Win rate on current match surface (windowed or all-time)",
+    description="Win percentage on current match surface (windowed or all-time)",
     mirror=True,
 )
-def surface_win_rate(days: int | None = None) -> pl.Expr:
-    """Win rate on the current match's surface.
+def surface_win_pct(days: int | None = None) -> pl.Expr:
+    """Win percentage on the current match's surface.
 
     Groups by (player_id, surface) so each player has separate
-    win rates for clay, hard, grass, etc.
+    win percentages for clay, hard, grass, etc.
     """
     group_by = ["player_id", "surface"]
     if days is None:
@@ -46,14 +46,14 @@ def surface_matches(days: int | None = None) -> pl.Expr:
 
 
 @feature(
-    name="surface_win_rate_diff",
+    name="surface_win_pct_diff",
     params=["days"],
-    description="Difference in surface win rate (player - opponent)",
-    depends_on=["surface_win_rate"],
+    description="Difference in surface win percentage (player - opponent)",
+    depends_on=["surface_win_pct"],
     mirror=False,
 )
-def surface_win_rate_diff(days: int | None = None) -> pl.Expr:
-    """Difference between player and opponent surface win rate."""
+def surface_win_pct_diff(days: int | None = None) -> pl.Expr:
+    """Difference between player and opponent surface win percentage."""
     if days is None:
-        return pl.col("player_surface_win_rate") - pl.col("opp_surface_win_rate")
-    return pl.col(f"player_surface_win_rate_{days}d") - pl.col(f"opp_surface_win_rate_{days}d")
+        return pl.col("player_surface_win_pct") - pl.col("opp_surface_win_pct")
+    return pl.col(f"player_surface_win_pct_{days}d") - pl.col(f"opp_surface_win_pct_{days}d")

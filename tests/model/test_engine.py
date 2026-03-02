@@ -75,21 +75,21 @@ class TestParseFeatureSpec:
     def test_feature_with_string_param(self):
         """Parse feature with string parameter."""
         prefix, base_name, full_name, params = parse_feature_spec(
-            "player_surface_win_rate(surface='clay')"
+            "player_surface_win_pct(surface='clay')"
         )
         assert prefix == "player"
-        assert base_name == "surface_win_rate"
-        assert full_name == "player_surface_win_rate"
+        assert base_name == "surface_win_pct"
+        assert full_name == "player_surface_win_pct"
         assert params == {"surface": "clay"}
 
     def test_feature_with_double_quoted_string(self):
         """Parse feature with double-quoted string parameter."""
         prefix, base_name, full_name, params = parse_feature_spec(
-            'opp_surface_win_rate(surface="clay")'
+            'opp_surface_win_pct(surface="clay")'
         )
         assert prefix == "opp"
-        assert base_name == "surface_win_rate"
-        assert full_name == "opp_surface_win_rate"
+        assert base_name == "surface_win_pct"
+        assert full_name == "opp_surface_win_pct"
         assert params == {"surface": "clay"}
 
     def test_feature_with_spaces(self):
