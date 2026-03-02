@@ -44,6 +44,7 @@ class DiscoveryOptions(BaseModel):
     direction: Literal["minimize", "maximize"] = "minimize"
     min_features: int = 5
     max_features: int | None = None
+    exclude_features: list[str] = []
 
 
 class ModelConfig(BaseModel):

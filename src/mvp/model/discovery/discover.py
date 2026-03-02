@@ -238,6 +238,11 @@ class FeatureDiscovery:
         if all_features is None:
             all_features = get_all_feature_specs()
 
+        if self.config.discovery.exclude_features:
+            excluded = set(self.config.discovery.exclude_features)
+            all_features = [f for f in all_features if f not in excluded]
+            self._log(f"Excluding {len(excluded)} features: {list(excluded)}")
+
         self._log(f"PHASE 1: Feature Selection")
         self._log(f"Starting with {len(all_features)} features from registry...")
 
