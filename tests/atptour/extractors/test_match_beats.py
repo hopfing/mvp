@@ -8,6 +8,10 @@ import pytest
 import requests
 
 from mvp.atptour.extractors.match_beats import MatchBeatsExtractor
+from mvp.atptour.extractors.match_centre import DataType, MatchCentreExtractor
+
+# Patch target for decrypt_response (now in match_centre module)
+DECRYPT_PATCH = "mvp.atptour.extractors.match_centre.decrypt_response"
 from mvp.atptour.tournament import Tournament
 from mvp.common.enums import Circuit
 
@@ -164,7 +168,7 @@ class TestMatchBeatsExtractor:
         with (
             patch.object(extractor.session, "get", side_effect=get_side_effect),
             patch(
-                "mvp.atptour.extractors.match_beats.decrypt_response",
+                DECRYPT_PATCH,
                 side_effect=decrypt_side_effect,
             ),
         ):
@@ -195,7 +199,7 @@ class TestMatchBeatsExtractor:
         with (
             patch.object(extractor.session, "get", side_effect=get_side_effect),
             patch(
-                "mvp.atptour.extractors.match_beats.decrypt_response",
+                DECRYPT_PATCH,
                 side_effect=decrypt_side_effect,
             ),
         ):
@@ -230,7 +234,7 @@ class TestMatchBeatsExtractor:
         with (
             patch.object(extractor.session, "get", side_effect=get_side_effect),
             patch(
-                "mvp.atptour.extractors.match_beats.decrypt_response",
+                DECRYPT_PATCH,
                 side_effect=decrypt_side_effect,
             ),
         ):
@@ -255,7 +259,7 @@ class TestMatchBeatsExtractor:
         with (
             patch.object(extractor.session, "get", side_effect=get_side_effect),
             patch(
-                "mvp.atptour.extractors.match_beats.decrypt_response",
+                DECRYPT_PATCH,
                 return_value=make_status_decrypted(match_beats_available=False),
             ),
         ):
@@ -293,7 +297,7 @@ class TestMatchBeatsExtractor:
         with (
             patch.object(extractor.session, "get", side_effect=get_side_effect),
             patch(
-                "mvp.atptour.extractors.match_beats.decrypt_response",
+                DECRYPT_PATCH,
                 side_effect=decrypt_side_effect,
             ),
         ):
@@ -329,7 +333,7 @@ class TestMatchBeatsExtractor:
         with (
             patch.object(extractor.session, "get", side_effect=get_side_effect),
             patch(
-                "mvp.atptour.extractors.match_beats.decrypt_response",
+                DECRYPT_PATCH,
                 side_effect=decrypt_side_effect,
             ),
         ):
@@ -390,7 +394,7 @@ class TestMatchBeatsExtractor:
         with (
             patch.object(extractor.session, "get", return_value=mock_response),
             patch(
-                "mvp.atptour.extractors.match_beats.decrypt_response",
+                DECRYPT_PATCH,
                 return_value=make_status_decrypted(),
             ),
         ):
@@ -409,28 +413,30 @@ class TestMatchBeatsExtractor:
 
         assert status is None
 
-    def test_fetch_match_data(self, extractor):
-        """Should fetch and decrypt match data."""
+    def test_fetch_data(self, extractor):
+        """Should fetch and decrypt data."""
         mock_response = make_mock_response(make_data_response())
+        endpoint = "https://example.com/api"
 
         with (
             patch.object(extractor.session, "get", return_value=mock_response),
             patch(
-                "mvp.atptour.extractors.match_beats.decrypt_response",
+                DECRYPT_PATCH,
                 return_value=make_data_decrypted(),
             ),
         ):
-            data = extractor._fetch_match_data(2023, "339", "MS001")
+            data = extractor._fetch_data(endpoint, 2023, "339", "MS001")
 
         assert data["isMatchComplete"] is True
 
-    def test_fetch_match_data_failure_returns_none(self, extractor):
+    def test_fetch_data_failure_returns_none(self, extractor):
         """Should return None when data request fails."""
+        endpoint = "https://example.com/api"
         with patch.object(
             extractor.session,
             "get",
             side_effect=requests.RequestException("error"),
         ):
-            data = extractor._fetch_match_data(2023, "339", "MS001")
+            data = extractor._fetch_data(endpoint, 2023, "339", "MS001")
 
         assert data is None
