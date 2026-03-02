@@ -13,6 +13,7 @@ from mvp.common.enums import Circuit
 
 
 class TestProcessTournaments:
+    @patch("mvp.atptour.pipeline.MatchBeatsExtractor")
     @patch("mvp.atptour.pipeline.MatchStatsTransformer")
     @patch("mvp.atptour.pipeline.MatchStatsExtractor")
     @patch("mvp.atptour.pipeline.ResultsTransformer")
@@ -31,6 +32,7 @@ class TestProcessTournaments:
         MockResultsTx,
         MockMatchStatsExt,
         MockMatchStatsTx,
+        MockMatchBeatsExt,
     ):
         from mvp.atptour.pipeline import _process_tournaments
 
@@ -58,6 +60,7 @@ class TestProcessTournaments:
         MockMatchStatsExt.return_value.run.assert_called_once()
         MockMatchStatsTx.return_value.run.assert_called_once()
 
+    @patch("mvp.atptour.pipeline.MatchBeatsExtractor")
     @patch("mvp.atptour.pipeline.MatchStatsTransformer")
     @patch("mvp.atptour.pipeline.MatchStatsExtractor")
     @patch("mvp.atptour.pipeline.ResultsTransformer")
@@ -76,6 +79,7 @@ class TestProcessTournaments:
         MockResultsTx,
         MockMatchStatsExt,
         MockMatchStatsTx,
+        MockMatchBeatsExt,
     ):
         from mvp.atptour.pipeline import _process_tournaments
 
@@ -100,6 +104,7 @@ class TestProcessTournaments:
         # Second tournament still processed
         MockOverviewTx.return_value.run.assert_called_once()
 
+    @patch("mvp.atptour.pipeline.MatchBeatsExtractor")
     @patch("mvp.atptour.pipeline.MatchStatsTransformer")
     @patch("mvp.atptour.pipeline.MatchStatsExtractor")
     @patch("mvp.atptour.pipeline.ResultsTransformer")
@@ -118,6 +123,7 @@ class TestProcessTournaments:
         MockResultsTx,
         MockMatchStatsExt,
         MockMatchStatsTx,
+        MockMatchBeatsExt,
     ):
         """Archive tournaments: results always refresh, stats only when refresh=True."""
         from mvp.atptour.pipeline import _process_tournaments
@@ -136,6 +142,7 @@ class TestProcessTournaments:
             mock_tournament, refresh=False
         )
 
+    @patch("mvp.atptour.pipeline.MatchBeatsExtractor")
     @patch("mvp.atptour.pipeline.MatchStatsTransformer")
     @patch("mvp.atptour.pipeline.MatchStatsExtractor")
     @patch("mvp.atptour.pipeline.ResultsTransformer")
@@ -154,6 +161,7 @@ class TestProcessTournaments:
         MockResultsTx,
         MockMatchStatsExt,
         MockMatchStatsTx,
+        MockMatchBeatsExt,
     ):
         """Active tournaments (not archive, not refresh): results=True, stats=False."""
         from mvp.atptour.pipeline import _process_tournaments
@@ -172,6 +180,7 @@ class TestProcessTournaments:
             mock_tournament, refresh=False
         )
 
+    @patch("mvp.atptour.pipeline.MatchBeatsExtractor")
     @patch("mvp.atptour.pipeline.MatchStatsTransformer")
     @patch("mvp.atptour.pipeline.MatchStatsExtractor")
     @patch("mvp.atptour.pipeline.ResultsTransformer")
@@ -190,6 +199,7 @@ class TestProcessTournaments:
         MockResultsTx,
         MockMatchStatsExt,
         MockMatchStatsTx,
+        MockMatchBeatsExt,
     ):
         """With --refresh: both results and stats refreshed."""
         from mvp.atptour.pipeline import _process_tournaments
@@ -208,6 +218,7 @@ class TestProcessTournaments:
             mock_tournament, refresh=True
         )
 
+    @patch("mvp.atptour.pipeline.MatchBeatsExtractor")
     @patch("mvp.atptour.pipeline.MatchStatsTransformer")
     @patch("mvp.atptour.pipeline.MatchStatsExtractor")
     @patch("mvp.atptour.pipeline.ResultsTransformer")
@@ -226,6 +237,7 @@ class TestProcessTournaments:
         MockResultsTx,
         MockMatchStatsExt,
         MockMatchStatsTx,
+        MockMatchBeatsExt,
     ):
         """data_root is forwarded to all constructors."""
         from mvp.atptour.pipeline import _process_tournaments
@@ -247,6 +259,7 @@ class TestProcessTournaments:
         MockMatchStatsExt.assert_called_once_with(data_root=data_root)
         MockMatchStatsTx.assert_called_once_with(mock_tournament, data_root=data_root)
 
+    @patch("mvp.atptour.pipeline.MatchBeatsExtractor")
     @patch("mvp.atptour.pipeline.MatchStatsTransformer")
     @patch("mvp.atptour.pipeline.MatchStatsExtractor")
     @patch("mvp.atptour.pipeline.ResultsTransformer")
@@ -265,6 +278,7 @@ class TestProcessTournaments:
         MockResultsTx,
         MockMatchStatsExt,
         MockMatchStatsTx,
+        MockMatchBeatsExt,
     ):
         from mvp.atptour.pipeline import _process_tournaments
 
