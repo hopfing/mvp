@@ -24,9 +24,9 @@ class TestFeatureDiscovery:
 
         # Check that all starter features are registered
         expected_features = [
-            "win_rate",
+            "win_pct",
             "matches_played",
-            "win_rate_diff",
+            "win_pct_diff",
             "h2h_wins",
             "ranking_points_diff",
             "svc_first_serve_win_pct",

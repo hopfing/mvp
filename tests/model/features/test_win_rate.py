@@ -17,20 +17,20 @@ def ensure_features_registered():
     yield
 
 
-class TestWinRateFeature:
-    """Tests for win_rate feature."""
+class TestWinPctFeature:
+    """Tests for win_pct feature."""
 
-    def test_win_rate_registered(self):
-        """win_rate is registered with correct metadata."""
+    def test_win_pct_registered(self):
+        """win_pct is registered with correct metadata."""
         registry = get_registry()
-        feat = registry.get("win_rate")
-        assert feat.name == "win_rate"
+        feat = registry.get("win_pct")
+        assert feat.name == "win_pct"
         assert feat.params == ["days"]
         assert feat.mirror is True
 
-    def test_win_rate_computes_rolling_mean(self):
-        """win_rate computes rolling mean of won column."""
-        from mvp.model.features.win_rate import win_rate
+    def test_win_pct_computes_rolling_mean(self):
+        """win_pct computes rolling mean of won column."""
+        from mvp.model.features.win_rate import win_pct
 
         df = pl.DataFrame(
             {
@@ -45,16 +45,16 @@ class TestWinRateFeature:
             }
         ).lazy()
 
-        result = df.with_columns(win_rate(days=30).alias("win_rate")).collect()
+        result = df.with_columns(win_pct(days=30).alias("win_pct")).collect()
 
         # Row 0: no prior matches -> null
         # Row 1: 1 prior match (won=1) -> 1.0
         # Row 2: 2 prior matches (won=1,0) -> 0.5
         # Row 3: 3 prior matches (won=1,0,1) -> 0.666...
-        assert result["win_rate"][0] is None
-        assert result["win_rate"][1] == 1.0
-        assert result["win_rate"][2] == 0.5
-        assert abs(result["win_rate"][3] - 2 / 3) < 0.001
+        assert result["win_pct"][0] is None
+        assert result["win_pct"][1] == 1.0
+        assert result["win_pct"][2] == 0.5
+        assert abs(result["win_pct"][3] - 2 / 3) < 0.001
 
 
 class TestMatchesPlayedFeature:
@@ -95,36 +95,36 @@ class TestMatchesPlayedFeature:
         assert result["matches_played"].to_list() == [0, 1, 2, 3]
 
 
-class TestWinRateDiffFeature:
-    """Tests for win_rate_diff feature."""
+class TestWinPctDiffFeature:
+    """Tests for win_pct_diff feature."""
 
-    def test_win_rate_diff_registered(self):
-        """win_rate_diff is registered with correct metadata."""
+    def test_win_pct_diff_registered(self):
+        """win_pct_diff is registered with correct metadata."""
         registry = get_registry()
-        feat = registry.get("win_rate_diff")
-        assert feat.name == "win_rate_diff"
+        feat = registry.get("win_pct_diff")
+        assert feat.name == "win_pct_diff"
         assert feat.params == ["days"]
-        assert feat.depends_on == ["win_rate"]
+        assert feat.depends_on == ["win_pct"]
         assert feat.mirror is False  # Diff features don't mirror
 
-    def test_win_rate_diff_computes_difference(self):
-        """win_rate_diff computes player_win_rate - opp_win_rate."""
-        from mvp.model.features.win_rate import win_rate_diff
+    def test_win_pct_diff_computes_difference(self):
+        """win_pct_diff computes player_win_pct - opp_win_pct."""
+        from mvp.model.features.win_rate import win_pct_diff
 
         df = pl.DataFrame(
             {
-                "player_win_rate_30d": [0.8, 0.6, 0.5],
-                "opp_win_rate_30d": [0.4, 0.6, 0.7],
+                "player_win_pct_30d": [0.8, 0.6, 0.5],
+                "opp_win_pct_30d": [0.4, 0.6, 0.7],
             }
         ).lazy()
 
         result = df.with_columns(
-            win_rate_diff(days=30).alias("win_rate_diff")
+            win_pct_diff(days=30).alias("win_pct_diff")
         ).collect()
 
         # Row 0: 0.8 - 0.4 = 0.4
         # Row 1: 0.6 - 0.6 = 0.0
         # Row 2: 0.5 - 0.7 = -0.2
-        assert abs(result["win_rate_diff"][0] - 0.4) < 0.001
-        assert abs(result["win_rate_diff"][1] - 0.0) < 0.001
-        assert abs(result["win_rate_diff"][2] - (-0.2)) < 0.001
+        assert abs(result["win_pct_diff"][0] - 0.4) < 0.001
+        assert abs(result["win_pct_diff"][1] - 0.0) < 0.001
+        assert abs(result["win_pct_diff"][2] - (-0.2)) < 0.001

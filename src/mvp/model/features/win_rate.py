@@ -14,19 +14,19 @@ from mvp.model.registry import feature
 
 
 @feature(
-    name="win_rate",
+    name="win_pct",
     params=["days"],
-    description="Win rate (windowed or all-time)",
+    description="Win percentage (windowed or all-time)",
     mirror=True,
 )
-def win_rate(days: int | None = None) -> pl.Expr:
-    """Win rate over past N days, or all-time if days is None.
+def win_pct(days: int | None = None) -> pl.Expr:
+    """Win percentage over past N days, or all-time if days is None.
 
     Args:
         days: Window size in days. If None, uses all-time cumulative.
 
     Returns:
-        Polars expression computing the win rate.
+        Polars expression computing the win percentage.
     """
     if days is None:
         return cumulative_mean("won", group_by="player_id")
@@ -54,23 +54,23 @@ def matches_played(days: int | None = None) -> pl.Expr:
 
 
 @feature(
-    name="win_rate_diff",
+    name="win_pct_diff",
     params=["days"],
-    description="Difference between player and opponent win rate",
-    depends_on=["win_rate"],
+    description="Difference between player and opponent win percentage",
+    depends_on=["win_pct"],
     mirror=False,
 )
-def win_rate_diff(days: int | None = None) -> pl.Expr:
-    """Difference between player and opponent win rate.
+def win_pct_diff(days: int | None = None) -> pl.Expr:
+    """Difference between player and opponent win percentage.
 
-    Requires win_rate to be computed first for both player and opponent.
+    Requires win_pct to be computed first for both player and opponent.
 
     Args:
         days: Window size in days. If None, uses all-time.
 
     Returns:
-        Polars expression computing player_win_rate - opp_win_rate.
+        Polars expression computing player_win_pct - opp_win_pct.
     """
     if days is None:
-        return pl.col("player_win_rate") - pl.col("opp_win_rate")
-    return pl.col(f"player_win_rate_{days}d") - pl.col(f"opp_win_rate_{days}d")
+        return pl.col("player_win_pct") - pl.col("opp_win_pct")
+    return pl.col(f"player_win_pct_{days}d") - pl.col(f"opp_win_pct_{days}d")

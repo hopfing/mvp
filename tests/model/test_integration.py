@@ -106,9 +106,9 @@ class TestAllFeaturesIntegration:
         features = registry.list_features()
 
         expected_features = [
-            "win_rate",
+            "win_pct",
             "matches_played",
-            "win_rate_diff",
+            "win_pct_diff",
             "h2h_wins",
             "ranking_points_diff",
         ]
@@ -116,12 +116,12 @@ class TestAllFeaturesIntegration:
         for feat_name in expected_features:
             assert feat_name in features, f"Feature '{feat_name}' not registered"
 
-    def test_win_rate_on_sample_data(self, sample_matches_df: pl.DataFrame):
-        """win_rate computes correctly on sample data."""
-        from mvp.model.features.win_rate import win_rate
+    def test_win_pct_on_sample_data(self, sample_matches_df: pl.DataFrame):
+        """win_pct computes correctly on sample data."""
+        from mvp.model.features.win_rate import win_pct
 
         result = sample_matches_df.with_columns(
-            win_rate(days=30).alias("player_win_rate_30d")
+            win_pct(days=30).alias("player_win_pct_30d")
         )
 
         # Player A's matches (rows 0, 2, 6, 10):
@@ -130,8 +130,8 @@ class TestAllFeaturesIntegration:
         # Row 6 (Jan 10): 2 wins -> 1.0
         # Row 10 (Jan 17): 3 wins -> 1.0
         player_a = result.filter(pl.col("player_id") == "A")
-        win_rates = player_a["player_win_rate_30d"].to_list()
-        assert win_rates == [None, 1.0, 1.0, 1.0]
+        win_pcts = player_a["player_win_pct_30d"].to_list()
+        assert win_pcts == [None, 1.0, 1.0, 1.0]
 
     def test_matches_played_on_sample_data(self, sample_matches_df: pl.DataFrame):
         """matches_played computes correctly on sample data."""
@@ -180,11 +180,11 @@ class TestAllFeaturesIntegration:
         """Multiple features can be computed together without conflict."""
         from mvp.model.features.h2h import h2h_wins
         from mvp.model.features.ranking import ranking_points_diff
-        from mvp.model.features.win_rate import matches_played, win_rate
+        from mvp.model.features.win_rate import matches_played, win_pct
 
         result = sample_matches_df.with_columns(
             [
-                win_rate(days=30).alias("player_win_rate_30d"),
+                win_pct(days=30).alias("player_win_pct_30d"),
                 matches_played(days=30).alias("matches_30d"),
                 h2h_wins().alias("h2h_wins_vs_opp"),
                 ranking_points_diff().alias("ranking_diff"),
@@ -192,7 +192,7 @@ class TestAllFeaturesIntegration:
         )
 
         # All columns should exist
-        assert "player_win_rate_30d" in result.columns
+        assert "player_win_pct_30d" in result.columns
         assert "matches_30d" in result.columns
         assert "h2h_wins_vs_opp" in result.columns
         assert "ranking_diff" in result.columns
@@ -200,31 +200,31 @@ class TestAllFeaturesIntegration:
         # Row count preserved
         assert len(result) == len(sample_matches_df)
 
-    def test_win_rate_diff_requires_dependencies(self, sample_matches_df: pl.DataFrame):
-        """win_rate_diff requires win_rate columns to be computed first."""
-        from mvp.model.features.win_rate import win_rate, win_rate_diff
+    def test_win_pct_diff_requires_dependencies(self, sample_matches_df: pl.DataFrame):
+        """win_pct_diff requires win_pct columns to be computed first."""
+        from mvp.model.features.win_rate import win_pct, win_pct_diff
 
-        # First compute win_rate for player and opponent
+        # First compute win_pct for player and opponent
         df_with_wr = sample_matches_df.with_columns(
             [
-                win_rate(days=30).alias("player_win_rate_30d"),
+                win_pct(days=30).alias("player_win_pct_30d"),
             ]
         )
 
-        # Simulate opponent's win_rate (in real system this would be mirrored)
+        # Simulate opponent's win_pct (in real system this would be mirrored)
         # For now just add a placeholder
-        df_with_both = df_with_wr.with_columns(pl.lit(0.5).alias("opp_win_rate_30d"))
+        df_with_both = df_with_wr.with_columns(pl.lit(0.5).alias("opp_win_pct_30d"))
 
-        # Now win_rate_diff should work
+        # Now win_pct_diff should work
         result = df_with_both.with_columns(
-            win_rate_diff(days=30).alias("win_rate_diff_30d")
+            win_pct_diff(days=30).alias("win_pct_diff_30d")
         )
 
-        assert "win_rate_diff_30d" in result.columns
+        assert "win_pct_diff_30d" in result.columns
 
     def test_features_handle_null_values(self):
         """Features handle null/missing values gracefully."""
-        from mvp.model.features.win_rate import win_rate
+        from mvp.model.features.win_rate import win_pct
 
         df = pl.DataFrame(
             {
@@ -238,7 +238,7 @@ class TestAllFeaturesIntegration:
             }
         ).sort("effective_match_date")
 
-        result = df.with_columns(win_rate(days=30).alias("win_rate"))
+        result = df.with_columns(win_pct(days=30).alias("win_pct"))
 
         # Should not crash, null is propagated through rolling_mean
         assert len(result) == 3
@@ -261,13 +261,13 @@ class TestFeatureMetadata:
         registry = get_registry()
 
         # Diff features should not mirror (they compare player vs opponent)
-        diff_features = ["win_rate_diff", "ranking_points_diff"]
+        diff_features = ["win_pct_diff", "ranking_points_diff"]
         for feat_name in diff_features:
             feat = registry.get(feat_name)
             assert feat.mirror is False, f"{feat_name} should not mirror"
 
         # Regular player features should mirror
-        mirror_features = ["win_rate", "matches_played", "h2h_wins"]
+        mirror_features = ["win_pct", "matches_played", "h2h_wins"]
         for feat_name in mirror_features:
             feat = registry.get(feat_name)
             assert feat.mirror is True, f"{feat_name} should mirror"
@@ -276,9 +276,9 @@ class TestFeatureMetadata:
         """Features with dependencies have them declared."""
         registry = get_registry()
 
-        # win_rate_diff depends on win_rate
-        feat = registry.get("win_rate_diff")
-        assert "win_rate" in feat.depends_on
+        # win_pct_diff depends on win_pct
+        feat = registry.get("win_pct_diff")
+        assert "win_pct" in feat.depends_on
 
 
 class TestTemporalSafety:
@@ -286,25 +286,25 @@ class TestTemporalSafety:
 
     def test_features_respect_temporal_ordering(self, sample_matches_df: pl.DataFrame):
         """Features compute differently based on temporal position."""
-        from mvp.model.features.win_rate import win_rate
+        from mvp.model.features.win_rate import win_pct
 
-        result = sample_matches_df.with_columns(win_rate(days=30).alias("win_rate"))
+        result = sample_matches_df.with_columns(win_pct(days=30).alias("win_pct"))
 
-        # For player A, win_rate should increase over time (all wins)
+        # For player A, win_pct should increase over time (all wins)
         player_a = result.filter(pl.col("player_id") == "A")
 
         # First match: null (no prior data)
-        assert player_a["win_rate"][0] is None
+        assert player_a["win_pct"][0] is None
 
         # Subsequent matches: should be 1.0 (100% win rate from prior matches)
         for i in range(1, len(player_a)):
-            assert player_a["win_rate"][i] == 1.0
+            assert player_a["win_pct"][i] == 1.0
 
     def test_features_player_isolation(self, sample_matches_df: pl.DataFrame):
         """Each player's features are computed independently."""
-        from mvp.model.features.win_rate import win_rate
+        from mvp.model.features.win_rate import win_pct
 
-        result = sample_matches_df.with_columns(win_rate(days=30).alias("win_rate"))
+        result = sample_matches_df.with_columns(win_pct(days=30).alias("win_pct"))
 
         # Player B always loses against A, wins against D
         player_b = result.filter(pl.col("player_id") == "B")

@@ -23,11 +23,11 @@ from mvp.model.primitives import (
 
 
 class TestWinRateNoFutureLeakage:
-    """Tests verifying win_rate does not include future matches."""
+    """Tests verifying win_pct does not include future matches."""
 
-    def test_win_rate_excludes_future_matches(self):
+    def test_win_pct_excludes_future_matches(self):
         """Win rate at time T must not include matches after time T."""
-        from mvp.model.features.win_rate import win_rate
+        from mvp.model.features.win_rate import win_pct
 
         # Player A: loses first 3 matches, then wins 3 matches
         df = pl.DataFrame(
@@ -45,19 +45,19 @@ class TestWinRateNoFutureLeakage:
             }
         ).sort("effective_match_date")
 
-        result = df.with_columns(win_rate(days=365).alias("win_rate"))
+        result = df.with_columns(win_pct(days=365).alias("win_pct"))
 
-        # At row 3 (first win), win_rate should be 0.0 (0/3 from losses)
+        # At row 3 (first win), win_pct should be 0.0 (0/3 from losses)
         # NOT 0.5 (3/6) which would indicate leakage from future wins
-        win_rate_at_first_win = result["win_rate"][3]
-        assert win_rate_at_first_win == 0.0, (
-            f"Expected win_rate=0.0 at first win, got {win_rate_at_first_win}. "
+        win_pct_at_first_win = result["win_pct"][3]
+        assert win_pct_at_first_win == 0.0, (
+            f"Expected win_pct=0.0 at first win, got {win_pct_at_first_win}. "
             "This indicates future leakage!"
         )
 
-    def test_win_rate_no_same_day_leakage(self):
+    def test_win_pct_no_same_day_leakage(self):
         """Win rate must not include other matches from the same day."""
-        from mvp.model.features.win_rate import win_rate
+        from mvp.model.features.win_rate import win_pct
 
         # Multiple matches on the same day - only prior day data should count
         df = pl.DataFrame(
@@ -73,16 +73,16 @@ class TestWinRateNoFutureLeakage:
             }
         ).sort("effective_match_date")
 
-        result = df.with_columns(win_rate(days=365).alias("win_rate"))
+        result = df.with_columns(win_pct(days=365).alias("win_pct"))
 
-        # All day-5 matches should see only the day-1 win (win_rate = 1.0)
+        # All day-5 matches should see only the day-1 win (win_pct = 1.0)
         # They should NOT see each other's results
-        day5_win_rates = result.filter(
+        day5_win_pcts = result.filter(
             pl.col("effective_match_date") == date(2024, 1, 5)
-        )["win_rate"].to_list()
+        )["win_pct"].to_list()
 
-        assert all(wr == 1.0 for wr in day5_win_rates), (
-            f"Expected all day-5 win_rates to be 1.0, got {day5_win_rates}. "
+        assert all(wr == 1.0 for wr in day5_win_pcts), (
+            f"Expected all day-5 win_pcts to be 1.0, got {day5_win_pcts}. "
             "Same-day leakage detected!"
         )
 
