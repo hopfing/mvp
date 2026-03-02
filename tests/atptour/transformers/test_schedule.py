@@ -6,7 +6,7 @@ from pathlib import Path
 import polars as pl
 from bs4 import BeautifulSoup
 
-from mvp.atptour.schemas.schedule import SCHEMA_VERSION, ScheduleRecord
+from mvp.atptour.schemas.schedule import ScheduleRecord
 from mvp.atptour.transformers.schedule import (
     ScheduleTransformer,
     _normalize_score,
@@ -430,9 +430,6 @@ class TestParseFollowedBy:
 
 
 class TestNewSchemaFields:
-    def test_schema_version_bumped(self):
-        assert SCHEMA_VERSION == "3.0.0"
-
     def test_court_match_num_and_is_time_estimated(self):
         record = ScheduleRecord(
             tournament_id="339", year=2026, circuit=Circuit.tour,

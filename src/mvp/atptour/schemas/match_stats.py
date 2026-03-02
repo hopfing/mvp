@@ -1,7 +1,6 @@
 """Match Stats staged schema."""
 
 from datetime import date, datetime
-from typing import ClassVar
 
 from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
 
@@ -17,18 +16,14 @@ from mvp.atptour.schema_helpers import (
     validate_doubles_partners,
     validate_winner_in_players,
 )
-from mvp.common.enums import Circuit, DrawType, Round
+from mvp.common.enums import Circuit, DrawType, Round, Surface
 from mvp.common.schema_hash import compute_schema_hash
-
-SCHEMA_VERSION = "1.0.0"
 
 _VALID_REASONS = {"RET", "DEF", "W/O", "UNP"}
 
 
 class MatchStatsRecord(BaseModel):
     """A single match stats record from an ATP match_stats JSON file."""
-
-    SCHEMA_VERSION: ClassVar[str] = SCHEMA_VERSION
 
     # Context
     tournament_id: str
@@ -40,7 +35,7 @@ class MatchStatsRecord(BaseModel):
     match_id: str
 
     # Tournament metadata
-    surface: str | None = None
+    surface: Surface | None = None
     tournament_start_date: date | None = None
     tournament_end_date: date | None = None
     tournament_city: str | None = None
@@ -168,6 +163,7 @@ class MatchStatsRecord(BaseModel):
     )(empty_to_none)
 
     _strip_city = field_validator("tournament_city", mode="before")(strip_or_none)
+    _strip_surface = field_validator("surface", mode="before")(strip_or_none)
 
     # Model validators
     @model_validator(mode="after")

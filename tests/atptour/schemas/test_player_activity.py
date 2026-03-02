@@ -6,7 +6,6 @@ import pytest
 
 from mvp.atptour.schemas.player_activity import (
     SCHEMA_HASH,
-    SCHEMA_VERSION,
     PlayerActivityRecord,
 )
 from mvp.common.enums import ActivityEventType, Circuit
@@ -286,15 +285,7 @@ class TestFieldCount:
         assert len(PlayerActivityRecord.model_fields) == 45
 
 
-class TestSchemaVersioning:
-    def test_schema_version_is_semver(self):
-        parts = SCHEMA_VERSION.split(".")
-        assert len(parts) == 3
-        assert all(p.isdigit() for p in parts)
-
+class TestSchemaHash:
     def test_schema_hash_is_hex_string(self):
         assert len(SCHEMA_HASH) == 16
         int(SCHEMA_HASH, 16)
-
-    def test_class_level_schema_version(self):
-        assert PlayerActivityRecord.SCHEMA_VERSION == "1.0.1"

@@ -1,7 +1,6 @@
 """Tournament Results staged schema."""
 
 from datetime import date, datetime
-from typing import ClassVar
 
 from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
 
@@ -19,13 +18,9 @@ from mvp.atptour.schema_helpers import (
 from mvp.common.enums import Circuit, DrawType, ResultType, Round
 from mvp.common.schema_hash import compute_schema_hash
 
-SCHEMA_VERSION = "2.0.0"
-
 
 class ResultRecord(BaseModel):
     """A single match result from a Tournament Results HTML page."""
-
-    SCHEMA_VERSION: ClassVar[str] = SCHEMA_VERSION
 
     tournament_id: str
     year: int

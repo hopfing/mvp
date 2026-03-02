@@ -133,8 +133,7 @@ class TestPlayerBioRecord:
         )
         assert r.birth_city is None
 
-    def test_schema_version_and_hash(self):
-        assert PlayerBioRecord.SCHEMA_VERSION == "1.0.0"
+    def test_schema_hash(self):
         assert hasattr(PlayerBioRecord, "SCHEMA_HASH")
         assert isinstance(PlayerBioRecord.SCHEMA_HASH, str)
 

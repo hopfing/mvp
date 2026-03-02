@@ -4,7 +4,6 @@ from datetime import date, datetime
 
 from mvp.atptour.schemas.schedule import (
     SCHEMA_HASH,
-    SCHEMA_VERSION,
     ScheduleRecord,
 )
 from mvp.common.enums import Circuit, DrawType, Round
@@ -139,12 +138,7 @@ class TestFieldCount:
         assert len(ScheduleRecord.model_fields) == 27
 
 
-class TestSchemaVersioning:
-    def test_schema_version_is_semver(self):
-        parts = SCHEMA_VERSION.split(".")
-        assert len(parts) == 3
-        assert all(p.isdigit() for p in parts)
-
+class TestSchemaHash:
     def test_schema_hash_is_hex_string(self):
         assert len(SCHEMA_HASH) == 16
         int(SCHEMA_HASH, 16)

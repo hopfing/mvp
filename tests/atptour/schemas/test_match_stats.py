@@ -7,7 +7,6 @@ from pydantic import ValidationError
 
 from mvp.atptour.schemas.match_stats import (
     SCHEMA_HASH,
-    SCHEMA_VERSION,
     MatchStatsRecord,
 )
 
@@ -243,12 +242,7 @@ class TestEmptyToNone:
         assert record.reason is None
 
 
-class TestSchemaVersioning:
-    def test_schema_version_is_semver(self):
-        parts = SCHEMA_VERSION.split(".")
-        assert len(parts) == 3
-        assert all(p.isdigit() for p in parts)
-
+class TestSchemaHash:
     def test_schema_hash_is_hex_string(self):
         assert len(SCHEMA_HASH) == 16
         int(SCHEMA_HASH, 16)  # raises if not valid hex

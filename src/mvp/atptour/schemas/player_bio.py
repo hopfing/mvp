@@ -1,7 +1,6 @@
 """Player bio staged schema."""
 
 from datetime import date, datetime
-from typing import ClassVar
 
 from pydantic import BaseModel, field_validator
 
@@ -9,13 +8,9 @@ from mvp.atptour.mappings import map_player_id
 from mvp.atptour.schema_helpers import strip_or_none
 from mvp.common.schema_hash import compute_schema_hash
 
-SCHEMA_VERSION = "1.0.0"
-
 
 class PlayerBioRecord(BaseModel):
     """A single player biographical record from an ATP player profile JSON."""
-
-    SCHEMA_VERSION: ClassVar[str] = SCHEMA_VERSION
 
     player_id: str
     first_name: str

@@ -1,20 +1,15 @@
 """Rankings staged schema."""
 
 from datetime import date, datetime
-from typing import ClassVar
 
 from pydantic import BaseModel, field_validator
 
 from mvp.atptour.mappings import map_player_id
 from mvp.common.schema_hash import compute_schema_hash
 
-SCHEMA_VERSION = "1.0.0"
-
 
 class RankingsRecord(BaseModel):
     """A single player ranking from a weekly ATP rankings snapshot."""
-
-    SCHEMA_VERSION: ClassVar[str] = SCHEMA_VERSION
 
     ranking_date: date
     rank: int

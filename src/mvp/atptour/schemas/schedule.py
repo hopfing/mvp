@@ -1,7 +1,6 @@
 """Schedule staged schema."""
 
 from datetime import date, datetime
-from typing import ClassVar
 
 from pydantic import BaseModel, computed_field, field_validator
 
@@ -15,13 +14,9 @@ from mvp.atptour.schema_helpers import empty_to_none
 from mvp.common.enums import Circuit, DrawType, Round
 from mvp.common.schema_hash import compute_schema_hash
 
-SCHEMA_VERSION = "3.0.0"
-
 
 class ScheduleRecord(BaseModel):
     """A single scheduled match entry from an ATP tournament schedule page."""
-
-    SCHEMA_VERSION: ClassVar[str] = SCHEMA_VERSION
 
     tournament_id: str
     year: int

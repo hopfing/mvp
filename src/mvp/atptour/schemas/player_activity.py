@@ -1,16 +1,12 @@
 """Player activity staged schema."""
 
 from datetime import date, datetime, timedelta
-from typing import ClassVar
-
 from pydantic import BaseModel, computed_field, field_validator, model_validator
 
 from mvp.atptour.mappings import create_match_uid, map_player_id, normalize_round
-from mvp.atptour.schema_helpers import empty_to_none, parse_indoor
-from mvp.common.enums import ActivityEventType, Circuit, Round
+from mvp.atptour.schema_helpers import empty_to_none, parse_indoor, strip_or_none
+from mvp.common.enums import ActivityEventType, Circuit, Round, Surface
 from mvp.common.schema_hash import compute_schema_hash
-
-SCHEMA_VERSION = "1.0.1"
 
 
 def _parse_tournament_date(v) -> date | None:
@@ -32,14 +28,12 @@ def _parse_tournament_date(v) -> date | None:
 class PlayerActivityRecord(BaseModel):
     """A single match from a player's activity/results history."""
 
-    SCHEMA_VERSION: ClassVar[str] = SCHEMA_VERSION
-
     # Context
     player_id: str
     year: int
     tournament_id: str
     event_type: ActivityEventType
-    surface: str | None = None
+    surface: Surface | None = None
     indoor: bool | None = None
     tournament_start_date: date | None = None
     tournament_end_date: date | None = None
@@ -90,7 +84,7 @@ class PlayerActivityRecord(BaseModel):
     parsed_at: datetime
 
     _normalize_round = field_validator("round", mode="before")(normalize_round)
-    _normalize_surface = field_validator("surface", mode="before")(empty_to_none)
+    _normalize_surface = field_validator("surface", mode="before")(strip_or_none)
     _normalize_indoor = field_validator("indoor", mode="before")(parse_indoor)
     _normalize_win_loss = field_validator("win_loss", mode="before")(empty_to_none)
     _empty_to_none_fields = field_validator(
