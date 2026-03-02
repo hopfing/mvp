@@ -133,6 +133,9 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
     model_parser.add_argument(
         "config", type=str, help="Config name or path (e.g., 'baseline' or 'baseline.yaml')"
     )
+    model_parser.add_argument(
+        "--refresh", action="store_true", help="Rebuild matches.parquet before running"
+    )
 
     # experiment subcommand - discovery from experiments/ directory
     exp_parser = subparsers.add_parser(
@@ -144,6 +147,9 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
     exp_parser.add_argument(
         "--output", "-o", type=str, required=True,
         help="Output filename for discovered config (saved to models/)"
+    )
+    exp_parser.add_argument(
+        "--refresh", action="store_true", help="Rebuild matches.parquet before running"
     )
     exp_parser.add_argument(
         "--verbose", "-v", action="store_true", help="Print progress"
@@ -165,15 +171,16 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
 
 def cmd_model(args: argparse.Namespace) -> int:
     """Run model training from config."""
-    from mvp.atptour.aggregators.matches import MatchesAggregator
     from mvp.model.runner import ExperimentRunner
 
     config_path = resolve_config_path(args.config, MODEL_DIR)
     if not config_path.exists():
         raise FileNotFoundError(f"Config file not found: {args.config} (tried {config_path})")
 
-    logger.info("Rebuilding matches.parquet")
-    MatchesAggregator().run()
+    if args.refresh:
+        from mvp.atptour.aggregators.matches import MatchesAggregator
+        logger.info("Rebuilding matches.parquet")
+        MatchesAggregator().run()
 
     runner = ExperimentRunner(config_path=config_path)
     results = runner.run()
@@ -185,7 +192,6 @@ def cmd_model(args: argparse.Namespace) -> int:
 
 def cmd_experiment(args: argparse.Namespace) -> int:
     """Run automated feature discovery."""
-    from mvp.atptour.aggregators.matches import MatchesAggregator
     from mvp.model.discovery import FeatureDiscovery
 
     config_path = resolve_config_path(args.config, EXPERIMENT_DIR)
@@ -198,8 +204,10 @@ def cmd_experiment(args: argparse.Namespace) -> int:
         output_name = f"{output_name}.yaml"
     output_path = MODEL_DIR / output_name
 
-    logger.info("Rebuilding matches.parquet")
-    MatchesAggregator().run()
+    if args.refresh:
+        from mvp.atptour.aggregators.matches import MatchesAggregator
+        logger.info("Rebuilding matches.parquet")
+        MatchesAggregator().run()
 
     discovery = FeatureDiscovery(
         config_path=config_path,
