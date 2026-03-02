@@ -23,12 +23,12 @@ def elo_diff() -> pl.Expr:
 
 
 @feature(
-    name="surface_elo_diff",
+    name="elo_surface_diff",
     params=[],
     description="Surface-adjusted Elo difference",
     mirror=False,
 )
-def surface_elo_diff() -> pl.Expr:
+def elo_surface_diff() -> pl.Expr:
     """Surface-adjusted Elo difference.
 
     Uses the match surface to select the appropriate adjustment.
@@ -51,34 +51,34 @@ def surface_elo_diff() -> pl.Expr:
 
 
 @feature(
-    name="serve_elo_diff",
+    name="svc_elo_diff",
     params=[],
     description="Serve Elo difference (player - opponent)",
     mirror=False,
 )
-def serve_elo_diff() -> pl.Expr:
+def svc_elo_diff() -> pl.Expr:
     """Serve Elo rating difference."""
     return pl.col("player_serve_elo") - pl.col("opp_serve_elo")
 
 
 @feature(
-    name="return_elo_diff",
+    name="ret_elo_diff",
     params=[],
     description="Return Elo difference (player - opponent)",
     mirror=False,
 )
-def return_elo_diff() -> pl.Expr:
+def ret_elo_diff() -> pl.Expr:
     """Return Elo rating difference."""
     return pl.col("player_return_elo") - pl.col("opp_return_elo")
 
 
 @feature(
-    name="serve_vs_return",
+    name="svc_elo_matchup",
     params=[],
     description="Player serve Elo vs opponent return Elo (direct matchup)",
     mirror=False,
 )
-def serve_vs_return() -> pl.Expr:
+def svc_elo_matchup() -> pl.Expr:
     """Player's serving ability vs opponent's returning ability.
 
     High value = player has serve advantage in the matchup.
@@ -87,12 +87,12 @@ def serve_vs_return() -> pl.Expr:
 
 
 @feature(
-    name="return_vs_serve",
+    name="ret_elo_matchup",
     params=[],
     description="Player return Elo vs opponent serve Elo (direct matchup)",
     mirror=False,
 )
-def return_vs_serve() -> pl.Expr:
+def ret_elo_matchup() -> pl.Expr:
     """Player's returning ability vs opponent's serving ability.
 
     High value = player has return advantage in the matchup.
@@ -116,40 +116,40 @@ def elo_rd_sum() -> pl.Expr:
 
 
 @feature(
-    name="serve_vs_return_rd",
+    name="svc_elo_matchup_rd",
     params=[],
     description="Uncertainty in serve vs return matchup",
     mirror=False,
 )
-def serve_vs_return_rd() -> pl.Expr:
+def svc_elo_matchup_rd() -> pl.Expr:
     """Uncertainty in the serve vs return matchup.
 
-    High value = less confident in serve_vs_return prediction.
+    High value = less confident in svc_elo_matchup prediction.
     """
     return pl.col("player_serve_elo_rd") + pl.col("opp_return_elo_rd")
 
 
 @feature(
-    name="return_vs_serve_rd",
+    name="ret_elo_matchup_rd",
     params=[],
     description="Uncertainty in return vs serve matchup",
     mirror=False,
 )
-def return_vs_serve_rd() -> pl.Expr:
+def ret_elo_matchup_rd() -> pl.Expr:
     """Uncertainty in the return vs serve matchup.
 
-    High value = less confident in return_vs_serve prediction.
+    High value = less confident in ret_elo_matchup prediction.
     """
     return pl.col("player_return_elo_rd") + pl.col("opp_serve_elo_rd")
 
 
 @feature(
-    name="clay_specialist",
+    name="elo_clay_specialist",
     params=[],
     description="Clay adjustment minus hard adjustment (clay preference)",
     mirror=True,
 )
-def clay_specialist() -> pl.Expr:
+def elo_clay_specialist() -> pl.Expr:
     """Clay court specialization indicator.
 
     Positive = player performs better on clay relative to hard.
@@ -158,12 +158,12 @@ def clay_specialist() -> pl.Expr:
 
 
 @feature(
-    name="grass_specialist",
+    name="elo_grass_specialist",
     params=[],
     description="Grass adjustment minus hard adjustment (grass preference)",
     mirror=True,
 )
-def grass_specialist() -> pl.Expr:
+def elo_grass_specialist() -> pl.Expr:
     """Grass court specialization indicator.
 
     Positive = player performs better on grass relative to hard.
@@ -172,12 +172,12 @@ def grass_specialist() -> pl.Expr:
 
 
 @feature(
-    name="surface_consistency",
+    name="elo_surface_consistency",
     params=[],
     description="Variance in surface adjustments (low = consistent across surfaces)",
     mirror=True,
 )
-def surface_consistency() -> pl.Expr:
+def elo_surface_consistency() -> pl.Expr:
     """Surface consistency indicator.
 
     Low value = player performs similarly across all surfaces.
@@ -195,88 +195,135 @@ def surface_consistency() -> pl.Expr:
 
 
 @feature(
-    name="first_serve_power_diff",
+    name="svc_first_serve_power_diff",
     params=[],
     description="First serve power difference (player - opponent)",
     mirror=False,
 )
-def first_serve_power_diff() -> pl.Expr:
+def svc_first_serve_power_diff() -> pl.Expr:
     """First serve power difference."""
     return pl.col("player_first_serve_power") - pl.col("opp_first_serve_power")
 
 
 @feature(
-    name="second_serve_reliability_diff",
+    name="svc_second_serve_reliability_diff",
     params=[],
     description="Second serve reliability difference (player - opponent)",
     mirror=False,
 )
-def second_serve_reliability_diff() -> pl.Expr:
+def svc_second_serve_reliability_diff() -> pl.Expr:
     """Second serve reliability difference."""
     return pl.col("player_second_serve_reliability") - pl.col("opp_second_serve_reliability")
 
 
 @feature(
-    name="ace_resistance_diff",
+    name="ret_ace_resistance_diff",
     params=[],
     description="Ace resistance difference (player - opponent)",
     mirror=False,
 )
-def ace_resistance_diff() -> pl.Expr:
+def ret_ace_resistance_diff() -> pl.Expr:
     """Ace resistance difference."""
     return pl.col("player_ace_resistance") - pl.col("opp_ace_resistance")
 
 
 @feature(
-    name="serve_clutch_diff",
+    name="svc_clutch_diff",
     params=[],
     description="Serve clutch difference (player - opponent)",
     mirror=False,
 )
-def serve_clutch_diff() -> pl.Expr:
+def svc_clutch_diff() -> pl.Expr:
     """Serve clutch (BP save rate) difference."""
     return pl.col("player_serve_clutch") - pl.col("opp_serve_clutch")
 
 
 @feature(
-    name="return_clutch_diff",
+    name="ret_clutch_diff",
     params=[],
     description="Return clutch difference (player - opponent)",
     mirror=False,
 )
-def return_clutch_diff() -> pl.Expr:
+def ret_clutch_diff() -> pl.Expr:
     """Return clutch (BP conversion) difference."""
     return pl.col("player_return_clutch") - pl.col("opp_return_clutch")
 
 
 @feature(
-    name="tb_clutch_diff",
+    name="elo_tb_clutch_diff",
     params=[],
     description="Tiebreak clutch difference (player - opponent)",
     mirror=False,
 )
-def tb_clutch_diff() -> pl.Expr:
+def elo_tb_clutch_diff() -> pl.Expr:
     """Tiebreak clutch difference."""
     return pl.col("player_tb_clutch") - pl.col("opp_tb_clutch")
 
 
 @feature(
-    name="overall_clutch_diff",
+    name="elo_clutch_diff",
     params=[],
     description="Overall clutch difference (player - opponent)",
     mirror=False,
 )
-def overall_clutch_diff() -> pl.Expr:
+def elo_clutch_diff() -> pl.Expr:
     """Overall clutch difference."""
     return pl.col("player_overall_clutch") - pl.col("opp_overall_clutch")
 
 
 @feature(
-    name="indoor_adj_diff",
+    name="elo_indoor_adj_diff",
     params=[],
     description="Indoor adjustment difference (player - opponent)",
     mirror=False,
 )
-def indoor_adj_diff() -> pl.Expr:
+def elo_indoor_adj_diff() -> pl.Expr:
     """Indoor venue adjustment difference."""
     return pl.col("player_indoor_adj") - pl.col("opp_indoor_adj")
+
+
+# =============================================================================
+# Matchup Features (player domain vs opponent opposite domain)
+# =============================================================================
+
+
+@feature(
+    name="svc_first_serve_power_matchup",
+    params=[],
+    description="Player first serve power vs opponent ace resistance",
+    mirror=False,
+)
+def svc_first_serve_power_matchup() -> pl.Expr:
+    """Player's first serve power vs opponent's ace resistance.
+
+    High value = player's serve power exceeds opponent's ability to return.
+    """
+    return pl.col("player_first_serve_power") - pl.col("opp_ace_resistance")
+
+
+@feature(
+    name="svc_clutch_matchup",
+    params=[],
+    description="Player serve clutch vs opponent return clutch",
+    mirror=False,
+)
+def svc_clutch_matchup() -> pl.Expr:
+    """Player's BP save ability vs opponent's BP conversion ability.
+
+    High value = player wins BP battles when serving.
+    """
+    return pl.col("player_serve_clutch") - pl.col("opp_return_clutch")
+
+
+@feature(
+    name="ret_clutch_matchup",
+    params=[],
+    description="Player return clutch vs opponent serve clutch",
+    mirror=False,
+)
+def ret_clutch_matchup() -> pl.Expr:
+    """Player's BP conversion ability vs opponent's BP save ability.
+
+    High value = player wins BP battles when returning.
+    """
+    return pl.col("player_return_clutch") - pl.col("opp_serve_clutch")
