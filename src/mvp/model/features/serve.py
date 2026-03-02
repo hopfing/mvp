@@ -202,3 +202,56 @@ def svc_rating_diff(days: int | None = None) -> pl.Expr:
     if days is None:
         return pl.col("player_svc_rating") - pl.col("opp_svc_rating")
     return pl.col(f"player_svc_rating_{days}d") - pl.col(f"opp_svc_rating_{days}d")
+
+
+# =============================================================================
+# Matchup Features (player serve vs opponent return)
+# =============================================================================
+
+
+@feature(
+    name="svc_first_serve_win_pct_matchup",
+    params=["days"],
+    description="Player first serve win % minus opponent first return win %",
+    depends_on=["svc_first_serve_win_pct", "ret_first_serve_win_pct"],
+    mirror=False,
+)
+def svc_first_serve_win_pct_matchup(days: int | None = None) -> pl.Expr:
+    """Player's first serve vs opponent's first serve return."""
+    if days is None:
+        return pl.col("player_svc_first_serve_win_pct") - pl.col("opp_ret_first_serve_win_pct")
+    return (
+        pl.col(f"player_svc_first_serve_win_pct_{days}d")
+        - pl.col(f"opp_ret_first_serve_win_pct_{days}d")
+    )
+
+
+@feature(
+    name="svc_second_serve_win_pct_matchup",
+    params=["days"],
+    description="Player second serve win % minus opponent second return win %",
+    depends_on=["svc_second_serve_win_pct", "ret_second_serve_win_pct"],
+    mirror=False,
+)
+def svc_second_serve_win_pct_matchup(days: int | None = None) -> pl.Expr:
+    """Player's second serve vs opponent's second serve return."""
+    if days is None:
+        return pl.col("player_svc_second_serve_win_pct") - pl.col("opp_ret_second_serve_win_pct")
+    return (
+        pl.col(f"player_svc_second_serve_win_pct_{days}d")
+        - pl.col(f"opp_ret_second_serve_win_pct_{days}d")
+    )
+
+
+@feature(
+    name="svc_bp_pct_matchup",
+    params=["days"],
+    description="Player BP save % minus opponent BP convert %",
+    depends_on=["svc_bp_save_pct", "ret_bp_convert_pct"],
+    mirror=False,
+)
+def svc_bp_pct_matchup(days: int | None = None) -> pl.Expr:
+    """Player's clutch serving vs opponent's clutch returning."""
+    if days is None:
+        return pl.col("player_svc_bp_save_pct") - pl.col("opp_ret_bp_convert_pct")
+    return pl.col(f"player_svc_bp_save_pct_{days}d") - pl.col(f"opp_ret_bp_convert_pct_{days}d")
