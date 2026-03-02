@@ -8,6 +8,7 @@ which registers the features via decorators.
 from mvp.model.features import (
     context,
     elo,
+    form,
     h2h,
     points,
     ranking,
@@ -24,6 +25,7 @@ __all__ = [
     "get_registry",
     "context",
     "elo",
+    "form",
     "h2h",
     "points",
     "ranking",
