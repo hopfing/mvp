@@ -311,13 +311,17 @@ class TournamentMatchesAggregator(BaseJob):
         # Step 7: LEFT JOIN Overview
         joined = self._join_overview(joined, overview_df)
 
-        # Step 8: Coalesce match_id before Match Beats join
+        # Step 8: Coalesce match_id before Match Beats join and normalize case
         match_id_variants = self._find_variants(joined, "match_id")
         if len(match_id_variants) > 1:
             joined = joined.with_columns(
                 pl.coalesce([pl.col(v) for v in match_id_variants]).alias(
                     "match_id"
                 )
+            )
+        if "match_id" in joined.columns:
+            joined = joined.with_columns(
+                pl.col("match_id").str.to_uppercase().alias("match_id")
             )
 
         # Step 9: LEFT JOIN Match Beats
@@ -492,6 +496,9 @@ class TournamentMatchesAggregator(BaseJob):
         if raw.is_empty():
             return pl.DataFrame()
 
+        # Normalize match_id case
+        raw = raw.with_columns(pl.col("match_id").str.to_uppercase())
+
         # Reuse MatchBeatsAggregator logic to aggregate and pivot
         mb_agg = MatchBeatsAggregator(data_root=self.data_root)
         match_level = mb_agg._aggregate_match_level(raw)
@@ -539,6 +546,7 @@ class TournamentMatchesAggregator(BaseJob):
         if raw.is_empty():
             return pl.DataFrame()
 
+        raw = raw.with_columns(pl.col("match_id").str.to_uppercase())
         sa_agg = StrokeAnalysisAggregator(data_root=self.data_root)
         player_match = sa_agg._pivot_to_player_match(raw)
 
@@ -576,6 +584,7 @@ class TournamentMatchesAggregator(BaseJob):
         if raw.is_empty():
             return pl.DataFrame()
 
+        raw = raw.with_columns(pl.col("match_id").str.to_uppercase())
         ra_agg = RallyAnalysisAggregator(data_root=self.data_root)
         player_match = ra_agg._pivot_to_player_match(raw)
 

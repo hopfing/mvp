@@ -85,6 +85,11 @@ class MatchBeatsPointRecord(BaseModel):
     source_file: str
     parsed_at: datetime
 
+    @field_validator("match_id", mode="before")
+    @classmethod
+    def _uppercase_match_id(cls, v: str) -> str:
+        return v.upper().strip()
+
     @field_validator("serve_speed", "fault_serve_speed", mode="before")
     @classmethod
     def zero_to_none(cls, v: float | None) -> float | None:

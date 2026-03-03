@@ -737,4 +737,4 @@ class TestMatchId:
         paths = xf.run()
         df = pl.read_parquet(paths[0])
         row = df.row(0, named=True)
-        assert row["match_id"] == "ms001"
+        assert row["match_id"] == "MS001"

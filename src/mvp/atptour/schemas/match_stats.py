@@ -138,6 +138,11 @@ class MatchStatsRecord(BaseModel):
     _normalize_round = field_validator("round", mode="before")(normalize_round)
     _normalize_ids = field_validator("p1_id", "p2_id", mode="before")(map_player_id)
 
+    @field_validator("match_id", mode="before")
+    @classmethod
+    def _uppercase_match_id(cls, v: str) -> str:
+        return v.upper().strip()
+
     @field_validator("winner_id", "p1_partner_id", "p2_partner_id", mode="before")
     @classmethod
     def _normalize_nullable_ids(cls, v: str | None) -> str | None:

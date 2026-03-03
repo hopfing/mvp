@@ -90,6 +90,11 @@ class ResultRecord(BaseModel):
     )
     _empty_to_none_match_id = field_validator("match_id", mode="before")(empty_to_none)
 
+    @field_validator("match_id", mode="after")
+    @classmethod
+    def _uppercase_match_id(cls, v: str | None) -> str | None:
+        return v.upper() if v else v
+
     @field_validator("p1_country", "p2_country", mode="before")
     @classmethod
     def _uppercase_country(cls, v: str) -> str:

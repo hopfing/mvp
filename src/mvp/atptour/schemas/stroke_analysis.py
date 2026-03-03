@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 
 SHOT_TYPES = [
@@ -121,6 +121,11 @@ class StrokeAnalysisRecord(BaseModel):
     p2_lob_forced_errors: int = 0
     p2_lob_unforced_errors: int = 0
     p2_lob_others: int = 0
+
+    @field_validator("match_id", mode="before")
+    @classmethod
+    def _uppercase_match_id(cls, v: str) -> str:
+        return v.upper().strip()
 
     # Traceability
     source_file: str

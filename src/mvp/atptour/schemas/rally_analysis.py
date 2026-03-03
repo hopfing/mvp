@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 
 RALLY_LENGTHS = ["short", "medium", "long"]
@@ -63,6 +63,11 @@ class RallyAnalysisRecord(BaseModel):
     p1_unclassified_err: int = 0
     p2_unclassified_won: int = 0
     p2_unclassified_err: int = 0
+
+    @field_validator("match_id", mode="before")
+    @classmethod
+    def _uppercase_match_id(cls, v: str) -> str:
+        return v.upper().strip()
 
     # Data quality
     points_missing: bool = False
