@@ -720,22 +720,20 @@ class TestTournamentMatchesAggregator:
             circuit=Circuit.tour, tid="580", year=2023, data_root=tmp_path
         )
         df = agg.aggregate()
-        # Match beats columns should be present
+        # Shared match beats columns
         assert "total_points" in df.columns
-        assert "mb_player_points_won" in df.columns
-        assert "mb_opp_points_won" in df.columns
-        assert "mb_player_aces" in df.columns
-        assert "mb_player_winners" in df.columns
-        assert "mb_match_duration" in df.columns
-        assert "mb_sets_played" in df.columns
         assert "rally_points_with_data" in df.columns
-        # AAAA row should have match beats data
+        # Unique match beats columns (kept with mb_ prefix)
+        assert "mb_player_winners" in df.columns
+        # Waterfalled columns (match_beats fills when match_stats absent)
+        assert "pts_total_pts_won" in df.columns
+        assert "svc_aces" in df.columns
+        # AAAA row should have match beats data waterfalled
         row_a = df.filter(pl.col("player_id") == "AAAA")
         assert row_a["total_points"].item() == 10
-        assert row_a["mb_player_points_won"].item() == 5
-        assert row_a["mb_opp_points_won"].item() == 5
-        assert row_a["mb_player_aces"].item() == 1
-        assert row_a["mb_match_duration"].item() == 600
+        assert row_a["pts_total_pts_won"].item() == 5
+        assert row_a["opp_pts_total_pts_won"].item() == 5
+        assert row_a["svc_aces"].item() == 1
 
     def test_match_beats_null_when_no_data(self, tmp_path):
         """Match beats columns should be null when no match_beats data exists."""
@@ -744,12 +742,12 @@ class TestTournamentMatchesAggregator:
             circuit=Circuit.tour, tid="580", year=2023, data_root=tmp_path
         )
         df = agg.aggregate()
-        # Match beats columns should exist but be all null
+        # Shared match beats columns should exist but be all null
         assert "total_points" in df.columns
-        assert "mb_player_points_won" in df.columns
         assert df["total_points"].null_count() == len(df)
-        assert df["mb_player_points_won"].null_count() == len(df)
-        assert df["mb_match_duration"].null_count() == len(df)
+        # Unique match beats columns should be all null
+        assert "mb_player_winners" in df.columns
+        assert df["mb_player_winners"].null_count() == len(df)
 
     def test_match_beats_schema_matches(self, tmp_path):
         """Output schema should include match_beats columns."""
@@ -784,7 +782,7 @@ class TestTournamentMatchesAggregator:
         # SF rows should have null match beats data
         sf = df.filter(pl.col("round") == "SF")
         assert sf["total_points"].null_count() == 2
-        assert sf["mb_player_points_won"].null_count() == 2
+        assert sf["mb_player_winners"].null_count() == 2
         # Final rows should have match beats data
         final = df.filter(pl.col("round") == "F")
         assert final["total_points"].null_count() == 0
