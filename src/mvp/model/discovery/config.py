@@ -70,7 +70,6 @@ class ValidationConfig(BaseModel):
 class DiscoveryConfig(BaseModel):
     """Complete discovery configuration."""
 
-    name: str | None = None
     description: str | None = None
     data: DataConfig
     discovery: DiscoveryOptions = DiscoveryOptions()
@@ -78,19 +77,17 @@ class DiscoveryConfig(BaseModel):
     validation: ValidationConfig = ValidationConfig()
 
     @classmethod
-    def from_yaml(cls, yaml_str: str, name: str | None = None) -> DiscoveryConfig:
+    def from_yaml(cls, yaml_str: str) -> DiscoveryConfig:
         """Parse config from YAML string."""
         data = yaml.safe_load(yaml_str)
-        if name and not data.get("name"):
-            data["name"] = name
+        data.pop("name", None)  # Ignore legacy name field
         return cls.model_validate(data)
 
     @classmethod
     def from_file(cls, path: str | Path) -> DiscoveryConfig:
-        """Load config from YAML file, deriving name from filename if not set."""
-        filename = Path(path).stem
+        """Load config from YAML file."""
         with open(path) as f:
-            return cls.from_yaml(f.read(), name=filename)
+            return cls.from_yaml(f.read())
 
     def to_experiment_config_dict(self, features: list[str]) -> dict[str, Any]:
         """Convert to experiment config dict with given features.
@@ -102,7 +99,6 @@ class DiscoveryConfig(BaseModel):
             Dict suitable for ExperimentConfig.model_validate().
         """
         return {
-            "name": self.name,
             "description": self.description,
             "data": self.data.model_dump(),
             "features": {"include": features},

@@ -82,7 +82,7 @@ model:
                 "run_id": "abc123",
                 "n_folds": 5,
             }
-            mock_instance.config.name = "test"
+            mock_instance.run_name = "test"
             mock_runner.return_value = mock_instance
 
             result = main(["model", str(config_path)])

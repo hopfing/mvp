@@ -11,7 +11,6 @@ class TestExperimentConfig:
     def test_minimal_config(self):
         """Parse minimal valid config."""
         yaml_str = """
-name: test_experiment
 data:
   date_range:
     start: "2020-01-01"
@@ -23,7 +22,6 @@ model:
   type: xgboost
 """
         config = ExperimentConfig.from_yaml(yaml_str)
-        assert config.name == "test_experiment"
         assert config.data.date_range.start == date(2020, 1, 1)
         assert config.data.date_range.end == date(2024, 12, 31)
         assert config.features.include == ["win_rate(days=30)"]
@@ -32,7 +30,6 @@ model:
     def test_walk_forward_validation(self):
         """Parse walk-forward validation config."""
         yaml_str = """
-name: test_experiment
 data:
   date_range:
     start: "2020-01-01"
@@ -57,7 +54,6 @@ validation:
     def test_default_validation(self):
         """Default validation is walk_forward with sensible defaults."""
         yaml_str = """
-name: test_experiment
 data:
   date_range:
     start: "2020-01-01"
@@ -75,7 +71,6 @@ model:
     def test_metrics_config(self):
         """Parse metrics configuration."""
         yaml_str = """
-name: test_experiment
 data:
   date_range:
     start: "2020-01-01"
@@ -98,7 +93,6 @@ metrics:
     def test_default_metrics(self):
         """Default metrics when not specified."""
         yaml_str = """
-name: test_experiment
 data:
   date_range:
     start: "2020-01-01"

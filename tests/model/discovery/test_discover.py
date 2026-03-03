@@ -19,7 +19,6 @@ class TestDiscoveryConfig:
     def test_loads_minimal_config(self, tmp_path):
         """Should load config with minimal required fields."""
         config_dict = {
-            "name": "test",
             "data": {
                 "date_range": {
                     "start": "2020-01-01",
@@ -33,14 +32,12 @@ class TestDiscoveryConfig:
 
         config = DiscoveryConfig.from_file(config_path)
 
-        assert config.name == "test"
         assert config.discovery.importance_method == "permutation"
         assert config.model.type == "xgboost"
 
     def test_loads_full_config(self, tmp_path):
         """Should load config with all fields."""
         config_dict = {
-            "name": "full_test",
             "data": {
                 "date_range": {
                     "start": "2020-01-01",
@@ -71,7 +68,6 @@ class TestDiscoveryConfig:
     def test_to_experiment_config_dict(self, tmp_path):
         """Should convert to experiment config format."""
         config_dict = {
-            "name": "test",
             "data": {
                 "date_range": {
                     "start": "2020-01-01",
@@ -88,7 +84,7 @@ class TestDiscoveryConfig:
             features=["win_rate(window_days=30)", "h2h_record()"]
         )
 
-        assert experiment_dict["name"] == "test"
+        assert "name" not in experiment_dict  # Name derived from filename, not in config
         assert experiment_dict["features"]["include"] == [
             "win_rate(window_days=30)",
             "h2h_record()",
@@ -182,7 +178,6 @@ class TestFeatureDiscovery:
             verbose=False,
         )
 
-        assert discovery.config.name == "test_discovery"
         assert discovery.verbose is False
 
     def test_creates_temp_config(self, discovery_config):

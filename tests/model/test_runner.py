@@ -81,7 +81,7 @@ validation:
             config_path=sample_config,
             matches_path=sample_matches,
         )
-        assert runner.config.name == "test_experiment"
+        assert runner.run_name == "config"  # Derived from filename config.yaml
 
     def test_runner_init_with_defaults(self, sample_config: Path, sample_matches: Path):
         """Runner uses default paths when not specified."""

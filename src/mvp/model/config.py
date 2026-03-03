@@ -70,7 +70,6 @@ class MetricsConfig(BaseModel):
 class ExperimentConfig(BaseModel):
     """Complete experiment configuration."""
 
-    name: str | None = None
     description: str | None = None
     data: DataConfig
     features: FeaturesConfig
@@ -79,18 +78,14 @@ class ExperimentConfig(BaseModel):
     metrics: MetricsConfig = MetricsConfig()
 
     @classmethod
-    def from_yaml(cls, yaml_str: str, name: str | None = None) -> ExperimentConfig:
+    def from_yaml(cls, yaml_str: str) -> ExperimentConfig:
         """Parse config from YAML string."""
         data = yaml.safe_load(yaml_str)
-        if name and not data.get("name"):
-            data["name"] = name
+        data.pop("name", None)  # Ignore legacy name field
         return cls.model_validate(data)
 
     @classmethod
     def from_file(cls, path: str) -> ExperimentConfig:
-        """Load config from YAML file, deriving name from filename if not set."""
-        from pathlib import Path
-
-        filename = Path(path).stem
+        """Load config from YAML file."""
         with open(path) as f:
-            return cls.from_yaml(f.read(), name=filename)
+            return cls.from_yaml(f.read())

@@ -46,9 +46,10 @@ class ExperimentRunner:
             cache_dir: Optional cache directory for features.
             mlflow_dir: Optional MLflow tracking directory.
             workflow: MLflow experiment name ("training" or "discovery").
-            run_name: Override for MLflow run name. Defaults to config name.
+            run_name: Override for MLflow run name. Defaults to filename.
             log_to_mlflow: Whether to log to MLflow. Set False for intermediate runs.
         """
+        self.config_path = Path(config_path)
         self.config = ExperimentConfig.from_file(str(config_path))
         self.matches_path = Path(
             matches_path or "data/aggregate/atptour/matches.parquet"
@@ -56,7 +57,7 @@ class ExperimentRunner:
         self.cache_dir = Path(cache_dir or "data/features/cache")
         self.mlflow_dir = Path(mlflow_dir) if mlflow_dir else None
         self.workflow = workflow
-        self.run_name = run_name or self.config.name
+        self.run_name = run_name or self.config_path.stem
         self.log_to_mlflow = log_to_mlflow
 
         self.engine = FeatureEngine(

@@ -185,7 +185,7 @@ def cmd_model(args: argparse.Namespace) -> int:
     runner = ExperimentRunner(config_path=config_path)
     results = runner.run()
 
-    print_run_summary(results, name=runner.config.name)
+    print_run_summary(results, name=runner.run_name)
 
     return 0
 
