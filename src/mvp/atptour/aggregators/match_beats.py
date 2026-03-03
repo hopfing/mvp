@@ -105,4 +105,42 @@ class MatchBeatsAggregator(BaseJob):
             ((pl.col("scorer") == "2") & (pl.col("result") == "FE")).sum().alias("p1_fes"),
             ((pl.col("scorer") == "1") & (pl.col("result") == "UE")).sum().alias("p2_ues"),
             ((pl.col("scorer") == "1") & (pl.col("result") == "FE")).sum().alias("p2_fes"),
+            # Serve speed - P1
+            pl.col("serve_speed").filter((pl.col("server") == "1") & (pl.col("serve") == 1)).mean().alias("p1_avg_1st_serve_speed"),
+            pl.col("serve_speed").filter((pl.col("server") == "1") & (pl.col("serve") == 1)).max().alias("p1_max_1st_serve_speed"),
+            pl.col("serve_speed").filter((pl.col("server") == "1") & (pl.col("serve") == 2)).mean().alias("p1_avg_2nd_serve_speed"),
+            pl.col("fault_serve_speed").filter(pl.col("server") == "1").mean().alias("p1_avg_fault_serve_speed"),
+            pl.col("fault_serve_speed").filter(pl.col("server") == "1").max().alias("p1_max_fault_serve_speed"),
+            # Serve speed - P2
+            pl.col("serve_speed").filter((pl.col("server") == "2") & (pl.col("serve") == 1)).mean().alias("p2_avg_1st_serve_speed"),
+            pl.col("serve_speed").filter((pl.col("server") == "2") & (pl.col("serve") == 1)).max().alias("p2_max_1st_serve_speed"),
+            pl.col("serve_speed").filter((pl.col("server") == "2") & (pl.col("serve") == 2)).mean().alias("p2_avg_2nd_serve_speed"),
+            pl.col("fault_serve_speed").filter(pl.col("server") == "2").mean().alias("p2_avg_fault_serve_speed"),
+            pl.col("fault_serve_speed").filter(pl.col("server") == "2").max().alias("p2_max_fault_serve_speed"),
+            # Rally overall
+            (~pl.col("rally_length_missing")).sum().alias("rally_points_with_data"),
+            ((pl.col("p1_rally_shots") + pl.col("p2_rally_shots") <= 4) & ~pl.col("rally_length_missing")).sum().alias("rally_short_count"),
+            ((pl.col("p1_rally_shots") + pl.col("p2_rally_shots")).is_between(5, 8) & ~pl.col("rally_length_missing")).sum().alias("rally_medium_count"),
+            ((pl.col("p1_rally_shots") + pl.col("p2_rally_shots") >= 9) & ~pl.col("rally_length_missing")).sum().alias("rally_long_count"),
+            (pl.col("p1_rally_shots") + pl.col("p2_rally_shots")).filter(~pl.col("rally_length_missing")).sum().alias("rally_total_shots"),
+            # Rally by outcome - P1
+            ((pl.col("scorer") == "1") & ~pl.col("rally_length_missing")).sum().alias("p1_rally_won_count"),
+            (pl.col("p1_rally_shots") + pl.col("p2_rally_shots")).filter((pl.col("scorer") == "1") & ~pl.col("rally_length_missing")).sum().alias("p1_rally_won_shots"),
+            ((pl.col("scorer") == "2") & ~pl.col("rally_length_missing")).sum().alias("p1_rally_lost_count"),
+            (pl.col("p1_rally_shots") + pl.col("p2_rally_shots")).filter((pl.col("scorer") == "2") & ~pl.col("rally_length_missing")).sum().alias("p1_rally_lost_shots"),
+            # Rally by serve context - P1
+            ((pl.col("server") == "1") & ~pl.col("rally_length_missing")).sum().alias("p1_rally_serving_count"),
+            (pl.col("p1_rally_shots") + pl.col("p2_rally_shots")).filter((pl.col("server") == "1") & ~pl.col("rally_length_missing")).sum().alias("p1_rally_serving_shots"),
+            ((pl.col("server") == "2") & ~pl.col("rally_length_missing")).sum().alias("p1_rally_returning_count"),
+            (pl.col("p1_rally_shots") + pl.col("p2_rally_shots")).filter((pl.col("server") == "2") & ~pl.col("rally_length_missing")).sum().alias("p1_rally_returning_shots"),
+            # Rally by outcome - P2
+            ((pl.col("scorer") == "2") & ~pl.col("rally_length_missing")).sum().alias("p2_rally_won_count"),
+            (pl.col("p1_rally_shots") + pl.col("p2_rally_shots")).filter((pl.col("scorer") == "2") & ~pl.col("rally_length_missing")).sum().alias("p2_rally_won_shots"),
+            ((pl.col("scorer") == "1") & ~pl.col("rally_length_missing")).sum().alias("p2_rally_lost_count"),
+            (pl.col("p1_rally_shots") + pl.col("p2_rally_shots")).filter((pl.col("scorer") == "1") & ~pl.col("rally_length_missing")).sum().alias("p2_rally_lost_shots"),
+            # Rally by serve context - P2
+            ((pl.col("server") == "2") & ~pl.col("rally_length_missing")).sum().alias("p2_rally_serving_count"),
+            (pl.col("p1_rally_shots") + pl.col("p2_rally_shots")).filter((pl.col("server") == "2") & ~pl.col("rally_length_missing")).sum().alias("p2_rally_serving_shots"),
+            ((pl.col("server") == "1") & ~pl.col("rally_length_missing")).sum().alias("p2_rally_returning_count"),
+            (pl.col("p1_rally_shots") + pl.col("p2_rally_shots")).filter((pl.col("server") == "1") & ~pl.col("rally_length_missing")).sum().alias("p2_rally_returning_shots"),
         )
