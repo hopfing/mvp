@@ -316,6 +316,56 @@ class TestMatchBeatsAggregator:
         assert result["p2_rally_returning_count"][0] == 3
         assert result["p2_rally_returning_shots"][0] == 18
 
+    def test_aggregates_clutch_stats(self, tmp_path):
+        """Should compute crucial and tiebreak point stats."""
+        _write_match_beats_parquet(tmp_path, points=_make_singles_points())
+
+        agg = MatchBeatsAggregator(data_root=tmp_path)
+        result = agg.run()
+
+        # is_crucial_point is True for points 2 and 6
+        assert result["p1_crucial_points_played"][0] == 2
+        # Point 2: scorer="2" (P1 lost), Point 6: scorer="2" (P1 lost)
+        assert result["p1_crucial_points_won"][0] == 0
+        assert result["p2_crucial_points_won"][0] == 2
+
+        # is_tiebreak is False for all points
+        assert result["p1_tiebreak_points_played"][0] == 0
+        assert result["p1_tiebreak_points_won"][0] == 0
+
+    def test_aggregates_game_quality(self, tmp_path):
+        """Should compute game quality stats (deduped by game)."""
+        _write_match_beats_parquet(tmp_path, points=_make_singles_points())
+
+        agg = MatchBeatsAggregator(data_root=tmp_path)
+        result = agg.run()
+
+        # Game 1: server="1", easy_hold=True, difficult_hold=False, multiple_deuces=False
+        # Game 2: server="2", easy_hold=False, difficult_hold=True, multiple_deuces=False
+        assert result["p1_easy_holds"][0] == 1
+        assert result["p1_difficult_holds"][0] == 0
+        assert result["p2_easy_holds"][0] == 0
+        assert result["p2_difficult_holds"][0] == 1
+
+        assert result["p1_games_multiple_deuces"][0] == 0
+        assert result["p2_games_multiple_deuces"][0] == 0
+
+        # Games won
+        assert result["p1_games_won"][0] == 1
+        assert result["p2_games_won"][0] == 1
+
+    def test_aggregates_match_context(self, tmp_path):
+        """Should compute match duration and sets played/won."""
+        _write_match_beats_parquet(tmp_path, points=_make_singles_points())
+
+        agg = MatchBeatsAggregator(data_root=tmp_path)
+        result = agg.run()
+
+        assert result["match_duration"][0] == 600
+        assert result["sets_played"][0] == 1
+        assert result["p1_sets_won"][0] == 1
+        assert result["p2_sets_won"][0] == 0
+
     def test_returns_none_when_no_data(self, tmp_path):
         """Should return None when no staged data exists."""
         agg = MatchBeatsAggregator(data_root=tmp_path)

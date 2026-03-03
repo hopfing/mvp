@@ -60,7 +60,7 @@ class MatchBeatsAggregator(BaseJob):
 
     def _aggregate_match_level(self, df: pl.DataFrame) -> pl.DataFrame:
         """Aggregate points to match level with p1_/p2_ columns."""
-        return df.group_by(
+        main = df.group_by(
             ["tournament_id", "year", "match_id", "p1_id", "p2_id"]
         ).agg(
             pl.len().alias("total_points"),
@@ -143,4 +143,41 @@ class MatchBeatsAggregator(BaseJob):
             (pl.col("p1_rally_shots") + pl.col("p2_rally_shots")).filter((pl.col("server") == "2") & ~pl.col("rally_length_missing")).sum().alias("p2_rally_serving_shots"),
             ((pl.col("server") == "1") & ~pl.col("rally_length_missing")).sum().alias("p2_rally_returning_count"),
             (pl.col("p1_rally_shots") + pl.col("p2_rally_shots")).filter((pl.col("server") == "1") & ~pl.col("rally_length_missing")).sum().alias("p2_rally_returning_shots"),
+            # Crucial points
+            (pl.col("is_crucial_point") & (pl.col("scorer") == "1")).sum().alias("p1_crucial_points_won"),
+            pl.col("is_crucial_point").sum().alias("p1_crucial_points_played"),
+            (pl.col("is_crucial_point") & (pl.col("scorer") == "2")).sum().alias("p2_crucial_points_won"),
+            pl.col("is_crucial_point").sum().alias("p2_crucial_points_played"),
+            # Tiebreak points
+            (pl.col("is_tiebreak") & (pl.col("scorer") == "1")).sum().alias("p1_tiebreak_points_won"),
+            pl.col("is_tiebreak").sum().alias("p1_tiebreak_points_played"),
+            (pl.col("is_tiebreak") & (pl.col("scorer") == "2")).sum().alias("p2_tiebreak_points_won"),
+            pl.col("is_tiebreak").sum().alias("p2_tiebreak_points_played"),
+            # Game quality - P1 serving (deduplicate by first point of each game)
+            pl.col("easy_hold").filter((pl.col("server") == "1") & (pl.col("point_num") == 1)).sum().alias("p1_easy_holds"),
+            pl.col("difficult_hold").filter((pl.col("server") == "1") & (pl.col("point_num") == 1)).sum().alias("p1_difficult_holds"),
+            pl.col("multiple_deuces").filter((pl.col("server") == "1") & (pl.col("point_num") == 1)).sum().alias("p1_games_multiple_deuces"),
+            # Game quality - P2 serving
+            pl.col("easy_hold").filter((pl.col("server") == "2") & (pl.col("point_num") == 1)).sum().alias("p2_easy_holds"),
+            pl.col("difficult_hold").filter((pl.col("server") == "2") & (pl.col("point_num") == 1)).sum().alias("p2_difficult_holds"),
+            pl.col("multiple_deuces").filter((pl.col("server") == "2") & (pl.col("point_num") == 1)).sum().alias("p2_games_multiple_deuces"),
+            # Games won (one entry per game via point_num == 1)
+            (pl.col("game_winner").filter(pl.col("point_num") == 1) == "1").sum().alias("p1_games_won"),
+            (pl.col("game_winner").filter(pl.col("point_num") == 1) == "2").sum().alias("p2_games_won"),
+            # Match context
+            pl.col("match_duration_at_point").max().alias("match_duration"),
+            pl.col("set_num").max().alias("sets_played"),
         )
+
+        # Sets won (needs set-level dedup)
+        sets_won = (
+            df.select(["tournament_id", "year", "match_id", "set_num", "set_winner"])
+            .unique(subset=["tournament_id", "year", "match_id", "set_num"])
+            .group_by(["tournament_id", "year", "match_id"])
+            .agg(
+                (pl.col("set_winner") == "1").sum().alias("p1_sets_won"),
+                (pl.col("set_winner") == "2").sum().alias("p2_sets_won"),
+            )
+        )
+
+        return main.join(sets_won, on=["tournament_id", "year", "match_id"], how="left")
