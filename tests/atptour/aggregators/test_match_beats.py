@@ -126,17 +126,18 @@ class TestMatchBeatsAggregator:
         assert agg.data_root == tmp_path
 
     def test_aggregates_points_to_match_level(self, tmp_path):
-        """Should aggregate point data to match level with p1_/p2_ columns."""
+        """Should aggregate point data to match level with player_/opp_ columns."""
         _write_match_beats_parquet(tmp_path, points=_make_singles_points())
 
         agg = MatchBeatsAggregator(data_root=tmp_path)
         result = agg.run()
 
         assert result is not None
-        assert len(result) == 1
-        assert result["total_points"][0] == 10
-        assert result["p1_points_won"][0] == 5
-        assert result["p2_points_won"][0] == 5
+        assert len(result) == 2
+        p1_row = result.filter(pl.col("player_id") == "PLAYER1")
+        assert p1_row["total_points"][0] == 10
+        assert p1_row["player_points_won"][0] == 5
+        assert p1_row["opp_points_won"][0] == 5
 
     def test_filters_doubles(self, tmp_path):
         """Should filter out doubles matches."""
@@ -152,30 +153,32 @@ class TestMatchBeatsAggregator:
 
         agg = MatchBeatsAggregator(data_root=tmp_path)
         result = agg.run()
+        p1_row = result.filter(pl.col("player_id") == "PLAYER1")
+        p2_row = result.filter(pl.col("player_id") == "PLAYER2")
 
         # P1 served 5 points (server=="1", points 0-4)
-        assert result["p1_service_points"][0] == 5
+        assert p1_row["player_service_points"][0] == 5
         # P1 first serves: points with serve==1 when server=="1" = points 0,1,2,4
-        assert result["p1_first_serve_points"][0] == 4
+        assert p1_row["player_first_serve_points"][0] == 4
         # P1 first serve won: serve==1, server=="1", scorer=="1" = points 0(A), 1(W)
-        assert result["p1_first_serve_won"][0] == 2
+        assert p1_row["player_first_serve_won"][0] == 2
         # P1 second serve: serve==2 when server=="1" = point 3
-        assert result["p1_second_serve_points"][0] == 1
+        assert p1_row["player_second_serve_points"][0] == 1
         # P1 second serve won: serve==2, server=="1", scorer=="1" = 0 (point 3 scorer=2)
-        assert result["p1_second_serve_won"][0] == 0
+        assert p1_row["player_second_serve_won"][0] == 0
         # P1 aces: result=="A" when server=="1" = point 0
-        assert result["p1_aces"][0] == 1
+        assert p1_row["player_aces"][0] == 1
         # P1 DFs: result=="DF" when server=="1" = point 4
-        assert result["p1_dfs"][0] == 1
+        assert p1_row["player_dfs"][0] == 1
 
         # P2 served 5 points (server=="2", points 5-9)
-        assert result["p2_service_points"][0] == 5
-        assert result["p2_first_serve_points"][0] == 4
-        assert result["p2_first_serve_won"][0] == 2
-        assert result["p2_second_serve_points"][0] == 1
-        assert result["p2_second_serve_won"][0] == 0
-        assert result["p2_aces"][0] == 0
-        assert result["p2_dfs"][0] == 0
+        assert p2_row["player_service_points"][0] == 5
+        assert p2_row["player_first_serve_points"][0] == 4
+        assert p2_row["player_first_serve_won"][0] == 2
+        assert p2_row["player_second_serve_points"][0] == 1
+        assert p2_row["player_second_serve_won"][0] == 0
+        assert p2_row["player_aces"][0] == 0
+        assert p2_row["player_dfs"][0] == 0
 
     def test_aggregates_return_stats(self, tmp_path):
         """Should compute return statistics per player."""
@@ -183,15 +186,17 @@ class TestMatchBeatsAggregator:
 
         agg = MatchBeatsAggregator(data_root=tmp_path)
         result = agg.run()
+        p1_row = result.filter(pl.col("player_id") == "PLAYER1")
+        p2_row = result.filter(pl.col("player_id") == "PLAYER2")
 
         # P1 return points = when P2 is serving = 5
-        assert result["p1_return_points"][0] == 5
+        assert p1_row["player_return_points"][0] == 5
         # P1 return points won: server=="2", scorer=="1" = points 5,7,8
-        assert result["p1_return_points_won"][0] == 3
+        assert p1_row["player_return_points_won"][0] == 3
         # P2 return points = when P1 is serving = 5
-        assert result["p2_return_points"][0] == 5
+        assert p2_row["player_return_points"][0] == 5
         # P2 return points won: server=="1", scorer=="2" = points 2,3,4
-        assert result["p2_return_points_won"][0] == 3
+        assert p2_row["player_return_points_won"][0] == 3
 
     def test_aggregates_break_points(self, tmp_path):
         """Should compute break point stats."""
@@ -199,20 +204,22 @@ class TestMatchBeatsAggregator:
 
         agg = MatchBeatsAggregator(data_root=tmp_path)
         result = agg.run()
+        p1_row = result.filter(pl.col("player_id") == "PLAYER1")
+        p2_row = result.filter(pl.col("player_id") == "PLAYER2")
 
         # is_break_point is True for points 2 and 6
         # Point 2: server="1", scorer="2" -> P1 faced BP, didn't save
-        assert result["p1_bp_faced"][0] == 1
-        assert result["p1_bp_saved"][0] == 0
+        assert p1_row["player_bp_faced"][0] == 1
+        assert p1_row["player_bp_saved"][0] == 0
         # Point 6: server="2", scorer="2" -> P1 had BP opportunity, didn't convert
-        assert result["p1_bp_opportunities"][0] == 1
-        assert result["p1_bp_converted"][0] == 0
+        assert p1_row["player_bp_opportunities"][0] == 1
+        assert p1_row["player_bp_converted"][0] == 0
         # Point 6: server="2", scorer="2" -> P2 faced BP, saved it
-        assert result["p2_bp_faced"][0] == 1
-        assert result["p2_bp_saved"][0] == 1
+        assert p2_row["player_bp_faced"][0] == 1
+        assert p2_row["player_bp_saved"][0] == 1
         # Point 2: server="1", scorer="2" -> P2 had BP opportunity, converted
-        assert result["p2_bp_opportunities"][0] == 1
-        assert result["p2_bp_converted"][0] == 1
+        assert p2_row["player_bp_opportunities"][0] == 1
+        assert p2_row["player_bp_converted"][0] == 1
 
     def test_aggregates_winners_and_errors(self, tmp_path):
         """Should compute winners/errors per player.
@@ -225,20 +232,22 @@ class TestMatchBeatsAggregator:
 
         agg = MatchBeatsAggregator(data_root=tmp_path)
         result = agg.run()
+        p1_row = result.filter(pl.col("player_id") == "PLAYER1")
+        p2_row = result.filter(pl.col("player_id") == "PLAYER2")
 
         # P1 winners: scorer=="1" & result=="W" = points 1,5
-        assert result["p1_winners"][0] == 2
+        assert p1_row["player_winners"][0] == 2
         # P1 UEs: scorer=="2" & result=="UE" = point 2 (P1 made UE, P2 won)
-        assert result["p1_ues"][0] == 1
+        assert p1_row["player_ues"][0] == 1
         # P1 FEs: scorer=="2" & result=="FE" = point 3 (P1 made FE, P2 won)
-        assert result["p1_fes"][0] == 1
+        assert p1_row["player_fes"][0] == 1
 
         # P2 winners: scorer=="2" & result=="W" = point 6
-        assert result["p2_winners"][0] == 1
+        assert p2_row["player_winners"][0] == 1
         # P2 UEs: scorer=="1" & result=="UE" = point 7 (P2 made UE, P1 won)
-        assert result["p2_ues"][0] == 1
+        assert p2_row["player_ues"][0] == 1
         # P2 FEs: scorer=="1" & result=="FE" = point 8 (P2 made FE, P1 won)
-        assert result["p2_fes"][0] == 1
+        assert p2_row["player_fes"][0] == 1
 
     def test_aggregates_serve_speed(self, tmp_path):
         """Should compute serve speed averages and maxes."""
@@ -246,24 +255,26 @@ class TestMatchBeatsAggregator:
 
         agg = MatchBeatsAggregator(data_root=tmp_path)
         result = agg.run()
+        p1_row = result.filter(pl.col("player_id") == "PLAYER1")
+        p2_row = result.filter(pl.col("player_id") == "PLAYER2")
 
         # P1 1st serve speeds (server="1", serve=1): 200, 190, 185, None = [200, 190, 185]
-        assert result["p1_avg_1st_serve_speed"][0] == pytest.approx(191.67, abs=0.01)
-        assert result["p1_max_1st_serve_speed"][0] == 200.0
+        assert p1_row["player_avg_1st_serve_speed"][0] == pytest.approx(191.67, abs=0.01)
+        assert p1_row["player_max_1st_serve_speed"][0] == 200.0
         # P1 2nd serve speed (server="1", serve=2): 150
-        assert result["p1_avg_2nd_serve_speed"][0] == 150.0
+        assert p1_row["player_avg_2nd_serve_speed"][0] == 150.0
         # P1 fault serve speed (server="1"): 180 (only non-null)
-        assert result["p1_avg_fault_serve_speed"][0] == 180.0
-        assert result["p1_max_fault_serve_speed"][0] == 180.0
+        assert p1_row["player_avg_fault_serve_speed"][0] == 180.0
+        assert p1_row["player_max_fault_serve_speed"][0] == 180.0
 
         # P2 1st serve speeds (server="2", serve=1): 195, 188, None, 192 = [195, 188, 192]
-        assert result["p2_avg_1st_serve_speed"][0] == pytest.approx(191.67, abs=0.01)
-        assert result["p2_max_1st_serve_speed"][0] == 195.0
+        assert p2_row["player_avg_1st_serve_speed"][0] == pytest.approx(191.67, abs=0.01)
+        assert p2_row["player_max_1st_serve_speed"][0] == 195.0
         # P2 2nd serve speed (server="2", serve=2): 145
-        assert result["p2_avg_2nd_serve_speed"][0] == 145.0
+        assert p2_row["player_avg_2nd_serve_speed"][0] == 145.0
         # P2 fault serve speed (server="2"): 160 (only non-null)
-        assert result["p2_avg_fault_serve_speed"][0] == 160.0
-        assert result["p2_max_fault_serve_speed"][0] == 160.0
+        assert p2_row["player_avg_fault_serve_speed"][0] == 160.0
+        assert p2_row["player_max_fault_serve_speed"][0] == 160.0
 
     def test_aggregates_rally_stats(self, tmp_path):
         """Should compute rally length statistics."""
@@ -271,50 +282,52 @@ class TestMatchBeatsAggregator:
 
         agg = MatchBeatsAggregator(data_root=tmp_path)
         result = agg.run()
+        p1_row = result.filter(pl.col("player_id") == "PLAYER1")
+        p2_row = result.filter(pl.col("player_id") == "PLAYER2")
 
         # rally_length_missing is True for indices 0 and 4, so 8 points have data
-        assert result["rally_points_with_data"][0] == 8
+        assert p1_row["rally_points_with_data"][0] == 8
 
         # Rally lengths (p1+p2 shots) for non-missing points:
         #   idx1: 2+2=4, idx2: 3+3=6, idx3: 4+4=8
         #   idx5: 1+1=2, idx6: 2+2=4, idx7: 3+3=6, idx8: 2+2=4, idx9: 1+1=2
         # Short (<=4): 4, 2, 4, 4, 2 = 5
-        assert result["rally_short_count"][0] == 5
+        assert p1_row["rally_short_count"][0] == 5
         # Medium (5-8): 6, 8, 6 = 3
-        assert result["rally_medium_count"][0] == 3
+        assert p1_row["rally_medium_count"][0] == 3
         # Long (>=9): 0
-        assert result["rally_long_count"][0] == 0
+        assert p1_row["rally_long_count"][0] == 0
         # Total shots: 4+6+8+2+4+6+4+2 = 36
-        assert result["rally_total_shots"][0] == 36
+        assert p1_row["rally_total_shots"][0] == 36
 
         # Rally by outcome - P1 (scorer=="1" & !missing)
         # P1 won: idx1(4), idx5(2), idx7(6), idx8(4) = 4 points, 16 shots
-        assert result["p1_rally_won_count"][0] == 4
-        assert result["p1_rally_won_shots"][0] == 16
+        assert p1_row["player_rally_won_count"][0] == 4
+        assert p1_row["player_rally_won_shots"][0] == 16
         # P1 lost (scorer=="2" & !missing): idx2(6), idx3(8), idx6(4), idx9(2) = 4 points, 20 shots
-        assert result["p1_rally_lost_count"][0] == 4
-        assert result["p1_rally_lost_shots"][0] == 20
+        assert p1_row["player_rally_lost_count"][0] == 4
+        assert p1_row["player_rally_lost_shots"][0] == 20
 
         # Rally by serve context - P1 serving (server=="1" & !missing)
         # idx1(4), idx2(6), idx3(8) = 3 points, 18 shots
-        assert result["p1_rally_serving_count"][0] == 3
-        assert result["p1_rally_serving_shots"][0] == 18
+        assert p1_row["player_rally_serving_count"][0] == 3
+        assert p1_row["player_rally_serving_shots"][0] == 18
         # P1 returning (server=="2" & !missing)
         # idx5(2), idx6(4), idx7(6), idx8(4), idx9(2) = 5 points, 18 shots
-        assert result["p1_rally_returning_count"][0] == 5
-        assert result["p1_rally_returning_shots"][0] == 18
+        assert p1_row["player_rally_returning_count"][0] == 5
+        assert p1_row["player_rally_returning_shots"][0] == 18
 
         # Rally by outcome - P2 (mirrors P1)
-        assert result["p2_rally_won_count"][0] == 4
-        assert result["p2_rally_won_shots"][0] == 20
-        assert result["p2_rally_lost_count"][0] == 4
-        assert result["p2_rally_lost_shots"][0] == 16
+        assert p2_row["player_rally_won_count"][0] == 4
+        assert p2_row["player_rally_won_shots"][0] == 20
+        assert p2_row["player_rally_lost_count"][0] == 4
+        assert p2_row["player_rally_lost_shots"][0] == 16
 
         # Rally by serve context - P2
-        assert result["p2_rally_serving_count"][0] == 5
-        assert result["p2_rally_serving_shots"][0] == 18
-        assert result["p2_rally_returning_count"][0] == 3
-        assert result["p2_rally_returning_shots"][0] == 18
+        assert p2_row["player_rally_serving_count"][0] == 5
+        assert p2_row["player_rally_serving_shots"][0] == 18
+        assert p2_row["player_rally_returning_count"][0] == 3
+        assert p2_row["player_rally_returning_shots"][0] == 18
 
     def test_aggregates_clutch_stats(self, tmp_path):
         """Should compute crucial and tiebreak point stats."""
@@ -322,16 +335,18 @@ class TestMatchBeatsAggregator:
 
         agg = MatchBeatsAggregator(data_root=tmp_path)
         result = agg.run()
+        p1_row = result.filter(pl.col("player_id") == "PLAYER1")
+        p2_row = result.filter(pl.col("player_id") == "PLAYER2")
 
         # is_crucial_point is True for points 2 and 6
-        assert result["p1_crucial_points_played"][0] == 2
+        assert p1_row["player_crucial_points_played"][0] == 2
         # Point 2: scorer="2" (P1 lost), Point 6: scorer="2" (P1 lost)
-        assert result["p1_crucial_points_won"][0] == 0
-        assert result["p2_crucial_points_won"][0] == 2
+        assert p1_row["player_crucial_points_won"][0] == 0
+        assert p2_row["player_crucial_points_won"][0] == 2
 
         # is_tiebreak is False for all points
-        assert result["p1_tiebreak_points_played"][0] == 0
-        assert result["p1_tiebreak_points_won"][0] == 0
+        assert p1_row["player_tiebreak_points_played"][0] == 0
+        assert p1_row["player_tiebreak_points_won"][0] == 0
 
     def test_aggregates_game_quality(self, tmp_path):
         """Should compute game quality stats (deduped by game)."""
@@ -339,20 +354,22 @@ class TestMatchBeatsAggregator:
 
         agg = MatchBeatsAggregator(data_root=tmp_path)
         result = agg.run()
+        p1_row = result.filter(pl.col("player_id") == "PLAYER1")
+        p2_row = result.filter(pl.col("player_id") == "PLAYER2")
 
         # Game 1: server="1", easy_hold=True, difficult_hold=False, multiple_deuces=False
         # Game 2: server="2", easy_hold=False, difficult_hold=True, multiple_deuces=False
-        assert result["p1_easy_holds"][0] == 1
-        assert result["p1_difficult_holds"][0] == 0
-        assert result["p2_easy_holds"][0] == 0
-        assert result["p2_difficult_holds"][0] == 1
+        assert p1_row["player_easy_holds"][0] == 1
+        assert p1_row["player_difficult_holds"][0] == 0
+        assert p2_row["player_easy_holds"][0] == 0
+        assert p2_row["player_difficult_holds"][0] == 1
 
-        assert result["p1_games_multiple_deuces"][0] == 0
-        assert result["p2_games_multiple_deuces"][0] == 0
+        assert p1_row["player_games_multiple_deuces"][0] == 0
+        assert p2_row["player_games_multiple_deuces"][0] == 0
 
         # Games won
-        assert result["p1_games_won"][0] == 1
-        assert result["p2_games_won"][0] == 1
+        assert p1_row["player_games_won"][0] == 1
+        assert p2_row["player_games_won"][0] == 1
 
     def test_aggregates_match_context(self, tmp_path):
         """Should compute match duration and sets played/won."""
@@ -360,11 +377,46 @@ class TestMatchBeatsAggregator:
 
         agg = MatchBeatsAggregator(data_root=tmp_path)
         result = agg.run()
+        p1_row = result.filter(pl.col("player_id") == "PLAYER1")
+        p2_row = result.filter(pl.col("player_id") == "PLAYER2")
 
-        assert result["match_duration"][0] == 600
-        assert result["sets_played"][0] == 1
-        assert result["p1_sets_won"][0] == 1
-        assert result["p2_sets_won"][0] == 0
+        assert p1_row["match_duration"][0] == 600
+        assert p1_row["sets_played"][0] == 1
+        assert p1_row["player_sets_won"][0] == 1
+        assert p2_row["player_sets_won"][0] == 0
+
+    def test_pivots_to_player_match_level(self, tmp_path):
+        """Should output two rows per match with player_/opp_ columns."""
+        _write_match_beats_parquet(tmp_path, points=_make_singles_points())
+
+        agg = MatchBeatsAggregator(data_root=tmp_path)
+        result = agg.run()
+
+        # Should have 2 rows (one per player perspective)
+        assert len(result) == 2
+
+        # Should have player_id and opp_id columns
+        assert "player_id" in result.columns
+        assert "opp_id" in result.columns
+
+        # Should NOT have p1_id or p2_id columns
+        assert "p1_id" not in result.columns
+        assert "p2_id" not in result.columns
+
+        # Should have player_/opp_ prefixed columns, not p1_/p2_
+        assert "player_points_won" in result.columns
+        assert "opp_points_won" in result.columns
+        assert "p1_points_won" not in result.columns
+
+        # Player perspective should swap
+        p1_row = result.filter(pl.col("player_id") == "PLAYER1")
+        p2_row = result.filter(pl.col("player_id") == "PLAYER2")
+        assert p1_row["player_points_won"][0] == p2_row["opp_points_won"][0]
+        assert p1_row["opp_points_won"][0] == p2_row["player_points_won"][0]
+
+        # Shared columns should be the same
+        assert p1_row["total_points"][0] == p2_row["total_points"][0]
+        assert p1_row["match_duration"][0] == p2_row["match_duration"][0]
 
     def test_returns_none_when_no_data(self, tmp_path):
         """Should return None when no staged data exists."""
