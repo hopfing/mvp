@@ -433,6 +433,19 @@ class FeatureDiscovery:
             self.config.discovery.metric, 0.0
         )
 
+        # Round 1 feature ranking (if available)
+        if selection_result and selection_result.history:
+            round_1 = selection_result.history[0]
+            if round_1.get("action") == "add" and "round_ranking" in round_1:
+                ranking = round_1["round_ranking"]
+                self._log("")
+                self._log("ROUND 1 FEATURE RANKING")
+                self._log("-" * 30)
+                for i, (feat, metric) in enumerate(ranking[:20], 1):
+                    self._log(f"  {i:2}. {feat}: {metric:.4f}")
+                if len(ranking) > 20:
+                    self._log(f"  ... and {len(ranking) - 20} more")
+
         # Summary
         self._log("")
         self._log("RESULTS")
