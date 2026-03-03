@@ -302,6 +302,85 @@ def _write_overview_parquet(
     return path
 
 
+def _write_match_beats_parquet(
+    data_root: Path,
+    circuit: str = "tour",
+    tid: str = "580",
+    year: int = 2023,
+) -> Path:
+    """Write a match_beats parquet with point-level data for the final match."""
+    path = (
+        data_root
+        / "stage"
+        / "atptour"
+        / "tournaments"
+        / circuit
+        / tid
+        / str(year)
+        / "match_beats.parquet"
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df = pl.DataFrame(
+        {
+            "tournament_id": [tid] * 10,
+            "year": [year] * 10,
+            "match_id": ["ms001"] * 10,
+            "is_doubles": [False] * 10,
+            "p1_id": ["AAAA"] * 10,
+            "p2_id": ["BBBB"] * 10,
+            "set_num": [1] * 10,
+            "set_winner": ["1"] * 10,
+            "game_num": [1] * 5 + [2] * 5,
+            "game_winner": ["1"] * 5 + ["2"] * 5,
+            "game_duration": [120] * 10,
+            "easy_hold": [True] * 5 + [False] * 5,
+            "difficult_hold": [False] * 5 + [True] * 5,
+            "multiple_deuces": [False] * 10,
+            "is_tiebreak": [False] * 10,
+            "point_num": list(range(1, 6)) * 2,
+            "point_id": [f"P{i}" for i in range(10)],
+            "result": ["A", "W", "UE", "FE", "DF", "W", "W", "UE", "FE", "N"],
+            "scorer": ["1", "1", "2", "2", "2", "1", "2", "1", "1", "2"],
+            "server": ["1"] * 5 + ["2"] * 5,
+            "serve": [1, 1, 1, 2, 1, 1, 1, 2, 1, 1],
+            "serve_speed": [
+                200.0, 190.0, 185.0, 150.0, None,
+                195.0, 188.0, 145.0, None, 192.0,
+            ],
+            "fault_serve_speed": [
+                None, None, None, 180.0, None,
+                None, None, 160.0, None, None,
+            ],
+            "p1_rally_shots": [0, 2, 3, 4, 0, 1, 2, 3, 2, 1],
+            "p2_rally_shots": [0, 2, 3, 4, 0, 1, 2, 3, 2, 1],
+            "rally_length_missing": [
+                True, False, False, False, True,
+                False, False, False, False, False,
+            ],
+            "is_break_point": [
+                False, False, True, False, False,
+                False, True, False, False, False,
+            ],
+            "break_points_in_game": [0] * 10,
+            "break_points_lost": [0] * 10,
+            "is_crucial_point": [
+                False, False, True, False, False,
+                False, True, False, False, False,
+            ],
+            "p1_game_score": ["0"] * 10,
+            "p2_game_score": ["0"] * 10,
+            "match_duration_at_point": [
+                60, 120, 180, 240, 300, 360, 420, 480, 540, 600,
+            ],
+            "source_file": ["test.json"] * 10,
+            "parsed_at": [None] * 10,
+            "schema_hash": ["test"] * 10,
+        }
+    )
+    df.write_parquet(path)
+    return path
+
+
 class TestTournamentMatchesAggregator:
     def test_results_only(self, tmp_path):
         """Only results parquet exists."""
@@ -632,3 +711,80 @@ class TestTournamentMatchesAggregator:
             / "matches.parquet"
         )
         assert result_path == expected
+
+    def test_match_beats_columns_appear_when_data_available(self, tmp_path):
+        """Match beats columns should be populated when match_beats data exists."""
+        _write_results_parquet(tmp_path)
+        _write_match_beats_parquet(tmp_path)
+        agg = TournamentMatchesAggregator(
+            circuit=Circuit.tour, tid="580", year=2023, data_root=tmp_path
+        )
+        df = agg.aggregate()
+        # Match beats columns should be present
+        assert "total_points" in df.columns
+        assert "mb_player_points_won" in df.columns
+        assert "mb_opp_points_won" in df.columns
+        assert "mb_player_aces" in df.columns
+        assert "mb_player_winners" in df.columns
+        assert "mb_match_duration" in df.columns
+        assert "mb_sets_played" in df.columns
+        assert "rally_points_with_data" in df.columns
+        # AAAA row should have match beats data
+        row_a = df.filter(pl.col("player_id") == "AAAA")
+        assert row_a["total_points"].item() == 10
+        assert row_a["mb_player_points_won"].item() == 5
+        assert row_a["mb_opp_points_won"].item() == 5
+        assert row_a["mb_player_aces"].item() == 1
+        assert row_a["mb_match_duration"].item() == 600
+
+    def test_match_beats_null_when_no_data(self, tmp_path):
+        """Match beats columns should be null when no match_beats data exists."""
+        _write_results_parquet(tmp_path)
+        agg = TournamentMatchesAggregator(
+            circuit=Circuit.tour, tid="580", year=2023, data_root=tmp_path
+        )
+        df = agg.aggregate()
+        # Match beats columns should exist but be all null
+        assert "total_points" in df.columns
+        assert "mb_player_points_won" in df.columns
+        assert df["total_points"].null_count() == len(df)
+        assert df["mb_player_points_won"].null_count() == len(df)
+        assert df["mb_match_duration"].null_count() == len(df)
+
+    def test_match_beats_schema_matches(self, tmp_path):
+        """Output schema should include match_beats columns."""
+        _write_results_parquet(tmp_path)
+        _write_schedule_parquet(tmp_path)
+        _write_match_stats_parquet(tmp_path)
+        _write_overview_parquet(tmp_path)
+        _write_match_beats_parquet(tmp_path)
+        agg = TournamentMatchesAggregator(
+            circuit=Circuit.tour, tid="580", year=2023, data_root=tmp_path
+        )
+        df = agg.aggregate()
+        expected_cols = set(MATCHES_SCHEMA.keys())
+        actual_cols = set(df.columns)
+        missing = expected_cols - actual_cols
+        extra = actual_cols - expected_cols
+        assert expected_cols == actual_cols, (
+            f"Missing: {missing}, Extra: {extra}"
+        )
+
+    def test_match_beats_no_row_loss(self, tmp_path):
+        """LEFT JOIN should not lose matches without match_beats data."""
+        _write_results_parquet(tmp_path)
+        _write_schedule_parquet(tmp_path)
+        _write_match_beats_parquet(tmp_path)
+        agg = TournamentMatchesAggregator(
+            circuit=Circuit.tour, tid="580", year=2023, data_root=tmp_path
+        )
+        df = agg.aggregate()
+        # 2 matches * 2 rows = 4 (Final from results+schedule+match_beats, SF from schedule only)
+        assert len(df) == 4
+        # SF rows should have null match beats data
+        sf = df.filter(pl.col("round") == "SF")
+        assert sf["total_points"].null_count() == 2
+        assert sf["mb_player_points_won"].null_count() == 2
+        # Final rows should have match beats data
+        final = df.filter(pl.col("round") == "F")
+        assert final["total_points"].null_count() == 0

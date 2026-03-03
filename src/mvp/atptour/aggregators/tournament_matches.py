@@ -10,6 +10,7 @@ from mvp.atptour.aggregators.helpers import (
     explode_results,
     explode_schedule,
 )
+from mvp.atptour.aggregators.match_beats import MatchBeatsAggregator
 from mvp.common.base_job import BaseJob
 from mvp.common.enums import Circuit
 
@@ -38,6 +39,59 @@ _STAT_FIELDS = [
     "pts_service_pts_won", "pts_service_pts_played",
     "pts_return_pts_won", "pts_return_pts_played",
     "pts_total_pts_won", "pts_total_pts_played",
+]
+
+_MATCH_BEATS_PLAYER_FIELDS = [
+    "points_won",
+    "service_points",
+    "first_serve_points",
+    "first_serve_won",
+    "second_serve_points",
+    "second_serve_won",
+    "aces",
+    "dfs",
+    "return_points",
+    "return_points_won",
+    "bp_faced",
+    "bp_saved",
+    "bp_opportunities",
+    "bp_converted",
+    "winners",
+    "ues",
+    "fes",
+    "avg_1st_serve_speed",
+    "max_1st_serve_speed",
+    "avg_2nd_serve_speed",
+    "avg_fault_serve_speed",
+    "max_fault_serve_speed",
+    "rally_won_count",
+    "rally_won_shots",
+    "rally_lost_count",
+    "rally_lost_shots",
+    "rally_serving_count",
+    "rally_serving_shots",
+    "rally_returning_count",
+    "rally_returning_shots",
+    "crucial_points_won",
+    "crucial_points_played",
+    "tiebreak_points_won",
+    "tiebreak_points_played",
+    "easy_holds",
+    "difficult_holds",
+    "games_multiple_deuces",
+    "games_won",
+    "sets_won",
+]
+
+_MATCH_BEATS_SHARED_FIELDS = [
+    "total_points",
+    "rally_points_with_data",
+    "rally_short_count",
+    "rally_medium_count",
+    "rally_long_count",
+    "rally_total_shots",
+    "mb_match_duration",
+    "mb_sets_played",
 ]
 
 MATCHES_SCHEMA: dict[str, pl.DataType] = {
@@ -104,6 +158,45 @@ MATCHES_SCHEMA: dict[str, pl.DataType] = {
     # Doubles
     "player_partner_id": pl.String,
     "opp_partner_id": pl.String,
+    # Match Beats - shared fields
+    "total_points": pl.UInt32,
+    "rally_points_with_data": pl.UInt32,
+    "rally_short_count": pl.UInt32,
+    "rally_medium_count": pl.UInt32,
+    "rally_long_count": pl.UInt32,
+    "rally_total_shots": pl.Int64,
+    "mb_match_duration": pl.Int64,
+    "mb_sets_played": pl.Int64,
+    # Match Beats - player fields
+    **{f"mb_player_{field}": pl.UInt32 for field in _MATCH_BEATS_PLAYER_FIELDS
+       if field not in ("avg_1st_serve_speed", "max_1st_serve_speed",
+                        "avg_2nd_serve_speed", "avg_fault_serve_speed",
+                        "max_fault_serve_speed", "rally_won_shots",
+                        "rally_lost_shots", "rally_serving_shots",
+                        "rally_returning_shots", "sets_won")},
+    **{f"mb_player_{field}": pl.Float64 for field in _MATCH_BEATS_PLAYER_FIELDS
+       if field in ("avg_1st_serve_speed", "max_1st_serve_speed",
+                    "avg_2nd_serve_speed", "avg_fault_serve_speed",
+                    "max_fault_serve_speed")},
+    **{f"mb_player_{field}": pl.Int64 for field in _MATCH_BEATS_PLAYER_FIELDS
+       if field in ("rally_won_shots", "rally_lost_shots",
+                    "rally_serving_shots", "rally_returning_shots")},
+    "mb_player_sets_won": pl.UInt32,
+    # Match Beats - opponent fields
+    **{f"mb_opp_{field}": pl.UInt32 for field in _MATCH_BEATS_PLAYER_FIELDS
+       if field not in ("avg_1st_serve_speed", "max_1st_serve_speed",
+                        "avg_2nd_serve_speed", "avg_fault_serve_speed",
+                        "max_fault_serve_speed", "rally_won_shots",
+                        "rally_lost_shots", "rally_serving_shots",
+                        "rally_returning_shots", "sets_won")},
+    **{f"mb_opp_{field}": pl.Float64 for field in _MATCH_BEATS_PLAYER_FIELDS
+       if field in ("avg_1st_serve_speed", "max_1st_serve_speed",
+                    "avg_2nd_serve_speed", "avg_fault_serve_speed",
+                    "max_fault_serve_speed")},
+    **{f"mb_opp_{field}": pl.Int64 for field in _MATCH_BEATS_PLAYER_FIELDS
+       if field in ("rally_won_shots", "rally_lost_shots",
+                    "rally_serving_shots", "rally_returning_shots")},
+    "mb_opp_sets_won": pl.UInt32,
 }
 
 
@@ -192,7 +285,20 @@ class TournamentMatchesAggregator(BaseJob):
         # Step 7: LEFT JOIN Overview
         joined = self._join_overview(joined, overview_df)
 
-        # Step 7: Waterfall resolution
+        # Step 8: Coalesce match_id before Match Beats join
+        match_id_variants = self._find_variants(joined, "match_id")
+        if len(match_id_variants) > 1:
+            joined = joined.with_columns(
+                pl.coalesce([pl.col(v) for v in match_id_variants]).alias(
+                    "match_id"
+                )
+            )
+
+        # Step 9: LEFT JOIN Match Beats
+        match_beats_df = self._load_and_prepare_match_beats()
+        joined = self._join_match_beats(joined, match_beats_df)
+
+        # Step 9: Waterfall resolution
         result = self._apply_waterfall(joined)
 
         return result
@@ -339,6 +445,54 @@ class TournamentMatchesAggregator(BaseJob):
             on=["tournament_id", "year", "circuit"],
             how="left",
             suffix="_overview",
+        )
+
+    def _load_and_prepare_match_beats(self) -> pl.DataFrame:
+        """Load staged match_beats, aggregate to player-match level, rename for join."""
+        raw = self._load_parquet("match_beats.parquet")
+        if raw.is_empty():
+            return pl.DataFrame()
+
+        # Filter doubles
+        raw = raw.filter(~pl.col("is_doubles"))
+        if raw.is_empty():
+            return pl.DataFrame()
+
+        # Reuse MatchBeatsAggregator logic to aggregate and pivot
+        mb_agg = MatchBeatsAggregator(data_root=self.data_root)
+        match_level = mb_agg._aggregate_match_level(raw)
+        player_match = mb_agg._pivot_to_player_match(match_level)
+
+        # Drop opp_id (already in main table)
+        if "opp_id" in player_match.columns:
+            player_match = player_match.drop("opp_id")
+
+        # Rename columns that conflict with existing ones and add mb_ prefix
+        # to player/opp fields for clarity
+        rename_map = {}
+        rename_map["match_duration"] = "mb_match_duration"
+        rename_map["sets_played"] = "mb_sets_played"
+        for col in player_match.columns:
+            if col.startswith("player_") and col != "player_id":
+                rename_map[col] = "mb_" + col
+            elif col.startswith("opp_"):
+                rename_map[col] = "mb_" + col
+        player_match = player_match.rename(rename_map)
+
+        return player_match
+
+    def _join_match_beats(
+        self, joined: pl.DataFrame, match_beats_df: pl.DataFrame
+    ) -> pl.DataFrame:
+        """LEFT JOIN Match Beats on (tournament_id, year, match_id, player_id)."""
+        if joined.is_empty() or match_beats_df.is_empty():
+            return joined
+
+        return joined.join(
+            match_beats_df,
+            on=["tournament_id", "year", "match_id", "player_id"],
+            how="left",
+            suffix="_match_beats",
         )
 
     def _apply_waterfall(self, df: pl.DataFrame) -> pl.DataFrame:
@@ -655,6 +809,12 @@ class TournamentMatchesAggregator(BaseJob):
             # Doubles
             "player_partner_id",
             "opp_partner_id",
+            # Match Beats - shared fields
+            *_MATCH_BEATS_SHARED_FIELDS,
+            # Match Beats - player fields
+            *[f"mb_player_{f}" for f in _MATCH_BEATS_PLAYER_FIELDS],
+            # Match Beats - opponent fields
+            *[f"mb_opp_{f}" for f in _MATCH_BEATS_PLAYER_FIELDS],
         ]
 
         return output_cols
