@@ -146,6 +146,100 @@ class TestMatchBeatsAggregator:
         result = agg.run()
         assert result is None
 
+    def test_aggregates_serve_stats(self, tmp_path):
+        """Should compute serve statistics per player."""
+        _write_match_beats_parquet(tmp_path, points=_make_singles_points())
+
+        agg = MatchBeatsAggregator(data_root=tmp_path)
+        result = agg.run()
+
+        # P1 served 5 points (server=="1", points 0-4)
+        assert result["p1_service_points"][0] == 5
+        # P1 first serves: points with serve==1 when server=="1" = points 0,1,2,4
+        assert result["p1_first_serve_points"][0] == 4
+        # P1 first serve won: serve==1, server=="1", scorer=="1" = points 0(A), 1(W)
+        assert result["p1_first_serve_won"][0] == 2
+        # P1 second serve: serve==2 when server=="1" = point 3
+        assert result["p1_second_serve_points"][0] == 1
+        # P1 second serve won: serve==2, server=="1", scorer=="1" = 0 (point 3 scorer=2)
+        assert result["p1_second_serve_won"][0] == 0
+        # P1 aces: result=="A" when server=="1" = point 0
+        assert result["p1_aces"][0] == 1
+        # P1 DFs: result=="DF" when server=="1" = point 4
+        assert result["p1_dfs"][0] == 1
+
+        # P2 served 5 points (server=="2", points 5-9)
+        assert result["p2_service_points"][0] == 5
+        assert result["p2_first_serve_points"][0] == 4
+        assert result["p2_first_serve_won"][0] == 2
+        assert result["p2_second_serve_points"][0] == 1
+        assert result["p2_second_serve_won"][0] == 0
+        assert result["p2_aces"][0] == 0
+        assert result["p2_dfs"][0] == 0
+
+    def test_aggregates_return_stats(self, tmp_path):
+        """Should compute return statistics per player."""
+        _write_match_beats_parquet(tmp_path, points=_make_singles_points())
+
+        agg = MatchBeatsAggregator(data_root=tmp_path)
+        result = agg.run()
+
+        # P1 return points = when P2 is serving = 5
+        assert result["p1_return_points"][0] == 5
+        # P1 return points won: server=="2", scorer=="1" = points 5,7,8
+        assert result["p1_return_points_won"][0] == 3
+        # P2 return points = when P1 is serving = 5
+        assert result["p2_return_points"][0] == 5
+        # P2 return points won: server=="1", scorer=="2" = points 2,3,4
+        assert result["p2_return_points_won"][0] == 3
+
+    def test_aggregates_break_points(self, tmp_path):
+        """Should compute break point stats."""
+        _write_match_beats_parquet(tmp_path, points=_make_singles_points())
+
+        agg = MatchBeatsAggregator(data_root=tmp_path)
+        result = agg.run()
+
+        # is_break_point is True for points 2 and 6
+        # Point 2: server="1", scorer="2" -> P1 faced BP, didn't save
+        assert result["p1_bp_faced"][0] == 1
+        assert result["p1_bp_saved"][0] == 0
+        # Point 6: server="2", scorer="2" -> P1 had BP opportunity, didn't convert
+        assert result["p1_bp_opportunities"][0] == 1
+        assert result["p1_bp_converted"][0] == 0
+        # Point 6: server="2", scorer="2" -> P2 faced BP, saved it
+        assert result["p2_bp_faced"][0] == 1
+        assert result["p2_bp_saved"][0] == 1
+        # Point 2: server="1", scorer="2" -> P2 had BP opportunity, converted
+        assert result["p2_bp_opportunities"][0] == 1
+        assert result["p2_bp_converted"][0] == 1
+
+    def test_aggregates_winners_and_errors(self, tmp_path):
+        """Should compute winners/errors per player.
+
+        Winners are attributed to the scorer (who hit the winning shot).
+        Errors are attributed to the player who LOST the point (the one
+        who made the error), not the scorer.
+        """
+        _write_match_beats_parquet(tmp_path, points=_make_singles_points())
+
+        agg = MatchBeatsAggregator(data_root=tmp_path)
+        result = agg.run()
+
+        # P1 winners: scorer=="1" & result=="W" = points 1,5
+        assert result["p1_winners"][0] == 2
+        # P1 UEs: scorer=="2" & result=="UE" = point 2 (P1 made UE, P2 won)
+        assert result["p1_ues"][0] == 1
+        # P1 FEs: scorer=="2" & result=="FE" = point 3 (P1 made FE, P2 won)
+        assert result["p1_fes"][0] == 1
+
+        # P2 winners: scorer=="2" & result=="W" = point 6
+        assert result["p2_winners"][0] == 1
+        # P2 UEs: scorer=="1" & result=="UE" = point 7 (P2 made UE, P1 won)
+        assert result["p2_ues"][0] == 1
+        # P2 FEs: scorer=="1" & result=="FE" = point 8 (P2 made FE, P1 won)
+        assert result["p2_fes"][0] == 1
+
     def test_returns_none_when_no_data(self, tmp_path):
         """Should return None when no staged data exists."""
         agg = MatchBeatsAggregator(data_root=tmp_path)

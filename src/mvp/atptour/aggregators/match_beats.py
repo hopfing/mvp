@@ -66,4 +66,43 @@ class MatchBeatsAggregator(BaseJob):
             pl.len().alias("total_points"),
             (pl.col("scorer") == "1").sum().alias("p1_points_won"),
             (pl.col("scorer") == "2").sum().alias("p2_points_won"),
+            # Serve stats - P1
+            (pl.col("server") == "1").sum().alias("p1_service_points"),
+            ((pl.col("server") == "1") & (pl.col("serve") == 1)).sum().alias("p1_first_serve_points"),
+            ((pl.col("server") == "1") & (pl.col("serve") == 1) & (pl.col("scorer") == "1")).sum().alias("p1_first_serve_won"),
+            ((pl.col("server") == "1") & (pl.col("serve") == 2)).sum().alias("p1_second_serve_points"),
+            ((pl.col("server") == "1") & (pl.col("serve") == 2) & (pl.col("scorer") == "1")).sum().alias("p1_second_serve_won"),
+            ((pl.col("server") == "1") & (pl.col("result") == "A")).sum().alias("p1_aces"),
+            ((pl.col("server") == "1") & (pl.col("result") == "DF")).sum().alias("p1_dfs"),
+            # Serve stats - P2
+            (pl.col("server") == "2").sum().alias("p2_service_points"),
+            ((pl.col("server") == "2") & (pl.col("serve") == 1)).sum().alias("p2_first_serve_points"),
+            ((pl.col("server") == "2") & (pl.col("serve") == 1) & (pl.col("scorer") == "2")).sum().alias("p2_first_serve_won"),
+            ((pl.col("server") == "2") & (pl.col("serve") == 2)).sum().alias("p2_second_serve_points"),
+            ((pl.col("server") == "2") & (pl.col("serve") == 2) & (pl.col("scorer") == "2")).sum().alias("p2_second_serve_won"),
+            ((pl.col("server") == "2") & (pl.col("result") == "A")).sum().alias("p2_aces"),
+            ((pl.col("server") == "2") & (pl.col("result") == "DF")).sum().alias("p2_dfs"),
+            # Return stats (return points = opponent serving)
+            (pl.col("server") == "2").sum().alias("p1_return_points"),
+            ((pl.col("server") == "2") & (pl.col("scorer") == "1")).sum().alias("p1_return_points_won"),
+            (pl.col("server") == "1").sum().alias("p2_return_points"),
+            ((pl.col("server") == "1") & (pl.col("scorer") == "2")).sum().alias("p2_return_points_won"),
+            # Break points - P1
+            ((pl.col("server") == "1") & pl.col("is_break_point")).sum().alias("p1_bp_faced"),
+            ((pl.col("server") == "1") & pl.col("is_break_point") & (pl.col("scorer") == "1")).sum().alias("p1_bp_saved"),
+            ((pl.col("server") == "2") & pl.col("is_break_point")).sum().alias("p1_bp_opportunities"),
+            ((pl.col("server") == "2") & pl.col("is_break_point") & (pl.col("scorer") == "1")).sum().alias("p1_bp_converted"),
+            # Break points - P2
+            ((pl.col("server") == "2") & pl.col("is_break_point")).sum().alias("p2_bp_faced"),
+            ((pl.col("server") == "2") & pl.col("is_break_point") & (pl.col("scorer") == "2")).sum().alias("p2_bp_saved"),
+            ((pl.col("server") == "1") & pl.col("is_break_point")).sum().alias("p2_bp_opportunities"),
+            ((pl.col("server") == "1") & pl.col("is_break_point") & (pl.col("scorer") == "2")).sum().alias("p2_bp_converted"),
+            # Winners - by the player who hit the winner (scorer won with W)
+            ((pl.col("scorer") == "1") & (pl.col("result") == "W")).sum().alias("p1_winners"),
+            ((pl.col("scorer") == "2") & (pl.col("result") == "W")).sum().alias("p2_winners"),
+            # Errors - by the player who made the error (they lost the point)
+            ((pl.col("scorer") == "2") & (pl.col("result") == "UE")).sum().alias("p1_ues"),
+            ((pl.col("scorer") == "2") & (pl.col("result") == "FE")).sum().alias("p1_fes"),
+            ((pl.col("scorer") == "1") & (pl.col("result") == "UE")).sum().alias("p2_ues"),
+            ((pl.col("scorer") == "1") & (pl.col("result") == "FE")).sum().alias("p2_fes"),
         )
