@@ -91,6 +91,7 @@ class FeatureSelector:
             round_num = len(selected) + 1
             best_feature = None
             best_feature_metric = best_metric
+            round_results: list[tuple[str, float]] = []
 
             # Try adding each remaining feature
             feature_iter = remaining
@@ -108,6 +109,8 @@ class FeatureSelector:
                     metric = self.scorer(candidate)
                 except Exception:
                     continue
+
+                round_results.append((feature, metric))
 
                 if self._is_better(metric, best_feature_metric):
                     best_feature = feature
@@ -135,11 +138,24 @@ class FeatureSelector:
             if verbose:
                 print(f"  + {best_feature} -> {best_metric:.4f}")
 
+                # Show top 10 for round 1 (full feature ranking)
+                if round_num == 1 and round_results:
+                    reverse = self.direction == "maximize"
+                    top_10 = sorted(round_results, key=lambda x: x[1], reverse=reverse)[:10]
+                    print("  Round 1 top 10:")
+                    for i, (feat, met) in enumerate(top_10, 1):
+                        print(f"    {i}. {feat}: {met:.4f}")
+
+            # Sort round results by metric (best first)
+            reverse = self.direction == "maximize"
+            sorted_results = sorted(round_results, key=lambda x: x[1], reverse=reverse)
+
             history.append({
                 "step": len(history) + 1,
                 "action": "add",
                 "feature": best_feature,
                 "metric": best_metric,
+                "round_ranking": sorted_results,  # full ranking for this round
             })
 
         return SelectionResult(
