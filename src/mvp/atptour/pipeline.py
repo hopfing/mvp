@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 
 from mvp.atptour.aggregators.tournament_matches import TournamentMatchesAggregator
-from mvp.atptour.extractors.match_beats import MatchBeatsExtractor
+from mvp.atptour.extractors.match_centre import DataType, MatchCentreExtractor
 from mvp.atptour.extractors.match_stats import MatchStatsExtractor
 from mvp.atptour.extractors.overview import OverviewExtractor
 from mvp.atptour.extractors.player_activity import PlayerActivityExtractor
@@ -104,9 +104,14 @@ def _process_tournaments(
             MatchStatsTransformer(tournament, data_root=data_root).run()
 
             # MatchBeats extraction + transformation (2022+ only, handled internally)
-            MatchBeatsExtractor(data_root=data_root).run(
-                tournament, refresh=stats_refresh
-            )
+            MatchCentreExtractor(
+                data_root=data_root,
+                data_types=[
+                    DataType.MATCH_BEATS,
+                    DataType.STROKE_ANALYSIS,
+                    DataType.RALLY_ANALYSIS,
+                ],
+            ).run(tournament, refresh=stats_refresh)
             MatchBeatsTransformer(tournament, data_root=data_root).run()
 
             TournamentMatchesAggregator(

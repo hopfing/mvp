@@ -187,7 +187,7 @@ class FeatureDiscovery:
                 cache_dir=self.cache_dir,
                 mlflow_dir=self.mlflow_dir,
                 workflow="discovery",
-                run_name=run_name or self.config.name,
+                run_name=run_name or self.config_path.stem,
                 log_to_mlflow=log_to_mlflow,
             )
             result = runner.run()
@@ -389,7 +389,7 @@ class FeatureDiscovery:
         Returns:
             DiscoveryResult with all findings.
         """
-        self._log(f"Discovery: {self.config.name}")
+        self._log(f"Discovery: {self.config_path.stem}")
         self._log("=" * 60)
 
         # Phase 1: Selection
