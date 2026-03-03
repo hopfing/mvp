@@ -15,10 +15,16 @@ class TestDiagnosticResults:
         """Metrics property returns flat dict for MLflow."""
         results = DiagnosticResults(
             segments={
-                "circuit": {
-                    "tour": {"accuracy": 0.67, "n_matches": 100},
-                    "chal": {"accuracy": 0.63, "n_matches": 200},
-                }
+                "by_circuit": {
+                    "tour": {
+                        "overall": {"accuracy": 0.67, "n_matches": 100},
+                        "surface": {"Hard": {"accuracy": 0.68, "n_matches": 80}},
+                    },
+                    "chal": {
+                        "overall": {"accuracy": 0.63, "n_matches": 200},
+                    },
+                },
+                "overall": {},
             },
             calibration={"calibration_error": 0.03, "calibration_max_error": 0.08},
             errors={"error_rate_80plus": 0.09, "error_count_80plus": 5},
@@ -27,8 +33,9 @@ class TestDiagnosticResults:
 
         metrics = results.metrics
 
-        assert metrics["segment_circuit_tour_accuracy"] == 0.67
-        assert metrics["segment_circuit_chal_accuracy"] == 0.63
+        assert metrics["segment_tour_accuracy"] == 0.67
+        assert metrics["segment_chal_accuracy"] == 0.63
+        assert metrics["segment_tour_surface_Hard_accuracy"] == 0.68
         assert metrics["calibration_error"] == 0.03
         assert metrics["error_rate_80plus"] == 0.09
         assert metrics["temporal_drift"] == 0.02
@@ -36,7 +43,7 @@ class TestDiagnosticResults:
     def test_to_json_returns_valid_json(self) -> None:
         """to_json returns parseable JSON with all sections."""
         results = DiagnosticResults(
-            segments={"circuit": {"tour": {"accuracy": 0.67}}},
+            segments={"by_circuit": {"tour": {"overall": {"accuracy": 0.67}}}, "overall": {}},
             calibration={"calibration_error": 0.03},
             errors={"error_rate_80plus": 0.09},
             temporal={"temporal_drift": 0.02},
@@ -55,7 +62,7 @@ class TestDiagnosticsSegmentAnalysis:
     """Tests for segment analysis."""
 
     def test_circuit_segment_metrics(self) -> None:
-        """Computes metrics separately for tour and chal."""
+        """Computes metrics separately for tour and chal with subsegments."""
         df = pl.DataFrame({
             "circuit": ["tour", "tour", "chal", "chal"],
             "surface": ["Hard", "Hard", "Hard", "Hard"],
@@ -69,14 +76,17 @@ class TestDiagnosticsSegmentAnalysis:
         diagnostics = Diagnostics()
         result = diagnostics._segment_metrics(df, y_true, y_prob)
 
-        assert "circuit" in result
-        assert "tour" in result["circuit"]
-        assert "chal" in result["circuit"]
-        assert result["circuit"]["tour"]["n_matches"] == 2
-        assert result["circuit"]["chal"]["n_matches"] == 2
+        assert "by_circuit" in result
+        assert "tour" in result["by_circuit"]
+        assert "chal" in result["by_circuit"]
+        assert result["by_circuit"]["tour"]["overall"]["n_matches"] == 2
+        assert result["by_circuit"]["chal"]["overall"]["n_matches"] == 2
+        # Check subsegments exist
+        assert "surface" in result["by_circuit"]["tour"]
+        assert "Hard" in result["by_circuit"]["tour"]["surface"]
 
     def test_round_group_mapping(self) -> None:
-        """Maps rounds to Qualifying/Early/Late groups."""
+        """Maps rounds to Qualifying/Early/Late groups within circuit."""
         df = pl.DataFrame({
             "circuit": ["tour"] * 6,
             "surface": ["Hard"] * 6,
@@ -90,18 +100,23 @@ class TestDiagnosticsSegmentAnalysis:
         diagnostics = Diagnostics()
         result = diagnostics._segment_metrics(df, y_true, y_prob)
 
-        assert "round_group" in result
-        assert result["round_group"]["Qualifying"]["n_matches"] == 1
-        assert result["round_group"]["Early"]["n_matches"] == 2  # R64, R32
-        assert result["round_group"]["Late"]["n_matches"] == 3   # R16, QF, F
+        # Check round_group within circuit
+        tour_rounds = result["by_circuit"]["tour"]["round_group"]
+        assert tour_rounds["Qualifying"]["n_matches"] == 1
+        assert tour_rounds["Early"]["n_matches"] == 2  # R64, R32
+        assert tour_rounds["Late"]["n_matches"] == 3   # R16, QF, F
 
-    def test_ranking_bucket_assignment(self) -> None:
-        """Assigns players to ranking buckets correctly."""
+        # Also check overall round_group
+        assert result["overall"]["round_group"]["Qualifying"]["n_matches"] == 1
+        assert result["overall"]["round_group"]["Early"]["n_matches"] == 2
+        assert result["overall"]["round_group"]["Late"]["n_matches"] == 3
+
+    def test_surface_subsegment_within_circuit(self) -> None:
+        """Surface metrics computed within each circuit."""
         df = pl.DataFrame({
-            "circuit": ["tour"] * 5,
-            "surface": ["Hard"] * 5,
+            "circuit": ["tour", "tour", "chal", "chal", "chal"],
+            "surface": ["Hard", "Clay", "Hard", "Hard", "Clay"],
             "round": ["R32"] * 5,
-            "player_ranking": [10, 30, 75, 150, 300],
             "effective_match_date": ["2023-01-01"] * 5,
         })
         y_true = np.array([1, 1, 1, 1, 1])
@@ -110,12 +125,13 @@ class TestDiagnosticsSegmentAnalysis:
         diagnostics = Diagnostics()
         result = diagnostics._segment_metrics(df, y_true, y_prob)
 
-        assert "ranking_bucket" in result
-        assert result["ranking_bucket"]["1-20"]["n_matches"] == 1
-        assert result["ranking_bucket"]["21-50"]["n_matches"] == 1
-        assert result["ranking_bucket"]["51-100"]["n_matches"] == 1
-        assert result["ranking_bucket"]["101-200"]["n_matches"] == 1
-        assert result["ranking_bucket"]["201+"]["n_matches"] == 1
+        # Tour has 1 Hard, 1 Clay
+        assert result["by_circuit"]["tour"]["surface"]["Hard"]["n_matches"] == 1
+        assert result["by_circuit"]["tour"]["surface"]["Clay"]["n_matches"] == 1
+
+        # Chal has 2 Hard, 1 Clay
+        assert result["by_circuit"]["chal"]["surface"]["Hard"]["n_matches"] == 2
+        assert result["by_circuit"]["chal"]["surface"]["Clay"]["n_matches"] == 1
 
 
 class TestDiagnosticsCalibration:
@@ -309,11 +325,11 @@ class TestDiagnosticsComputeAll:
         assert isinstance(result, DiagnosticResults)
 
         # Verify segments include data from both folds
-        assert "circuit" in result.segments
-        assert "tour" in result.segments["circuit"]
-        assert "chal" in result.segments["circuit"]
-        assert result.segments["circuit"]["tour"]["n_matches"] == 2
-        assert result.segments["circuit"]["chal"]["n_matches"] == 2
+        assert "by_circuit" in result.segments
+        assert "tour" in result.segments["by_circuit"]
+        assert "chal" in result.segments["by_circuit"]
+        assert result.segments["by_circuit"]["tour"]["overall"]["n_matches"] == 2
+        assert result.segments["by_circuit"]["chal"]["overall"]["n_matches"] == 2
 
     def test_compute_all_returns_complete_diagnostics(self) -> None:
         """compute_all returns all diagnostic components."""

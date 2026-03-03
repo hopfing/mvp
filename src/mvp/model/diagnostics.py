@@ -28,17 +28,27 @@ RANKING_BUCKETS: list[tuple[str, int, int | None]] = [
 
 
 def _compute_metrics_for_segment(
-    y_true: np.ndarray, y_prob: np.ndarray
+    y_true: np.ndarray, y_prob: np.ndarray, include_calibration: bool = False
 ) -> dict[str, float]:
-    """Compute standard metrics for a segment."""
+    """Compute standard metrics for a segment.
+
+    Args:
+        y_true: True labels.
+        y_prob: Predicted probabilities.
+        include_calibration: If True, include calibration_error and error_rate_80plus.
+    """
     if len(y_true) == 0:
-        return {
+        result = {
             "accuracy": 0.0,
             "log_loss": 0.0,
             "brier_score": 0.0,
             "roc_auc": 0.0,
             "n_matches": 0,
         }
+        if include_calibration:
+            result["calibration_error"] = 0.0
+            result["error_rate_80plus"] = 0.0
+        return result
 
     y_pred = (y_prob >= 0.5).astype(int)
     y_prob_clipped = np.clip(y_prob, 1e-15, 1 - 1e-15)
@@ -56,7 +66,59 @@ def _compute_metrics_for_segment(
         metrics["log_loss"] = 0.0
         metrics["roc_auc"] = 0.0
 
+    if include_calibration:
+        metrics["calibration_error"] = _compute_calibration_error(y_true, y_prob)
+        metrics["error_rate_80plus"] = _compute_error_rate_80plus(y_true, y_prob)
+
     return metrics
+
+
+def _compute_calibration_error(y_true: np.ndarray, y_prob: np.ndarray) -> float:
+    """Compute weighted mean calibration error for probabilities >= 0.50."""
+    mask = y_prob >= 0.50
+    y_true_filtered = y_true[mask]
+    y_prob_filtered = y_prob[mask]
+
+    if len(y_true_filtered) == 0:
+        return 0.0
+
+    bucket_edges = [0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95, 1.00]
+    errors = []
+    weights = []
+
+    for i in range(len(bucket_edges) - 1):
+        low, high = bucket_edges[i], bucket_edges[i + 1]
+        if i == len(bucket_edges) - 2:
+            bucket_mask = (y_prob_filtered >= low) & (y_prob_filtered <= high)
+        else:
+            bucket_mask = (y_prob_filtered >= low) & (y_prob_filtered < high)
+
+        if not bucket_mask.any():
+            continue
+
+        predicted_mean = float(np.mean(y_prob_filtered[bucket_mask]))
+        actual = float(np.mean(y_true_filtered[bucket_mask]))
+        n = int(bucket_mask.sum())
+        error = abs(predicted_mean - actual)
+
+        errors.append(error)
+        weights.append(n)
+
+    if weights:
+        return float(np.average(errors, weights=weights))
+    return 0.0
+
+
+def _compute_error_rate_80plus(y_true: np.ndarray, y_prob: np.ndarray) -> float:
+    """Compute error rate for predictions at 80%+ confidence."""
+    y_pred = (y_prob >= 0.5).astype(int)
+    is_error = y_pred != y_true
+    tier_mask = y_prob >= 0.80
+    tier_total = int(tier_mask.sum())
+    if tier_total == 0:
+        return 0.0
+    tier_errors = int((tier_mask & is_error).sum())
+    return tier_errors / tier_total
 
 
 class Diagnostics:
@@ -83,63 +145,100 @@ class Diagnostics:
 
     def _segment_metrics(
         self, df: pl.DataFrame, y_true: np.ndarray, y_prob: np.ndarray
-    ) -> dict[str, dict[str, dict[str, float]]]:
-        """Compute metrics for each segment."""
-        result: dict[str, dict[str, dict[str, float]]] = {}
+    ) -> dict[str, Any]:
+        """Compute metrics with circuit as primary segment.
 
-        # Circuit segment
-        result["circuit"] = {}
+        Returns structure:
+        {
+            "by_circuit": {
+                "chal": {
+                    "overall": {metrics with calibration},
+                    "surface": {"Clay": {...}, "Hard": {...}},
+                    "round_group": {"Qualifying": {...}, "Early": {...}, "Late": {...}},
+                },
+                "tour": {...},
+            },
+            "overall": {
+                "surface": {"Clay": {...}, ...},
+                "round_group": {...},
+            }
+        }
+        """
+        result: dict[str, Any] = {"by_circuit": {}, "overall": {}}
+
+        # Precompute round groups for the whole dataframe
+        round_groups_arr = None
+        if "round" in df.columns:
+            round_groups_arr = df["round"].fill_null("").map_elements(
+                self._get_round_group, return_dtype=pl.Utf8
+            ).to_numpy()
+
+        # Get list of circuits
+        circuits = []
         if "circuit" in df.columns:
-            for circuit in df["circuit"].drop_nulls().unique().sort().to_list():
-                mask = (df["circuit"] == circuit).fill_null(False).to_numpy()
-                if mask.any():
-                    result["circuit"][circuit] = _compute_metrics_for_segment(
-                        y_true[mask], y_prob[mask]
-                    )
+            circuits = df["circuit"].drop_nulls().unique().sort().to_list()
 
-        # Surface segment
-        result["surface"] = {}
+        # Process each circuit
+        for circuit in circuits:
+            circuit_mask = (df["circuit"] == circuit).fill_null(False).to_numpy()
+            if not circuit_mask.any():
+                continue
+
+            circuit_y_true = y_true[circuit_mask]
+            circuit_y_prob = y_prob[circuit_mask]
+            circuit_df = df.filter(pl.col("circuit") == circuit)
+
+            circuit_data: dict[str, Any] = {}
+
+            # Overall metrics for this circuit
+            circuit_data["overall"] = _compute_metrics_for_segment(
+                circuit_y_true, circuit_y_prob, include_calibration=True
+            )
+
+            # Surface subsegments within this circuit
+            circuit_data["surface"] = {}
+            if "surface" in df.columns:
+                for surface in circuit_df["surface"].drop_nulls().unique().sort().to_list():
+                    surface_mask = (circuit_df["surface"] == surface).fill_null(False).to_numpy()
+                    if surface_mask.any():
+                        circuit_data["surface"][surface] = _compute_metrics_for_segment(
+                            circuit_y_true[surface_mask],
+                            circuit_y_prob[surface_mask],
+                            include_calibration=True,
+                        )
+
+            # Round group subsegments within this circuit
+            circuit_data["round_group"] = {}
+            if round_groups_arr is not None:
+                circuit_round_groups = round_groups_arr[circuit_mask]
+                for group in ["Qualifying", "Early", "Late", "Other"]:
+                    group_mask = circuit_round_groups == group
+                    if group_mask.any():
+                        circuit_data["round_group"][group] = _compute_metrics_for_segment(
+                            circuit_y_true[group_mask],
+                            circuit_y_prob[group_mask],
+                            include_calibration=True,
+                        )
+
+            result["by_circuit"][circuit] = circuit_data
+
+        # Overall (non-circuit-specific) segments for backwards compatibility
+        result["overall"]["surface"] = {}
         if "surface" in df.columns:
             for surface in df["surface"].drop_nulls().unique().sort().to_list():
                 mask = (df["surface"] == surface).fill_null(False).to_numpy()
                 if mask.any():
-                    result["surface"][surface] = _compute_metrics_for_segment(
-                        y_true[mask], y_prob[mask]
+                    result["overall"]["surface"][surface] = _compute_metrics_for_segment(
+                        y_true[mask], y_prob[mask], include_calibration=True
                     )
 
-        # Round group segment
-        result["round_group"] = {}
-        result["round_raw"] = {}
-        if "round" in df.columns:
-            round_groups = df["round"].fill_null("").map_elements(
-                self._get_round_group, return_dtype=pl.Utf8
-            ).to_numpy()
+        result["overall"]["round_group"] = {}
+        if round_groups_arr is not None:
             for group in ["Qualifying", "Early", "Late", "Other"]:
-                mask = round_groups == group
+                mask = round_groups_arr == group
                 if mask.any():
-                    result["round_group"][group] = _compute_metrics_for_segment(
-                        y_true[mask], y_prob[mask]
-                    )
-
-            # Raw rounds (JSON only, not flattened to metrics)
-            for round_val in df["round"].unique().to_list():
-                mask = (df["round"] == round_val).fill_null(False).to_numpy()
-                if mask.any():
-                    result["round_raw"][round_val] = _compute_metrics_for_segment(
-                        y_true[mask], y_prob[mask]
-                    )
-
-        # Ranking bucket segment
-        result["ranking_bucket"] = {}
-        if "player_ranking" in df.columns:
-            ranking_buckets = np.array([
-                self._get_ranking_bucket(r) for r in df["player_ranking"].to_list()
-            ])
-            for bucket, _, _ in RANKING_BUCKETS:
-                mask = ranking_buckets == bucket
-                if mask.any():
-                    result["ranking_bucket"][bucket] = _compute_metrics_for_segment(
-                        y_true[mask], y_prob[mask]
+                    result["overall"]["round_group"][group] = _compute_metrics_for_segment(
+                        y_true[mask], y_prob[mask], include_calibration=True
                     )
 
         return result
@@ -364,7 +463,7 @@ class Diagnostics:
 class DiagnosticResults:
     """Container for all diagnostic results."""
 
-    segments: dict[str, dict[str, dict[str, float]]]
+    segments: dict[str, Any]
     calibration: dict[str, Any]
     errors: dict[str, Any]
     temporal: dict[str, Any]
@@ -374,12 +473,32 @@ class DiagnosticResults:
         """Flatten results to MLflow-loggable metrics."""
         result: dict[str, float] = {}
 
-        # Flatten segment metrics
-        for segment_type, segments in self.segments.items():
-            for segment_value, metrics in segments.items():
+        # Flatten circuit-based segment metrics
+        by_circuit = self.segments.get("by_circuit", {})
+        for circuit, circuit_data in by_circuit.items():
+            # Circuit overall
+            if "overall" in circuit_data:
+                for metric_name, value in circuit_data["overall"].items():
+                    if metric_name != "n_matches" and isinstance(value, (int, float)):
+                        key = f"segment_{circuit}_{metric_name}"
+                        result[key] = value
+
+            # Circuit subsegments
+            for subseg_type in ["surface", "round_group"]:
+                if subseg_type in circuit_data:
+                    for subseg_value, metrics in circuit_data[subseg_type].items():
+                        for metric_name, value in metrics.items():
+                            if metric_name != "n_matches" and isinstance(value, (int, float)):
+                                key = f"segment_{circuit}_{subseg_type}_{subseg_value}_{metric_name}"
+                                result[key] = value
+
+        # Flatten overall segment metrics (non-circuit-specific)
+        overall = self.segments.get("overall", {})
+        for seg_type, segments in overall.items():
+            for seg_value, metrics in segments.items():
                 for metric_name, value in metrics.items():
-                    if metric_name != "n_matches":
-                        key = f"segment_{segment_type}_{segment_value}_{metric_name}"
+                    if metric_name != "n_matches" and isinstance(value, (int, float)):
+                        key = f"segment_overall_{seg_type}_{seg_value}_{metric_name}"
                         result[key] = value
 
         # Add calibration metrics

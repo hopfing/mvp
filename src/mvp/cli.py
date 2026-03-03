@@ -44,20 +44,51 @@ def print_run_summary(results: dict[str, Any], name: str | None = None) -> None:
         print("=" * 70 + "\n")
         return
 
-    # Segments with multiple metrics
+    # Circuit-based segments with subsegments
     segments = diagnostics.segments
-    if segments:
-        print("\nSegments:")
-        for seg_type in ["circuit", "surface", "round_group"]:
-            if seg_type not in segments:
-                continue
-            print(f"  {seg_type}:")
-            for name, seg_metrics in segments[seg_type].items():
-                acc = seg_metrics.get('accuracy', 0)
-                auc = seg_metrics.get('roc_auc', 0)
-                ll = seg_metrics.get('log_loss', 0)
-                n = seg_metrics.get('n_matches', 0)
-                print(f"    {name:12} {acc:5.1%} acc | {auc:.3f} AUC | {ll:.3f} log_loss | n={n:,}")
+    by_circuit = segments.get("by_circuit", {})
+
+    if by_circuit:
+        print("\nSegments by Circuit:")
+        for circuit in sorted(by_circuit.keys()):
+            circuit_data = by_circuit[circuit]
+            overall = circuit_data.get("overall", {})
+
+            # Circuit header with overall metrics
+            acc = overall.get('accuracy', 0)
+            auc = overall.get('roc_auc', 0)
+            ll = overall.get('log_loss', 0)
+            cal = overall.get('calibration_error', 0)
+            err = overall.get('error_rate_80plus', 0)
+            n = overall.get('n_matches', 0)
+            print(f"\n  {circuit.upper()}  {acc:5.1%} acc | {auc:.3f} AUC | {ll:.3f} ll | {cal:.1%} cal | {err:.1%} err80 | n={n:,}")
+
+            # Surface subsegments
+            if circuit_data.get("surface"):
+                print("    surface:")
+                for surface, m in sorted(circuit_data["surface"].items()):
+                    acc = m.get('accuracy', 0)
+                    auc = m.get('roc_auc', 0)
+                    ll = m.get('log_loss', 0)
+                    cal = m.get('calibration_error', 0)
+                    err = m.get('error_rate_80plus', 0)
+                    n = m.get('n_matches', 0)
+                    print(f"      {surface:8} {acc:5.1%} | {auc:.3f} | {ll:.3f} | {cal:.1%} | {err:.1%} | n={n:,}")
+
+            # Round group subsegments
+            if circuit_data.get("round_group"):
+                print("    round:")
+                for group in ["Qualifying", "Early", "Late", "Other"]:
+                    if group not in circuit_data["round_group"]:
+                        continue
+                    m = circuit_data["round_group"][group]
+                    acc = m.get('accuracy', 0)
+                    auc = m.get('roc_auc', 0)
+                    ll = m.get('log_loss', 0)
+                    cal = m.get('calibration_error', 0)
+                    err = m.get('error_rate_80plus', 0)
+                    n = m.get('n_matches', 0)
+                    print(f"      {group:10} {acc:5.1%} | {auc:.3f} | {ll:.3f} | {cal:.1%} | {err:.1%} | n={n:,}")
 
     # Calibration buckets table
     cal_data = diagnostics.calibration

@@ -99,7 +99,7 @@ class MatchCentreExtractor(BaseExtractor):
                 existing = set()
             else:
                 existing = {p.stem for p in self.list_files(data_dir, "*.json")}
-            to_fetch = [mid for mid in match_ids if mid.upper() not in existing]
+            to_fetch = [mid.upper() for mid in match_ids if mid.upper() not in existing]
             to_fetch_by_type[dt] = set(to_fetch)
 
         # Get union of all matches that need fetching
