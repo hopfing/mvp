@@ -98,7 +98,7 @@ class MatchCentreExtractor(BaseExtractor):
             if refresh:
                 existing = set()
             else:
-                existing = {p.stem for p in self.list_files(data_dir, "*.json")}
+                existing = {p.stem.upper() for p in self.list_files(data_dir, "*.json")}
             to_fetch = [mid.upper() for mid in match_ids if mid.upper() not in existing]
             to_fetch_by_type[dt] = set(to_fetch)
 

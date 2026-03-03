@@ -36,8 +36,8 @@ class MatchStatsExtractor(BaseExtractor):
         if refresh:
             existing = set()
         else:
-            existing = {p.stem for p in self.list_files(stats_dir, "*.json")}
-        to_fetch = [mid for mid in match_ids if mid not in existing]
+            existing = {p.stem.upper() for p in self.list_files(stats_dir, "*.json")}
+        to_fetch = [mid for mid in match_ids if mid.upper() not in existing]
 
         logger.info(
             "%s: %d match IDs, %d already fetched, %d to fetch",
