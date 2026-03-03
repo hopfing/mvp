@@ -45,6 +45,7 @@ class DiscoveryOptions(BaseModel):
     min_features: int = 5
     max_features: int | None = None
     exclude_features: list[str] = []
+    window_sizes: list[int] | None = None  # None = all defaults, [] = all-time only
 
 
 class ModelConfig(BaseModel):

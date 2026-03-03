@@ -42,21 +42,27 @@ class DiscoveryResult:
     recommended_config_path: Path | None = None
 
 
-def get_all_feature_specs() -> list[str]:
+DEFAULT_day_windows = [7, 14, 30, 60, 90, 180, 365]
+
+
+def get_all_feature_specs(window_sizes: list[int] | None = None) -> list[str]:
     """Get all registered features with parameter variants.
 
     For features with a days parameter, generates:
     - All-time variant (no params)
-    - Windowed variants for each standard window size
+    - Windowed variants for each window size in window_sizes
 
     For mirrorable features (mirror=True), generates both player_* and opp_* versions.
     For diff-style features (mirror=False), only generates player_* version.
     For match-level features (match_level=True), generates unprefixed version.
 
+    Args:
+        window_sizes: Window sizes to include. None = all defaults, [] = all-time only.
+
     Returns:
         List of feature specs like ["player_win_rate", "opp_win_rate", "is_clay", ...].
     """
-    DAY_WINDOWS = [7, 14, 30, 60, 90, 180, 365]
+    day_windows = DEFAULT_day_windows if window_sizes is None else window_sizes
 
     registry = get_registry()
     feature_names = registry.list_features()
@@ -71,7 +77,7 @@ def get_all_feature_specs() -> list[str]:
                 specs.append(name)
             elif "days" in feature_def.params and len(feature_def.params) == 1:
                 specs.append(name)  # All-time
-                for days in DAY_WINDOWS:
+                for days in day_windows:
                     specs.append(f"{name}(days={days})")
             else:
                 default_params = {}
@@ -98,7 +104,7 @@ def get_all_feature_specs() -> list[str]:
         elif "days" in feature_def.params and len(feature_def.params) == 1:
             for prefix in prefixes:
                 specs.append(f"{prefix}_{name}")  # All-time (days=None)
-                for days in DAY_WINDOWS:
+                for days in day_windows:
                     specs.append(f"{prefix}_{name}(days={days})")
         else:
             default_params = {}
@@ -240,7 +246,9 @@ class FeatureDiscovery:
             SelectionResult with selected features.
         """
         if all_features is None:
-            all_features = get_all_feature_specs()
+            all_features = get_all_feature_specs(
+                window_sizes=self.config.discovery.window_sizes
+            )
 
         if self.config.discovery.exclude_features:
             excluded = set(self.config.discovery.exclude_features)
