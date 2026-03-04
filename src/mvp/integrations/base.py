@@ -265,24 +265,30 @@ def merge_predictions(
 
     # 3. Auto-fill results
     if len(merged) > 0 and len(matches) > 0:
+        # Find winner player_id and P1 player_id per match
+        won_rows = matches.filter(pl.col("won") == True).select(
+            "match_uid",
+            pl.col("player_id").alias("winner_id"),
+        )
         if "draw_p1_id" in matches.columns:
-            canonical = matches.filter(
-                pl.col("won").is_not_null()
-                & (
-                    pl.when(pl.col("draw_p1_id").is_not_null())
-                    .then(pl.col("player_id") == pl.col("draw_p1_id"))
-                    .otherwise(pl.col("player_id") < pl.col("opp_id"))
-                )
+            p1_rows = matches.group_by("match_uid").agg(
+                pl.col("draw_p1_id").first().alias("_draw_p1"),
+                pl.col("player_id").min().alias("_alpha_p1"),
+            ).select(
+                "match_uid",
+                pl.when(pl.col("_draw_p1").is_not_null())
+                .then(pl.col("_draw_p1"))
+                .otherwise(pl.col("_alpha_p1"))
+                .alias("p1_id"),
             )
         else:
-            canonical = matches.filter(
-                pl.col("won").is_not_null()
-                & (pl.col("player_id") < pl.col("opp_id"))
+            p1_rows = matches.group_by("match_uid").agg(
+                pl.col("player_id").min().alias("p1_id"),
             )
-
+        result_lookup = won_rows.join(p1_rows, on="match_uid")
         result_map: dict[str, str] = {}
-        for row in canonical.select("match_uid", "won").iter_rows(named=True):
-            result_map[row["match_uid"]] = "P1" if row["won"] else "P2"
+        for row in result_lookup.iter_rows(named=True):
+            result_map[row["match_uid"]] = "P1" if row["winner_id"] == row["p1_id"] else "P2"
 
         new_results = []
         for row in merged.iter_rows(named=True):
