@@ -579,11 +579,11 @@ for _m in _STYLE_MATCHUP_PAIRS:
     mirror=True,
 )
 def is_power_server() -> pl.Expr:
-    speed_p75 = pl.col("player_style_avg_1st_serve_speed").quantile(0.75)
-    ace_p75 = pl.col("player_svc_ace_pct").quantile(0.75)
+    speed_p50 = pl.col("player_style_avg_1st_serve_speed").quantile(0.50)
+    ace_p50 = pl.col("player_svc_ace_pct").quantile(0.50)
     return (
-        (pl.col("player_style_avg_1st_serve_speed") > speed_p75)
-        & (pl.col("player_svc_ace_pct") > ace_p75)
+        (pl.col("player_style_avg_1st_serve_speed") > speed_p50)
+        & (pl.col("player_svc_ace_pct") > ace_p50)
     ).cast(pl.Int8)
 
 
@@ -595,47 +595,47 @@ def is_power_server() -> pl.Expr:
     mirror=True,
 )
 def is_placement_server() -> pl.Expr:
-    speed_p75 = pl.col("player_style_avg_1st_serve_speed").quantile(0.75)
-    ace_p75 = pl.col("player_svc_ace_pct").quantile(0.75)
+    speed_p50 = pl.col("player_style_avg_1st_serve_speed").quantile(0.50)
+    ace_p50 = pl.col("player_svc_ace_pct").quantile(0.50)
     return (
-        (pl.col("player_svc_ace_pct") > ace_p75)
-        & (pl.col("player_style_avg_1st_serve_speed") <= speed_p75)
+        (pl.col("player_svc_ace_pct") > ace_p50)
+        & (pl.col("player_style_avg_1st_serve_speed") <= speed_p50)
     ).cast(pl.Int8)
 
 
 @feature(
     name="is_counterpuncher",
     params=[],
-    description="Wins long rallies, few UEs, strong return (bottom quartile UEs)",
+    description="Wins long rallies, few UEs, strong return (above median all)",
     depends_on=["style_long_rally_win_pct", "style_ue_rate", "ret_first_serve_win_pct"],
     mirror=True,
 )
 def is_counterpuncher() -> pl.Expr:
-    rally_p75 = pl.col("player_style_long_rally_win_pct").quantile(0.75)
-    ue_p25 = pl.col("player_style_ue_rate").quantile(0.25)
-    ret_p75 = pl.col("player_ret_first_serve_win_pct").quantile(0.75)
+    rally_p50 = pl.col("player_style_long_rally_win_pct").quantile(0.50)
+    ue_p50 = pl.col("player_style_ue_rate").quantile(0.50)
+    ret_p50 = pl.col("player_ret_first_serve_win_pct").quantile(0.50)
     return (
-        (pl.col("player_style_long_rally_win_pct") > rally_p75)
-        & (pl.col("player_style_ue_rate") < ue_p25)
-        & (pl.col("player_ret_first_serve_win_pct") > ret_p75)
+        (pl.col("player_style_long_rally_win_pct") > rally_p50)
+        & (pl.col("player_style_ue_rate") < ue_p50)
+        & (pl.col("player_ret_first_serve_win_pct") > ret_p50)
     ).cast(pl.Int8)
 
 
 @feature(
     name="is_aggressive_baseliner",
     params=[],
-    description="High winner rate, efficient, strong ground strokes (top quartile all)",
+    description="High winner rate, efficient, strong ground strokes (above median all)",
     depends_on=["style_winner_rate", "style_winner_ue_ratio", "style_ground_stroke_winner_rate"],
     mirror=True,
 )
 def is_aggressive_baseliner() -> pl.Expr:
-    wr_p75 = pl.col("player_style_winner_rate").quantile(0.75)
-    wur_p75 = pl.col("player_style_winner_ue_ratio").quantile(0.75)
-    gswr_p75 = pl.col("player_style_ground_stroke_winner_rate").quantile(0.75)
+    wr_p50 = pl.col("player_style_winner_rate").quantile(0.50)
+    wur_p50 = pl.col("player_style_winner_ue_ratio").quantile(0.50)
+    gswr_p50 = pl.col("player_style_ground_stroke_winner_rate").quantile(0.50)
     return (
-        (pl.col("player_style_winner_rate") > wr_p75)
-        & (pl.col("player_style_winner_ue_ratio") > wur_p75)
-        & (pl.col("player_style_ground_stroke_winner_rate") > gswr_p75)
+        (pl.col("player_style_winner_rate") > wr_p50)
+        & (pl.col("player_style_winner_ue_ratio") > wur_p50)
+        & (pl.col("player_style_ground_stroke_winner_rate") > gswr_p50)
     ).cast(pl.Int8)
 
 
@@ -666,16 +666,16 @@ def is_clay_specialist() -> pl.Expr:
 @feature(
     name="is_clutch_player",
     params=[],
-    description="High BP save and BP convert rates (top quartile both)",
+    description="High BP save and BP convert rates (above median both)",
     depends_on=["svc_bp_save_pct", "ret_bp_convert_pct"],
     mirror=True,
 )
 def is_clutch_player() -> pl.Expr:
-    bp_save_p75 = pl.col("player_svc_bp_save_pct").quantile(0.75)
-    bp_conv_p75 = pl.col("player_ret_bp_convert_pct").quantile(0.75)
+    bp_save_p50 = pl.col("player_svc_bp_save_pct").quantile(0.50)
+    bp_conv_p50 = pl.col("player_ret_bp_convert_pct").quantile(0.50)
     return (
-        (pl.col("player_svc_bp_save_pct") > bp_save_p75)
-        & (pl.col("player_ret_bp_convert_pct") > bp_conv_p75)
+        (pl.col("player_svc_bp_save_pct") > bp_save_p50)
+        & (pl.col("player_ret_bp_convert_pct") > bp_conv_p50)
     ).cast(pl.Int8)
 
 
