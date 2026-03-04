@@ -418,6 +418,39 @@ class TestMatchBeatsAggregator:
         assert p1_row["total_points"][0] == p2_row["total_points"][0]
         assert p1_row["match_duration"][0] == p2_row["match_duration"][0]
 
+    def test_aggregates_max_2nd_serve_speed(self, tmp_path):
+        """Should compute max 2nd serve speed per player."""
+        _write_match_beats_parquet(tmp_path, points=_make_singles_points())
+        agg = MatchBeatsAggregator(data_root=tmp_path)
+        result = agg.run()
+        p1_row = result.filter(pl.col("player_id") == "PLAYER1")
+        p2_row = result.filter(pl.col("player_id") == "PLAYER2")
+        # P1 2nd serve (server="1", serve=2): speed=150 → max=150
+        assert p1_row["player_max_2nd_serve_speed"][0] == 150.0
+        # P2 2nd serve (server="2", serve=2): speed=145 → max=145
+        assert p2_row["player_max_2nd_serve_speed"][0] == 145.0
+
+    def test_aggregates_std_1st_serve_speed(self, tmp_path):
+        """Should compute std dev of 1st serve speeds per player."""
+        _write_match_beats_parquet(tmp_path, points=_make_singles_points())
+        agg = MatchBeatsAggregator(data_root=tmp_path)
+        result = agg.run()
+        p1_row = result.filter(pl.col("player_id") == "PLAYER1")
+        # P1 1st serve speeds (server="1", serve=1): [200, 190, 185] → std ≈ 7.64
+        assert p1_row["player_std_1st_serve_speed"][0] == pytest.approx(7.64, abs=0.01)
+
+    def test_aggregates_service_games(self, tmp_path):
+        """Should count service games per player."""
+        _write_match_beats_parquet(tmp_path, points=_make_singles_points())
+        agg = MatchBeatsAggregator(data_root=tmp_path)
+        result = agg.run()
+        p1_row = result.filter(pl.col("player_id") == "PLAYER1")
+        p2_row = result.filter(pl.col("player_id") == "PLAYER2")
+        # Game 1: server="1" (point_num=1 exists) → p1 has 1 service game
+        # Game 2: server="2" (point_num=1 exists) → p2 has 1 service game
+        assert p1_row["player_service_games"][0] == 1
+        assert p2_row["player_service_games"][0] == 1
+
     def test_returns_none_when_no_data(self, tmp_path):
         """Should return None when no staged data exists."""
         agg = MatchBeatsAggregator(data_root=tmp_path)

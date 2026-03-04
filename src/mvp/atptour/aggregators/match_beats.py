@@ -106,16 +106,23 @@ class MatchBeatsAggregator(BaseJob):
             ((pl.col("scorer") == "2") & (pl.col("result") == "FE")).sum().alias("p1_fes"),
             ((pl.col("scorer") == "1") & (pl.col("result") == "UE")).sum().alias("p2_ues"),
             ((pl.col("scorer") == "1") & (pl.col("result") == "FE")).sum().alias("p2_fes"),
+            # Service games
+            ((pl.col("server") == "1") & (pl.col("point_num") == 1)).sum().alias("p1_service_games"),
+            ((pl.col("server") == "2") & (pl.col("point_num") == 1)).sum().alias("p2_service_games"),
             # Serve speed - P1
             pl.col("serve_speed").filter((pl.col("server") == "1") & (pl.col("serve") == 1)).mean().alias("p1_avg_1st_serve_speed"),
             pl.col("serve_speed").filter((pl.col("server") == "1") & (pl.col("serve") == 1)).max().alias("p1_max_1st_serve_speed"),
+            pl.col("serve_speed").filter((pl.col("server") == "1") & (pl.col("serve") == 1)).std().alias("p1_std_1st_serve_speed"),
             pl.col("serve_speed").filter((pl.col("server") == "1") & (pl.col("serve") == 2)).mean().alias("p1_avg_2nd_serve_speed"),
+            pl.col("serve_speed").filter((pl.col("server") == "1") & (pl.col("serve") == 2)).max().alias("p1_max_2nd_serve_speed"),
             pl.col("fault_serve_speed").filter(pl.col("server") == "1").mean().alias("p1_avg_fault_serve_speed"),
             pl.col("fault_serve_speed").filter(pl.col("server") == "1").max().alias("p1_max_fault_serve_speed"),
             # Serve speed - P2
             pl.col("serve_speed").filter((pl.col("server") == "2") & (pl.col("serve") == 1)).mean().alias("p2_avg_1st_serve_speed"),
             pl.col("serve_speed").filter((pl.col("server") == "2") & (pl.col("serve") == 1)).max().alias("p2_max_1st_serve_speed"),
+            pl.col("serve_speed").filter((pl.col("server") == "2") & (pl.col("serve") == 1)).std().alias("p2_std_1st_serve_speed"),
             pl.col("serve_speed").filter((pl.col("server") == "2") & (pl.col("serve") == 2)).mean().alias("p2_avg_2nd_serve_speed"),
+            pl.col("serve_speed").filter((pl.col("server") == "2") & (pl.col("serve") == 2)).max().alias("p2_max_2nd_serve_speed"),
             pl.col("fault_serve_speed").filter(pl.col("server") == "2").mean().alias("p2_avg_fault_serve_speed"),
             pl.col("fault_serve_speed").filter(pl.col("server") == "2").max().alias("p2_max_fault_serve_speed"),
             # Rally overall
