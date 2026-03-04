@@ -435,3 +435,42 @@ class TestStyleMatchupFeatures:
         ).collect()
         assert result["m"][0] == pytest.approx(0.25)
         assert result["m"][1] == pytest.approx(0.15)
+
+
+class TestStyleBoolLabels:
+    """Tests for Layer 2 bool style labels."""
+
+    def test_is_power_server_registered(self):
+        registry = get_registry()
+        feat = registry.get("is_power_server")
+        assert feat.mirror is True
+        assert "style_avg_1st_serve_speed" in feat.depends_on
+        assert "svc_ace_pct" in feat.depends_on
+
+    def test_is_power_server_computes(self):
+        from mvp.model.features.style import is_power_server
+        df = pl.DataFrame({
+            "player_style_avg_1st_serve_speed": [
+                220.0, 215.0, 210.0, 205.0, 195.0, 190.0, 185.0, 180.0,
+            ],
+            "player_svc_ace_pct": [
+                0.25, 0.22, 0.18, 0.15, 0.12, 0.10, 0.08, 0.05,
+            ],
+        }).lazy()
+        result = df.with_columns(is_power_server().alias("is_power_server")).collect()
+        # Top 2 rows have both metrics above p75 -> should be 1
+        # p75 of speed ~ 211.25, p75 of ace ~ 0.1925
+        assert result["is_power_server"][0] == 1
+        assert result["is_power_server"][1] == 1
+        assert result["is_power_server"][7] == 0
+
+    def test_all_7_labels_registered(self):
+        registry = get_registry()
+        labels = [
+            "is_power_server", "is_placement_server",
+            "is_counterpuncher", "is_aggressive_baseliner",
+            "is_net_rusher", "is_clay_specialist", "is_clutch_player",
+        ]
+        for name in labels:
+            feat = registry.get(name)
+            assert feat.mirror is True, f"{name} should mirror"
