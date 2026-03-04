@@ -6,12 +6,14 @@ from datetime import date, datetime
 import polars as pl
 
 from mvp.integrations.base import (
+    COL_LETTERS,
     COLUMN_NAMES,
     COLUMN_SCHEMA,
     FORMULA_COLUMNS,
     PIPELINE_COLUMN_ORDER,
     PIPELINE_COLUMNS,
     USER_COLUMNS,
+    generate_formulas,
     merge_predictions,
     prepare_predictions,
 )
@@ -365,3 +367,47 @@ class TestMergePredictions:
         })
         result = merge_predictions(existing, new, matches)
         assert len(result) == 1
+
+
+class TestColLetters:
+    def test_first_column_is_A(self):
+        assert COL_LETTERS[COLUMN_NAMES[0]] == "A"
+
+    def test_26th_column_is_Z(self):
+        assert COL_LETTERS[COLUMN_NAMES[25]] == "Z"
+
+    def test_27th_column_is_AA(self):
+        assert COL_LETTERS[COLUMN_NAMES[26]] == "AA"
+
+
+class TestGenerateFormulas:
+    def test_returns_all_formula_columns(self):
+        formulas = generate_formulas(row=2)
+        assert set(formulas.keys()) == FORMULA_COLUMNS
+
+    def test_p1_edge_formula(self):
+        formulas = generate_formulas(row=2)
+        assert formulas["p1_edge"].startswith("=IF(")
+        assert "1/" in formulas["p1_edge"]
+
+    def test_to_win_references_bet_side(self):
+        formulas = generate_formulas(row=2)
+        assert '"P1"' in formulas["to_win"]
+        assert '"P2"' in formulas["to_win"]
+
+    def test_net_references_bet_result(self):
+        formulas = generate_formulas(row=2)
+        assert '"W"' in formulas["net"]
+        assert '"L"' in formulas["net"]
+        assert '"V"' in formulas["net"]
+
+    def test_formulas_use_correct_row_number(self):
+        f2 = generate_formulas(row=2)
+        f5 = generate_formulas(row=5)
+        assert "2" in f2["p1_edge"] and "5" not in f2["p1_edge"]
+        assert "5" in f5["p1_edge"] and "2" not in f5["p1_edge"]
+
+    def test_all_formulas_start_with_equals(self):
+        formulas = generate_formulas(row=2)
+        for name, formula in formulas.items():
+            assert formula.startswith("="), f"{name} doesn't start with ="

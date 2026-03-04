@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import string
 from datetime import datetime
 from typing import Protocol
 from zoneinfo import ZoneInfo
@@ -61,6 +62,53 @@ COLUMN_NAMES = [c["name"] for c in COLUMN_SCHEMA]
 PIPELINE_COLUMNS = {c["name"] for c in COLUMN_SCHEMA if c["owner"] == "pipeline"}
 USER_COLUMNS = {c["name"] for c in COLUMN_SCHEMA if c["owner"] == "user"}
 FORMULA_COLUMNS = {c["name"] for c in COLUMN_SCHEMA if c["owner"] == "formula"}
+
+def _col_letter(index: int) -> str:
+    """Convert 0-based column index to spreadsheet column letter(s)."""
+    if index < 26:
+        return string.ascii_uppercase[index]
+    return string.ascii_uppercase[index // 26 - 1] + string.ascii_uppercase[index % 26]
+
+
+COL_LETTERS = {col["name"]: _col_letter(i) for i, col in enumerate(COLUMN_SCHEMA)}
+
+
+def generate_formulas(row: int) -> dict[str, str]:
+    """Return a dict mapping formula column name to spreadsheet formula for the given row.
+
+    Args:
+        row: 1-indexed row number (row 1 = header, row 2 = first data row).
+
+    Returns:
+        Dict mapping each formula column name to its formula string.
+    """
+    r = row
+    p1_prob = COL_LETTERS["p1_prob"]
+    p2_prob = COL_LETTERS["p2_prob"]
+    p1_odds = COL_LETTERS["p1_odds"]
+    p2_odds = COL_LETTERS["p2_odds"]
+    pin_p1 = COL_LETTERS["pin_p1_odds"]
+    pin_p2 = COL_LETTERS["pin_p2_odds"]
+    bet_side = COL_LETTERS["bet_side"]
+    stake_col = COL_LETTERS["stake"]
+    to_win_col = COL_LETTERS["to_win"]
+    bet_result_col = COL_LETTERS["bet_result"]
+    p1_edge_col = COL_LETTERS["p1_edge"]
+    p1_pin_edge_col = COL_LETTERS["p1_pin_edge"]
+    p2_edge_col = COL_LETTERS["p2_edge"]
+    p2_pin_edge_col = COL_LETTERS["p2_pin_edge"]
+
+    return {
+        "p1_edge": f'=IF({p1_odds}{r}="", "", {p1_prob}{r}-(1/{p1_odds}{r}))',
+        "p1_pin_edge": f'=IF({pin_p1}{r}="", "", {p1_prob}{r}-(1/{pin_p1}{r}))',
+        "p2_edge": f'=IF({p2_odds}{r}="", "", {p2_prob}{r}-(1/{p2_odds}{r}))',
+        "p2_pin_edge": f'=IF({pin_p2}{r}="", "", {p2_prob}{r}-(1/{pin_p2}{r}))',
+        "to_win": f'=IF({bet_side}{r}="P1", {stake_col}{r}*({p1_odds}{r}-1), IF({bet_side}{r}="P2", {stake_col}{r}*({p2_odds}{r}-1), ""))',
+        "bet_edge": f'=IF({bet_side}{r}="P1", {p1_edge_col}{r}, IF({bet_side}{r}="P2", {p2_edge_col}{r}, ""))',
+        "bet_pin_edge": f'=IF({bet_side}{r}="P1", {p1_pin_edge_col}{r}, IF({bet_side}{r}="P2", {p2_pin_edge_col}{r}, ""))',
+        "net": f'=IF({bet_result_col}{r}="W", {to_win_col}{r}, IF({bet_result_col}{r}="L", -{stake_col}{r}, IF({bet_result_col}{r}="V", 0, "")))',
+    }
+
 
 CIRCUIT_LABELS = {"tour": "ATP", "chal": "CH"}
 
