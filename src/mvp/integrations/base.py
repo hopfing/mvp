@@ -268,7 +268,11 @@ def merge_predictions(
         if "draw_p1_id" in matches.columns:
             canonical = matches.filter(
                 pl.col("won").is_not_null()
-                & (pl.col("player_id") == pl.col("draw_p1_id"))
+                & (
+                    pl.when(pl.col("draw_p1_id").is_not_null())
+                    .then(pl.col("player_id") == pl.col("draw_p1_id"))
+                    .otherwise(pl.col("player_id") < pl.col("opp_id"))
+                )
             )
         else:
             canonical = matches.filter(
