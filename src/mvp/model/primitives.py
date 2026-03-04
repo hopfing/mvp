@@ -69,6 +69,33 @@ def rolling_mean(
     )
 
 
+def rolling_max(
+    col: str,
+    days: int,
+    group_by: str | list[str],
+    date_col: str = "effective_match_date",
+) -> pl.Expr:
+    """Max of column over past N days, excluding current row.
+
+    Args:
+        col: Column to find max of.
+        days: Window size in days.
+        group_by: Column(s) to group by (e.g., "player_id").
+        date_col: Date column for temporal ordering.
+
+    Returns:
+        Polars expression computing the rolling max.
+    """
+    if isinstance(group_by, str):
+        group_by = [group_by]
+
+    return (
+        pl.col(col)
+        .rolling_max_by(by=date_col, window_size=f"{days}d", closed="left")
+        .over(group_by)
+    )
+
+
 def rolling_count(
     days: int,
     group_by: str | list[str],

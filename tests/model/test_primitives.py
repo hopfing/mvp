@@ -8,6 +8,7 @@ from mvp.model.primitives import (
     cumulative_mean,
     cumulative_sum,
     rolling_count,
+    rolling_max,
     rolling_mean,
     rolling_sum,
 )
@@ -173,6 +174,59 @@ class TestRollingMean:
         # Row 0: no prior → null (not 100.0)
         # Row 1: 1 prior (100) → 100.0 (not 150.0)
         assert result["rolling_avg"].to_list() == [None, 100.0]
+
+
+class TestRollingMax:
+    """Tests for rolling_max primitive."""
+
+    def test_rolling_max_basic(self):
+        """Returns max value within window."""
+        df = pl.DataFrame(
+            {
+                "player_id": ["A"] * 4,
+                "effective_match_date": [
+                    date(2024, 1, 1),
+                    date(2024, 1, 5),
+                    date(2024, 1, 10),
+                    date(2024, 1, 15),
+                ],
+                "speed": [200.0, 190.0, 210.0, 195.0],
+            }
+        ).lazy()
+
+        result = df.with_columns(
+            rolling_max("speed", days=30, group_by="player_id").alias("max_speed")
+        ).collect()
+
+        # Row 0: no prior → null
+        # Row 1: [200] → 200
+        # Row 2: [200, 190] → 200
+        # Row 3: [200, 190, 210] → 210
+        assert result["max_speed"][0] is None
+        assert result["max_speed"][1] == 200.0
+        assert result["max_speed"][2] == 200.0
+        assert result["max_speed"][3] == 210.0
+
+    def test_rolling_max_respects_window(self):
+        """Only includes values within the window period."""
+        df = pl.DataFrame(
+            {
+                "player_id": ["A"] * 3,
+                "effective_match_date": [
+                    date(2024, 1, 1),
+                    date(2024, 1, 5),
+                    date(2024, 2, 10),  # 40 days after first
+                ],
+                "speed": [220.0, 190.0, 195.0],
+            }
+        ).lazy()
+
+        result = df.with_columns(
+            rolling_max("speed", days=7, group_by="player_id").alias("max_speed")
+        ).collect()
+
+        # Row 2: 7d window before Feb 10 = Feb 3 to Feb 9 → no matches → null
+        assert result["max_speed"][2] is None
 
 
 class TestRollingCount:
