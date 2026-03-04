@@ -1,5 +1,6 @@
 """Tests for prediction sync base module."""
 
+import logging
 from datetime import date, datetime
 
 import polars as pl
@@ -11,6 +12,7 @@ from mvp.integrations.base import (
     PIPELINE_COLUMN_ORDER,
     PIPELINE_COLUMNS,
     USER_COLUMNS,
+    merge_predictions,
     prepare_predictions,
 )
 
@@ -133,3 +135,233 @@ class TestPreparePredictions:
         df = prepare_predictions(_make_predictions())
         assert df.columns == PIPELINE_COLUMN_ORDER
         assert set(df.columns) == PIPELINE_COLUMNS
+
+
+def _make_sheet_row(**overrides):
+    """Build a single sheet row dict with all 34 columns."""
+    defaults = {col: "" for col in COLUMN_NAMES}
+    defaults.update({
+        "match_uid": "M1",
+        "match_date": "2024-01-15",
+        "match_time": "09:00",
+        "circuit": "ATP",
+        "tournament": "Test Open",
+        "surface": "Hard",
+        "round": "R32",
+        "p1": "John Smith",
+        "p2": "Jane Doe",
+        "p1_elo": "1530",
+        "p2_elo": "1470",
+        "p1_prob": "0.65",
+        "p2_prob": "0.35",
+        "prediction": "P1",
+        "tournament_day": "2024-01-15",
+        "model_version": "v1",
+        "predicted_at": "2024-01-14T12:00:00",
+    })
+    defaults.update(overrides)
+    return defaults
+
+
+def _sheet_df(rows):
+    """Build a DataFrame from list of row dicts, all Utf8."""
+    if not rows:
+        return pl.DataFrame(schema={col: pl.Utf8 for col in COLUMN_NAMES})
+    return pl.DataFrame(rows, schema={col: pl.Utf8 for col in COLUMN_NAMES})
+
+
+def _matches_df(rows):
+    """Build a minimal matches DataFrame for result lookup."""
+    return pl.DataFrame(rows)
+
+
+class TestMergePredictions:
+    def test_new_rows_added(self):
+        existing = _sheet_df([])
+        new = prepare_predictions(_make_predictions())
+        matches = _matches_df({
+            "match_uid": ["2024-0001-MS001"],
+            "won": [None],
+            "player_id": ["A"],
+            "opp_id": ["B"],
+        })
+        result = merge_predictions(existing, new, matches)
+        assert len(result) == 1
+        assert result["match_uid"][0] == "2024-0001-MS001"
+
+    def test_existing_rows_user_columns_preserved(self):
+        row = _make_sheet_row(
+            match_uid="2024-0001-MS001",
+            p1_odds="2.10",
+            stake="100",
+            bet_side="P1",
+            notes="my notes",
+        )
+        existing = _sheet_df([row])
+        new = prepare_predictions(_make_predictions())
+        matches = _matches_df({
+            "match_uid": ["2024-0001-MS001"],
+            "won": [None],
+            "player_id": ["A"],
+            "opp_id": ["B"],
+        })
+        result = merge_predictions(existing, new, matches)
+        assert len(result) == 1
+        assert result["p1_odds"][0] == "2.10"
+        assert result["stake"][0] == "100"
+        assert result["notes"][0] == "my notes"
+
+    def test_result_auto_filled_when_blank(self):
+        row = _make_sheet_row(match_uid="M1", result="")
+        existing = _sheet_df([row])
+        new = prepare_predictions(_make_predictions(match_uid="OTHER"))
+        matches = _matches_df({
+            "match_uid": ["M1", "M1"],
+            "won": [True, False],
+            "player_id": ["A", "B"],
+            "opp_id": ["B", "A"],
+        })
+        result = merge_predictions(existing, new, matches)
+        m1_row = result.filter(pl.col("match_uid") == "M1")
+        assert m1_row["result"][0] == "P1"
+
+    def test_result_p2_wins(self):
+        row = _make_sheet_row(match_uid="M1", result="")
+        existing = _sheet_df([row])
+        new = prepare_predictions(_make_predictions(match_uid="OTHER"))
+        matches = _matches_df({
+            "match_uid": ["M1", "M1"],
+            "won": [False, True],
+            "player_id": ["A", "B"],
+            "opp_id": ["B", "A"],
+        })
+        result = merge_predictions(existing, new, matches)
+        m1_row = result.filter(pl.col("match_uid") == "M1")
+        assert m1_row["result"][0] == "P2"
+
+    def test_result_not_overwritten_when_filled(self):
+        row = _make_sheet_row(match_uid="M1", result="P2")
+        existing = _sheet_df([row])
+        new = prepare_predictions(_make_predictions(match_uid="OTHER"))
+        matches = _matches_df({
+            "match_uid": ["M1", "M1"],
+            "won": [True, False],
+            "player_id": ["A", "B"],
+            "opp_id": ["B", "A"],
+        })
+        result = merge_predictions(existing, new, matches)
+        m1_row = result.filter(pl.col("match_uid") == "M1")
+        assert m1_row["result"][0] == "P2"
+
+    def test_result_mismatch_logs_warning(self, caplog):
+        row = _make_sheet_row(match_uid="M1", result="P2")
+        existing = _sheet_df([row])
+        new = prepare_predictions(_make_predictions(match_uid="OTHER"))
+        matches = _matches_df({
+            "match_uid": ["M1", "M1"],
+            "won": [True, False],
+            "player_id": ["A", "B"],
+            "opp_id": ["B", "A"],
+        })
+        with caplog.at_level(logging.WARNING):
+            merge_predictions(existing, new, matches)
+        assert "Result mismatch" in caplog.text
+
+    def test_result_with_draw_p1_id(self):
+        row = _make_sheet_row(match_uid="M1", result="")
+        existing = _sheet_df([row])
+        new = prepare_predictions(_make_predictions(match_uid="OTHER"))
+        matches = _matches_df({
+            "match_uid": ["M1", "M1"],
+            "won": [True, False],
+            "player_id": ["ZVEREV", "ALCARAZ"],
+            "opp_id": ["ALCARAZ", "ZVEREV"],
+            "draw_p1_id": ["ZVEREV", "ZVEREV"],
+        })
+        result = merge_predictions(existing, new, matches)
+        m1_row = result.filter(pl.col("match_uid") == "M1")
+        assert m1_row["result"][0] == "P1"
+
+    def test_sort_order(self):
+        row1 = _make_sheet_row(
+            match_uid="M1",
+            tournament_day="2024-01-16",
+            tournament="B Open",
+            match_time="10:00",
+        )
+        row2 = _make_sheet_row(
+            match_uid="M2",
+            tournament_day="2024-01-15",
+            tournament="A Open",
+            match_time="14:00",
+        )
+        existing = _sheet_df([row1, row2])
+        new = prepare_predictions(_make_predictions(match_uid="OTHER"))
+        matches = _matches_df({
+            "match_uid": ["M1", "M2"],
+            "won": [None, None],
+            "player_id": ["A", "A"],
+            "opp_id": ["B", "B"],
+        })
+        result = merge_predictions(existing, new, matches)
+        uids = result["match_uid"].to_list()
+        assert uids.index("M2") < uids.index("M1")
+
+    def test_output_has_all_34_columns(self):
+        existing = _sheet_df([])
+        new = prepare_predictions(_make_predictions())
+        matches = _matches_df({
+            "match_uid": ["2024-0001-MS001"],
+            "won": [None],
+            "player_id": ["A"],
+            "opp_id": ["B"],
+        })
+        result = merge_predictions(existing, new, matches)
+        assert list(result.columns) == COLUMN_NAMES
+        assert len(result.columns) == 34
+
+    def test_empty_existing_empty_new(self):
+        existing = _sheet_df([])
+        new = prepare_predictions(
+            pl.DataFrame(schema={
+                "match_uid": pl.Utf8,
+                "p1_id": pl.Utf8,
+                "p2_id": pl.Utf8,
+                "p1_name": pl.Utf8,
+                "p2_name": pl.Utf8,
+                "p1_win_prob": pl.Float64,
+                "p2_win_prob": pl.Float64,
+                "p1_elo": pl.Float64,
+                "p2_elo": pl.Float64,
+                "tournament_name": pl.Utf8,
+                "circuit": pl.Utf8,
+                "surface": pl.Utf8,
+                "round": pl.Utf8,
+                "effective_match_date": pl.Date,
+                "scheduled_datetime": pl.Datetime,
+                "model_version": pl.Utf8,
+                "predicted_at": pl.Datetime,
+            })
+        )
+        matches = _matches_df({
+            "match_uid": [],
+            "won": [],
+            "player_id": [],
+            "opp_id": [],
+        })
+        result = merge_predictions(existing, new, matches)
+        assert len(result) == 0
+        assert list(result.columns) == COLUMN_NAMES
+
+    def test_duplicate_match_uid_not_added(self):
+        row = _make_sheet_row(match_uid="2024-0001-MS001")
+        existing = _sheet_df([row])
+        new = prepare_predictions(_make_predictions())
+        matches = _matches_df({
+            "match_uid": ["2024-0001-MS001"],
+            "won": [None],
+            "player_id": ["A"],
+            "opp_id": ["B"],
+        })
+        result = merge_predictions(existing, new, matches)
+        assert len(result) == 1

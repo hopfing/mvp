@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Protocol
 from zoneinfo import ZoneInfo
 
 import polars as pl
+
+logger = logging.getLogger(__name__)
 
 # Column schema: ordered list defining the sheet layout.
 # "owner" is "pipeline", "user", or "formula".
@@ -158,6 +161,95 @@ def prepare_predictions(predictions: pl.DataFrame) -> pl.DataFrame:
     )
 
     return result.select(PIPELINE_COLUMN_ORDER)
+
+
+def merge_predictions(
+    existing: pl.DataFrame,
+    new_predictions: pl.DataFrame,
+    matches: pl.DataFrame,
+) -> pl.DataFrame:
+    """Merge new predictions with existing sheet data, auto-filling results.
+
+    Args:
+        existing: Current sheet data (all Utf8 columns). Empty if first run.
+        new_predictions: Output of prepare_predictions() — pipeline columns only.
+        matches: Full matches.parquet DataFrame for result lookup.
+
+    Returns:
+        Merged DataFrame with all 34 columns, sorted by tournament_day/tournament/
+        match_time/round.
+    """
+    # 1. Identify new match_uids
+    existing_uids: set[str] = set()
+    if len(existing) > 0 and "match_uid" in existing.columns:
+        existing_uids = set(existing["match_uid"].to_list())
+
+    new_uids = set(new_predictions["match_uid"].to_list())
+    truly_new = new_uids - existing_uids
+
+    # 2. Build new rows with all 34 columns
+    if truly_new:
+        new_rows = new_predictions.filter(pl.col("match_uid").is_in(list(truly_new)))
+        for col_def in COLUMN_SCHEMA:
+            if col_def["name"] not in new_rows.columns:
+                new_rows = new_rows.with_columns(pl.lit("").alias(col_def["name"]))
+        new_rows = new_rows.select(COLUMN_NAMES)
+        new_rows = new_rows.cast({col: pl.Utf8 for col in COLUMN_NAMES})
+
+        if len(existing) > 0:
+            merged = pl.concat([existing, new_rows], how="diagonal_relaxed")
+        else:
+            merged = new_rows
+    else:
+        if len(existing) > 0:
+            merged = existing
+        else:
+            return pl.DataFrame(schema={col: pl.Utf8 for col in COLUMN_NAMES})
+
+    # 3. Auto-fill results
+    if len(merged) > 0 and len(matches) > 0:
+        if "draw_p1_id" in matches.columns:
+            canonical = matches.filter(
+                pl.col("won").is_not_null()
+                & (pl.col("player_id") == pl.col("draw_p1_id"))
+            )
+        else:
+            canonical = matches.filter(
+                pl.col("won").is_not_null()
+                & (pl.col("player_id") < pl.col("opp_id"))
+            )
+
+        result_map: dict[str, str] = {}
+        for row in canonical.select("match_uid", "won").iter_rows(named=True):
+            result_map[row["match_uid"]] = "P1" if row["won"] else "P2"
+
+        new_results = []
+        for row in merged.iter_rows(named=True):
+            uid = row["match_uid"]
+            current_result = (row.get("result") or "").strip()
+
+            if uid in result_map:
+                data_result = result_map[uid]
+                if not current_result:
+                    new_results.append(data_result)
+                else:
+                    if current_result != data_result:
+                        logger.warning(
+                            "Result mismatch for %s: sheet says %s, data says %s",
+                            uid,
+                            current_result,
+                            data_result,
+                        )
+                    new_results.append(current_result)
+            else:
+                new_results.append(current_result)
+
+        merged = merged.with_columns(pl.Series("result", new_results))
+
+    # 4. Sort
+    merged = merged.sort(["tournament_day", "tournament", "match_time", "round"])
+
+    return merged
 
 
 class PredictionSync(Protocol):
