@@ -768,6 +768,42 @@ class TestTournamentMatchesAggregator:
             f"Missing: {missing}, Extra: {extra}"
         )
 
+    def test_draw_p1_id_from_schedule_authority(self, tmp_path):
+        """draw_p1_id reflects schedule's draw order for both player rows."""
+        _write_results_parquet(tmp_path)
+        _write_schedule_parquet(tmp_path)
+        agg = TournamentMatchesAggregator(
+            circuit=Circuit.tour, tid="580", year=2023, data_root=tmp_path
+        )
+        df = agg.aggregate()
+        assert "draw_p1_id" in df.columns
+        # Schedule has BBBB as p1 for the final (highest authority)
+        final = df.filter(pl.col("round") == "F")
+        assert final["draw_p1_id"][0] == "BBBB"
+        assert final["draw_p1_id"][1] == "BBBB"
+        # SF has CCCC as p1 (from schedule)
+        sf = df.filter(pl.col("round") == "SF")
+        assert sf["draw_p1_id"][0] == "CCCC"
+        assert sf["draw_p1_id"][1] == "CCCC"
+
+    def test_draw_p1_id_from_results_when_no_schedule(self, tmp_path):
+        """draw_p1_id falls back to results authority when schedule is absent."""
+        _write_results_parquet(tmp_path)
+        agg = TournamentMatchesAggregator(
+            circuit=Circuit.tour, tid="580", year=2023, data_root=tmp_path
+        )
+        df = agg.aggregate()
+        assert "draw_p1_id" in df.columns
+        # Results has AAAA as p1 for the final
+        final = df.filter(pl.col("round") == "F")
+        assert final["draw_p1_id"][0] == "AAAA"
+        assert final["draw_p1_id"][1] == "AAAA"
+
+    def test_draw_p1_id_in_schema(self, tmp_path):
+        """draw_p1_id is present in MATCHES_SCHEMA."""
+        assert "draw_p1_id" in MATCHES_SCHEMA
+        assert MATCHES_SCHEMA["draw_p1_id"] == pl.String
+
     def test_match_beats_no_row_loss(self, tmp_path):
         """LEFT JOIN should not lose matches without match_beats data."""
         _write_results_parquet(tmp_path)

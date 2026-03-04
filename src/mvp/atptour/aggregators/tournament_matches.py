@@ -142,6 +142,7 @@ MATCHES_SCHEMA: dict[str, pl.DataType] = {
     "match_uid": pl.String,
     "player_id": pl.String,
     "opp_id": pl.String,
+    "draw_p1_id": pl.String,
     "tournament_id": pl.String,
     "year": pl.Int64,
     "circuit": pl.String,
@@ -339,7 +340,15 @@ class TournamentMatchesAggregator(BaseJob):
         rally_df = self._load_and_prepare_rally_analysis()
         joined = self._join_rally_analysis(joined, rally_df)
 
-        # Step 12: Waterfall resolution
+        # Step 12: Add draw_p1_id from authority
+        if authority:
+            authority_df = pl.DataFrame({
+                "match_uid": list(authority.keys()),
+                "draw_p1_id": list(authority.values()),
+            })
+            joined = joined.join(authority_df, on="match_uid", how="left")
+
+        # Step 13: Waterfall resolution
         result = self._apply_waterfall(joined)
 
         return result
@@ -846,6 +855,7 @@ class TournamentMatchesAggregator(BaseJob):
             "match_uid",
             "player_id",
             "opp_id",
+            "draw_p1_id",
             "tournament_id",
             "year",
             "circuit",
