@@ -41,7 +41,7 @@ SERVE_BASELINE = {"Hard": 0.62, "Clay": 0.60, "Grass": 0.64}
 RETURN_BASELINE = {"Hard": 0.38, "Clay": 0.40, "Grass": 0.36}
 
 # Serve/return update scaling
-SERVE_RETURN_SCALE = 400.0
+SERVE_RETURN_SCALE = 4000.0
 
 # Initial seeding from ranking
 SEED_ELO_MAX = 2400.0
@@ -70,4 +70,10 @@ TB_CLUTCH_BASELINE = 0.50
 
 # Style dimension update settings
 STYLE_K_MULT = 0.3  # More conservative than serve/return (0.4)
-STYLE_SCALE = 300.0  # Smaller scale than serve/return (400)
+STYLE_SCALE = 3000.0  # Smaller scale than serve/return (4000)
+
+# EMA smoothing for serve/return Elo and style dimensions
+EMA_ALPHA = 0.10  # Half-life ~7 matches
+
+# Indoor adjustment EMA scale (centered at 0, not DEFAULT_ELO)
+INDOOR_EMA_SCALE = 500.0

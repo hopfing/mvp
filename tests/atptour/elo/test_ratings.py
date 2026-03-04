@@ -613,3 +613,93 @@ class TestUpdateIndoorAdj:
 
         new_adj = update_indoor_adj(0.0, won=False, k=16.0)
         assert new_adj < 0.0
+
+
+class TestEMAConvergence:
+    """Test that EMA-based ratings converge to stable values."""
+
+    def test_serve_elo_converges(self):
+        """Applying the same serve observation repeatedly converges."""
+        elo = DEFAULT_ELO
+        for _ in range(200):
+            elo = update_serve_elo(elo, 0.70, "Hard", 16.0)
+        # Target = 1500 + (0.70 - 0.62) * 4000 = 1820
+        assert abs(elo - 1820.0) < 0.01
+
+    def test_return_elo_converges(self):
+        """Applying the same return observation repeatedly converges."""
+        elo = DEFAULT_ELO
+        for _ in range(200):
+            elo = update_return_elo(elo, 0.45, "Hard", 16.0)
+        # Target = 1500 + (0.45 - 0.38) * 4000 = 1780
+        assert abs(elo - 1780.0) < 0.01
+
+    def test_first_serve_power_converges(self):
+        from mvp.atptour.elo.ratings import update_first_serve_power
+
+        elo = DEFAULT_ELO
+        for _ in range(200):
+            elo = update_first_serve_power(elo, 0.25, "Hard", 16.0)
+        # Target = 1500 + (0.25 - 0.176) * 3000 = 1722
+        assert abs(elo - 1722.0) < 0.01
+
+    def test_tb_clutch_converges(self):
+        from mvp.atptour.elo.ratings import update_tb_clutch
+
+        elo = DEFAULT_ELO
+        for _ in range(200):
+            elo = update_tb_clutch(elo, 2, 3, 16.0)
+        # Target = 1500 + (0.6667 - 0.50) * 3000 = 2000
+        assert abs(elo - 2000.0) < 1.0
+
+    def test_indoor_adj_converges_winner(self):
+        from mvp.atptour.elo.ratings import update_indoor_adj
+
+        adj = 0.0
+        for _ in range(200):
+            adj = update_indoor_adj(adj, won=True, k=16.0)
+        # Target = INDOOR_EMA_SCALE * 1.0 = 500.0
+        assert abs(adj - 500.0) < 0.01
+
+    def test_indoor_adj_converges_loser(self):
+        from mvp.atptour.elo.ratings import update_indoor_adj
+
+        adj = 0.0
+        for _ in range(200):
+            adj = update_indoor_adj(adj, won=False, k=16.0)
+        # Target = INDOOR_EMA_SCALE * -1.0 = -500.0
+        assert abs(adj - (-500.0)) < 0.01
+
+    def test_different_match_counts_same_stats_converge(self):
+        """Two players with identical stats but different match counts
+        end up at similar ratings."""
+        # Player A: 50 matches
+        elo_a = DEFAULT_ELO
+        for _ in range(50):
+            elo_a = update_serve_elo(elo_a, 0.68, "Hard", 16.0)
+
+        # Player B: 500 matches
+        elo_b = DEFAULT_ELO
+        for _ in range(500):
+            elo_b = update_serve_elo(elo_b, 0.68, "Hard", 16.0)
+
+        # Both converge to 1500 + (0.68 - 0.62) * 4000 = 1740
+        assert abs(elo_a - elo_b) < 2.0
+        assert abs(elo_a - 1740.0) < 2.0
+
+    def test_below_baseline_converges_down(self):
+        """Rating converges below DEFAULT_ELO for below-baseline performance."""
+        elo = DEFAULT_ELO
+        for _ in range(200):
+            elo = update_serve_elo(elo, 0.55, "Hard", 16.0)
+        # Target = 1500 + (0.55 - 0.62) * 4000 = 1220
+        assert abs(elo - 1220.0) < 0.01
+
+    def test_serve_elo_bounded_after_many_matches(self):
+        """Unlike the old accumulator, EMA stays bounded even after
+        hundreds of above-baseline observations."""
+        elo = DEFAULT_ELO
+        for _ in range(1000):
+            elo = update_serve_elo(elo, 0.70, "Hard", 16.0)
+        # Should be near 1820, not 500,000+
+        assert 1800.0 < elo < 1850.0
