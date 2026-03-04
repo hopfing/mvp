@@ -45,6 +45,7 @@ COLUMN_SCHEMA = [
     {"name": "bet_odds", "owner": "formula"},
     {"name": "stake", "owner": "user"},
     {"name": "to_win", "owner": "formula"},
+    {"name": "book", "owner": "user"},
     # Results
     {"name": "result", "owner": "pipeline"},  # auto-filled
     {"name": "bet_result", "owner": "user"},
@@ -101,8 +102,8 @@ def generate_formulas(row: int) -> dict[str, str]:
         "p2_edge": f'=IF({p2_odds}{r}="", "", {p2_prob}{r}-(1/{p2_odds}{r}))',
         "p2_pe": f'=IF({pin_p2}{r}="", "", {p2_prob}{r}-(1/{pin_p2}{r}))',
         "bet_odds": f'=IF({bet_side}{r}="P1", {p1_odds}{r}, IF({bet_side}{r}="P2", {p2_odds}{r}, ""))',
-        "to_win": f'=IF({bet_side}{r}="P1", {stake_col}{r}*({bet_odds_col}{r}-1), IF({bet_side}{r}="P2", {stake_col}{r}*({bet_odds_col}{r}-1), ""))',
-        "net": f'=IF({bet_result_col}{r}="W", {to_win_col}{r}, IF({bet_result_col}{r}="L", -{stake_col}{r}, IF({bet_result_col}{r}="V", 0, "")))',
+        "to_win": f'=IF({stake_col}{r}="", "", {stake_col}{r}*{bet_odds_col}{r})',
+        "net": f'=IF({bet_result_col}{r}="W", {to_win_col}{r}-{stake_col}{r}, IF({bet_result_col}{r}="L", -{stake_col}{r}, IF({bet_result_col}{r}="V", 0, "")))',
     }
 
 

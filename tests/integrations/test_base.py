@@ -21,7 +21,7 @@ from mvp.integrations.base import (
 
 class TestColumnSchema:
     def test_column_schema_has_34_columns(self):
-        assert len(COLUMN_SCHEMA) == 33
+        assert len(COLUMN_SCHEMA) == 34
 
     def test_match_uid_is_in_schema(self):
         assert "match_uid" in COLUMN_NAMES
@@ -322,7 +322,7 @@ class TestMergePredictions:
         })
         result = merge_predictions(existing, new, matches)
         assert list(result.columns) == COLUMN_NAMES
-        assert len(result.columns) == 33
+        assert len(result.columns) == 34
 
     def test_empty_existing_empty_new(self):
         existing = _sheet_df([])
@@ -392,10 +392,10 @@ class TestGenerateFormulas:
         assert formulas["p1_edge"].startswith("=IF(")
         assert "1/" in formulas["p1_edge"]
 
-    def test_to_win_references_bet_side(self):
+    def test_to_win_is_stake_times_odds(self):
         formulas = generate_formulas(row=2)
-        assert '"P1"' in formulas["to_win"]
-        assert '"P2"' in formulas["to_win"]
+        assert COL_LETTERS["stake"] in formulas["to_win"]
+        assert COL_LETTERS["bet_odds"] in formulas["to_win"]
 
     def test_net_references_bet_result(self):
         formulas = generate_formulas(row=2)
