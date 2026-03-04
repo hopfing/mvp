@@ -437,6 +437,49 @@ class TestStyleMatchupFeatures:
         assert result["m"][1] == pytest.approx(0.15)
 
 
+class TestStyleMatchupInteractions:
+    """Tests for Layer 3 matchup interaction features."""
+
+    def test_power_serve_vs_strong_return_registered(self):
+        registry = get_registry()
+        feat = registry.get("matchup_power_serve_vs_strong_return")
+        assert feat.mirror is False
+        assert "is_power_server" in feat.depends_on
+
+    def test_power_serve_vs_strong_return_computes(self):
+        from mvp.model.features.style import matchup_power_serve_vs_strong_return
+
+        df = pl.DataFrame({
+            "player_is_power_server": [1, 1, 0, 0, 1, 0, 1, 0],
+            "opp_ret_first_serve_win_pct": [0.50, 0.30, 0.48, 0.25, 0.45, 0.42, 0.35, 0.38],
+        }).lazy()
+        result = df.with_columns(
+            matchup_power_serve_vs_strong_return().alias("m")
+        ).collect()
+        ret_p75 = result["opp_ret_first_serve_win_pct"].quantile(0.75)
+        for i in range(8):
+            expected = (
+                result["player_is_power_server"][i] == 1
+                and result["opp_ret_first_serve_win_pct"][i] > ret_p75
+            )
+            assert result["m"][i] == int(expected), f"Row {i}: expected {expected}"
+
+    def test_all_7_interactions_registered(self):
+        registry = get_registry()
+        interactions = [
+            "matchup_power_serve_vs_strong_return",
+            "matchup_placement_serve_vs_strong_return",
+            "matchup_aggressor_vs_counterpuncher",
+            "matchup_counterpuncher_vs_aggressor",
+            "matchup_both_power_servers",
+            "matchup_both_counterpunchers",
+            "matchup_net_rusher_vs_passer",
+        ]
+        for name in interactions:
+            feat = registry.get(name)
+            assert feat.mirror is False
+
+
 class TestStyleBoolLabels:
     """Tests for Layer 2 bool style labels."""
 

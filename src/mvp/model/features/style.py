@@ -699,3 +699,109 @@ def is_clutch_player() -> pl.Expr:
         & (pl.col("player_ret_bp_convert_pct") > bp_conv_p75)
         & (pl.col("player_style_crucial_pts_win_pct") > crucial_p75)
     ).cast(pl.Int8)
+
+
+# =============================================================================
+# Layer 3: Matchup Interactions (bool combinations)
+# =============================================================================
+
+
+@feature(
+    name="matchup_power_serve_vs_strong_return",
+    params=[],
+    description="Player is power server AND opponent has strong return",
+    depends_on=["is_power_server", "ret_first_serve_win_pct"],
+    mirror=False,
+)
+def matchup_power_serve_vs_strong_return() -> pl.Expr:
+    ret_p75 = pl.col("opp_ret_first_serve_win_pct").quantile(0.75)
+    return (
+        (pl.col("player_is_power_server") == 1)
+        & (pl.col("opp_ret_first_serve_win_pct") > ret_p75)
+    ).cast(pl.Int8)
+
+
+@feature(
+    name="matchup_placement_serve_vs_strong_return",
+    params=[],
+    description="Player is placement server AND opponent has strong return",
+    depends_on=["is_placement_server", "ret_first_serve_win_pct"],
+    mirror=False,
+)
+def matchup_placement_serve_vs_strong_return() -> pl.Expr:
+    ret_p75 = pl.col("opp_ret_first_serve_win_pct").quantile(0.75)
+    return (
+        (pl.col("player_is_placement_server") == 1)
+        & (pl.col("opp_ret_first_serve_win_pct") > ret_p75)
+    ).cast(pl.Int8)
+
+
+@feature(
+    name="matchup_aggressor_vs_counterpuncher",
+    params=[],
+    description="Player is aggressive baseliner AND opponent is counterpuncher",
+    depends_on=["is_aggressive_baseliner", "is_counterpuncher"],
+    mirror=False,
+)
+def matchup_aggressor_vs_counterpuncher() -> pl.Expr:
+    return (
+        (pl.col("player_is_aggressive_baseliner") == 1)
+        & (pl.col("opp_is_counterpuncher") == 1)
+    ).cast(pl.Int8)
+
+
+@feature(
+    name="matchup_counterpuncher_vs_aggressor",
+    params=[],
+    description="Player is counterpuncher AND opponent is aggressive baseliner",
+    depends_on=["is_counterpuncher", "is_aggressive_baseliner"],
+    mirror=False,
+)
+def matchup_counterpuncher_vs_aggressor() -> pl.Expr:
+    return (
+        (pl.col("player_is_counterpuncher") == 1)
+        & (pl.col("opp_is_aggressive_baseliner") == 1)
+    ).cast(pl.Int8)
+
+
+@feature(
+    name="matchup_both_power_servers",
+    params=[],
+    description="Both players are power servers",
+    depends_on=["is_power_server"],
+    mirror=False,
+)
+def matchup_both_power_servers() -> pl.Expr:
+    return (
+        (pl.col("player_is_power_server") == 1)
+        & (pl.col("opp_is_power_server") == 1)
+    ).cast(pl.Int8)
+
+
+@feature(
+    name="matchup_both_counterpunchers",
+    params=[],
+    description="Both players are counterpunchers",
+    depends_on=["is_counterpuncher"],
+    mirror=False,
+)
+def matchup_both_counterpunchers() -> pl.Expr:
+    return (
+        (pl.col("player_is_counterpuncher") == 1)
+        & (pl.col("opp_is_counterpuncher") == 1)
+    ).cast(pl.Int8)
+
+
+@feature(
+    name="matchup_net_rusher_vs_passer",
+    params=[],
+    description="Player is net rusher AND opponent has high passing frequency",
+    depends_on=["is_net_rusher", "style_passing_frequency"],
+    mirror=False,
+)
+def matchup_net_rusher_vs_passer() -> pl.Expr:
+    pass_p75 = pl.col("opp_style_passing_frequency").quantile(0.75)
+    return (
+        (pl.col("player_is_net_rusher") == 1)
+        & (pl.col("opp_style_passing_frequency") > pass_p75)
+    ).cast(pl.Int8)
