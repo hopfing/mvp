@@ -384,7 +384,7 @@ def cmd_live(args: argparse.Namespace) -> int:
 
     # Predict with production model
     predictor = ProductionPredictor()
-    predictions = predictor.predict()
+    predictions = predictor.predict(tournament_keys=pairs)
 
     if len(predictions) == 0:
         print("\nNo pending matches to predict.")

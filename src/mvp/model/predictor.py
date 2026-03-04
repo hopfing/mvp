@@ -132,8 +132,13 @@ class ProductionPredictor:
         artifact = joblib.load(artifact_path)
         return artifact["model"], artifact["medians"], artifact["feature_cols"]
 
-    def predict(self) -> pl.DataFrame:
+    def predict(
+        self, tournament_keys: list[tuple[str, int]] | None = None
+    ) -> pl.DataFrame:
         """Generate predictions for pending matches (won is null).
+
+        Args:
+            tournament_keys: If provided, only predict for these (tid, year) pairs.
 
         Returns:
             DataFrame with one row per match, containing prediction columns.
@@ -154,6 +159,16 @@ class ProductionPredictor:
                     df = df.filter(pl.col(col).is_in(value))
                 else:
                     df = df.filter(pl.col(col) == value)
+
+        # Scope to specific tournaments if requested
+        if tournament_keys is not None:
+            keys_df = pl.DataFrame(
+                {"tournament_id": [t for t, _ in tournament_keys],
+                 "_year": [y for _, y in tournament_keys]},
+            ).with_columns(pl.col("_year").cast(pl.Int32))
+            df = df.with_columns(
+                pl.col("effective_match_date").dt.year().alias("_year")
+            ).join(keys_df, on=["tournament_id", "_year"], how="semi").drop("_year")
 
         # Keep only pending matches
         pending = df.filter(pl.col("won").is_null())
