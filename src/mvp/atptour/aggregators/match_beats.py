@@ -9,6 +9,9 @@ from mvp.common.base_job import BaseJob
 
 logger = logging.getLogger(__name__)
 
+# Columns that may be Null-typed when a tournament has no speed data.
+_NULLABLE_FLOAT_COLS = ["serve_speed", "fault_serve_speed"]
+
 
 class MatchBeatsAggregator(BaseJob):
     """Aggregate point-level MatchBeats data to player-match level.
@@ -38,6 +41,7 @@ class MatchBeatsAggregator(BaseJob):
         for pq_file in parquet_files:
             try:
                 df = pl.read_parquet(pq_file)
+                df = df.cast({c: pl.Float64 for c in _NULLABLE_FLOAT_COLS if c in df.columns})
                 df = df.filter(~pl.col("is_doubles"))
                 if len(df) > 0:
                     all_dfs.append(df)
@@ -48,7 +52,7 @@ class MatchBeatsAggregator(BaseJob):
             logger.info("No singles matches found")
             return None
 
-        combined = pl.concat(all_dfs, how="diagonal_relaxed")
+        combined = pl.concat(all_dfs)
         result = self._aggregate_match_level(combined)
         result = self._pivot_to_player_match(result)
 
