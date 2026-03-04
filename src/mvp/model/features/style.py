@@ -208,3 +208,225 @@ def style_rally_lost_avg_length() -> pl.Expr:
     return ratio_feature(
         "mb_player_rally_lost_shots", "mb_player_rally_lost_count", days=_DAYS
     )
+
+
+# =============================================================================
+# Layer 1: Raw Style Metrics — Wing Preference (stroke_analysis)
+# =============================================================================
+
+
+@feature(
+    name="style_fh_winner_share",
+    params=[],
+    description="365d FH winners as share of FH+BH winners (offensive wing preference)",
+    mirror=True,
+)
+def style_fh_winner_share() -> pl.Expr:
+    total = pl.col("player_fh_winners") + pl.col("player_bh_winners")
+    per_match = pl.when(total > 0).then(pl.col("player_fh_winners") / total).otherwise(None)
+    return _rolling_365(per_match)
+
+
+@feature(
+    name="style_fh_ue_share",
+    params=[],
+    description="365d FH UEs as share of FH+BH UEs (error wing tendency)",
+    mirror=True,
+)
+def style_fh_ue_share() -> pl.Expr:
+    total = pl.col("player_fh_unforced_errors") + pl.col("player_bh_unforced_errors")
+    per_match = pl.when(total > 0).then(pl.col("player_fh_unforced_errors") / total).otherwise(None)
+    return _rolling_365(per_match)
+
+
+@feature(
+    name="style_fh_winner_rate",
+    params=[],
+    description="365d FH productivity (FH winners / total FH outcomes)",
+    mirror=True,
+)
+def style_fh_winner_rate() -> pl.Expr:
+    total = (
+        pl.col("player_fh_winners")
+        + pl.col("player_fh_forced_errors")
+        + pl.col("player_fh_unforced_errors")
+    )
+    per_match = pl.when(total > 0).then(pl.col("player_fh_winners") / total).otherwise(None)
+    return _rolling_365(per_match)
+
+
+@feature(
+    name="style_bh_winner_rate",
+    params=[],
+    description="365d BH productivity (BH winners / total BH outcomes)",
+    mirror=True,
+)
+def style_bh_winner_rate() -> pl.Expr:
+    total = (
+        pl.col("player_bh_winners")
+        + pl.col("player_bh_forced_errors")
+        + pl.col("player_bh_unforced_errors")
+    )
+    per_match = pl.when(total > 0).then(pl.col("player_bh_winners") / total).otherwise(None)
+    return _rolling_365(per_match)
+
+
+# =============================================================================
+# Layer 1: Raw Style Metrics — Rally Ball-Striking (stroke_analysis)
+# =============================================================================
+
+
+def _shot_type_total(prefix: str) -> pl.Expr:
+    """Total outcomes for a shot type: winners + FE + UE + others."""
+    return (
+        pl.col(f"player_{prefix}_winners")
+        + pl.col(f"player_{prefix}_forced_errors")
+        + pl.col(f"player_{prefix}_unforced_errors")
+        + pl.col(f"player_{prefix}_others")
+    )
+
+
+@feature(
+    name="style_ground_stroke_winner_rate",
+    params=[],
+    description="365d ground stroke winners / total ground strokes (rally offense)",
+    mirror=True,
+)
+def style_ground_stroke_winner_rate() -> pl.Expr:
+    total = _shot_type_total("ground_stroke")
+    per_match = pl.when(total > 0).then(pl.col("player_ground_stroke_winners") / total).otherwise(None)
+    return _rolling_365(per_match)
+
+
+@feature(
+    name="style_ground_stroke_ue_rate",
+    params=[],
+    description="365d ground stroke UEs / total ground strokes (rally error tendency)",
+    mirror=True,
+)
+def style_ground_stroke_ue_rate() -> pl.Expr:
+    total = _shot_type_total("ground_stroke")
+    per_match = pl.when(total > 0).then(pl.col("player_ground_stroke_unforced_errors") / total).otherwise(None)
+    return _rolling_365(per_match)
+
+
+# =============================================================================
+# Layer 1: Raw Style Metrics — Shot Variety (stroke_analysis)
+# =============================================================================
+
+
+@feature(
+    name="style_net_approach_frequency",
+    params=[],
+    description="365d net play shots (volley+approach+overhead) per point",
+    mirror=True,
+)
+def style_net_approach_frequency() -> pl.Expr:
+    net_total = _shot_type_total("volley") + _shot_type_total("approach") + _shot_type_total("overhead")
+    pts = pl.col("pts_total_pts_played")
+    per_match = pl.when(pts > 0).then(net_total / pts).otherwise(None)
+    return _rolling_365(per_match)
+
+
+@feature(
+    name="style_drop_shot_frequency",
+    params=[],
+    description="365d drop shots per point (craft/variety)",
+    mirror=True,
+)
+def style_drop_shot_frequency() -> pl.Expr:
+    total = _shot_type_total("drop_shot")
+    pts = pl.col("pts_total_pts_played")
+    per_match = pl.when(pts > 0).then(total / pts).otherwise(None)
+    return _rolling_365(per_match)
+
+
+@feature(
+    name="style_drop_shot_effectiveness",
+    params=[],
+    description="365d drop shot winners / total drop shots",
+    mirror=True,
+)
+def style_drop_shot_effectiveness() -> pl.Expr:
+    total = _shot_type_total("drop_shot")
+    per_match = pl.when(total > 0).then(pl.col("player_drop_shot_winners") / total).otherwise(None)
+    return _rolling_365(per_match)
+
+
+@feature(
+    name="style_passing_frequency",
+    params=[],
+    description="365d passing shots per point",
+    mirror=True,
+)
+def style_passing_frequency() -> pl.Expr:
+    total = _shot_type_total("passing")
+    pts = pl.col("pts_total_pts_played")
+    per_match = pl.when(pts > 0).then(total / pts).otherwise(None)
+    return _rolling_365(per_match)
+
+
+@feature(
+    name="style_lob_frequency",
+    params=[],
+    description="365d lob shots per point (defensive variety)",
+    mirror=True,
+)
+def style_lob_frequency() -> pl.Expr:
+    total = _shot_type_total("lob")
+    pts = pl.col("pts_total_pts_played")
+    per_match = pl.when(pts > 0).then(total / pts).otherwise(None)
+    return _rolling_365(per_match)
+
+
+# =============================================================================
+# Layer 1: Raw Style Metrics — Rally Length (rally_analysis)
+# =============================================================================
+
+
+@feature(
+    name="style_short_rally_pct",
+    params=[],
+    description="365d short rallies as share of total rallies (serve-dominated play)",
+    mirror=True,
+)
+def style_short_rally_pct() -> pl.Expr:
+    rpwd = pl.col("rally_points_with_data")
+    per_match = pl.when(rpwd > 0).then(pl.col("rally_short_count") / rpwd).otherwise(None)
+    return _rolling_365(per_match)
+
+
+@feature(
+    name="style_long_rally_pct",
+    params=[],
+    description="365d long rallies as share of total rallies (grinder tendency)",
+    mirror=True,
+)
+def style_long_rally_pct() -> pl.Expr:
+    rpwd = pl.col("rally_points_with_data")
+    per_match = pl.when(rpwd > 0).then(pl.col("rally_long_count") / rpwd).otherwise(None)
+    return _rolling_365(per_match)
+
+
+@feature(
+    name="style_short_rally_win_pct",
+    params=[],
+    description="365d short rally points won / total short rallies (quick-point efficiency)",
+    mirror=True,
+)
+def style_short_rally_win_pct() -> pl.Expr:
+    total = pl.col("player_short_won") + pl.col("player_short_err")
+    per_match = pl.when(total > 0).then(pl.col("player_short_won") / total).otherwise(None)
+    return _rolling_365(per_match)
+
+
+@feature(
+    name="style_long_rally_win_pct",
+    params=[],
+    description="365d long rally points won / total long rallies (endurance/consistency)",
+    mirror=True,
+)
+def style_long_rally_win_pct() -> pl.Expr:
+    total = pl.col("player_long_won") + pl.col("player_long_err")
+    per_match = pl.when(total > 0).then(pl.col("player_long_won") / total).otherwise(None)
+    return _rolling_365(per_match)

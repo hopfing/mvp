@@ -174,3 +174,180 @@ class TestStyleAggressionFeatures:
         assert result["rwl"][0] is None
         assert result["rwl"][1] == pytest.approx(4.0)
         assert result["rwl"][2] == pytest.approx(4.0)
+
+
+def _make_stroke_df() -> pl.LazyFrame:
+    """Test DataFrame with stroke_analysis columns."""
+    return pl.DataFrame({
+        "player_id": ["A", "A", "A"],
+        "effective_match_date": [
+            date(2024, 1, 1),
+            date(2024, 3, 1),
+            date(2024, 6, 1),
+        ],
+        "player_fh_winners": [10, 12, 8],
+        "player_fh_unforced_errors": [5, 4, 6],
+        "player_fh_forced_errors": [3, 2, 4],
+        "player_bh_winners": [6, 8, 4],
+        "player_bh_unforced_errors": [4, 3, 5],
+        "player_bh_forced_errors": [2, 1, 3],
+    }).lazy()
+
+
+def _make_shot_variety_df() -> pl.LazyFrame:
+    """Test DataFrame with stroke_analysis shot variety columns."""
+    return pl.DataFrame({
+        "player_id": ["A", "A", "A"],
+        "effective_match_date": [
+            date(2024, 1, 1),
+            date(2024, 3, 1),
+            date(2024, 6, 1),
+        ],
+        "player_ground_stroke_winners": [15, 18, 12],
+        "player_ground_stroke_unforced_errors": [10, 8, 12],
+        "player_ground_stroke_forced_errors": [5, 6, 4],
+        "player_ground_stroke_others": [70, 68, 72],
+        "player_volley_winners": [3, 4, 2],
+        "player_volley_forced_errors": [1, 1, 1],
+        "player_volley_unforced_errors": [1, 0, 1],
+        "player_volley_others": [5, 6, 4],
+        "player_approach_winners": [2, 3, 1],
+        "player_approach_forced_errors": [1, 0, 1],
+        "player_approach_unforced_errors": [0, 1, 0],
+        "player_approach_others": [3, 2, 3],
+        "player_overhead_winners": [1, 1, 0],
+        "player_overhead_forced_errors": [0, 0, 0],
+        "player_overhead_unforced_errors": [0, 0, 1],
+        "player_overhead_others": [1, 1, 0],
+        "player_drop_shot_winners": [2, 3, 1],
+        "player_drop_shot_forced_errors": [1, 0, 1],
+        "player_drop_shot_unforced_errors": [1, 1, 0],
+        "player_drop_shot_others": [2, 2, 2],
+        "player_passing_winners": [3, 2, 4],
+        "player_passing_forced_errors": [1, 1, 1],
+        "player_passing_unforced_errors": [1, 1, 2],
+        "player_passing_others": [3, 4, 3],
+        "player_lob_winners": [1, 0, 1],
+        "player_lob_forced_errors": [0, 1, 0],
+        "player_lob_unforced_errors": [1, 0, 1],
+        "player_lob_others": [2, 3, 2],
+        "pts_total_pts_played": [150, 160, 140],
+    }).lazy()
+
+
+def _make_rally_df() -> pl.LazyFrame:
+    """Test DataFrame with rally_analysis columns."""
+    return pl.DataFrame({
+        "player_id": ["A", "A", "A"],
+        "effective_match_date": [
+            date(2024, 1, 1),
+            date(2024, 3, 1),
+            date(2024, 6, 1),
+        ],
+        "rally_short_count": [40, 45, 38],
+        "rally_medium_count": [30, 28, 32],
+        "rally_long_count": [10, 12, 8],
+        "rally_points_with_data": [80, 85, 78],
+        "player_short_won": [22, 25, 20],
+        "player_short_err": [18, 20, 18],
+        "player_long_won": [6, 8, 4],
+        "player_long_err": [4, 4, 4],
+    }).lazy()
+
+
+class TestStyleWingFeatures:
+    """Tests for wing preference metrics."""
+
+    def test_fh_winner_share_registered(self):
+        registry = get_registry()
+        feat = registry.get("style_fh_winner_share")
+        assert feat.mirror is True
+
+    def test_fh_winner_share_computes(self):
+        from mvp.model.features.style import style_fh_winner_share
+
+        df = _make_stroke_df()
+        result = df.with_columns(
+            style_fh_winner_share().alias("fws")
+        ).collect()
+        # Row 0: no prior -> null
+        # Row 1: 10/(10+6) = 0.625
+        # Row 2: mean(10/16, 12/20) = mean(0.625, 0.6) = 0.6125
+        assert result["fws"][0] is None
+        assert result["fws"][1] == pytest.approx(10 / 16)
+        assert result["fws"][2] == pytest.approx((10 / 16 + 12 / 20) / 2, abs=0.001)
+
+    def test_fh_winner_rate_computes(self):
+        from mvp.model.features.style import style_fh_winner_rate
+
+        df = _make_stroke_df()
+        result = df.with_columns(
+            style_fh_winner_rate().alias("fwr")
+        ).collect()
+        # Row 1: 10/(10+3+5) = 10/18 ~ 0.5556
+        assert result["fwr"][0] is None
+        assert result["fwr"][1] == pytest.approx(10 / 18, abs=0.001)
+
+
+class TestStyleShotVarietyFeatures:
+    """Tests for rally ball-striking and shot variety metrics."""
+
+    def test_ground_stroke_winner_rate_computes(self):
+        from mvp.model.features.style import style_ground_stroke_winner_rate
+
+        df = _make_shot_variety_df()
+        result = df.with_columns(
+            style_ground_stroke_winner_rate().alias("gswr")
+        ).collect()
+        # Row 1: 15/(15+10+5+70) = 15/100 = 0.15
+        assert result["gswr"][0] is None
+        assert result["gswr"][1] == pytest.approx(0.15)
+
+    def test_net_approach_frequency_computes(self):
+        from mvp.model.features.style import style_net_approach_frequency
+
+        df = _make_shot_variety_df()
+        result = df.with_columns(
+            style_net_approach_frequency().alias("naf")
+        ).collect()
+        # Row 1: net = volley(3+1+1+5) + approach(2+1+0+3) + overhead(1+0+0+1) = 10+6+2 = 18
+        # 18/150 = 0.12
+        assert result["naf"][0] is None
+        assert result["naf"][1] == pytest.approx(18 / 150, abs=0.001)
+
+    def test_drop_shot_effectiveness_computes(self):
+        from mvp.model.features.style import style_drop_shot_effectiveness
+
+        df = _make_shot_variety_df()
+        result = df.with_columns(
+            style_drop_shot_effectiveness().alias("dse")
+        ).collect()
+        # Row 1: 2/(2+1+1+2) = 2/6 ~ 0.333
+        assert result["dse"][0] is None
+        assert result["dse"][1] == pytest.approx(2 / 6, abs=0.001)
+
+
+class TestStyleRallyLengthFeatures:
+    """Tests for rally length metrics."""
+
+    def test_short_rally_pct_computes(self):
+        from mvp.model.features.style import style_short_rally_pct
+
+        df = _make_rally_df()
+        result = df.with_columns(
+            style_short_rally_pct().alias("srp")
+        ).collect()
+        # Row 1: 40/80 = 0.5
+        assert result["srp"][0] is None
+        assert result["srp"][1] == pytest.approx(0.5)
+
+    def test_short_rally_win_pct_computes(self):
+        from mvp.model.features.style import style_short_rally_win_pct
+
+        df = _make_rally_df()
+        result = df.with_columns(
+            style_short_rally_win_pct().alias("srwp")
+        ).collect()
+        # Row 1: 22/(22+18) = 22/40 = 0.55
+        assert result["srwp"][0] is None
+        assert result["srwp"][1] == pytest.approx(22 / 40)
