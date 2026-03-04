@@ -112,7 +112,6 @@ def generate_formulas(row: int) -> dict[str, str]:
 
 CIRCUIT_LABELS = {"tour": "ATP", "chal": "CH"}
 
-
 CT = ZoneInfo("America/Chicago")
 UTC = ZoneInfo("UTC")
 
@@ -182,6 +181,7 @@ def prepare_predictions(predictions: pl.DataFrame) -> pl.DataFrame:
             "prediction": prediction,
             "result": "",
             "match_uid": row["match_uid"],
+            "_tournament_id": row["tournament_id"],
             "tournament_day": match_date,  # placeholder, computed below
             "model_version": row["model_version"],
             "predicted_at": predicted_at_str,
@@ -194,11 +194,20 @@ def prepare_predictions(predictions: pl.DataFrame) -> pl.DataFrame:
 
     result = pl.DataFrame(rows)
 
-    # tournament_day: min match_date per tournament
-    min_dates = result.group_by("tournament").agg(
+    # Validate: null tournament names indicate upstream data issues
+    null_tournaments = result.filter(pl.col("tournament").is_null())
+    if len(null_tournaments) > 0:
+        uids = null_tournaments["match_uid"].to_list()
+        raise ValueError(
+            f"{len(uids)} predictions have null tournament_name: {uids}"
+        )
+
+    # tournament_day: min match_date per tournament_id (unique per event)
+    min_dates = result.group_by("_tournament_id").agg(
         pl.col("match_date").min().alias("tournament_day")
     )
-    result = result.drop("tournament_day").join(min_dates, on="tournament")
+    result = result.drop("tournament_day").join(min_dates, on="_tournament_id")
+    result = result.drop("_tournament_id")
 
     # Ensure correct types: elo as int, probs as float, everything else string
     result = result.with_columns(
@@ -295,7 +304,14 @@ def merge_predictions(
         merged = merged.with_columns(pl.Series("result", new_results))
 
     # 4. Sort
-    merged = merged.sort(["tournament_day", "tournament", "match_time", "round"])
+    from mvp.atptour.aggregators.matches import ROUND_ORDER
+
+    merged = merged.with_columns(
+        pl.col("round").replace_strict(ROUND_ORDER, default=99).alias("_round_order")
+    )
+    merged = merged.sort(
+        ["tournament_day", "circuit", "tournament", "match_date", "_round_order", "match_time"]
+    ).drop("_round_order")
 
     return merged
 

@@ -10,11 +10,23 @@ import numpy as np
 import polars as pl
 from sklearn.metrics import accuracy_score, brier_score_loss, log_loss, roc_auc_score
 
-# Round group mappings
-ROUND_GROUPS: dict[str, list[str]] = {
-    "Qualifying": ["Q1", "Q2", "Q3"],
-    "Early": ["R128", "R64", "R32"],
-    "Late": ["R16", "QF", "SF", "F", "RR"],
+# Ordered rounds for per-round diagnostics
+ROUND_ORDER: list[str] = ["Q1", "Q2", "Q3", "RR", "R128", "R64", "R32", "R16", "QF", "SF", "F"]
+
+# Performance-based betting groups (circuit-aware)
+# Tour: flat performance R128-SF, only F/RR separate
+# Chal: Q1 stands alone (.813 AUC), Q2-QF moderate, SF/F weak
+BETTING_GROUPS: dict[str, dict[str, list[str]]] = {
+    "tour": {
+        "Qualifying": ["Q1", "Q2", "Q3"],
+        "Main Draw": ["R128", "R64", "R32", "R16", "QF", "SF"],
+        "Final": ["F", "RR"],
+    },
+    "chal": {
+        "Strong": ["Q1"],
+        "Mid": ["Q2", "R32", "R16", "QF"],
+        "Tight": ["SF", "F"],
+    },
 }
 
 # Ranking bucket boundaries
@@ -124,9 +136,10 @@ def _compute_error_rate_80plus(y_true: np.ndarray, y_prob: np.ndarray) -> float:
 class Diagnostics:
     """Compute diagnostics for experiment analysis."""
 
-    def _get_round_group(self, round_val: str) -> str:
-        """Map round to group."""
-        for group, rounds in ROUND_GROUPS.items():
+    def _get_betting_group(self, round_val: str, circuit: str) -> str:
+        """Map round to betting group based on circuit."""
+        circuit_groups = BETTING_GROUPS.get(circuit, {})
+        for group, rounds in circuit_groups.items():
             if round_val in rounds:
                 return group
         return "Other"
@@ -154,24 +167,23 @@ class Diagnostics:
                 "chal": {
                     "overall": {metrics with calibration},
                     "surface": {"Clay": {...}, "Hard": {...}},
-                    "round_group": {"Qualifying": {...}, "Early": {...}, "Late": {...}},
+                    "round": {"Q1": {...}, "R32": {...}, ...},
+                    "betting_group": {"Strong": {...}, "Mid": {...}, "Tight": {...}},
                 },
                 "tour": {...},
             },
             "overall": {
                 "surface": {"Clay": {...}, ...},
-                "round_group": {...},
+                "round": {"Q1": {...}, ...},
             }
         }
         """
         result: dict[str, Any] = {"by_circuit": {}, "overall": {}}
 
-        # Precompute round groups for the whole dataframe
-        round_groups_arr = None
+        # Precompute round values
+        rounds_arr = None
         if "round" in df.columns:
-            round_groups_arr = df["round"].fill_null("").map_elements(
-                self._get_round_group, return_dtype=pl.Utf8
-            ).to_numpy()
+            rounds_arr = df["round"].fill_null("").to_numpy()
 
         # Get list of circuits
         circuits = []
@@ -207,14 +219,28 @@ class Diagnostics:
                             include_calibration=True,
                         )
 
-            # Round group subsegments within this circuit
-            circuit_data["round_group"] = {}
-            if round_groups_arr is not None:
-                circuit_round_groups = round_groups_arr[circuit_mask]
-                for group in ["Qualifying", "Early", "Late", "Other"]:
-                    group_mask = circuit_round_groups == group
+            # Per-round metrics within this circuit
+            circuit_data["round"] = {}
+            if rounds_arr is not None:
+                circuit_rounds = rounds_arr[circuit_mask]
+                for rnd in ROUND_ORDER:
+                    rnd_mask = circuit_rounds == rnd
+                    if rnd_mask.any():
+                        circuit_data["round"][rnd] = _compute_metrics_for_segment(
+                            circuit_y_true[rnd_mask],
+                            circuit_y_prob[rnd_mask],
+                            include_calibration=True,
+                        )
+
+            # Betting group subsegments (circuit-aware)
+            circuit_data["betting_group"] = {}
+            circuit_groups = BETTING_GROUPS.get(circuit, {})
+            if rounds_arr is not None and circuit_groups:
+                circuit_rounds = rounds_arr[circuit_mask]
+                for group, group_rounds in circuit_groups.items():
+                    group_mask = np.isin(circuit_rounds, group_rounds)
                     if group_mask.any():
-                        circuit_data["round_group"][group] = _compute_metrics_for_segment(
+                        circuit_data["betting_group"][group] = _compute_metrics_for_segment(
                             circuit_y_true[group_mask],
                             circuit_y_prob[group_mask],
                             include_calibration=True,
@@ -222,7 +248,7 @@ class Diagnostics:
 
             result["by_circuit"][circuit] = circuit_data
 
-        # Overall (non-circuit-specific) segments for backwards compatibility
+        # Overall (non-circuit-specific) segments
         result["overall"]["surface"] = {}
         if "surface" in df.columns:
             for surface in df["surface"].drop_nulls().unique().sort().to_list():
@@ -232,12 +258,12 @@ class Diagnostics:
                         y_true[mask], y_prob[mask], include_calibration=True
                     )
 
-        result["overall"]["round_group"] = {}
-        if round_groups_arr is not None:
-            for group in ["Qualifying", "Early", "Late", "Other"]:
-                mask = round_groups_arr == group
+        result["overall"]["round"] = {}
+        if rounds_arr is not None:
+            for rnd in ROUND_ORDER:
+                mask = rounds_arr == rnd
                 if mask.any():
-                    result["overall"]["round_group"][group] = _compute_metrics_for_segment(
+                    result["overall"]["round"][rnd] = _compute_metrics_for_segment(
                         y_true[mask], y_prob[mask], include_calibration=True
                     )
 
@@ -484,7 +510,7 @@ class DiagnosticResults:
                         result[key] = value
 
             # Circuit subsegments
-            for subseg_type in ["surface", "round_group"]:
+            for subseg_type in ["surface", "round", "betting_group"]:
                 if subseg_type in circuit_data:
                     for subseg_value, metrics in circuit_data[subseg_type].items():
                         for metric_name, value in metrics.items():

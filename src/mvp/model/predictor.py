@@ -239,6 +239,7 @@ class ProductionPredictor:
             (1.0 - pl.col("_p1_win_prob")).alias("p2_win_prob"),
             pl.col("_player_surface_elo").alias("p1_elo"),
             pl.col("_opp_surface_elo").alias("p2_elo"),
+            pl.col("tournament_id"),
             pl.col("tournament_name"),
             pl.col("circuit"),
             pl.col("surface"),
