@@ -53,6 +53,8 @@ COLUMN_SCHEMA = [
     {"name": "notes", "owner": "user"},
     # Metadata
     {"name": "match_uid", "owner": "pipeline"},
+    {"name": "p1_id", "owner": "pipeline"},
+    {"name": "p2_id", "owner": "pipeline"},
     {"name": "tournament_day", "owner": "pipeline"},
     {"name": "model_version", "owner": "pipeline"},
     {"name": "predicted_at", "owner": "pipeline"},
@@ -178,6 +180,8 @@ def prepare_predictions(predictions: pl.DataFrame) -> pl.DataFrame:
             "prediction": prediction,
             "result": "",
             "match_uid": row["match_uid"],
+            "p1_id": row["p1_id"],
+            "p2_id": row["p2_id"],
             "_tournament_id": row["tournament_id"],
             "tournament_day": match_date,  # placeholder, computed below
             "model_version": row["model_version"],
@@ -230,7 +234,7 @@ def merge_predictions(
         matches: Full matches.parquet DataFrame for result lookup.
 
     Returns:
-        Merged DataFrame with all 34 columns, sorted by tournament_day/tournament/
+        Merged DataFrame with all 36 columns, sorted by tournament_day/tournament/
         match_time/round.
     """
     # 1. Identify new match_uids
@@ -241,7 +245,7 @@ def merge_predictions(
     new_uids = set(new_predictions["match_uid"].to_list())
     truly_new = new_uids - existing_uids
 
-    # 2. Build new rows with all 34 columns
+    # 2. Build new rows with all 36 columns
     if truly_new:
         new_rows = new_predictions.filter(pl.col("match_uid").is_in(list(truly_new)))
         for col_def in COLUMN_SCHEMA:
@@ -260,40 +264,24 @@ def merge_predictions(
         else:
             return pl.DataFrame(schema={col: pl.Utf8 for col in COLUMN_NAMES})
 
-    # 3. Auto-fill results
+    # 3. Auto-fill results using player IDs
     if len(merged) > 0 and len(matches) > 0:
-        # Find winner player_id and P1 player_id per match
+        # Build winner_id map: match_uid -> player_id of winner
         won_rows = matches.filter(pl.col("won") == True).select(
-            "match_uid",
-            pl.col("player_id").alias("winner_id"),
+            "match_uid", pl.col("player_id").alias("winner_id"),
         )
-        if "draw_p1_id" in matches.columns:
-            p1_rows = matches.group_by("match_uid").agg(
-                pl.col("draw_p1_id").first().alias("_draw_p1"),
-                pl.col("player_id").min().alias("_alpha_p1"),
-            ).select(
-                "match_uid",
-                pl.when(pl.col("_draw_p1").is_not_null())
-                .then(pl.col("_draw_p1"))
-                .otherwise(pl.col("_alpha_p1"))
-                .alias("p1_id"),
-            )
-        else:
-            p1_rows = matches.group_by("match_uid").agg(
-                pl.col("player_id").min().alias("p1_id"),
-            )
-        result_lookup = won_rows.join(p1_rows, on="match_uid")
-        result_map: dict[str, str] = {}
-        for row in result_lookup.iter_rows(named=True):
-            result_map[row["match_uid"]] = "P1" if row["winner_id"] == row["p1_id"] else "P2"
+        winner_map: dict[str, str] = {}
+        for row in won_rows.iter_rows(named=True):
+            winner_map[row["match_uid"]] = row["winner_id"]
 
         new_results = []
         for row in merged.iter_rows(named=True):
             uid = row["match_uid"]
             current_result = (row.get("result") or "").strip()
+            sheet_p1_id = (row.get("p1_id") or "").strip()
 
-            if uid in result_map:
-                data_result = result_map[uid]
+            if uid in winner_map and sheet_p1_id:
+                data_result = "P1" if winner_map[uid] == sheet_p1_id else "P2"
                 if not current_result:
                     new_results.append(data_result)
                 else:

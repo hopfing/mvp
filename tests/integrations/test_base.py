@@ -20,8 +20,8 @@ from mvp.integrations.base import (
 
 
 class TestColumnSchema:
-    def test_column_schema_has_34_columns(self):
-        assert len(COLUMN_SCHEMA) == 34
+    def test_column_schema_has_36_columns(self):
+        assert len(COLUMN_SCHEMA) == 36
 
     def test_match_uid_is_in_schema(self):
         assert "match_uid" in COLUMN_NAMES
@@ -142,10 +142,12 @@ class TestPreparePredictions:
 
 
 def _make_sheet_row(**overrides):
-    """Build a single sheet row dict with all 34 columns."""
+    """Build a single sheet row dict with all 36 columns."""
     defaults = {col: "" for col in COLUMN_NAMES}
     defaults.update({
         "match_uid": "M1",
+        "p1_id": "A",
+        "p2_id": "B",
         "date": "2024-01-15",
         "time": "09:00",
         "circuit": "ATP",
@@ -271,8 +273,8 @@ class TestMergePredictions:
             merge_predictions(existing, new, matches)
         assert "Result mismatch" in caplog.text
 
-    def test_result_with_draw_p1_id(self):
-        row = _make_sheet_row(match_uid="M1", result="")
+    def test_result_uses_sheet_p1_id(self):
+        row = _make_sheet_row(match_uid="M1", result="", p1_id="ZVEREV", p2_id="ALCARAZ")
         existing = _sheet_df([row])
         new = prepare_predictions(_make_predictions(match_uid="OTHER"))
         matches = _matches_df({
@@ -280,7 +282,6 @@ class TestMergePredictions:
             "won": [True, False],
             "player_id": ["ZVEREV", "ALCARAZ"],
             "opp_id": ["ALCARAZ", "ZVEREV"],
-            "draw_p1_id": ["ZVEREV", "ZVEREV"],
         })
         result = merge_predictions(existing, new, matches)
         m1_row = result.filter(pl.col("match_uid") == "M1")
@@ -311,7 +312,7 @@ class TestMergePredictions:
         uids = result["match_uid"].to_list()
         assert uids.index("M2") < uids.index("M1")
 
-    def test_output_has_all_34_columns(self):
+    def test_output_has_all_36_columns(self):
         existing = _sheet_df([])
         new = prepare_predictions(_make_predictions())
         matches = _matches_df({
@@ -322,7 +323,7 @@ class TestMergePredictions:
         })
         result = merge_predictions(existing, new, matches)
         assert list(result.columns) == COLUMN_NAMES
-        assert len(result.columns) == 34
+        assert len(result.columns) == 36
 
     def test_empty_existing_empty_new(self):
         existing = _sheet_df([])
@@ -355,6 +356,7 @@ class TestMergePredictions:
         })
         result = merge_predictions(existing, new, matches)
         assert len(result) == 0
+        assert len(result.columns) == 36
         assert list(result.columns) == COLUMN_NAMES
 
     def test_duplicate_match_uid_not_added(self):
