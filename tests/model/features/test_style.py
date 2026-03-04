@@ -351,3 +351,47 @@ class TestStyleRallyLengthFeatures:
         # Row 1: 22/(22+18) = 22/40 = 0.55
         assert result["srwp"][0] is None
         assert result["srwp"][1] == pytest.approx(22 / 40)
+
+
+class TestStyleDiffFeatures:
+    """Tests for diff features (player - opponent)."""
+
+    def test_all_29_diffs_registered(self):
+        registry = get_registry()
+        single_features = [
+            "style_avg_1st_serve_speed", "style_max_1st_serve_speed",
+            "style_avg_2nd_serve_speed", "style_max_2nd_serve_speed",
+            "style_1st_serve_speed_variance",
+            "style_winner_rate", "style_ue_rate",
+            "style_winner_ue_ratio", "style_forced_error_rate",
+            "style_easy_hold_pct", "style_difficult_hold_pct",
+            "style_crucial_pts_win_pct",
+            "style_rally_won_avg_length", "style_rally_lost_avg_length",
+            "style_fh_winner_share", "style_fh_ue_share",
+            "style_fh_winner_rate", "style_bh_winner_rate",
+            "style_ground_stroke_winner_rate", "style_ground_stroke_ue_rate",
+            "style_net_approach_frequency", "style_drop_shot_frequency",
+            "style_drop_shot_effectiveness", "style_passing_frequency",
+            "style_lob_frequency",
+            "style_short_rally_pct", "style_long_rally_pct",
+            "style_short_rally_win_pct", "style_long_rally_win_pct",
+        ]
+        for name in single_features:
+            diff_name = f"{name}_diff"
+            feat = registry.get(diff_name)
+            assert feat.mirror is False, f"{diff_name} should not mirror"
+            assert name in feat.depends_on, f"{diff_name} should depend on {name}"
+
+    def test_winner_rate_diff_computes(self):
+        from mvp.model.features.style import style_winner_rate_diff
+
+        df = pl.DataFrame({
+            "player_style_winner_rate": [0.20, 0.25, 0.18],
+            "opp_style_winner_rate": [0.15, 0.25, 0.22],
+        }).lazy()
+        result = df.with_columns(
+            style_winner_rate_diff().alias("d")
+        ).collect()
+        assert result["d"][0] == pytest.approx(0.05)
+        assert result["d"][1] == pytest.approx(0.0)
+        assert result["d"][2] == pytest.approx(-0.04)

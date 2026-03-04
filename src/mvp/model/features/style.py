@@ -430,3 +430,61 @@ def style_long_rally_win_pct() -> pl.Expr:
     total = pl.col("player_long_won") + pl.col("player_long_err")
     per_match = pl.when(total > 0).then(pl.col("player_long_won") / total).otherwise(None)
     return _rolling_365(per_match)
+
+
+# =============================================================================
+# Layer 1: Diff Features (player - opponent, same stat)
+# =============================================================================
+
+_STYLE_SINGLE_FEATURES = [
+    "style_avg_1st_serve_speed",
+    "style_max_1st_serve_speed",
+    "style_avg_2nd_serve_speed",
+    "style_max_2nd_serve_speed",
+    "style_1st_serve_speed_variance",
+    "style_winner_rate",
+    "style_ue_rate",
+    "style_winner_ue_ratio",
+    "style_forced_error_rate",
+    "style_easy_hold_pct",
+    "style_difficult_hold_pct",
+    "style_crucial_pts_win_pct",
+    "style_rally_won_avg_length",
+    "style_rally_lost_avg_length",
+    "style_fh_winner_share",
+    "style_fh_ue_share",
+    "style_fh_winner_rate",
+    "style_bh_winner_rate",
+    "style_ground_stroke_winner_rate",
+    "style_ground_stroke_ue_rate",
+    "style_net_approach_frequency",
+    "style_drop_shot_frequency",
+    "style_drop_shot_effectiveness",
+    "style_passing_frequency",
+    "style_lob_frequency",
+    "style_short_rally_pct",
+    "style_long_rally_pct",
+    "style_short_rally_win_pct",
+    "style_long_rally_win_pct",
+]
+
+
+def _register_diff(base_name: str) -> None:
+    """Register a diff feature for a single stat."""
+    diff_name = f"{base_name}_diff"
+
+    @feature(
+        name=diff_name,
+        params=[],
+        description=f"{base_name} difference (player - opponent)",
+        depends_on=[base_name],
+        mirror=False,
+    )
+    def _diff() -> pl.Expr:
+        return pl.col(f"player_{base_name}") - pl.col(f"opp_{base_name}")
+
+    globals()[diff_name] = _diff
+
+
+for _base in _STYLE_SINGLE_FEATURES:
+    _register_diff(_base)
