@@ -14,6 +14,70 @@ def ensure_features_registered():
     yield
 
 
+class TestSurfaceEloExpr:
+    """Test the surface_elo_expr helper."""
+
+    def _base_df(self, surface: str) -> pl.DataFrame:
+        return pl.DataFrame({
+            "player_elo": [1500.0],
+            "player_hard_adj": [30.0],
+            "player_clay_adj": [20.0],
+            "player_grass_adj": [10.0],
+            "opp_elo": [1400.0],
+            "opp_hard_adj": [15.0],
+            "opp_clay_adj": [25.0],
+            "opp_grass_adj": [5.0],
+            "surface": [surface],
+        })
+
+    def test_hard_surface_player(self):
+        from mvp.model.features.elo import surface_elo_expr
+
+        df = self._base_df("Hard")
+        result = df.select(surface_elo_expr("player").alias("val"))
+        assert result["val"].to_list() == [1530.0]
+
+    def test_hard_surface_opp(self):
+        from mvp.model.features.elo import surface_elo_expr
+
+        df = self._base_df("Hard")
+        result = df.select(surface_elo_expr("opp").alias("val"))
+        assert result["val"].to_list() == [1415.0]
+
+    def test_clay_surface(self):
+        from mvp.model.features.elo import surface_elo_expr
+
+        df = self._base_df("Clay")
+        result = df.select(surface_elo_expr("player").alias("val"))
+        assert result["val"].to_list() == [1520.0]
+
+    def test_grass_surface(self):
+        from mvp.model.features.elo import surface_elo_expr
+
+        df = self._base_df("Grass")
+        result = df.select(surface_elo_expr("player").alias("val"))
+        assert result["val"].to_list() == [1510.0]
+
+    def test_unknown_surface(self):
+        from mvp.model.features.elo import surface_elo_expr
+
+        df = self._base_df("Carpet")
+        result = df.select(surface_elo_expr("player").alias("val"))
+        # Unknown surface gets no adjustment (otherwise 0.0)
+        assert result["val"].to_list() == [1500.0]
+
+    def test_elo_surface_diff_uses_helper(self):
+        """elo_surface_diff should produce the same result as manual helper diff."""
+        from mvp.model.features.elo import elo_surface_diff, surface_elo_expr
+
+        df = self._base_df("Clay")
+        diff_result = df.select(elo_surface_diff().alias("diff"))
+        manual_result = df.select(
+            (surface_elo_expr("player") - surface_elo_expr("opp")).alias("diff")
+        )
+        assert diff_result["diff"].to_list() == manual_result["diff"].to_list()
+
+
 class TestStyleDimensionFeatures:
     """Test style dimension derived features."""
 

@@ -11,6 +11,21 @@ import polars as pl
 from mvp.model.registry import feature
 
 
+def surface_elo_expr(prefix: str) -> pl.Expr:
+    """Surface-adjusted Elo for a player.
+
+    Args:
+        prefix: "player" or "opp"
+    """
+    return (
+        pl.col(f"{prefix}_elo")
+        + pl.when(pl.col("surface") == "Hard").then(pl.col(f"{prefix}_hard_adj"))
+        .when(pl.col("surface") == "Clay").then(pl.col(f"{prefix}_clay_adj"))
+        .when(pl.col("surface") == "Grass").then(pl.col(f"{prefix}_grass_adj"))
+        .otherwise(0.0)
+    )
+
+
 @feature(
     name="elo_diff",
     params=[],
@@ -29,25 +44,8 @@ def elo_diff() -> pl.Expr:
     mirror=False,
 )
 def elo_surface_diff() -> pl.Expr:
-    """Surface-adjusted Elo difference.
-
-    Uses the match surface to select the appropriate adjustment.
-    """
-    player_surface_elo = (
-        pl.col("player_elo")
-        + pl.when(pl.col("surface") == "Hard").then(pl.col("player_hard_adj"))
-        .when(pl.col("surface") == "Clay").then(pl.col("player_clay_adj"))
-        .when(pl.col("surface") == "Grass").then(pl.col("player_grass_adj"))
-        .otherwise(0.0)
-    )
-    opp_surface_elo = (
-        pl.col("opp_elo")
-        + pl.when(pl.col("surface") == "Hard").then(pl.col("opp_hard_adj"))
-        .when(pl.col("surface") == "Clay").then(pl.col("opp_clay_adj"))
-        .when(pl.col("surface") == "Grass").then(pl.col("opp_grass_adj"))
-        .otherwise(0.0)
-    )
-    return player_surface_elo - opp_surface_elo
+    """Surface-adjusted Elo difference."""
+    return surface_elo_expr("player") - surface_elo_expr("opp")
 
 
 @feature(
