@@ -36,7 +36,7 @@ class SheetsSync:
         creds = json.loads(Path(creds_path).read_text())
         gc = gspread.service_account_from_dict(creds)
         spreadsheet = gc.open_by_key(sheet_id)
-        self._worksheet = spreadsheet.sheet1
+        self._worksheet = spreadsheet.worksheet("bets")
 
     def read_existing(self) -> pl.DataFrame:
         """Read all rows from the sheet."""
