@@ -307,16 +307,52 @@ class ScheduleTransformer(BaseJob):
         return self.save_parquet(df, target)
 
     def _dedup(self, df: pl.DataFrame) -> pl.DataFrame:
-        """Deduplicate by match_uid, keeping latest snapshot. Preserve null-uid rows."""
+        """Deduplicate by match_uid, keeping latest snapshot.
+
+        Also detects replaced draw entries: if a player appears in multiple
+        matches in the same round (excluding RR) with different opponents,
+        only the match from the latest snapshot survives.
+        """
         before = len(df)
         has_uid = df.filter(pl.col("match_uid").is_not_null())
         no_uid = df.filter(pl.col("match_uid").is_null())
+
+        # First, keep latest data per match_uid
         has_uid = (
             has_uid.sort("snapshot_timestamp")
             .group_by("match_uid")
             .last()
             .select(df.columns)
         )
+
+        # Drop replaced draw entries: same player+round, different opponent
+        replaced_uids: set[str] = set()
+        non_rr = has_uid.filter(pl.col("round") != "RR")
+        for side, opp_side in [("p1_id", "p2_id"), ("p2_id", "p1_id")]:
+            # Group by (player, round) and find duplicates
+            grouped = non_rr.group_by([side, "round"]).agg(
+                pl.col("match_uid"),
+                pl.col(opp_side),
+                pl.col("snapshot_timestamp"),
+            )
+            dupes = grouped.filter(pl.col("match_uid").list.len() > 1)
+            for row in dupes.iter_rows(named=True):
+                uids = row["match_uid"]
+                timestamps = row["snapshot_timestamp"]
+                # Keep the match from the latest snapshot, mark others as replaced
+                latest_idx = timestamps.index(max(timestamps))
+                for i, uid in enumerate(uids):
+                    if i != latest_idx:
+                        replaced_uids.add(uid)
+
+        if replaced_uids:
+            logger.info(
+                "Dropped %d replaced draw entries for %s",
+                len(replaced_uids),
+                self.tournament.logging_id,
+            )
+            has_uid = has_uid.filter(~pl.col("match_uid").is_in(list(replaced_uids)))
+
         df = pl.concat([has_uid, no_uid])
         df = df.drop("snapshot_timestamp")
         dupes_removed = before - len(df)
