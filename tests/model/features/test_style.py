@@ -517,3 +517,41 @@ class TestStyleBoolLabels:
         for name in labels:
             feat = registry.get(name)
             assert feat.mirror is True, f"{name} should mirror"
+
+
+class TestStyleFeatureCount:
+    """Verify total feature count matches design."""
+
+    _STYLE_BOOL_LABELS = {
+        "is_power_server", "is_placement_server", "is_counterpuncher",
+        "is_aggressive_baseliner", "is_net_rusher", "is_clay_specialist",
+        "is_clutch_player",
+    }
+
+    def _is_style_feature(self, name: str) -> bool:
+        return (
+            name.startswith("style_")
+            or name.startswith("matchup_")
+            or name in self._STYLE_BOOL_LABELS
+        )
+
+    def test_total_style_features_registered(self):
+        registry = get_registry()
+        style_features = [
+            n for n in registry.list_features()
+            if self._is_style_feature(n)
+        ]
+        # 29 single + 29 diff + 15 matchup + 7 bool + 7 interaction = 87
+        assert len(style_features) == 87, (
+            f"Expected 87 style features, got {len(style_features)}: {sorted(style_features)}"
+        )
+
+    def test_no_duplicate_registrations(self):
+        """Each feature name is unique."""
+        registry = get_registry()
+        all_names = registry.list_features()
+        style_names = [
+            n for n in all_names
+            if self._is_style_feature(n)
+        ]
+        assert len(style_names) == len(set(style_names))
