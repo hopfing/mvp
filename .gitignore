@@ -9,3 +9,6 @@ mlruns/
 # Experiment configs (iterative/exploratory)
 experiments/
 models/
+
+# Environment
+.env
