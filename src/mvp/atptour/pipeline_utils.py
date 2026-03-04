@@ -6,7 +6,7 @@ from pathlib import Path
 
 import polars as pl
 
-_SKIP_IDS = {"0", "AAA1", "AAA2", "AAA3", "AAA4", "AAA5", "AAA6", "AAA7", "AAA8"}
+from mvp.atptour.mappings import is_placeholder_id
 
 DAVIS_CUP_TIDS = {"8096", "8097", "8099"}
 
@@ -33,7 +33,7 @@ def get_active_players(
             tid_year = (row["tournament_id"], row["year"])
             for col in id_columns:
                 pid = row.get(col)
-                if pid and pid not in _SKIP_IDS:
+                if pid and not is_placeholder_id(pid):
                     player_tournaments.setdefault(pid, set()).add(tid_year)
 
     return player_tournaments

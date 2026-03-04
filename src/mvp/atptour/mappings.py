@@ -104,9 +104,12 @@ def map_player_id(raw: str) -> str:
     return result
 
 
-_PLACEHOLDER_IDS = frozenset(
-    {"0", "AAA1", "AAA2", "AAA3", "AAA4", "AAA5", "AAA6", "AAA7", "AAA8"}
-)
+_PLACEHOLDER_IDS = frozenset({
+    "0", "AAA1", "AAA2", "AAA3", "AAA4", "AAA5", "AAA6", "AAA7", "AAA8",
+    "X500", "X501", "X502", "X503", "X504", "X505", "X506", "X507", "X508",
+    "X509", "X510", "X511", "X512", "X513", "X514", "X515", "X516", "X517",
+    "X519", "X521", "X526", "X577", "X578", "X581",
+})
 
 
 def is_placeholder_id(player_id: str) -> bool:
