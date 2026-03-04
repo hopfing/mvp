@@ -102,7 +102,7 @@ class TestPreparePredictions:
         assert df["time"][0] == ""
         assert df["date"][0] == "2024-03-10"
 
-    def test_tournament_day_is_min_date_per_tournament(self):
+    def test_tournament_day_uses_match_date(self):
         row1 = {
             "match_uid": "2024-0001-MS001",
             "p1_id": "A", "p2_id": "B",
@@ -113,6 +113,7 @@ class TestPreparePredictions:
             "tournament_name": "Brisbane",
             "circuit": "tour", "surface": "Hard", "round": "R32",
             "effective_match_date": date(2024, 1, 15),
+            "match_date": date(2024, 1, 15),
             "scheduled_datetime": datetime(2024, 1, 15, 10, 0, 0),
             "model_version": "v1",
             "predicted_at": datetime(2024, 1, 14, 12, 0, 0),
@@ -121,12 +122,20 @@ class TestPreparePredictions:
             **row1,
             "match_uid": "2024-0001-MS002",
             "effective_match_date": date(2024, 1, 16),
+            "match_date": date(2024, 1, 16),
             "scheduled_datetime": datetime(2024, 1, 16, 10, 0, 0),
         }
         df = prepare_predictions(pl.DataFrame([row1, row2]))
-        # Both should get the min date: 2024-01-15 10:00 UTC -> 2024-01-15 04:00 CT
+        # Each match gets its own match_date as tournament_day (UTC schedule date)
         assert df["tournament_day"][0] == "2024-01-15"
-        assert df["tournament_day"][1] == "2024-01-15"
+        assert df["tournament_day"][1] == "2024-01-16"
+
+    def test_tournament_day_falls_back_to_ct_date(self):
+        df = prepare_predictions(
+            _make_predictions(scheduled_datetime=datetime(2024, 1, 15, 10, 0, 0))
+        )
+        # No match_date -> falls back to CT-converted date
+        assert df["tournament_day"][0] == "2024-01-15"
 
     def test_elo_values_are_rounded(self):
         df = prepare_predictions(

@@ -265,6 +265,8 @@ class ProductionPredictor:
         ]
         if "scheduled_datetime" in canonical.columns:
             select_exprs.append(pl.col("scheduled_datetime"))
+        if "match_date" in canonical.columns:
+            select_exprs.append(pl.col("match_date"))
         result = canonical.select(select_exprs)
 
         logger.info("Generated %d predictions", len(result))

@@ -111,6 +111,15 @@ def generate_formulas(row: int) -> dict[str, str]:
 
 CIRCUIT_LABELS = {"tour": "ATP", "chal": "CH"}
 
+
+def _format_date(val) -> str | None:
+    """Format a date/datetime value as YYYY-MM-DD string, or None."""
+    if val is None:
+        return None
+    if hasattr(val, "strftime"):
+        return val.strftime("%Y-%m-%d")
+    return str(val) or None
+
 CT = ZoneInfo("America/Chicago")
 UTC = ZoneInfo("UTC")
 
@@ -183,7 +192,7 @@ def prepare_predictions(predictions: pl.DataFrame) -> pl.DataFrame:
             "p1_id": row["p1_id"],
             "p2_id": row["p2_id"],
             "_tournament_id": row["tournament_id"],
-            "tournament_day": match_date,  # placeholder, computed below
+            "tournament_day": _format_date(row.get("match_date")) or match_date,
             "model_version": row["model_version"],
             "predicted_at": predicted_at_str,
         })
@@ -203,11 +212,6 @@ def prepare_predictions(predictions: pl.DataFrame) -> pl.DataFrame:
             f"{len(uids)} predictions have null tournament_name: {uids}"
         )
 
-    # tournament_day: min match_date per tournament_id (unique per event)
-    min_dates = result.group_by("_tournament_id").agg(
-        pl.col("date").min().alias("tournament_day")
-    )
-    result = result.drop("tournament_day").join(min_dates, on="_tournament_id")
     result = result.drop("_tournament_id")
 
     # Ensure correct types: elo as int, probs as float, everything else string
