@@ -153,17 +153,6 @@ class TestStyleAggressionFeatures:
         assert result["ehp"][1] == pytest.approx(0.5)
         assert result["ehp"][2] == pytest.approx(11 / 21, abs=0.001)
 
-    def test_crucial_pts_win_pct_computes(self):
-        from mvp.model.features.style import style_crucial_pts_win_pct
-
-        df = _make_style_df()
-        result = df.with_columns(style_crucial_pts_win_pct().alias("cp")).collect()
-        # Row 1: 8/15 ~ 0.5333
-        # Row 2: (8+10)/(15+18) = 18/33 ~ 0.5454
-        assert result["cp"][0] is None
-        assert result["cp"][1] == pytest.approx(8 / 15, abs=0.001)
-        assert result["cp"][2] == pytest.approx(18 / 33, abs=0.001)
-
     def test_rally_won_avg_length_computes(self):
         from mvp.model.features.style import style_rally_won_avg_length
 
@@ -356,7 +345,7 @@ class TestStyleRallyLengthFeatures:
 class TestStyleDiffFeatures:
     """Tests for diff features (player - opponent)."""
 
-    def test_all_29_diffs_registered(self):
+    def test_all_28_diffs_registered(self):
         registry = get_registry()
         single_features = [
             "style_avg_1st_serve_speed", "style_max_1st_serve_speed",
@@ -365,7 +354,6 @@ class TestStyleDiffFeatures:
             "style_winner_rate", "style_ue_rate",
             "style_winner_ue_ratio", "style_forced_error_rate",
             "style_easy_hold_pct", "style_difficult_hold_pct",
-            "style_crucial_pts_win_pct",
             "style_rally_won_avg_length", "style_rally_lost_avg_length",
             "style_fh_winner_share", "style_fh_ue_share",
             "style_fh_winner_rate", "style_bh_winner_rate",
@@ -541,9 +529,9 @@ class TestStyleFeatureCount:
             n for n in registry.list_features()
             if self._is_style_feature(n)
         ]
-        # 29 single + 29 diff + 15 matchup + 7 bool + 7 interaction = 87
-        assert len(style_features) == 87, (
-            f"Expected 87 style features, got {len(style_features)}: {sorted(style_features)}"
+        # 28 single + 28 diff + 15 matchup + 7 bool + 7 interaction = 85
+        assert len(style_features) == 85, (
+            f"Expected 85 style features, got {len(style_features)}: {sorted(style_features)}"
         )
 
     def test_no_duplicate_registrations(self):

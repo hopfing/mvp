@@ -163,25 +163,6 @@ def style_difficult_hold_pct() -> pl.Expr:
 
 
 # =============================================================================
-# Layer 1: Raw Style Metrics — Pressure (match_beats)
-# =============================================================================
-
-
-@feature(
-    name="style_crucial_pts_win_pct",
-    params=[],
-    description="365d crucial points won percentage (big-point performance)",
-    mirror=True,
-)
-def style_crucial_pts_win_pct() -> pl.Expr:
-    return ratio_feature(
-        "mb_player_crucial_points_won",
-        "mb_player_crucial_points_played",
-        days=_DAYS,
-    )
-
-
-# =============================================================================
 # Layer 1: Raw Style Metrics — Rally Shape (match_beats)
 # =============================================================================
 
@@ -448,7 +429,6 @@ _STYLE_SINGLE_FEATURES = [
     "style_forced_error_rate",
     "style_easy_hold_pct",
     "style_difficult_hold_pct",
-    "style_crucial_pts_win_pct",
     "style_rally_won_avg_length",
     "style_rally_lost_avg_length",
     "style_fh_winner_share",
@@ -537,9 +517,9 @@ _STYLE_MATCHUP_PAIRS = [
      "style_ground_stroke_winner_rate", "style_ground_stroke_ue_rate",
      "Rally offense vs opponent rally errors"),
     ("style_easy_hold_pct_matchup",
-     "player_style_easy_hold_pct", "opp_style_crucial_pts_win_pct",
-     "style_easy_hold_pct", "style_crucial_pts_win_pct",
-     "Serve dominance vs opponent clutch performance"),
+     "player_style_easy_hold_pct", "opp_ret_bp_convert_pct",
+     "style_easy_hold_pct", "ret_bp_convert_pct",
+     "Serve dominance vs opponent break point conversion"),
     ("style_difficult_hold_pct_matchup",
      "player_style_difficult_hold_pct", "opp_style_forced_error_rate",
      "style_difficult_hold_pct", "style_forced_error_rate",
@@ -686,18 +666,16 @@ def is_clay_specialist() -> pl.Expr:
 @feature(
     name="is_clutch_player",
     params=[],
-    description="Performs under pressure: BP save, BP convert, crucial points all top quartile",
-    depends_on=["svc_bp_save_pct", "ret_bp_convert_pct", "style_crucial_pts_win_pct"],
+    description="High BP save and BP convert rates (top quartile both)",
+    depends_on=["svc_bp_save_pct", "ret_bp_convert_pct"],
     mirror=True,
 )
 def is_clutch_player() -> pl.Expr:
     bp_save_p75 = pl.col("player_svc_bp_save_pct").quantile(0.75)
     bp_conv_p75 = pl.col("player_ret_bp_convert_pct").quantile(0.75)
-    crucial_p75 = pl.col("player_style_crucial_pts_win_pct").quantile(0.75)
     return (
         (pl.col("player_svc_bp_save_pct") > bp_save_p75)
         & (pl.col("player_ret_bp_convert_pct") > bp_conv_p75)
-        & (pl.col("player_style_crucial_pts_win_pct") > crucial_p75)
     ).cast(pl.Int8)
 
 
