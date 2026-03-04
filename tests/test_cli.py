@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -50,6 +51,12 @@ class TestParseArgs:
         args = parse_args(["live", "--refresh"])
         assert args.refresh is True
 
+    def test_train_subcommand(self):
+        from mvp.cli import parse_args
+
+        args = parse_args(["train"])
+        assert args.command == "train"
+
     def test_log_level_option(self):
         from mvp.cli import parse_args
 
@@ -97,7 +104,20 @@ model:
             main(["model", "/nonexistent/config.yaml"])
 
 
+class TestCmdTrain:
+    @patch("mvp.model.predictor.ProductionPredictor")
+    def test_train_calls_predictor(self, mock_predictor_cls):
+        from mvp.cli import cmd_train
+
+        args = SimpleNamespace()
+        result = cmd_train(args)
+
+        mock_predictor_cls.return_value.train.assert_called_once()
+        assert result == 0
+
+
 class TestCmdLive:
+    @patch("mvp.model.predictor.ProductionPredictor")
     @patch("mvp.atptour.aggregators.matches.MatchesAggregator")
     @patch("mvp.atptour.pipeline.run_player_data")
     @patch("mvp.atptour.pipeline._process_tournaments")
@@ -110,6 +130,7 @@ class TestCmdLive:
         mock_process,
         mock_player_data,
         mock_aggregator,
+        mock_predictor_cls,
     ):
         from mvp.cli import cmd_live
 
@@ -118,6 +139,7 @@ class TestCmdLive:
         ]
         mock_process.return_value = []
         mock_player_data.return_value = MagicMock(has_failures=False)
+        mock_predictor_cls.return_value.predict.return_value = MagicMock(__len__=lambda s: 0)
 
         args = SimpleNamespace(tid=None, refresh=False)
         result = cmd_live(args)
@@ -127,8 +149,10 @@ class TestCmdLive:
         mock_process.assert_called_once()
         mock_player_data.assert_called_once()
         mock_aggregator.return_value.run.assert_called_once()
+        mock_predictor_cls.return_value.predict.assert_called_once()
         assert result == 0
 
+    @patch("mvp.model.predictor.ProductionPredictor")
     @patch("mvp.atptour.aggregators.matches.MatchesAggregator")
     @patch("mvp.atptour.pipeline.run_player_data")
     @patch("mvp.atptour.pipeline._process_tournaments")
@@ -141,6 +165,7 @@ class TestCmdLive:
         mock_process,
         mock_player_data,
         mock_aggregator,
+        mock_predictor_cls,
     ):
         from mvp.cli import cmd_live
 
@@ -150,6 +175,7 @@ class TestCmdLive:
         ]
         mock_process.return_value = []
         mock_player_data.return_value = MagicMock(has_failures=False)
+        mock_predictor_cls.return_value.predict.return_value = MagicMock(__len__=lambda s: 0)
 
         args = SimpleNamespace(tid="580", refresh=False)
         cmd_live(args)
@@ -196,3 +222,123 @@ class TestCmdLive:
         args = SimpleNamespace(tid=None, refresh=False)
         with pytest.raises(RuntimeError, match="failed tournament"):
             cmd_live(args)
+
+
+class TestCmdLiveSheets:
+    """Tests for Sheets sync integration in cmd_live."""
+
+    @patch("mvp.integrations.sheets.SheetsSync")
+    @patch("mvp.integrations.base.merge_predictions")
+    @patch("mvp.integrations.base.prepare_predictions")
+    @patch("mvp.model.predictor.ProductionPredictor")
+    @patch("mvp.atptour.aggregators.matches.MatchesAggregator")
+    @patch("mvp.atptour.pipeline.run_player_data")
+    @patch("mvp.atptour.pipeline._process_tournaments")
+    @patch("mvp.atptour.discovery.TournamentDiscovery")
+    @patch("mvp.atptour.pipeline.run_rankings")
+    def test_live_pushes_to_sheets(
+        self,
+        mock_rankings,
+        mock_discovery,
+        mock_process,
+        mock_player_data,
+        mock_aggregator,
+        mock_predictor_cls,
+        mock_prepare,
+        mock_merge,
+        mock_sheets_cls,
+    ):
+        """Sheets sync is called after predictions are saved."""
+        import polars as pl
+        from mvp.cli import cmd_live
+        from mvp.integrations.base import COLUMN_NAMES
+
+        mock_discovery.return_value.get_active_tournaments.return_value = [("580", 2026)]
+        mock_process.return_value = []
+        mock_player_data.return_value = MagicMock(has_failures=False)
+
+        # Mock predictions as a real DataFrame (cmd_live checks len())
+        predictions = pl.DataFrame({
+            "match_uid": ["M1"],
+            "p1_name": ["John"],
+            "p2_name": ["Jane"],
+            "p1_win_prob": [0.65],
+            "p2_win_prob": [0.35],
+            "p1_elo": [1530.0],
+            "p2_elo": [1470.0],
+            "tournament_name": ["Open"],
+            "circuit": ["tour"],
+            "surface": ["Hard"],
+            "round": ["R32"],
+            "effective_match_date": [datetime(2024, 1, 15)],
+            "model_version": ["v1"],
+            "predicted_at": [datetime(2024, 1, 14)],
+        })
+        mock_predictor_cls.return_value.predict.return_value = predictions
+
+        # Mock Sheets
+        mock_sheets = MagicMock()
+        mock_sheets.read_existing.return_value = pl.DataFrame(
+            schema={col: pl.Utf8 for col in COLUMN_NAMES}
+        )
+        mock_sheets_cls.return_value = mock_sheets
+        mock_prepare.return_value = pl.DataFrame({"match_uid": ["M1"]})
+        mock_merge.return_value = pl.DataFrame({"match_uid": ["M1"]})
+
+        args = SimpleNamespace(tid=None, refresh=False)
+        result = cmd_live(args)
+
+        assert result == 0
+        mock_sheets.write.assert_called_once()
+
+    @patch("mvp.integrations.sheets.SheetsSync")
+    @patch("mvp.model.predictor.ProductionPredictor")
+    @patch("mvp.atptour.aggregators.matches.MatchesAggregator")
+    @patch("mvp.atptour.pipeline.run_player_data")
+    @patch("mvp.atptour.pipeline._process_tournaments")
+    @patch("mvp.atptour.discovery.TournamentDiscovery")
+    @patch("mvp.atptour.pipeline.run_rankings")
+    def test_live_continues_when_sheets_fails(
+        self,
+        mock_rankings,
+        mock_discovery,
+        mock_process,
+        mock_player_data,
+        mock_aggregator,
+        mock_predictor_cls,
+        mock_sheets_cls,
+    ):
+        """Pipeline completes even if Sheets sync raises."""
+        import polars as pl
+        from mvp.cli import cmd_live
+
+        mock_discovery.return_value.get_active_tournaments.return_value = [("580", 2026)]
+        mock_process.return_value = []
+        mock_player_data.return_value = MagicMock(has_failures=False)
+
+        predictions = pl.DataFrame({
+            "match_uid": ["M1"],
+            "p1_name": ["John"],
+            "p2_name": ["Jane"],
+            "p1_win_prob": [0.65],
+            "p2_win_prob": [0.35],
+            "p1_elo": [1530.0],
+            "p2_elo": [1470.0],
+            "tournament_name": ["Open"],
+            "circuit": ["tour"],
+            "surface": ["Hard"],
+            "round": ["R32"],
+            "effective_match_date": [datetime(2024, 1, 15)],
+            "model_version": ["v1"],
+            "predicted_at": [datetime(2024, 1, 14)],
+        })
+        mock_predictor_cls.return_value.predict.return_value = predictions
+
+        # SheetsSync constructor raises
+        mock_sheets_cls.side_effect = ValueError("No credentials")
+
+        args = SimpleNamespace(tid=None, refresh=False)
+        result = cmd_live(args)
+
+        # Should succeed despite Sheets failure
+        assert result == 0

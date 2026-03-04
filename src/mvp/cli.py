@@ -75,13 +75,26 @@ def print_run_summary(results: dict[str, Any], name: str | None = None) -> None:
                     n = m.get('n_matches', 0)
                     print(f"      {surface:8} {acc:5.1%} | {auc:.3f} | {ll:.3f} | {cal:.1%} | {err:.1%} | n={n:,}")
 
-            # Round group subsegments
-            if circuit_data.get("round_group"):
+            # Per-round metrics
+            if circuit_data.get("round"):
                 print("    round:")
-                for group in ["Qualifying", "Early", "Late", "Other"]:
-                    if group not in circuit_data["round_group"]:
+                from mvp.model.diagnostics import ROUND_ORDER
+                for rnd in ROUND_ORDER:
+                    if rnd not in circuit_data["round"]:
                         continue
-                    m = circuit_data["round_group"][group]
+                    m = circuit_data["round"][rnd]
+                    acc = m.get('accuracy', 0)
+                    auc = m.get('roc_auc', 0)
+                    ll = m.get('log_loss', 0)
+                    cal = m.get('calibration_error', 0)
+                    err = m.get('error_rate_80plus', 0)
+                    n = m.get('n_matches', 0)
+                    print(f"      {rnd:10} {acc:5.1%} | {auc:.3f} | {ll:.3f} | {cal:.1%} | {err:.1%} | n={n:,}")
+
+            # Betting group subsegments (circuit-aware performance groups)
+            if circuit_data.get("betting_group"):
+                print("    betting group:")
+                for group, m in circuit_data["betting_group"].items():
                     acc = m.get('accuracy', 0)
                     auc = m.get('roc_auc', 0)
                     ll = m.get('log_loss', 0)
@@ -116,6 +129,54 @@ def print_run_summary(results: dict[str, Any], name: str | None = None) -> None:
 
     print(f"\nMLflow run: {results.get('run_id', 'N/A')}")
     print("=" * 70 + "\n")
+
+_CIRCUIT_LABELS = {"tour": "ATP", "chal": "Challenger"}
+
+
+def print_predictions(predictions: Any) -> None:
+    """Print human-readable prediction summary."""
+    import polars as pl
+
+    print("\n" + "=" * 78)
+    print(f"{'PREDICTIONS':^78}")
+    print("=" * 78)
+    print(f"\n{len(predictions)} matches\n")
+
+    # Pre-compute min date per tournament for headers
+    tournament_dates: dict[str, str] = {}
+    for row in predictions.iter_rows(named=True):
+        key = row.get("tournament_name") or "Unknown"
+        dt = row.get("effective_match_date")
+        if dt is not None:
+            date_str = dt.strftime("%Y-%m-%d") if hasattr(dt, "strftime") else str(dt)[:10]
+            if key not in tournament_dates or date_str < tournament_dates[key]:
+                tournament_dates[key] = date_str
+
+    # Group by tournament for readability
+    sorted_df = predictions.sort(["tournament_name", "effective_match_date", "round"])
+    current_tournament = None
+
+    for row in sorted_df.iter_rows(named=True):
+        tournament = row.get("tournament_name") or "Unknown"
+        if tournament != current_tournament:
+            current_tournament = tournament
+            circuit = row.get("circuit") or ""
+            label = _CIRCUIT_LABELS.get(circuit, circuit.upper())
+            surface = row.get("surface") or ""
+            date_str = tournament_dates.get(tournament, "")
+            print(f"\n  {label} {tournament} ({surface}) {date_str}")
+            print(f"  {'─' * 60}")
+
+        p1 = row.get("p1_name") or "TBD"
+        p2 = row.get("p2_name") or "TBD"
+        p1_prob = row.get("p1_win_prob") or 0.5
+        p2_prob = row.get("p2_win_prob") or 0.5
+        rnd = row.get("round") or ""
+
+        print(f"  {rnd:5} {p1:25} {p1_prob:5.1%}  vs  {p2_prob:5.1%} {p2}")
+
+    print("\n" + "=" * 78 + "\n")
+
 
 # Default directories for each command
 MODEL_DIR = Path("models")
@@ -186,6 +247,11 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         "--verbose", "-v", action="store_true", help="Print progress"
     )
 
+    # train subcommand - train production model
+    subparsers.add_parser(
+        "train", help="Train (or retrain) the production model from production.yaml"
+    )
+
     # live subcommand
     live_parser = subparsers.add_parser(
         "live", help="Run live pipeline for active tournaments"
@@ -198,6 +264,16 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
     )
 
     return parser.parse_args(args)
+
+
+def cmd_train(args: argparse.Namespace) -> int:
+    """Train the production model from production.yaml."""
+    from mvp.model.predictor import ProductionPredictor
+
+    predictor = ProductionPredictor()
+    predictor.train()
+    print("Production model trained and saved.")
+    return 0
 
 
 def cmd_model(args: argparse.Namespace) -> int:
@@ -269,6 +345,7 @@ def cmd_live(args: argparse.Namespace) -> int:
         run_player_data,
         run_rankings,
     )
+    from mvp.model.predictor import ProductionPredictor
 
     current_year = datetime.now().year
     run_rankings(start_year=current_year - 1)
@@ -292,10 +369,7 @@ def cmd_live(args: argparse.Namespace) -> int:
     logger.info("Running cross-tournament aggregation")
     MatchesAggregator().run()
 
-    # TODO: feature engineering (Phase 5)
-    # TODO: predict with active model (Phase 5)
-
-    # Report failures
+    # Report extraction/aggregation failures
     if failed or player_result.has_failures:
         error_parts = []
         if failed:
@@ -307,6 +381,40 @@ def cmd_live(args: argparse.Namespace) -> int:
                 f"{len(player_result.all_failures)} failed player operation(s)"
             )
         raise RuntimeError(f"Pipeline finished with {', '.join(error_parts)}")
+
+    # Predict with production model
+    predictor = ProductionPredictor()
+    predictions = predictor.predict()
+
+    if len(predictions) == 0:
+        print("\nNo pending matches to predict.")
+        return 0
+
+    predictor.save_predictions(predictions)
+    print_predictions(predictions)
+
+    # Sync to Google Sheets (best-effort)
+    try:
+        import polars as pl
+
+        from mvp.integrations.base import merge_predictions, prepare_predictions
+        from mvp.integrations.sheets import SheetsSync
+
+        matches_path = Path("data/aggregate/atptour/matches.parquet")
+        sheets = SheetsSync()
+        existing = sheets.read_existing()
+
+        matches_df = pl.read_parquet(matches_path) if matches_path.exists() else pl.DataFrame()
+
+        prepared = prepare_predictions(predictions)
+        merged = merge_predictions(existing, prepared, matches_df)
+        sheets.write(merged)
+
+        n_new = len(merged) - len(existing)
+        print(f"Synced to Google Sheets ({n_new} new matches)")
+    except Exception as e:
+        logger.error("Sheets sync failed: %s", e)
+        print(f"Warning: Sheets sync failed ({e}). Predictions saved locally.")
 
     return 0
 
@@ -320,7 +428,9 @@ def main(args: list[str] | None = None) -> int:
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    if parsed.command == "model":
+    if parsed.command == "train":
+        return cmd_train(parsed)
+    elif parsed.command == "model":
         return cmd_model(parsed)
     elif parsed.command == "experiment":
         return cmd_experiment(parsed)
