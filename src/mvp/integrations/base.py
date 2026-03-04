@@ -310,7 +310,7 @@ def merge_predictions(
         pl.col("round").replace_strict(ROUND_ORDER, default=99).alias("_round_order")
     )
     merged = merged.sort(
-        ["tournament_day", "circuit", "tournament", "match_date", "_round_order", "match_time"]
+        ["tournament_day", "circuit", "tournament", "match_date", "match_time", "_round_order"]
     ).drop("_round_order")
 
     return merged
