@@ -21,7 +21,7 @@ from mvp.integrations.base import (
 
 class TestColumnSchema:
     def test_column_schema_has_34_columns(self):
-        assert len(COLUMN_SCHEMA) == 34
+        assert len(COLUMN_SCHEMA) == 33
 
     def test_match_uid_is_in_schema(self):
         assert "match_uid" in COLUMN_NAMES
@@ -89,8 +89,8 @@ class TestPreparePredictions:
         df = prepare_predictions(
             _make_predictions(scheduled_datetime=datetime(2024, 1, 15, 3, 0, 0))
         )
-        assert df["match_date"][0] == "2024-01-14"
-        assert df["match_time"][0] == "21:00"
+        assert df["date"][0] == "2024-01-14"
+        assert df["time"][0] == "21:00"
 
     def test_missing_scheduled_datetime(self):
         df = prepare_predictions(
@@ -99,8 +99,8 @@ class TestPreparePredictions:
                 effective_match_date=date(2024, 3, 10),
             )
         )
-        assert df["match_time"][0] == ""
-        assert df["match_date"][0] == "2024-03-10"
+        assert df["time"][0] == ""
+        assert df["date"][0] == "2024-03-10"
 
     def test_tournament_day_is_min_date_per_tournament(self):
         row1 = {
@@ -146,8 +146,8 @@ def _make_sheet_row(**overrides):
     defaults = {col: "" for col in COLUMN_NAMES}
     defaults.update({
         "match_uid": "M1",
-        "match_date": "2024-01-15",
-        "match_time": "09:00",
+        "date": "2024-01-15",
+        "time": "09:00",
         "circuit": "ATP",
         "tournament": "Test Open",
         "surface": "Hard",
@@ -322,7 +322,7 @@ class TestMergePredictions:
         })
         result = merge_predictions(existing, new, matches)
         assert list(result.columns) == COLUMN_NAMES
-        assert len(result.columns) == 34
+        assert len(result.columns) == 33
 
     def test_empty_existing_empty_new(self):
         existing = _sheet_df([])

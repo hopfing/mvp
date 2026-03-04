@@ -16,8 +16,8 @@ logger = logging.getLogger(__name__)
 # "owner" is "pipeline", "user", or "formula".
 COLUMN_SCHEMA = [
     # Match info (pipeline-written)
-    {"name": "match_date", "owner": "pipeline"},
-    {"name": "match_time", "owner": "pipeline"},
+    {"name": "date", "owner": "pipeline"},
+    {"name": "time", "owner": "pipeline"},
     {"name": "circuit", "owner": "pipeline"},
     {"name": "tournament", "owner": "pipeline"},
     {"name": "surface", "owner": "pipeline"},
@@ -33,19 +33,18 @@ COLUMN_SCHEMA = [
     # Odds (user-filled)
     {"name": "p1_odds", "owner": "user"},
     {"name": "p2_odds", "owner": "user"},
-    {"name": "pin_p1_odds", "owner": "user"},
-    {"name": "pin_p2_odds", "owner": "user"},
+    {"name": "p1_pin", "owner": "user"},
+    {"name": "p2_pin", "owner": "user"},
     # Edge analysis (formulas)
     {"name": "p1_edge", "owner": "formula"},
-    {"name": "p1_pin_edge", "owner": "formula"},
+    {"name": "p1_pe", "owner": "formula"},
     {"name": "p2_edge", "owner": "formula"},
-    {"name": "p2_pin_edge", "owner": "formula"},
+    {"name": "p2_pe", "owner": "formula"},
     # Bet action
     {"name": "bet_side", "owner": "user"},
+    {"name": "bet_odds", "owner": "formula"},
     {"name": "stake", "owner": "user"},
     {"name": "to_win", "owner": "formula"},
-    {"name": "bet_edge", "owner": "formula"},
-    {"name": "bet_pin_edge", "owner": "formula"},
     # Results
     {"name": "result", "owner": "pipeline"},  # auto-filled
     {"name": "bet_result", "owner": "user"},
@@ -87,25 +86,22 @@ def generate_formulas(row: int) -> dict[str, str]:
     p2_prob = COL_LETTERS["p2_prob"]
     p1_odds = COL_LETTERS["p1_odds"]
     p2_odds = COL_LETTERS["p2_odds"]
-    pin_p1 = COL_LETTERS["pin_p1_odds"]
-    pin_p2 = COL_LETTERS["pin_p2_odds"]
+    pin_p1 = COL_LETTERS["p1_pin"]
+    pin_p2 = COL_LETTERS["p2_pin"]
     bet_side = COL_LETTERS["bet_side"]
     stake_col = COL_LETTERS["stake"]
     to_win_col = COL_LETTERS["to_win"]
     bet_result_col = COL_LETTERS["bet_result"]
-    p1_edge_col = COL_LETTERS["p1_edge"]
-    p1_pin_edge_col = COL_LETTERS["p1_pin_edge"]
-    p2_edge_col = COL_LETTERS["p2_edge"]
-    p2_pin_edge_col = COL_LETTERS["p2_pin_edge"]
+
+    bet_odds_col = COL_LETTERS["bet_odds"]
 
     return {
         "p1_edge": f'=IF({p1_odds}{r}="", "", {p1_prob}{r}-(1/{p1_odds}{r}))',
-        "p1_pin_edge": f'=IF({pin_p1}{r}="", "", {p1_prob}{r}-(1/{pin_p1}{r}))',
+        "p1_pe": f'=IF({pin_p1}{r}="", "", {p1_prob}{r}-(1/{pin_p1}{r}))',
         "p2_edge": f'=IF({p2_odds}{r}="", "", {p2_prob}{r}-(1/{p2_odds}{r}))',
-        "p2_pin_edge": f'=IF({pin_p2}{r}="", "", {p2_prob}{r}-(1/{pin_p2}{r}))',
-        "to_win": f'=IF({bet_side}{r}="P1", {stake_col}{r}*({p1_odds}{r}-1), IF({bet_side}{r}="P2", {stake_col}{r}*({p2_odds}{r}-1), ""))',
-        "bet_edge": f'=IF({bet_side}{r}="P1", {p1_edge_col}{r}, IF({bet_side}{r}="P2", {p2_edge_col}{r}, ""))',
-        "bet_pin_edge": f'=IF({bet_side}{r}="P1", {p1_pin_edge_col}{r}, IF({bet_side}{r}="P2", {p2_pin_edge_col}{r}, ""))',
+        "p2_pe": f'=IF({pin_p2}{r}="", "", {p2_prob}{r}-(1/{pin_p2}{r}))',
+        "bet_odds": f'=IF({bet_side}{r}="P1", {p1_odds}{r}, IF({bet_side}{r}="P2", {p2_odds}{r}, ""))',
+        "to_win": f'=IF({bet_side}{r}="P1", {stake_col}{r}*({bet_odds_col}{r}-1), IF({bet_side}{r}="P2", {stake_col}{r}*({bet_odds_col}{r}-1), ""))',
         "net": f'=IF({bet_result_col}{r}="W", {to_win_col}{r}, IF({bet_result_col}{r}="L", -{stake_col}{r}, IF({bet_result_col}{r}="V", 0, "")))',
     }
 
@@ -166,8 +162,8 @@ def prepare_predictions(predictions: pl.DataFrame) -> pl.DataFrame:
             predicted_at_str = str(predicted_at)
 
         rows.append({
-            "match_date": match_date,
-            "match_time": match_time,
+            "date": match_date,
+            "time": match_time,
             "circuit": CIRCUIT_LABELS.get(row["circuit"], row["circuit"]),
             "tournament": row["tournament_name"],
             "surface": row["surface"],
@@ -204,7 +200,7 @@ def prepare_predictions(predictions: pl.DataFrame) -> pl.DataFrame:
 
     # tournament_day: min match_date per tournament_id (unique per event)
     min_dates = result.group_by("_tournament_id").agg(
-        pl.col("match_date").min().alias("tournament_day")
+        pl.col("date").min().alias("tournament_day")
     )
     result = result.drop("tournament_day").join(min_dates, on="_tournament_id")
     result = result.drop("_tournament_id")
@@ -320,7 +316,7 @@ def merge_predictions(
         pl.col("round").replace_strict(ROUND_ORDER, default=99).alias("_round_order")
     )
     merged = merged.sort(
-        ["tournament_day", "circuit", "tournament", "match_date", "match_time", "_round_order"]
+        ["tournament_day", "circuit", "tournament", "date", "time", "_round_order"]
     ).drop("_round_order")
 
     return merged
