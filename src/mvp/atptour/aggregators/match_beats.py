@@ -48,7 +48,7 @@ class MatchBeatsAggregator(BaseJob):
             logger.info("No singles matches found")
             return None
 
-        combined = pl.concat(all_dfs)
+        combined = pl.concat(all_dfs, how="diagonal_relaxed")
         result = self._aggregate_match_level(combined)
         result = self._pivot_to_player_match(result)
 
