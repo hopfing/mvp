@@ -488,3 +488,99 @@ def _register_diff(base_name: str) -> None:
 
 for _base in _STYLE_SINGLE_FEATURES:
     _register_diff(_base)
+
+
+# =============================================================================
+# Layer 1: Matchup Features (cross-domain player X vs opponent Y)
+# =============================================================================
+
+# (matchup_name, player_col, opp_col, dep1, dep2, description)
+_STYLE_MATCHUP_PAIRS = [
+    ("style_winner_rate_matchup",
+     "player_style_winner_rate", "opp_style_forced_error_rate",
+     "style_winner_rate", "style_forced_error_rate",
+     "Player offensive output vs opponent offensive pressure"),
+    ("style_fh_winner_rate_matchup",
+     "player_style_fh_winner_rate", "opp_style_bh_winner_rate",
+     "style_fh_winner_rate", "style_bh_winner_rate",
+     "Player FH strength vs opponent BH quality"),
+    ("style_bh_winner_rate_matchup",
+     "player_style_bh_winner_rate", "opp_style_fh_winner_rate",
+     "style_bh_winner_rate", "style_fh_winner_rate",
+     "Player BH strength vs opponent FH quality"),
+    ("style_net_approach_frequency_matchup",
+     "player_style_net_approach_frequency", "opp_style_passing_frequency",
+     "style_net_approach_frequency", "style_passing_frequency",
+     "Net rusher vs passer"),
+    ("style_lob_frequency_matchup",
+     "player_style_lob_frequency", "opp_style_net_approach_frequency",
+     "style_lob_frequency", "style_net_approach_frequency",
+     "Lobber vs net rusher"),
+    ("style_short_rally_pct_matchup",
+     "player_style_short_rally_pct", "opp_style_long_rally_pct",
+     "style_short_rally_pct", "style_long_rally_pct",
+     "Quick play preference vs grind preference"),
+    ("style_long_rally_pct_matchup",
+     "player_style_long_rally_pct", "opp_style_short_rally_pct",
+     "style_long_rally_pct", "style_short_rally_pct",
+     "Grind preference vs quick play preference"),
+    ("style_short_rally_win_pct_matchup",
+     "player_style_short_rally_win_pct", "opp_style_long_rally_win_pct",
+     "style_short_rally_win_pct", "style_long_rally_win_pct",
+     "Quick-point efficiency vs endurance"),
+    ("style_long_rally_win_pct_matchup",
+     "player_style_long_rally_win_pct", "opp_style_short_rally_win_pct",
+     "style_long_rally_win_pct", "style_short_rally_win_pct",
+     "Endurance vs quick-point efficiency"),
+    ("style_ground_stroke_winner_rate_matchup",
+     "player_style_ground_stroke_winner_rate", "opp_style_ground_stroke_ue_rate",
+     "style_ground_stroke_winner_rate", "style_ground_stroke_ue_rate",
+     "Rally offense vs opponent rally errors"),
+    ("style_easy_hold_pct_matchup",
+     "player_style_easy_hold_pct", "opp_style_crucial_pts_win_pct",
+     "style_easy_hold_pct", "style_crucial_pts_win_pct",
+     "Serve dominance vs opponent clutch performance"),
+    ("style_difficult_hold_pct_matchup",
+     "player_style_difficult_hold_pct", "opp_style_forced_error_rate",
+     "style_difficult_hold_pct", "style_forced_error_rate",
+     "Under-pressure serving vs opponent offensive pressure"),
+    ("style_rally_won_avg_length_matchup",
+     "player_style_rally_won_avg_length", "opp_style_rally_lost_avg_length",
+     "style_rally_won_avg_length", "style_rally_lost_avg_length",
+     "Player winning rally length vs opponent losing rally length"),
+    ("style_ue_rate_matchup",
+     "player_style_ue_rate", "opp_style_winner_rate",
+     "style_ue_rate", "style_winner_rate",
+     "Player error tendency vs opponent attack output"),
+    ("style_drop_shot_effectiveness_matchup",
+     "player_style_drop_shot_effectiveness", "opp_style_net_approach_frequency",
+     "style_drop_shot_effectiveness", "style_net_approach_frequency",
+     "Drop shot craft vs opponent net rushing"),
+]
+
+
+def _register_matchup(
+    name: str,
+    player_col: str,
+    opp_col: str,
+    dep1: str,
+    dep2: str,
+    description: str,
+) -> None:
+    """Register a cross-domain matchup feature."""
+
+    @feature(
+        name=name,
+        params=[],
+        description=description,
+        depends_on=[dep1, dep2],
+        mirror=False,
+    )
+    def _matchup() -> pl.Expr:
+        return pl.col(player_col) - pl.col(opp_col)
+
+    globals()[name] = _matchup
+
+
+for _m in _STYLE_MATCHUP_PAIRS:
+    _register_matchup(*_m)

@@ -395,3 +395,43 @@ class TestStyleDiffFeatures:
         assert result["d"][0] == pytest.approx(0.05)
         assert result["d"][1] == pytest.approx(0.0)
         assert result["d"][2] == pytest.approx(-0.04)
+
+
+class TestStyleMatchupFeatures:
+    """Tests for cross-domain matchup features."""
+
+    def test_all_matchups_registered(self):
+        registry = get_registry()
+        matchup_names = [
+            "style_winner_rate_matchup",
+            "style_fh_winner_rate_matchup",
+            "style_bh_winner_rate_matchup",
+            "style_net_approach_frequency_matchup",
+            "style_lob_frequency_matchup",
+            "style_short_rally_pct_matchup",
+            "style_long_rally_pct_matchup",
+            "style_short_rally_win_pct_matchup",
+            "style_long_rally_win_pct_matchup",
+            "style_ground_stroke_winner_rate_matchup",
+            "style_easy_hold_pct_matchup",
+            "style_difficult_hold_pct_matchup",
+            "style_rally_won_avg_length_matchup",
+            "style_ue_rate_matchup",
+            "style_drop_shot_effectiveness_matchup",
+        ]
+        for name in matchup_names:
+            feat = registry.get(name)
+            assert feat.mirror is False
+            assert len(feat.depends_on) == 2
+
+    def test_fh_winner_rate_matchup_computes(self):
+        from mvp.model.features.style import style_fh_winner_rate_matchup
+        df = pl.DataFrame({
+            "player_style_fh_winner_rate": [0.55, 0.60],
+            "opp_style_bh_winner_rate": [0.30, 0.45],
+        }).lazy()
+        result = df.with_columns(
+            style_fh_winner_rate_matchup().alias("m")
+        ).collect()
+        assert result["m"][0] == pytest.approx(0.25)
+        assert result["m"][1] == pytest.approx(0.15)
