@@ -39,8 +39,11 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["slow: marks tests that process the full raw data corpus"]
-addopts = "-m 'not slow'"
+markers = [
+    "slow: marks tests that process the full raw data corpus",
+    "integration: marks tests that require external services (Google Sheets)",
+]
+addopts = "-m 'not slow and not integration'"
 
 [tool.ruff]
 target-version = "py312"
