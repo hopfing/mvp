@@ -74,7 +74,8 @@ class SheetsSync:
             formulas = generate_formulas(sheet_row)
             for col_name, formula in formulas.items():
                 col_idx = COLUMN_NAMES.index(col_name)
-                row_list[col_idx] = formula
+                if not row_list[col_idx]:
+                    row_list[col_idx] = formula
             cell_rows.append(row_list)
 
         all_data = [COLUMN_NAMES] + cell_rows

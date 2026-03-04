@@ -74,8 +74,8 @@ class TestSheetsSync:
             call_kwargs = mock_ws.update.call_args
             assert call_kwargs.kwargs["value_input_option"] == "USER_ENTERED"
 
-    def test_write_injects_formulas(self):
-        """Write replaces formula column values with actual formulas."""
+    def test_write_injects_formulas_when_empty(self):
+        """Write injects formulas into empty formula cells."""
         with patch("mvp.integrations.sheets.gspread"):
             from mvp.integrations.sheets import SheetsSync
 
@@ -83,18 +83,37 @@ class TestSheetsSync:
             mock_ws = MagicMock()
             sync._worksheet = mock_ws
 
-            df = pl.DataFrame({col: ["val"] for col in COLUMN_NAMES})
+            df = pl.DataFrame({col: [""] for col in COLUMN_NAMES})
             sync.write(df)
 
             call_args = mock_ws.update.call_args
             all_data = call_args.kwargs["values"]
 
-            # Row 0 is header, row 1 is data
             data_row = all_data[1]
-            expected_formulas = generate_formulas(2)  # sheet row 2
+            expected_formulas = generate_formulas(2)
             for col_name, formula in expected_formulas.items():
                 col_idx = COLUMN_NAMES.index(col_name)
                 assert data_row[col_idx] == formula, f"Formula mismatch for {col_name}"
+
+    def test_write_preserves_manual_formula_overrides(self):
+        """Write does not overwrite non-empty formula cells with formulas."""
+        with patch("mvp.integrations.sheets.gspread"):
+            from mvp.integrations.sheets import SheetsSync
+
+            sync = SheetsSync.__new__(SheetsSync)
+            mock_ws = MagicMock()
+            sync._worksheet = mock_ws
+
+            data = {col: [""] for col in COLUMN_NAMES}
+            data["to_win"] = ["150.50"]
+            df = pl.DataFrame(data)
+            sync.write(df)
+
+            call_args = mock_ws.update.call_args
+            all_data = call_args.kwargs["values"]
+            data_row = all_data[1]
+            col_idx = COLUMN_NAMES.index("to_win")
+            assert data_row[col_idx] == "150.50"
 
     def test_write_header_is_column_names(self):
         """Write puts COLUMN_NAMES as the header row."""
@@ -147,7 +166,7 @@ class TestSheetsSync:
             sync._worksheet = mock_ws
 
             df = pl.DataFrame(
-                {col: ["val1", "val2", "val3"] for col in COLUMN_NAMES}
+                {col: ["", "", ""] for col in COLUMN_NAMES}
             )
             sync.write(df)
 
