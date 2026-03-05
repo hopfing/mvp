@@ -580,6 +580,55 @@ class TestStyleBoolZscoreWiring:
         assert "style_net_approach_frequency_zscore" in feat.depends_on
 
 
+class TestStyleZscoreComputation:
+    """Test that z-score features actually compute correctly."""
+
+    def test_zscore_computes_on_dataframe(self):
+        """Z-score feature should produce population-relative scores."""
+        from mvp.model.features.style import style_avg_1st_serve_speed_zscore
+
+        df = pl.DataFrame({
+            "player_id": ["A", "B", "C", "D", "E"],
+            "effective_match_date": [
+                date(2024, 1, 1),
+                date(2024, 1, 2),
+                date(2024, 1, 3),
+                date(2024, 1, 4),
+                date(2024, 1, 5),
+            ],
+            "player_style_avg_1st_serve_speed": [
+                200.0, 180.0, 210.0, 190.0, 220.0,
+            ],
+        }).sort("effective_match_date").lazy()
+
+        result = df.with_columns(
+            style_avg_1st_serve_speed_zscore().alias("z")
+        ).collect()
+
+        assert result["z"][0] is None
+        assert result["z"][1] is None
+        # Row 2: prior [200, 180], mean=190, std=14.14, val=210 → z≈1.41
+        assert result["z"][2] == pytest.approx(1.414, abs=0.01)
+        # Row 4: prior [200, 180, 210, 190], val=220 → positive z
+        assert result["z"][4] is not None
+        assert result["z"][4] > 0
+
+    def test_zscore_diff_computes(self):
+        """Z-score diff should be player_zscore - opp_zscore."""
+        from mvp.model.features.style import style_avg_1st_serve_speed_zscore_diff
+
+        df = pl.DataFrame({
+            "player_style_avg_1st_serve_speed_zscore": [1.5, -0.3, 0.0],
+            "opp_style_avg_1st_serve_speed_zscore": [0.5, 0.8, -1.2],
+        }).lazy()
+        result = df.with_columns(
+            style_avg_1st_serve_speed_zscore_diff().alias("d")
+        ).collect()
+        assert result["d"][0] == pytest.approx(1.0)
+        assert result["d"][1] == pytest.approx(-1.1)
+        assert result["d"][2] == pytest.approx(1.2)
+
+
 class TestStyleFeatureCount:
     """Verify total feature count matches design."""
 
