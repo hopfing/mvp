@@ -304,11 +304,13 @@ class TestNormalizeServeScore:
         assert normalize_serve_score(0.62, "Hard") == 0.5
 
     def test_above_baseline_returns_above_half(self):
-        score = normalize_serve_score(0.67, "Hard")
+        # (0.645 - 0.62) / 0.10 + 0.5 = 0.75
+        score = normalize_serve_score(0.645, "Hard")
         assert score == pytest.approx(0.75)
 
     def test_below_baseline_returns_below_half(self):
-        score = normalize_serve_score(0.57, "Hard")
+        # (0.595 - 0.62) / 0.10 + 0.5 = 0.25
+        score = normalize_serve_score(0.595, "Hard")
         assert score == pytest.approx(0.25)
 
     def test_clamped_at_one(self):
@@ -740,9 +742,10 @@ class TestEMAConvergence:
         """Applying the same serve observation vs fixed opponent converges."""
         server_elo = DEFAULT_ELO
         opp_return_elo = DEFAULT_ELO
+        # Use 0.655 (within non-clamped range for DEVIATION_SCALE=0.10)
         for _ in range(500):
             server_elo, opp_return_elo = update_serve_elo(
-                server_elo, opp_return_elo, 0.70, "Hard", 16.0
+                server_elo, opp_return_elo, 0.655, "Hard", 16.0
             )
         # Strong serve% pushes server up, returner down; zero-sum
         assert server_elo > DEFAULT_ELO
@@ -750,7 +753,7 @@ class TestEMAConvergence:
         # Check convergence: last update should be tiny
         prev_server = server_elo
         server_elo, opp_return_elo = update_serve_elo(
-            server_elo, opp_return_elo, 0.70, "Hard", 16.0
+            server_elo, opp_return_elo, 0.655, "Hard", 16.0
         )
         assert abs(server_elo - prev_server) < 0.1
 
@@ -758,9 +761,10 @@ class TestEMAConvergence:
         """Applying the same return observation vs fixed opponent converges."""
         returner_elo = DEFAULT_ELO
         server_elo = DEFAULT_ELO
+        # Use 0.585 (within non-clamped range for DEVIATION_SCALE=0.10)
         for _ in range(500):
             returner_elo, server_elo = update_return_elo(
-                returner_elo, server_elo, 0.55, "Hard", 16.0
+                returner_elo, server_elo, 0.585, "Hard", 16.0
             )
         # Low opp serve% means returner did well
         assert returner_elo > DEFAULT_ELO
@@ -768,7 +772,7 @@ class TestEMAConvergence:
         # Check convergence: last update should be tiny
         prev_returner = returner_elo
         returner_elo, server_elo = update_return_elo(
-            returner_elo, server_elo, 0.55, "Hard", 16.0
+            returner_elo, server_elo, 0.585, "Hard", 16.0
         )
         assert abs(returner_elo - prev_returner) < 0.1
 
@@ -811,17 +815,18 @@ class TestEMAConvergence:
     def test_different_match_counts_same_stats_converge(self):
         """Two players with identical stats but different match counts
         end up at similar ratings."""
+        # Use 0.645 (within non-clamped range for DEVIATION_SCALE=0.10)
         # Player A: 200 matches vs fixed opponent
         server_a = DEFAULT_ELO
         opp_a = DEFAULT_ELO
         for _ in range(200):
-            server_a, opp_a = update_serve_elo(server_a, opp_a, 0.68, "Hard", 16.0)
+            server_a, opp_a = update_serve_elo(server_a, opp_a, 0.645, "Hard", 16.0)
 
         # Player B: 500 matches vs fixed opponent
         server_b = DEFAULT_ELO
         opp_b = DEFAULT_ELO
         for _ in range(500):
-            server_b, opp_b = update_serve_elo(server_b, opp_b, 0.68, "Hard", 16.0)
+            server_b, opp_b = update_serve_elo(server_b, opp_b, 0.645, "Hard", 16.0)
 
         # Both converge toward the same equilibrium
         assert abs(server_a - server_b) < 5.0
