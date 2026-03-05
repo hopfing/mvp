@@ -331,28 +331,79 @@ class TestNormalizeServeScore:
 
 
 class TestUpdateServeElo:
-    """Test serve Elo update based on serve points won percentage."""
+    """Test opponent-relative serve Elo update."""
 
-    def test_above_baseline_increases(self):
-        # 0.70 serve % on Hard (baseline 0.62) should increase
-        new_elo = update_serve_elo(1500.0, 0.70, "Hard", 16.0)
-        assert new_elo > 1500.0
+    def test_above_expected_increases_serve_elo(self):
+        server_elo, returner_elo = update_serve_elo(
+            server_serve_elo=1500.0,
+            returner_return_elo=1500.0,
+            serve_pct=0.70,
+            surface="Hard",
+            k=12.8,
+        )
+        assert server_elo > 1500.0
+        assert returner_elo < 1500.0
 
-    def test_below_baseline_decreases(self):
-        # 0.55 serve % on Hard (baseline 0.62) should decrease
-        new_elo = update_serve_elo(1500.0, 0.55, "Hard", 16.0)
-        assert new_elo < 1500.0
+    def test_below_expected_decreases_serve_elo(self):
+        server_elo, returner_elo = update_serve_elo(
+            server_serve_elo=1500.0,
+            returner_return_elo=1500.0,
+            serve_pct=0.55,
+            surface="Hard",
+            k=12.8,
+        )
+        assert server_elo < 1500.0
+        assert returner_elo > 1500.0
 
-    def test_missing_stats_unchanged(self):
-        new_elo = update_serve_elo(1500.0, None, "Hard", 16.0)
-        assert new_elo == 1500.0
+    def test_at_baseline_equal_ratings_no_change(self):
+        server_elo, returner_elo = update_serve_elo(
+            server_serve_elo=1500.0,
+            returner_return_elo=1500.0,
+            serve_pct=0.62,
+            surface="Hard",
+            k=12.8,
+        )
+        assert server_elo == 1500.0
+        assert returner_elo == 1500.0
+
+    def test_zero_sum(self):
+        server_elo, returner_elo = update_serve_elo(
+            server_serve_elo=1600.0,
+            returner_return_elo=1400.0,
+            serve_pct=0.68,
+            surface="Hard",
+            k=12.8,
+        )
+        server_delta = server_elo - 1600.0
+        returner_delta = returner_elo - 1400.0
+        assert abs(server_delta + returner_delta) < 1e-10
+
+    def test_strong_server_vs_weak_returner_expected_high(self):
+        server_elo, _ = update_serve_elo(
+            server_serve_elo=1700.0,
+            returner_return_elo=1300.0,
+            serve_pct=0.62,
+            surface="Hard",
+            k=12.8,
+        )
+        assert server_elo < 1700.0
+
+    def test_none_serve_pct_returns_unchanged(self):
+        server_elo, returner_elo = update_serve_elo(
+            server_serve_elo=1500.0,
+            returner_return_elo=1500.0,
+            serve_pct=None,
+            surface="Hard",
+            k=12.8,
+        )
+        assert server_elo == 1500.0
+        assert returner_elo == 1500.0
 
     def test_clay_baseline_different(self):
-        # Same serve % should have different effect on clay (baseline 0.60) vs hard (0.62)
-        hard_elo = update_serve_elo(1500.0, 0.62, "Hard", 16.0)
-        clay_elo = update_serve_elo(1500.0, 0.62, "Clay", 16.0)
-        assert hard_elo == 1500.0  # at baseline
-        assert clay_elo > 1500.0  # above clay baseline
+        hard_serve, _ = update_serve_elo(1500.0, 1500.0, 0.62, "Hard", 12.8)
+        clay_serve, _ = update_serve_elo(1500.0, 1500.0, 0.62, "Clay", 12.8)
+        assert hard_serve == 1500.0
+        assert clay_serve > 1500.0
 
 
 class TestUpdateReturnElo:

@@ -181,22 +181,32 @@ def apply_inactivity_rd(
 
 
 def update_serve_elo(
-    current_elo: float,
+    server_serve_elo: float,
+    returner_return_elo: float,
     serve_pct: float | None,
     surface: str,
     k: float,
-) -> float:
-    """Update serve Elo based on serve points won percentage.
+) -> tuple[float, float]:
+    """Update serve and return Elo for a serve sub-game.
 
-    Uses EMA toward a target derived from observed serve percentage.
-    Returns unchanged elo if serve_pct is None.
+    Uses opponent-relative Elo: normalizes serve% to a [0,1] score,
+    computes expected score from serve Elo vs return Elo, and updates
+    both ratings (zero-sum).
+
+    Returns:
+        Tuple of (new_server_serve_elo, new_returner_return_elo).
     """
     if serve_pct is None:
-        return current_elo
+        return server_serve_elo, returner_return_elo
 
-    baseline = SERVE_BASELINE.get(surface, 0.62)
-    target = DEFAULT_ELO + (serve_pct - baseline) * SERVE_RETURN_SCALE
-    return current_elo + EMA_ALPHA * (target - current_elo)
+    score = normalize_serve_score(serve_pct, surface)
+    expected = expected_score(server_serve_elo, returner_return_elo)
+    surprise = score - expected
+
+    return (
+        server_serve_elo + k * surprise,
+        returner_return_elo - k * surprise,
+    )
 
 
 def update_return_elo(
