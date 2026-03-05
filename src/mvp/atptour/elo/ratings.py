@@ -28,6 +28,7 @@ from mvp.atptour.elo.constants import (
     SEED_UNRANKED,
     SERVE_BASELINE,
     SERVE_CLUTCH_BASELINE,
+    SERVE_RETURN_DEVIATION_SCALE,
     SERVE_RETURN_SCALE,
     STYLE_SCALE,
     TB_CLUTCH_BASELINE,
@@ -98,6 +99,16 @@ def get_k_factor(player: PlayerRating, round_name: str) -> float:
 def expected_score(player_elo: float, opponent_elo: float) -> float:
     """Calculate expected score (win probability) using Elo formula."""
     return 1.0 / (1.0 + 10.0 ** ((opponent_elo - player_elo) / 400.0))
+
+
+def normalize_serve_score(serve_pct: float, surface: str) -> float:
+    """Normalize raw serve% to a [0,1] score centered at 0.5 for baseline.
+
+    Uses surface-specific baselines. Clamps to [0, 1].
+    """
+    baseline = SERVE_BASELINE.get(surface, 0.62)
+    score = (serve_pct - baseline) / SERVE_RETURN_DEVIATION_SCALE + 0.5
+    return max(0.0, min(1.0, score))
 
 
 def update_elo(

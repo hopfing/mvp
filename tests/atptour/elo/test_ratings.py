@@ -1,5 +1,7 @@
 from datetime import date
 
+import pytest
+
 from mvp.atptour.elo.constants import (
     BASE_K,
     DEFAULT_ELO,
@@ -13,6 +15,7 @@ from mvp.atptour.elo.ratings import (
     apply_inactivity_rd,
     expected_score,
     get_k_factor,
+    normalize_serve_score,
     update_elo,
     update_rd,
     update_return_elo,
@@ -292,6 +295,39 @@ class TestApplyInactivityRD:
     def test_no_last_date_returns_unchanged(self):
         new_rd = apply_inactivity_rd(200.0, None, date(2024, 1, 1))
         assert new_rd == 200.0
+
+
+class TestNormalizeServeScore:
+    """Test normalization of serve% to [0,1] score."""
+
+    def test_at_baseline_returns_half(self):
+        assert normalize_serve_score(0.62, "Hard") == 0.5
+
+    def test_above_baseline_returns_above_half(self):
+        score = normalize_serve_score(0.67, "Hard")
+        assert score == pytest.approx(0.75)
+
+    def test_below_baseline_returns_below_half(self):
+        score = normalize_serve_score(0.57, "Hard")
+        assert score == pytest.approx(0.25)
+
+    def test_clamped_at_one(self):
+        score = normalize_serve_score(0.85, "Hard")
+        assert score == 1.0
+
+    def test_clamped_at_zero(self):
+        score = normalize_serve_score(0.40, "Hard")
+        assert score == 0.0
+
+    def test_clay_baseline(self):
+        assert normalize_serve_score(0.60, "Clay") == 0.5
+
+    def test_grass_baseline(self):
+        assert normalize_serve_score(0.64, "Grass") == 0.5
+
+    def test_unknown_surface_uses_default(self):
+        score = normalize_serve_score(0.62, "Carpet")
+        assert score == 0.5
 
 
 class TestUpdateServeElo:

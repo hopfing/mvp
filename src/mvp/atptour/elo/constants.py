@@ -77,3 +77,7 @@ EMA_ALPHA = 0.10  # Half-life ~7 matches
 
 # Indoor adjustment EMA scale (centered at 0, not DEFAULT_ELO)
 INDOOR_EMA_SCALE = 500.0
+
+# Score normalization for serve/return Elo
+# Maps ±10pp from surface baseline to the full [0,1] range
+SERVE_RETURN_DEVIATION_SCALE = 0.20
