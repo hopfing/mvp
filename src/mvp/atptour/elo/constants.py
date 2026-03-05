@@ -30,7 +30,7 @@ ROUND_IMPORTANCE = {
 SURFACE_K_MULT = 0.5
 
 # Serve/Return K-factor
-SERVE_RETURN_K_MULT = 0.4
+SERVE_RETURN_K_MULT = 1.0
 
 # RD decay/growth
 RD_DECAY_FACTOR = 0.95
@@ -80,4 +80,4 @@ INDOOR_EMA_SCALE = 500.0
 
 # Score normalization for serve/return Elo
 # Maps ±10pp from surface baseline to the full [0,1] range
-SERVE_RETURN_DEVIATION_SCALE = 0.20
+SERVE_RETURN_DEVIATION_SCALE = 0.10
