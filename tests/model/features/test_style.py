@@ -475,24 +475,24 @@ class TestStyleBoolLabels:
         registry = get_registry()
         feat = registry.get("is_power_server")
         assert feat.mirror is True
-        assert "style_avg_1st_serve_speed" in feat.depends_on
+        assert "style_avg_1st_serve_speed_zscore" in feat.depends_on
         assert "svc_ace_pct" in feat.depends_on
 
     def test_is_power_server_computes(self):
         from mvp.model.features.style import is_power_server
         df = pl.DataFrame({
-            "player_style_avg_1st_serve_speed": [
-                220.0, 215.0, 210.0, 205.0, 195.0, 190.0, 185.0, 180.0,
+            "player_style_avg_1st_serve_speed_zscore": [
+                2.0, 1.5, 0.5, 0.2, -0.3, -0.8, -1.2, -1.8,
             ],
             "player_svc_ace_pct": [
                 0.25, 0.22, 0.18, 0.15, 0.12, 0.10, 0.08, 0.05,
             ],
         }).lazy()
         result = df.with_columns(is_power_server().alias("is_power_server")).collect()
-        # Top 2 rows have both metrics above p75 -> should be 1
-        # p75 of speed ~ 211.25, p75 of ace ~ 0.1925
+        # z>0 AND ace above median → power server
+        # Row 0: z=2.0>0, ace=0.25>median(~0.135) → 1
+        # Row 7: z=-1.8<0 → 0
         assert result["is_power_server"][0] == 1
-        assert result["is_power_server"][1] == 1
         assert result["is_power_server"][7] == 0
 
     def test_all_7_labels_registered(self):
@@ -553,6 +553,31 @@ class TestStyleZscoreDiffFeatures:
         registry = get_registry()
         feat = registry.get("style_avg_1st_serve_speed_zscore_diff")
         assert feat.mirror is False
+
+
+class TestStyleBoolZscoreWiring:
+    """Tests that bool labels depend on z-score features."""
+
+    def test_power_server_depends_on_zscore(self):
+        registry = get_registry()
+        feat = registry.get("is_power_server")
+        assert "style_avg_1st_serve_speed_zscore" in feat.depends_on
+
+    def test_counterpuncher_depends_on_zscore(self):
+        registry = get_registry()
+        feat = registry.get("is_counterpuncher")
+        assert "style_long_rally_win_pct_zscore" in feat.depends_on
+        assert "style_ue_rate_zscore" in feat.depends_on
+
+    def test_aggressive_baseliner_depends_on_zscore(self):
+        registry = get_registry()
+        feat = registry.get("is_aggressive_baseliner")
+        assert "style_winner_rate_zscore" in feat.depends_on
+
+    def test_net_rusher_depends_on_zscore(self):
+        registry = get_registry()
+        feat = registry.get("is_net_rusher")
+        assert "style_net_approach_frequency_zscore" in feat.depends_on
 
 
 class TestStyleFeatureCount:
