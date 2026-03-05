@@ -486,9 +486,15 @@ class FeatureEngine:
                 continue
 
             if prefix == "player" and col_name not in computed_player_cols:
-                # Check if this feature depends on an opp_ derived column
-                needs_opp_derived = any(
-                    dep in opp_derived_bases for dep in feature_def.depends_on
+                # Defer features that directly reference opp_ columns in their
+                # expression (mirror=False + depends on derived opp_ feature).
+                # Mirrored features only use player_ columns, so they can
+                # compute now even if their dependencies have opp_ variants.
+                needs_opp_derived = (
+                    not feature_def.mirror
+                    and any(
+                        dep in opp_derived_bases for dep in feature_def.depends_on
+                    )
                 )
                 if needs_opp_derived:
                     deferred_specs.append(spec)
