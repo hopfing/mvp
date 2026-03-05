@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import polars as pl
 
-from mvp.model.primitives import ratio_feature, rolling_max, rolling_mean
+from mvp.model.primitives import expanding_zscore, ratio_feature, rolling_max, rolling_mean
 from mvp.model.registry import feature
 
 _DAYS = 365
@@ -468,6 +468,27 @@ def _register_diff(base_name: str) -> None:
 
 for _base in _STYLE_SINGLE_FEATURES:
     _register_diff(_base)
+
+
+def _register_zscore(base_name: str) -> None:
+    """Register a z-score feature for a raw style metric."""
+    zscore_name = f"{base_name}_zscore"
+
+    @feature(
+        name=zscore_name,
+        params=[],
+        description=f"{base_name} z-score (population-relative)",
+        depends_on=[base_name],
+        mirror=True,
+    )
+    def _zscore() -> pl.Expr:
+        return expanding_zscore(f"player_{base_name}")
+
+    globals()[zscore_name] = _zscore
+
+
+for _base in _STYLE_SINGLE_FEATURES:
+    _register_zscore(_base)
 
 
 # =============================================================================

@@ -507,6 +507,30 @@ class TestStyleBoolLabels:
             assert feat.mirror is True, f"{name} should mirror"
 
 
+class TestStyleZscoreFeatures:
+    """Tests for z-score style features."""
+
+    def test_zscore_features_registered(self):
+        """All 28 raw style metrics should have _zscore variants."""
+        from mvp.model.features.style import _STYLE_SINGLE_FEATURES
+        registry = get_registry()
+        for base in _STYLE_SINGLE_FEATURES:
+            zscore_name = f"{base}_zscore"
+            assert zscore_name in registry.list_features(), f"Missing {zscore_name}"
+
+    def test_zscore_depends_on_raw(self):
+        """Z-score features should depend on their raw metric."""
+        registry = get_registry()
+        feat = registry.get("style_avg_1st_serve_speed_zscore")
+        assert "style_avg_1st_serve_speed" in feat.depends_on
+
+    def test_zscore_is_mirrored(self):
+        """Z-score features should have mirror=True."""
+        registry = get_registry()
+        feat = registry.get("style_avg_1st_serve_speed_zscore")
+        assert feat.mirror is True
+
+
 class TestStyleFeatureCount:
     """Verify total feature count matches design."""
 
@@ -529,9 +553,9 @@ class TestStyleFeatureCount:
             n for n in registry.list_features()
             if self._is_style_feature(n)
         ]
-        # 28 single + 28 diff + 15 matchup + 7 bool + 7 interaction = 85
-        assert len(style_features) == 85, (
-            f"Expected 85 style features, got {len(style_features)}: {sorted(style_features)}"
+        # 28 single + 28 diff + 28 zscore + 15 matchup + 7 bool + 7 interaction = 113
+        assert len(style_features) == 113, (
+            f"Expected 113 style features, got {len(style_features)}: {sorted(style_features)}"
         )
 
     def test_no_duplicate_registrations(self):
