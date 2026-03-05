@@ -14,7 +14,6 @@ class PointResult(StrEnum):
     UNFORCED_ERROR = "UE"
     FORCED_ERROR = "FE"
     DOUBLE_FAULT = "DF"
-    UNKNOWN = "N"
 
 
 class MatchBeatsPointRecord(BaseModel):
@@ -51,8 +50,8 @@ class MatchBeatsPointRecord(BaseModel):
     point_num: int
     point_id: str  # e.g., "1_1_1_1" (set_game_point_serve)
 
-    # Point outcome
-    result: PointResult
+    # Point outcome (None when result type not tracked, e.g. most Challengers)
+    result: PointResult | None = None
     scorer: str  # "1" or "2"
     server: str  # "1" or "2"
 
@@ -100,8 +99,10 @@ class MatchBeatsPointRecord(BaseModel):
 
     @field_validator("result", mode="before")
     @classmethod
-    def normalize_result(cls, v: str) -> str:
-        """Normalize result to enum value."""
+    def normalize_result(cls, v: str | None) -> str | None:
+        """Normalize result to enum value. None means no data."""
+        if v is None:
+            return None
         return v.upper().strip() if isinstance(v, str) else v
 
 

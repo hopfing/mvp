@@ -63,11 +63,19 @@ class MatchBeatsAggregator(BaseJob):
         logger.info("Aggregated %d matches to %s", len(result), output)
         return result
 
+    _RESULT_DEPENDENT_COLS = [
+        "p1_winners", "p1_ues", "p1_fes",
+        "p2_winners", "p2_ues", "p2_fes",
+    ]
+
     def _aggregate_match_level(self, df: pl.DataFrame) -> pl.DataFrame:
         """Aggregate points to match level with p1_/p2_ columns."""
         main = df.group_by(
             ["tournament_id", "year", "match_id", "p1_id", "p2_id"]
         ).agg(
+            # Track whether any point has W/UE/FE result data
+            # (A and DF are tracked even when W/UE/FE are not)
+            pl.col("result").is_in(["W", "UE", "FE"]).any().alias("_has_result_data"),
             pl.len().alias("total_points"),
             (pl.col("scorer") == "1").sum().alias("p1_points_won"),
             (pl.col("scorer") == "2").sum().alias("p2_points_won"),
@@ -192,7 +200,19 @@ class MatchBeatsAggregator(BaseJob):
             )
         )
 
-        return main.join(sets_won, on=["tournament_id", "year", "match_id"], how="left")
+        result = main.join(sets_won, on=["tournament_id", "year", "match_id"], how="left")
+
+        # Null out winner/UE/FE columns for matches without result data
+        # (e.g. most Challengers where result is always None)
+        result = result.with_columns([
+            pl.when(pl.col("_has_result_data"))
+            .then(pl.col(c))
+            .otherwise(None)
+            .alias(c)
+            for c in self._RESULT_DEPENDENT_COLS
+        ]).drop("_has_result_data")
+
+        return result
 
     def _pivot_to_player_match(self, df: pl.DataFrame) -> pl.DataFrame:
         """Pivot match-level p1_/p2_ data to player-match level player_/opp_."""

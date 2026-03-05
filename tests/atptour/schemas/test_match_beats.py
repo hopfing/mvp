@@ -44,7 +44,6 @@ class TestPointResult:
         assert PointResult.UNFORCED_ERROR == "UE"
         assert PointResult.FORCED_ERROR == "FE"
         assert PointResult.DOUBLE_FAULT == "DF"
-        assert PointResult.UNKNOWN == "N"
 
 
 class TestMatchBeatsPointRecord:
@@ -98,10 +97,16 @@ class TestMatchBeatsPointRecord:
 
     def test_all_result_types(self, valid_point_data):
         """Should accept all result types."""
-        for result in ["A", "W", "UE", "FE", "DF", "N"]:
+        for result in ["A", "W", "UE", "FE", "DF"]:
             valid_point_data["result"] = result
             record = MatchBeatsPointRecord(**valid_point_data)
             assert record.result == PointResult(result)
+
+    def test_none_result(self, valid_point_data):
+        """Should accept None result (no data available)."""
+        valid_point_data["result"] = None
+        record = MatchBeatsPointRecord(**valid_point_data)
+        assert record.result is None
 
     def test_defaults(self, valid_point_data):
         """Should have sensible defaults."""

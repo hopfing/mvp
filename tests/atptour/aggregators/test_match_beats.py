@@ -53,7 +53,7 @@ def _make_singles_points() -> pl.DataFrame:
         "is_tiebreak": [False] * 10,
         "point_num": list(range(1, 6)) * 2,
         "point_id": [f"P{i}" for i in range(10)],
-        "result": ["A", "W", "UE", "FE", "DF", "W", "W", "UE", "FE", "N"],
+        "result": ["A", "W", "UE", "FE", "DF", "W", "W", "UE", "FE", None],
         "scorer": ["1", "1", "2", "2", "2", "1", "2", "1", "1", "2"],
         "server": ["1"] * 5 + ["2"] * 5,
         "serve": [1, 1, 1, 2, 1, 1, 1, 2, 1, 1],
@@ -450,6 +450,37 @@ class TestMatchBeatsAggregator:
         # Game 2: server="2" (point_num=1 exists) → p2 has 1 service game
         assert p1_row["player_service_games"][0] == 1
         assert p2_row["player_service_games"][0] == 1
+
+    def test_nulls_winners_ues_when_no_result_data(self, tmp_path):
+        """Should null out winner/UE/FE columns when match has no result data.
+
+        Challenger matches typically have result=None for all points
+        (only aces and DFs are tagged). The aggregator should produce
+        null, not 0, for winners/UEs/FEs in these matches.
+        """
+        # Create a match with only None and DF/A results (typical Challenger)
+        points = _make_singles_points()
+        # Replace all results with None except aces/DFs
+        points = points.with_columns(
+            pl.when(pl.col("result").is_in(["A", "DF"]))
+            .then(pl.col("result"))
+            .otherwise(None)
+            .alias("result")
+        )
+        _write_match_beats_parquet(tmp_path, points=points)
+
+        agg = MatchBeatsAggregator(data_root=tmp_path)
+        result = agg.run()
+
+        p1_row = result.filter(pl.col("player_id") == "PLAYER1")
+        # Winners/UEs/FEs should be null, not 0
+        assert p1_row["player_winners"][0] is None
+        assert p1_row["player_ues"][0] is None
+        assert p1_row["player_fes"][0] is None
+        # But total_points should still be counted
+        assert p1_row["total_points"][0] == 10
+        # And aces/DFs should still work
+        assert p1_row["player_aces"][0] == 1
 
     def test_returns_none_when_no_data(self, tmp_path):
         """Should return None when no staged data exists."""

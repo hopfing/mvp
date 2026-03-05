@@ -339,7 +339,7 @@ def _write_match_beats_parquet(
             "is_tiebreak": [False] * 10,
             "point_num": list(range(1, 6)) * 2,
             "point_id": [f"P{i}" for i in range(10)],
-            "result": ["A", "W", "UE", "FE", "DF", "W", "W", "UE", "FE", "N"],
+            "result": ["A", "W", "UE", "FE", "DF", "W", "W", "UE", "FE", None],
             "scorer": ["1", "1", "2", "2", "2", "1", "2", "1", "1", "2"],
             "server": ["1"] * 5 + ["2"] * 5,
             "serve": [1, 1, 1, 2, 1, 1, 1, 2, 1, 1],

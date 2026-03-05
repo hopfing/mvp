@@ -174,10 +174,10 @@ class MatchBeatsTransformer(BaseJob):
         parsed_at: datetime,
     ) -> MatchBeatsPointRecord:
         """Create a MatchBeatsPointRecord from raw point data."""
-        # Normalize result
+        # Normalize result — "N" means no data, map to None
         result = point_data.get("result", "N")
-        if result not in [e.value for e in PointResult]:
-            result = "N"
+        if result == "N" or result not in [e.value for e in PointResult]:
+            result = None
 
         # Normalize scorer/server (can be int or str)
         scorer = point_data.get("scorer", "1")
