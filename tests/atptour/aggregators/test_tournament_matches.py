@@ -822,3 +822,136 @@ class TestTournamentMatchesAggregator:
         # Final rows should have match beats data
         final = df.filter(pl.col("round") == "F")
         assert final["total_points"].null_count() == 0
+
+
+class TestDropReplacedScheduleRows:
+    """Tests for dropping stale schedule-only rows when draw changes."""
+
+    def _write_replacement_scenario(self, data_root, *, include_rr=False):
+        """Set up: schedule has A vs B in R32, but results show A vs C in R32.
+
+        The A vs B schedule entry is stale (B was replaced by C).
+        Also includes an R16 result for D vs E (unrelated, should be kept).
+        """
+        tid, year, circuit = "999", 2026, "chal"
+        base = data_root / "stage" / "atptour" / "tournaments" / circuit / tid / str(year)
+        base.mkdir(parents=True, exist_ok=True)
+
+        # Schedule: original draw has A vs B in R32
+        sched_uids = ["2026_999_SGL_R32_AAAA_BBBB", "2026_999_SGL_R16_DDDD_EEEE"]
+        sched_rounds = ["R32", "R16"]
+        sched_p1 = ["AAAA", "DDDD"]
+        sched_p2 = ["BBBB", "EEEE"]
+
+        if include_rr:
+            # RR match: same player AAAA with different opp FFFF — should NOT be dropped
+            sched_uids.append("2026_999_SGL_RR_AAAA_FFFF")
+            sched_rounds.append("RR")
+            sched_p1.append("AAAA")
+            sched_p2.append("FFFF")
+
+        n = len(sched_uids)
+        sched_df = pl.DataFrame({
+            "match_uid": sched_uids,
+            "tournament_id": [tid] * n,
+            "year": [year] * n,
+            "circuit": [circuit] * n,
+            "draw_type": ["singles"] * n,
+            "round": sched_rounds,
+            "match_date": [date(2026, 3, 2)] * n,
+            "scheduled_datetime": [datetime(2026, 3, 2, 10, 0)] * n,
+            "time_suffix": [""] * n,
+            "display_time": ["10:00"] * n,
+            "court_name": ["Court 1"] * n,
+            "court_match_num": list(range(1, n + 1)),
+            "is_time_estimated": [False] * n,
+            "p1_id": sched_p1,
+            "p1_name": [f"Player {p}" for p in sched_p1],
+            "p1_country": ["USA"] * n,
+            "p1_seed": [None] * n,
+            "p1_entry": [None] * n,
+            "p2_id": sched_p2,
+            "p2_name": [f"Player {p}" for p in sched_p2],
+            "p2_country": ["USA"] * n,
+            "p2_seed": [None] * n,
+            "p2_entry": [None] * n,
+            "status": [None] * n,
+            "score": [None] * n,
+            "source_file": ["schedule.html"] * n,
+            "parsed_at": [datetime(2026, 1, 1)] * n,
+        })
+        sched_df.write_parquet(base / "schedule.parquet")
+
+        # Results: A beat C in R32 (replacement), D beat E in R16
+        results_df = pl.DataFrame({
+            "match_uid": ["2026_999_SGL_R32_AAAA_CCCC", "2026_999_SGL_R16_DDDD_EEEE"],
+            "tournament_id": [tid, tid],
+            "year": [year, year],
+            "circuit": [circuit, circuit],
+            "draw_type": ["singles", "singles"],
+            "round": ["R32", "R16"],
+            "match_id": ["MS001", "MS002"],
+            "winner_id": ["AAAA", "DDDD"],
+            "p1_id": ["AAAA", "DDDD"],
+            "p1_name": ["Player AAAA", "Player DDDD"],
+            "p1_country": ["USA", "USA"],
+            "p1_seed": [None, None],
+            "p1_entry": [None, None],
+            "p2_id": ["CCCC", "EEEE"],
+            "p2_name": ["Player CCCC", "Player EEEE"],
+            "p2_country": ["USA", "USA"],
+            "p2_seed": [None, None],
+            "p2_entry": [None, None],
+            "p1_partner_id": [None, None],
+            "p1_partner_name": [None, None],
+            "p1_partner_country": [None, None],
+            "p2_partner_id": [None, None],
+            "p2_partner_name": [None, None],
+            "p2_partner_country": [None, None],
+            "result_type": ["completed", "completed"],
+            "duration_seconds": [5400, 6000],
+            **{
+                f"p{p}_set{s}_{k}": [None, None]
+                for p in [1, 2] for s in range(1, 6)
+                for k in ["games", "tiebreak"]
+            },
+            "tournament_start_date": [date(2026, 3, 1), date(2026, 3, 1)],
+            "tournament_end_date": [date(2026, 3, 8), date(2026, 3, 8)],
+            "source_file": ["results.html", "results.html"],
+            "parsed_at": [datetime(2026, 1, 1), datetime(2026, 1, 1)],
+        })
+        results_df.write_parquet(base / "results.parquet")
+
+        return tid, year, circuit
+
+    def test_stale_schedule_row_dropped(self, tmp_path):
+        """Schedule-only row for A vs B is dropped when results show A vs C in same round."""
+        tid, year, circuit = self._write_replacement_scenario(tmp_path)
+        agg = TournamentMatchesAggregator(
+            circuit=Circuit.chal, tid=tid, year=year, data_root=tmp_path
+        )
+        df = agg.aggregate()
+
+        # A vs B stale row should be gone (2 player-match rows)
+        uids = df["match_uid"].unique().to_list()
+        assert "2026_999_SGL_R32_AAAA_BBBB" not in uids
+
+        # A vs C result should be present
+        assert "2026_999_SGL_R32_AAAA_CCCC" in uids
+
+        # D vs E should be present (matched in both results and schedule)
+        assert "2026_999_SGL_R16_DDDD_EEEE" in uids
+
+    def test_rr_not_dropped(self, tmp_path):
+        """RR matches should never be dropped by this logic."""
+        tid, year, circuit = self._write_replacement_scenario(
+            tmp_path, include_rr=True
+        )
+        agg = TournamentMatchesAggregator(
+            circuit=Circuit.chal, tid=tid, year=year, data_root=tmp_path
+        )
+        df = agg.aggregate()
+
+        # RR match should survive even though AAAA has a different R32 result
+        uids = df["match_uid"].unique().to_list()
+        assert "2026_999_SGL_RR_AAAA_FFFF" in uids

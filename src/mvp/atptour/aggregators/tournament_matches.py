@@ -297,6 +297,9 @@ class TournamentMatchesAggregator(BaseJob):
         # Step 4: FULL OUTER JOIN Results + Schedule
         joined = self._join_results_schedule(ex_results, ex_schedule)
 
+        # Step 4b: Drop stale schedule-only rows replaced by actual results
+        joined = self._drop_replaced_schedule_rows(joined)
+
         # Step 5: LEFT JOIN Match Stats
         joined = self._join_match_stats(joined, ex_stats)
 
@@ -463,6 +466,96 @@ class TournamentMatchesAggregator(BaseJob):
             coalesce=True,
             suffix="_schedule",
         )
+
+    def _drop_replaced_schedule_rows(self, df: pl.DataFrame) -> pl.DataFrame:
+        """Drop schedule-only rows where the player has a result in the same round.
+
+        When a draw changes (e.g. player withdrawal), the schedule may show
+        the original matchup while results contain the replacement matchup.
+        If the same player appears in the same round with a different opponent
+        — one from schedule (won is null) and one from results — the
+        schedule-only row is stale and should be dropped.
+
+        Round Robin (RR) is excluded since players legitimately have multiple
+        matches in the same round.
+        """
+        if df.is_empty():
+            return df
+
+        # Need won column (from results) and round info
+        if "won" not in df.columns:
+            return df
+
+        # Build effective round/opp from both sources
+        round_col = "round"
+        round_sched = "round_schedule"
+        opp_col = "opp_id"
+        opp_sched = "opp_id_schedule"
+
+        has_round = round_col in df.columns
+        has_round_sched = round_sched in df.columns
+        has_opp = opp_col in df.columns
+        has_opp_sched = opp_sched in df.columns
+
+        if not (has_round or has_round_sched):
+            return df
+
+        # Add working columns
+        work = df.with_columns(
+            pl.coalesce(
+                [pl.col(c) for c in [round_col, round_sched] if c in df.columns]
+            ).alias("_eff_round"),
+            pl.coalesce(
+                [pl.col(c) for c in [opp_col, opp_sched] if c in df.columns]
+            ).alias("_eff_opp"),
+        )
+
+        # Schedule-only: won is null; results-backed: won is not null
+        schedule_only = work.filter(
+            pl.col("won").is_null() & pl.col("_eff_round").is_not_null()
+            & (pl.col("_eff_round") != "RR")
+        )
+        has_results = work.filter(
+            pl.col("won").is_not_null() & pl.col("_eff_round").is_not_null()
+        )
+
+        if schedule_only.is_empty() or has_results.is_empty():
+            return df
+
+        # For each results-backed row, record (player_id, round, opp)
+        results_keys = has_results.select(
+            pl.col("player_id"),
+            pl.col("_eff_round").alias("_r_round"),
+            pl.col("_eff_opp").alias("_r_opp"),
+        ).unique()
+
+        # Join schedule-only rows against results keys on (player_id, round)
+        tagged = schedule_only.join(
+            results_keys,
+            left_on=["player_id", "_eff_round"],
+            right_on=["player_id", "_r_round"],
+            how="inner",
+        )
+
+        # Keep only where the opponent differs — that's a replaced matchup
+        replaced = tagged.filter(
+            pl.col("_eff_opp") != pl.col("_r_opp")
+        )
+
+        if replaced.is_empty():
+            return df
+
+        stale_uids = set(replaced["match_uid"].to_list())
+
+        logger.info(
+            "Dropping %d stale schedule-only match(es) replaced by results for %s/%s: %s",
+            len(stale_uids),
+            self.tid,
+            self.year,
+            stale_uids,
+        )
+
+        return df.filter(~pl.col("match_uid").is_in(list(stale_uids)))
 
     def _join_match_stats(
         self, joined: pl.DataFrame, ex_stats: pl.DataFrame
