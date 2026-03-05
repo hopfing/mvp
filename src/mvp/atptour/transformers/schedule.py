@@ -338,43 +338,26 @@ class ScheduleTransformer(BaseJob):
         return paths
 
     def run(self) -> Path | None:
-        """Process schedule HTML files. Returns parquet path or None."""
-        schedule_dir = self.build_path(
-            "raw",
+        """Stage new snapshots and consolidate into schedule.parquet."""
+        self.stage()
+        return self.consolidate()
+
+    def consolidate(self) -> Path | None:
+        """Read all per-snapshot parquets, dedup, write schedule.parquet.
+
+        Returns parquet path or None if no snapshots exist.
+        """
+        snapshot_dir = self.build_path(
+            "stage",
             f"tournaments/{self.tournament.circuit.value}/{self.tournament.tournament_id}/{self.tournament.year}/schedule",
         )
-        html_files = self.list_files(schedule_dir, "schedule_*.html")
-        if not html_files:
-            logger.info(
-                "No schedule files for %s", self.tournament.logging_id
-            )
+        parquet_files = self.list_files(snapshot_dir, "schedule_*.parquet")
+        if not parquet_files:
+            logger.info("No schedule snapshots to consolidate for %s", self.tournament.logging_id)
             return None
 
-        all_records: list[ScheduleRecord] = []
-        parsed_at = dt.datetime.now(dt.UTC).replace(tzinfo=None)
-
-        for html_path in html_files:
-            snapshot_ts = _parse_snapshot_timestamp(html_path.stem)
-            source_file = str(self._display_path(html_path))
-            html_content = self.read_html(html_path)
-            records = _parse_schedule_html(
-                html_content,
-                tournament_id=self.tournament.tournament_id,
-                year=self.tournament.year,
-                circuit=self.tournament.circuit,
-                snapshot_timestamp=snapshot_ts,
-                source_file=source_file,
-                parsed_at=parsed_at,
-            )
-            all_records.extend(records)
-
-        if not all_records:
-            return None
-
-        df = pl.DataFrame(
-            [r.model_dump() for r in all_records],
-            schema_overrides=polars_schema(ScheduleRecord),
-        )
+        dfs = [pl.read_parquet(f) for f in parquet_files]
+        df = pl.concat(dfs, how="diagonal_relaxed")
 
         df = self._dedup(df)
         self._assert_unique(df, ["match_uid"])

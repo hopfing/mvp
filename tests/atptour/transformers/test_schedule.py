@@ -949,3 +949,47 @@ class TestIncrementalStaging:
         df = pl.read_parquet(snapshot_dir / "schedule_20260207_140000.parquet")
         assert "snapshot_timestamp" in df.columns
         assert df["snapshot_timestamp"][0] == datetime(2026, 2, 7, 14, 0, 0)
+
+
+class TestConsolidate:
+    def test_consolidate_merges_snapshots(self, tmp_path):
+        """consolidate() reads per-snapshot parquets, deduplicates, writes schedule.parquet."""
+        _write_schedule_html(
+            tmp_path, "schedule_20260207_140000.html", FIXTURE_SINGLES
+        )
+        _write_schedule_html(
+            tmp_path, "schedule_20260208_100000.html", FIXTURE_NO_COURT
+        )
+        tournament = _make_tournament()
+        xf = ScheduleTransformer(tournament, data_root=tmp_path)
+        xf.stage()
+        result = xf.consolidate()
+
+        assert result is not None
+        assert result.name == "schedule.parquet"
+        df = pl.read_parquet(result)
+        assert len(df) == 2
+        assert "snapshot_timestamp" not in df.columns
+
+    def test_consolidate_deduplicates(self, tmp_path):
+        """Same match in two snapshots produces one row after consolidation."""
+        _write_schedule_html(
+            tmp_path, "schedule_20260207_140000.html", FIXTURE_SINGLES
+        )
+        _write_schedule_html(
+            tmp_path, "schedule_20260208_100000.html", FIXTURE_SINGLES
+        )
+        tournament = _make_tournament()
+        xf = ScheduleTransformer(tournament, data_root=tmp_path)
+        xf.stage()
+        result = xf.consolidate()
+
+        df = pl.read_parquet(result)
+        assert len(df) == 1
+
+    def test_consolidate_no_snapshots_returns_none(self, tmp_path):
+        """No per-snapshot parquets returns None."""
+        tournament = _make_tournament()
+        xf = ScheduleTransformer(tournament, data_root=tmp_path)
+        result = xf.consolidate()
+        assert result is None
