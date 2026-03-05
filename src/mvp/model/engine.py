@@ -273,6 +273,20 @@ class FeatureEngine:
                         dep_spec = f"{dep_prefix}_{dep_name}"
                     add_with_deps(dep_spec)
 
+            # For opp_ specs of mirrored derived features, ensure the player_
+            # version is also added — Phase 4 mirrors player_ → opp_
+            if (
+                prefix == "opp"
+                and feature_def.mirror
+                and feature_def.depends_on
+            ):
+                if params:
+                    param_str = ", ".join(f"{k}={v}" for k, v in params.items())
+                    player_spec = f"player_{base_name}({param_str})"
+                else:
+                    player_spec = f"player_{base_name}"
+                add_with_deps(player_spec)
+
             result.append(spec)
 
         for spec in feature_specs:
