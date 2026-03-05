@@ -294,17 +294,22 @@ class FeatureEngine:
         feature_specs = self._resolve_dependencies(feature_specs)
 
         # Separate features into categories:
-        # - match_level_specs: no prefix, computed directly
+        # - match_level_specs: no prefix, no depends_on (computed directly)
+        # - match_level_derived_specs: no prefix, has depends_on (needs deps first)
         # - base_specs: player/opp prefixed, no depends_on
         # - derived_specs: player/opp prefixed, has depends_on
         match_level_specs = []
+        match_level_derived_specs = []
         base_specs = []
         derived_specs = []
         for spec in feature_specs:
             prefix, base_name, full_name, params = parse_feature_spec(spec)
             feature_def = self._registry.get(base_name)
             if prefix is None:
-                match_level_specs.append(spec)
+                if feature_def.depends_on:
+                    match_level_derived_specs.append(spec)
+                else:
+                    match_level_specs.append(spec)
             elif feature_def.depends_on:
                 derived_specs.append(spec)
             else:
@@ -415,7 +420,32 @@ class FeatureEngine:
             player_cols_for_mirror = list({p for p, _ in opp_cols_to_mirror})
             df = self._mirror_features(df, player_cols_for_mirror)
 
-        # Phase 3: compute derived features (those with depends_on)
+        # Phase 3a: compute match-level derived features (no prefix, has depends_on)
+        for spec in match_level_derived_specs:
+            _prefix, base_name, full_name, params = parse_feature_spec(spec)
+            col_name = build_column_name(full_name, params)
+
+            if col_name not in computed_match_level:
+                feature_def = self._registry.get(base_name)
+                cache_spec = base_name
+                if params:
+                    param_str = ",".join(f"{k}={v}" for k, v in params.items())
+                    cache_spec = f"{base_name}({param_str})"
+
+                if self._is_cached(cache_spec, matches_hash):
+                    cached = self._load_cached_feature(cache_spec)
+                    df = df.join(
+                        cached,
+                        on=["match_uid", "player_id"],
+                        how="left",
+                    )
+                else:
+                    expr = feature_def.func(**params)
+                    df = df.with_columns(expr.alias(col_name))
+                    self._cache_feature(cache_spec, df, [col_name], matches_hash)
+                computed_match_level.add(col_name)
+
+        # Phase 3b: compute derived features (those with depends_on)
         for spec in derived_specs:
             prefix, base_name, full_name, params = parse_feature_spec(spec)
             feature_def = self._registry.get(base_name)

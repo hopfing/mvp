@@ -131,6 +131,9 @@ class ExperimentRunner:
                 else:
                     df = df.filter(pl.col(col) == value)
 
+        # Drop rows with no outcome (e.g., future/unfinished matches)
+        df = df.filter(pl.col("won").is_not_null())
+
         # Get feature columns from config
         feature_cols = get_feature_columns(self.config.features.include)
 

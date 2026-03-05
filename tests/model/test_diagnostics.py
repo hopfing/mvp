@@ -85,8 +85,8 @@ class TestDiagnosticsSegmentAnalysis:
         assert "surface" in result["by_circuit"]["tour"]
         assert "Hard" in result["by_circuit"]["tour"]["surface"]
 
-    def test_round_group_mapping(self) -> None:
-        """Maps rounds to Qualifying/Early/Late groups within circuit."""
+    def test_per_round_metrics(self) -> None:
+        """Computes metrics for each individual round."""
         df = pl.DataFrame({
             "circuit": ["tour"] * 6,
             "surface": ["Hard"] * 6,
@@ -100,16 +100,42 @@ class TestDiagnosticsSegmentAnalysis:
         diagnostics = Diagnostics()
         result = diagnostics._segment_metrics(df, y_true, y_prob)
 
-        # Check round_group within circuit
-        tour_rounds = result["by_circuit"]["tour"]["round_group"]
-        assert tour_rounds["Qualifying"]["n_matches"] == 1
-        assert tour_rounds["Early"]["n_matches"] == 2  # R64, R32
-        assert tour_rounds["Late"]["n_matches"] == 3   # R16, QF, F
+        # Per-round within circuit
+        tour_rounds = result["by_circuit"]["tour"]["round"]
+        assert tour_rounds["Q1"]["n_matches"] == 1
+        assert tour_rounds["R64"]["n_matches"] == 1
+        assert tour_rounds["F"]["n_matches"] == 1
 
-        # Also check overall round_group
-        assert result["overall"]["round_group"]["Qualifying"]["n_matches"] == 1
-        assert result["overall"]["round_group"]["Early"]["n_matches"] == 2
-        assert result["overall"]["round_group"]["Late"]["n_matches"] == 3
+        # Overall per-round
+        assert result["overall"]["round"]["Q1"]["n_matches"] == 1
+        assert result["overall"]["round"]["R32"]["n_matches"] == 1
+
+    def test_betting_group_mapping(self) -> None:
+        """Maps rounds to circuit-aware betting groups."""
+        df = pl.DataFrame({
+            "circuit": ["tour"] * 4 + ["chal"] * 3,
+            "surface": ["Hard"] * 7,
+            "round": ["Q1", "R32", "SF", "F", "Q1", "R32", "SF"],
+            "player_ranking": [100] * 7,
+            "effective_match_date": ["2023-01-01"] * 7,
+        })
+        y_true = np.array([1, 1, 1, 1, 1, 1, 1])
+        y_prob = np.array([0.6, 0.6, 0.6, 0.6, 0.6, 0.6, 0.6])
+
+        diagnostics = Diagnostics()
+        result = diagnostics._segment_metrics(df, y_true, y_prob)
+
+        # Tour: Qualifying=[Q1], Main Draw=[R32,SF], Final=[F]
+        tour_bg = result["by_circuit"]["tour"]["betting_group"]
+        assert tour_bg["Qualifying"]["n_matches"] == 1
+        assert tour_bg["Main Draw"]["n_matches"] == 2  # R32, SF
+        assert tour_bg["Final"]["n_matches"] == 1       # F
+
+        # Chal: Strong=[Q1], Mid=[R32], Tight=[SF]
+        chal_bg = result["by_circuit"]["chal"]["betting_group"]
+        assert chal_bg["Strong"]["n_matches"] == 1
+        assert chal_bg["Mid"]["n_matches"] == 1
+        assert chal_bg["Tight"]["n_matches"] == 1
 
     def test_surface_subsegment_within_circuit(self) -> None:
         """Surface metrics computed within each circuit."""
