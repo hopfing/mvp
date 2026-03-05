@@ -7,6 +7,7 @@ import polars as pl
 from mvp.model.primitives import (
     cumulative_mean,
     cumulative_sum,
+    expanding_zscore,
     rolling_count,
     rolling_max,
     rolling_mean,
@@ -378,3 +379,98 @@ class TestCumulativeMean:
         # Row 2: 2 prior matches (10, 20) → 15.0
         # Row 3: 3 prior matches (10, 20, 30) → 20.0
         assert result["avg_score"].to_list() == [None, 10.0, 15.0, 20.0]
+
+
+class TestExpandingZscore:
+    """Tests for expanding_zscore primitive."""
+
+    def test_basic_zscore(self):
+        """Z-scores computed from expanding population mean/std."""
+        df = (
+            pl.DataFrame(
+                {
+                    "player_id": ["A", "B", "C", "A", "B"],
+                    "effective_match_date": [
+                        date(2024, 1, 1),
+                        date(2024, 1, 2),
+                        date(2024, 1, 3),
+                        date(2024, 1, 4),
+                        date(2024, 1, 5),
+                    ],
+                    "value": [10.0, 20.0, 30.0, 40.0, 50.0],
+                }
+            )
+            .sort("effective_match_date")
+            .lazy()
+        )
+
+        result = df.with_columns(
+            expanding_zscore("value").alias("zscore")
+        ).collect()
+
+        # Row 0: no prior data → null
+        # Row 1: 1 prior obs (need min_obs=2) → null
+        # Row 2: 2 prior obs, mean=15, std=7.071 → (30-15)/7.071 ≈ 2.121
+        # Row 3: 3 prior obs, mean=20, std=10 → (40-20)/10 = 2.0
+        # Row 4: 4 prior obs, mean=25, std=12.91 → (50-25)/12.91 ≈ 1.936
+        zscores = result["zscore"].to_list()
+        assert zscores[0] is None
+        assert zscores[1] is None
+        assert zscores[2] is not None
+        assert abs(zscores[2] - (30 - 15) / (10**2 / 2) ** 0.5) < 0.001
+        assert abs(zscores[3] - 2.0) < 0.001
+        assert zscores[4] is not None
+
+    def test_zscore_null_input(self):
+        """Null input values produce null z-scores."""
+        df = (
+            pl.DataFrame(
+                {
+                    "player_id": ["A", "B", "C", "D"],
+                    "effective_match_date": [
+                        date(2024, 1, 1),
+                        date(2024, 1, 2),
+                        date(2024, 1, 3),
+                        date(2024, 1, 4),
+                    ],
+                    "value": [10.0, 20.0, None, 40.0],
+                }
+            )
+            .sort("effective_match_date")
+            .lazy()
+        )
+
+        result = df.with_columns(
+            expanding_zscore("value").alias("zscore")
+        ).collect()
+
+        # Row 2 has null input → null z-score
+        assert result["zscore"][2] is None
+
+    def test_zscore_constant_values(self):
+        """When all prior values are identical (std=0), z-score is null."""
+        df = (
+            pl.DataFrame(
+                {
+                    "player_id": ["A", "B", "C", "D"],
+                    "effective_match_date": [
+                        date(2024, 1, 1),
+                        date(2024, 1, 2),
+                        date(2024, 1, 3),
+                        date(2024, 1, 4),
+                    ],
+                    "value": [5.0, 5.0, 5.0, 10.0],
+                }
+            )
+            .sort("effective_match_date")
+            .lazy()
+        )
+
+        result = df.with_columns(
+            expanding_zscore("value").alias("zscore")
+        ).collect()
+
+        # Row 2: prior values [5, 5], std=0 → null (not inf)
+        assert result["zscore"][2] is None
+        # Row 3: prior values [5, 5, 5], std=0 → null (not inf)
+        assert result["zscore"][3] is None

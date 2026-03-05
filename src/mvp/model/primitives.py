@@ -231,3 +231,45 @@ def ratio_feature(
         num = rolling_sum(numerator_col, days=days, group_by=group_by)
         denom = rolling_sum(denominator_col, days=days, group_by=group_by)
     return pl.when(denom > 0).then(num / denom).otherwise(None)
+
+
+def expanding_zscore(
+    col: str,
+    date_col: str = "effective_match_date",
+    min_obs: int = 2,
+) -> pl.Expr:
+    """Z-score relative to expanding population mean/std.
+
+    Computes (value - expanding_mean) / expanding_std across ALL rows
+    ordered by date. This gives a population-relative score: "how far
+    from the historical average is this value?"
+
+    Unlike other primitives, this is NOT partitioned by player — it
+    operates across the full population to establish the baseline.
+
+    Args:
+        col: Column to normalize.
+        date_col: Date column for temporal ordering.
+        min_obs: Minimum prior observations before computing z-score.
+
+    Returns:
+        Polars expression computing the z-score (null when insufficient data
+        or std is zero).
+    """
+    value = pl.col(col)
+    # Polars has no cum_mean/cum_std, so compute from cum_sum/cum_count
+    cum_s = value.cum_sum().shift(1)
+    cum_s2 = (value**2).cum_sum().shift(1)
+    cum_n = value.cum_count().shift(1)
+
+    exp_mean = cum_s / cum_n
+    # Population std: sqrt(E[X^2] - E[X]^2), but use sample std (ddof=1)
+    # Var = (sum_x2 - sum_x^2/n) / (n-1)
+    exp_var = (cum_s2 - cum_s**2 / cum_n) / (cum_n - 1)
+    exp_std = exp_var.sqrt()
+
+    return (
+        pl.when((cum_n >= min_obs) & (exp_std > 0) & value.is_not_null())
+        .then((value - exp_mean) / exp_std)
+        .otherwise(None)
+    )
