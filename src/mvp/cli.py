@@ -8,6 +8,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from mvp.draftkings.odds import fetch_and_save
+
 logger = logging.getLogger(__name__)
 
 
@@ -392,6 +394,15 @@ def cmd_live(args: argparse.Namespace) -> int:
 
     predictor.save_predictions(predictions)
     print_predictions(predictions)
+
+    # Fetch DraftKings odds (best-effort)
+    try:
+        n = fetch_and_save()
+        if n:
+            print(f"Fetched {n} DK moneyline odds entries")
+    except Exception as e:
+        logger.error("DK odds fetch failed: %s", e)
+        print(f"Warning: DK odds fetch failed ({e})")
 
     # Sync to Google Sheets (best-effort)
     try:

@@ -1,0 +1,277 @@
+"""DraftKings odds scraper for tennis markets."""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+from dataclasses import dataclass
+from datetime import datetime, timezone
+
+import polars as pl
+
+from mvp.common.base_extractor import BaseExtractor
+
+logger = logging.getLogger(__name__)
+
+TENNIS_URL = "https://sportsbook.draftkings.com/sports/tennis"
+LEAGUE_API_BASE = (
+    "https://sportsbook-nash.draftkings.com/api/sportscontent/dkusnj/v1/leagues"
+)
+
+SUBCATEGORIES = {
+    "moneyline": 6364,
+    "game_spread": 16089,
+    "total_games": 16090,
+    "total_sets": 5369,
+}
+
+_INCLUDE_PATTERNS = [
+    re.compile(r"^atp-"),
+    re.compile(r"^challenger-"),
+    re.compile(r"^australian-open-men"),
+    re.compile(r"^french-open-men"),
+    re.compile(r"^wimbledon-men"),
+    re.compile(r"^us-open-men"),
+]
+
+_EXCLUDE_PATTERNS = [
+    re.compile(r"-doubles"),
+    re.compile(r"-women"),
+]
+
+_API_HEADERS = {
+    "Accept": "application/json, text/plain, */*",
+    "Referer": "https://sportsbook.draftkings.com/",
+    "Origin": "https://sportsbook.draftkings.com",
+    "Sec-Fetch-Dest": "empty",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Site": "same-site",
+}
+
+
+@dataclass
+class OddsEntry:
+    book: str
+    dk_event_id: str
+    market: str
+    dk_selection_id: str
+    player_name: str
+    country_code: str
+    side: str
+    odds: float
+    points: float | None
+    tournament: str
+    dk_tournament_id: str
+    opponent_name: str
+    fetched_at: datetime
+
+
+def _is_atp_challenger(slug: str) -> bool:
+    """Check if a league slug is ATP or Challenger men's singles."""
+    slug = slug.lower().strip()
+    for pat in _EXCLUDE_PATTERNS:
+        if pat.search(slug):
+            return False
+    for pat in _INCLUDE_PATTERNS:
+        if pat.search(slug):
+            return True
+    return False
+
+
+def _parse_odds_response(
+    data: dict,
+    market: str,
+    fetched_at: datetime,
+) -> list[OddsEntry]:
+    """Parse odds API response into OddsEntry objects."""
+    entries = []
+    subcategory_id = SUBCATEGORIES.get(market)
+
+    event_map: dict[str, dict] = {}
+    for ev in data.get("events", []):
+        event_map[str(ev.get("id", ""))] = ev
+
+    selections_by_market: dict[str, list[dict]] = {}
+    for sel in data.get("selections", []):
+        selections_by_market.setdefault(sel.get("marketId", ""), []).append(sel)
+
+    league_map: dict[str, dict] = {}
+    for lg in data.get("leagues", []):
+        league_map[str(lg.get("id", ""))] = lg
+
+    for mkt in data.get("markets", []):
+        if subcategory_id is not None and mkt.get("subcategoryId") != subcategory_id:
+            continue
+
+        event_id = str(mkt.get("eventId", ""))
+        ev = event_map.get(event_id, {})
+        league_id = str(ev.get("leagueId", "") or mkt.get("leagueId", ""))
+        tournament = league_map.get(league_id, {}).get("name", "")
+
+        sels = selections_by_market.get(mkt.get("id", ""), [])
+        if not sels:
+            continue
+
+        player_names = [sel.get("label", "") for sel in sels]
+
+        for sel in sels:
+            label = sel.get("label", "")
+            true_odds = sel.get("trueOdds")
+            display_odds = sel.get("displayOdds", {}).get("decimal")
+            odds_val = true_odds if true_odds is not None else display_odds
+            if odds_val is None:
+                continue
+            odds_val = float(odds_val)
+
+            points = sel.get("points")
+            if points is not None:
+                points = float(points)
+
+            participants = sel.get("participants", [])
+            country_code = participants[0].get("countryCode", "") if participants else ""
+
+            opponent = next((n for n in player_names if n != label), "")
+
+            entries.append(OddsEntry(
+                book="dk",
+                dk_event_id=event_id,
+                market=market,
+                dk_selection_id=str(sel.get("id", "")),
+                player_name=label,
+                country_code=country_code.upper().strip() if country_code else "",
+                side=sel.get("outcomeType", "").lower(),
+                odds=odds_val,
+                points=points,
+                tournament=tournament,
+                dk_tournament_id=league_id,
+                opponent_name=opponent,
+                fetched_at=fetched_at,
+            ))
+
+    return entries
+
+
+class DraftKingsOddsScraper(BaseExtractor):
+    """Scraper for DraftKings tennis odds."""
+
+    def __init__(self, data_root=None):
+        super().__init__(domain="draftkings", data_root=data_root)
+
+    def _warm_session(self) -> None:
+        """Visit the tennis page to establish cookies needed for the API."""
+        self._fetch(TENNIS_URL)
+
+    def fetch_tennis_leagues(self) -> list[dict]:
+        """Fetch active tennis leagues from DK, filtered to ATP/Challenger."""
+        html = self.fetch_html(TENNIS_URL)
+
+        match = re.search(
+            r"window\.__INITIAL_STATE__\s*=\s*(\{.+?\});?\s*</script>",
+            html, re.DOTALL,
+        )
+        if not match:
+            raise ValueError("Could not find __INITIAL_STATE__ in DK tennis page")
+
+        state = json.loads(match.group(1))
+
+        leagues = []
+        for sport in state.get("sports", {}).get("data", []):
+            if sport.get("nameIdentifier", "").lower() != "tennis":
+                continue
+            for eg in sport.get("eventGroupInfos", []):
+                slug = eg.get("nameIdentifier", "")
+                if _is_atp_challenger(slug):
+                    leagues.append({
+                        "dk_tournament_id": str(eg.get("eventGroupId", "")),
+                        "name": eg.get("eventGroupName", ""),
+                        "slug": slug,
+                    })
+        return leagues
+
+    def fetch_league_odds(
+        self,
+        dk_tournament_id: str,
+        market: str = "moneyline",
+    ) -> tuple[list[OddsEntry], dict]:
+        """Fetch odds for one league. Returns (entries, raw_response)."""
+        url = f"{LEAGUE_API_BASE}/{dk_tournament_id}"
+        resp = self._fetch(url, headers=_API_HEADERS)
+        data = resp.json()
+
+        now = datetime.now(timezone.utc)
+        entries = _parse_odds_response(data, market, now)
+        return entries, data
+
+    def fetch_all_odds(
+        self,
+        market: str = "moneyline",
+    ) -> tuple[list[OddsEntry], list[dict]]:
+        """Discover leagues + fetch odds for each."""
+        if market not in SUBCATEGORIES:
+            raise ValueError(f"Unknown market: {market}. Choose from {list(SUBCATEGORIES)}")
+
+        leagues = self.fetch_tennis_leagues()
+        logger.info("Found %d ATP/Challenger leagues on DK", len(leagues))
+
+        all_entries: list[OddsEntry] = []
+        raw_responses: list[dict] = []
+
+        for league in leagues:
+            try:
+                entries, raw = self.fetch_league_odds(
+                    dk_tournament_id=league["dk_tournament_id"],
+                    market=market,
+                )
+                all_entries.extend(entries)
+                raw_responses.append({"league": league, "response": raw})
+                logger.info("  %s: %d entries", league["name"], len(entries))
+            except Exception as e:
+                logger.warning("Failed to fetch odds for %s: %s", league["name"], e)
+
+        return all_entries, raw_responses
+
+    def fetch_and_save(self, market: str = "moneyline") -> int:
+        """Full flow: discover leagues, fetch odds, save raw + stage parquet."""
+        entries, raw_responses = self.fetch_all_odds(market=market)
+
+        if not entries:
+            logger.info("No DK odds entries found")
+            return 0
+
+        raw_path = self.build_path("raw", market, "odds.json", version="datetime")
+        self.save_json(raw_responses, raw_path)
+
+        stage_path = self.build_path("stage", f"{market}.parquet")
+        new_df = pl.DataFrame([
+            {
+                "book": e.book,
+                "dk_event_id": e.dk_event_id,
+                "market": e.market,
+                "dk_selection_id": e.dk_selection_id,
+                "player_name": e.player_name,
+                "country_code": e.country_code,
+                "side": e.side,
+                "odds": e.odds,
+                "points": e.points,
+                "tournament": e.tournament,
+                "dk_tournament_id": e.dk_tournament_id,
+                "opponent_name": e.opponent_name,
+                "fetched_at": e.fetched_at,
+            }
+            for e in entries
+        ])
+
+        if stage_path.exists():
+            existing = pl.read_parquet(stage_path)
+            new_df = pl.concat([existing, new_df], how="diagonal_relaxed")
+
+        self.save_parquet(new_df, stage_path)
+        return len(entries)
+
+
+# Module-level convenience for CLI
+def fetch_and_save(market: str = "moneyline") -> int:
+    """Full flow: discover leagues, fetch odds, save raw + stage parquet."""
+    scraper = DraftKingsOddsScraper()
+    return scraper.fetch_and_save(market=market)
