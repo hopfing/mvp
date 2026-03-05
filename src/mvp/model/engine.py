@@ -446,30 +446,92 @@ class FeatureEngine:
                 computed_match_level.add(col_name)
 
         # Phase 3b: compute derived features (those with depends_on)
+        # Identify which derived features need opp_* mirroring so we can
+        # defer player_ features that depend on those opp_* columns.
+        opp_derived_bases: set[str] = set()
+        for spec in derived_specs:
+            prefix, base_name, _full, _params = parse_feature_spec(spec)
+            if prefix == "opp":
+                opp_derived_bases.add(base_name)
+
+        # First pass: compute player_ derived features that DON'T need
+        # opp_* derived columns (which haven't been mirrored yet).
+        deferred_specs: list[str] = []
+        derived_opp_to_mirror: list[str] = []
+
         for spec in derived_specs:
             prefix, base_name, full_name, params = parse_feature_spec(spec)
             feature_def = self._registry.get(base_name)
             col_name = build_column_name(full_name, params)
 
-            if prefix == "player" and col_name not in computed_player_cols:
-                cache_spec = f"player_{base_name}"
+            if prefix == "opp" and feature_def.mirror:
+                player_col = f"player_{base_name}"
                 if params:
-                    param_str = ",".join(f"{k}={v}" for k, v in params.items())
-                    cache_spec = f"player_{base_name}({param_str})"
+                    player_col = build_column_name(f"player_{base_name}", params)
+                derived_opp_to_mirror.append(player_col)
+                continue
 
-                if self._is_cached(cache_spec, matches_hash):
-                    cached = self._load_cached_feature(cache_spec)
-                    df = df.join(
-                        cached,
-                        on=["match_uid", "player_id"],
-                        how="left",
-                    )
-                else:
-                    expr = feature_def.func(**params)
-                    df = df.with_columns(expr.alias(col_name))
-                    self._cache_feature(cache_spec, df, [col_name], matches_hash)
-                computed_player_cols.add(col_name)
+            if prefix == "player" and col_name not in computed_player_cols:
+                # Check if this feature depends on an opp_ derived column
+                needs_opp_derived = any(
+                    dep in opp_derived_bases for dep in feature_def.depends_on
+                )
+                if needs_opp_derived:
+                    deferred_specs.append(spec)
+                    continue
 
+                df = self._compute_player_derived(
+                    df, base_name, col_name, params, feature_def,
+                    matches_hash, computed_player_cols,
+                )
+
+        # Phase 4: mirror derived features that need opp_* columns
+        if derived_opp_to_mirror:
+            df = self._mirror_features(df, derived_opp_to_mirror)
+
+        # Phase 5: compute deferred derived features (those that needed
+        # opp_* derived columns, e.g., matchup_aggressor_vs_counterpuncher)
+        for spec in deferred_specs:
+            prefix, base_name, full_name, params = parse_feature_spec(spec)
+            feature_def = self._registry.get(base_name)
+            col_name = build_column_name(full_name, params)
+
+            if col_name not in computed_player_cols:
+                df = self._compute_player_derived(
+                    df, base_name, col_name, params, feature_def,
+                    matches_hash, computed_player_cols,
+                )
+
+        return df
+
+    def _compute_player_derived(
+        self,
+        df: pl.DataFrame,
+        base_name: str,
+        col_name: str,
+        params: dict,
+        feature_def: "FeatureDef",
+        matches_hash: str,
+        computed_player_cols: set[str],
+    ) -> pl.DataFrame:
+        """Compute a single player-prefixed derived feature."""
+        cache_spec = f"player_{base_name}"
+        if params:
+            param_str = ",".join(f"{k}={v}" for k, v in params.items())
+            cache_spec = f"player_{base_name}({param_str})"
+
+        if self._is_cached(cache_spec, matches_hash):
+            cached = self._load_cached_feature(cache_spec)
+            df = df.join(
+                cached,
+                on=["match_uid", "player_id"],
+                how="left",
+            )
+        else:
+            expr = feature_def.func(**params)
+            df = df.with_columns(expr.alias(col_name))
+            self._cache_feature(cache_spec, df, [col_name], matches_hash)
+        computed_player_cols.add(col_name)
         return df
 
     def _mirror_features(

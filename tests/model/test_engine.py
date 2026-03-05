@@ -285,6 +285,59 @@ class TestFeatureEngineMirroring:
         assert "player_test_win_rate_30d" in result.columns
         assert "opp_test_win_rate_30d" not in result.columns
 
+    def test_mirror_derived_features(
+        self, matches_parquet: Path, tmp_path: Path
+    ):
+        """Derived features with mirror=True get opp_* columns via second mirror pass."""
+        registry = get_registry()
+        registry.clear()
+
+        # Base feature (no depends_on)
+        @feature(name="test_base", params=[], mirror=True)
+        def test_base() -> pl.Expr:
+            return pl.col("won").cast(pl.Float64)
+
+        # Derived feature with depends_on AND mirror=True (like is_counterpuncher)
+        @feature(
+            name="test_derived_bool",
+            params=[],
+            depends_on=["test_base"],
+            mirror=True,
+        )
+        def test_derived_bool() -> pl.Expr:
+            return (pl.col("player_test_base") > 0.5).cast(pl.Int8)
+
+        # Matchup feature that needs opp_test_derived_bool (like matchup_aggressor_vs_counterpuncher)
+        @feature(
+            name="test_matchup_bool",
+            params=[],
+            depends_on=["test_derived_bool"],
+            mirror=False,
+        )
+        def test_matchup_bool() -> pl.Expr:
+            return (
+                (pl.col("player_test_derived_bool") == 1)
+                & (pl.col("opp_test_derived_bool") == 1)
+            ).cast(pl.Int8)
+
+        try:
+            cache_dir = tmp_path / "cache"
+            engine = FeatureEngine(matches_path=matches_parquet, cache_dir=cache_dir)
+
+            result = engine.compute([
+                "player_test_base",
+                "opp_test_base",
+                "player_test_derived_bool",
+                "opp_test_derived_bool",
+                "player_test_matchup_bool",
+            ])
+
+            assert "player_test_derived_bool" in result.columns
+            assert "opp_test_derived_bool" in result.columns
+            assert "player_test_matchup_bool" in result.columns
+        finally:
+            registry.clear()
+
 
 class TestFeatureEngineCaching:
     """Tests for feature caching functionality."""
