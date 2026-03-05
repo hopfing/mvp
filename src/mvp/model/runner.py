@@ -172,8 +172,9 @@ class ExperimentRunner:
                 ).to_numpy()
                 y_test = test_df["won"].to_numpy().astype(int)
 
-                # Handle missing values with median imputation
+                # Handle missing values with median imputation (0 for all-NaN cols)
                 medians = np.nanmedian(X_train, axis=0)
+                medians = np.where(np.isnan(medians), 0.0, medians)
                 X_train = np.where(np.isnan(X_train), medians, X_train)
                 X_test = np.where(np.isnan(X_test), medians, X_test)
 
