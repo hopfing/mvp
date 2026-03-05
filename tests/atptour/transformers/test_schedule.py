@@ -863,3 +863,89 @@ class TestEmptyScheduleDir:
         )
         result = xf.run()
         assert result is None
+
+
+class TestIncrementalStaging:
+    def test_stage_creates_per_snapshot_parquets(self, tmp_path):
+        """Each HTML snapshot gets its own staged parquet."""
+        _write_schedule_html(
+            tmp_path, "schedule_20260207_140000.html", FIXTURE_SINGLES
+        )
+        _write_schedule_html(
+            tmp_path, "schedule_20260208_100000.html", FIXTURE_NO_COURT
+        )
+        tournament = _make_tournament()
+        xf = ScheduleTransformer(tournament, data_root=tmp_path)
+        xf.stage()
+
+        snapshot_dir = (
+            tmp_path / "stage" / "atptour" / "tournaments"
+            / "tour" / "339" / "2026" / "schedule"
+        )
+        parquets = sorted(snapshot_dir.glob("*.parquet"))
+        assert len(parquets) == 2
+        assert parquets[0].stem == "schedule_20260207_140000"
+        assert parquets[1].stem == "schedule_20260208_100000"
+
+    def test_stage_skips_already_staged(self, tmp_path):
+        """Second call to stage() doesn't re-parse existing snapshots."""
+        _write_schedule_html(
+            tmp_path, "schedule_20260207_140000.html", FIXTURE_SINGLES
+        )
+        tournament = _make_tournament()
+        xf = ScheduleTransformer(tournament, data_root=tmp_path)
+        xf.stage()
+
+        snapshot_dir = (
+            tmp_path / "stage" / "atptour" / "tournaments"
+            / "tour" / "339" / "2026" / "schedule"
+        )
+        parquet = snapshot_dir / "schedule_20260207_140000.parquet"
+        first_mtime = parquet.stat().st_mtime
+
+        import time
+        time.sleep(0.05)
+        xf.stage()
+        assert parquet.stat().st_mtime == first_mtime
+
+    def test_stage_processes_new_snapshot_only(self, tmp_path):
+        """Adding a new HTML file only stages that one file."""
+        _write_schedule_html(
+            tmp_path, "schedule_20260207_140000.html", FIXTURE_SINGLES
+        )
+        tournament = _make_tournament()
+        xf = ScheduleTransformer(tournament, data_root=tmp_path)
+        xf.stage()
+
+        snapshot_dir = (
+            tmp_path / "stage" / "atptour" / "tournaments"
+            / "tour" / "339" / "2026" / "schedule"
+        )
+        first_mtime = (snapshot_dir / "schedule_20260207_140000.parquet").stat().st_mtime
+
+        import time
+        time.sleep(0.05)
+        _write_schedule_html(
+            tmp_path, "schedule_20260208_100000.html", FIXTURE_NO_COURT
+        )
+        xf.stage()
+
+        assert (snapshot_dir / "schedule_20260207_140000.parquet").stat().st_mtime == first_mtime
+        assert (snapshot_dir / "schedule_20260208_100000.parquet").exists()
+
+    def test_staged_parquet_retains_snapshot_timestamp(self, tmp_path):
+        """Per-snapshot parquets must include snapshot_timestamp for dedup."""
+        _write_schedule_html(
+            tmp_path, "schedule_20260207_140000.html", FIXTURE_SINGLES
+        )
+        tournament = _make_tournament()
+        xf = ScheduleTransformer(tournament, data_root=tmp_path)
+        xf.stage()
+
+        snapshot_dir = (
+            tmp_path / "stage" / "atptour" / "tournaments"
+            / "tour" / "339" / "2026" / "schedule"
+        )
+        df = pl.read_parquet(snapshot_dir / "schedule_20260207_140000.parquet")
+        assert "snapshot_timestamp" in df.columns
+        assert df["snapshot_timestamp"][0] == datetime(2026, 2, 7, 14, 0, 0)

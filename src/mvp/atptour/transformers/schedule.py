@@ -257,6 +257,86 @@ class ScheduleTransformer(BaseJob):
         super().__init__(domain="atptour", data_root=data_root)
         self.tournament = tournament
 
+    def stage(self) -> list[Path]:
+        """Parse new HTML snapshots into per-snapshot parquets.
+
+        Skips snapshots that already have a current staged parquet.
+        Returns list of parquet paths written.
+        """
+        schedule_dir = self.build_path(
+            "raw",
+            f"tournaments/{self.tournament.circuit.value}/{self.tournament.tournament_id}/{self.tournament.year}/schedule",
+        )
+        html_files = self.list_files(schedule_dir, "schedule_*.html")
+        if not html_files:
+            logger.info("No schedule files for %s", self.tournament.logging_id)
+            return []
+
+        snapshot_stage_dir = self.build_path(
+            "stage",
+            f"tournaments/{self.tournament.circuit.value}/{self.tournament.tournament_id}/{self.tournament.year}/schedule",
+        )
+        existing = {p.stem: p for p in self.list_files(snapshot_stage_dir, "*.parquet")}
+
+        to_process = []
+        for html_path in html_files:
+            staged_path = existing.get(html_path.stem)
+            if staged_path is None:
+                to_process.append(html_path)
+            elif html_path.stat().st_mtime > staged_path.stat().st_mtime:
+                to_process.append(html_path)
+            elif not self.is_schema_current(staged_path, ScheduleRecord.SCHEMA_HASH):
+                to_process.append(html_path)
+
+        if not to_process:
+            logger.info(
+                "Schedule stage: all %d snapshots already staged for %s",
+                len(html_files),
+                self.tournament.logging_id,
+            )
+            return []
+
+        parsed_at = dt.datetime.now(dt.UTC).replace(tzinfo=None)
+        paths: list[Path] = []
+
+        for html_path in to_process:
+            snapshot_ts = _parse_snapshot_timestamp(html_path.stem)
+            source_file = str(self._display_path(html_path))
+            html_content = self.read_html(html_path)
+            records = _parse_schedule_html(
+                html_content,
+                tournament_id=self.tournament.tournament_id,
+                year=self.tournament.year,
+                circuit=self.tournament.circuit,
+                snapshot_timestamp=snapshot_ts,
+                source_file=source_file,
+                parsed_at=parsed_at,
+            )
+            if not records:
+                continue
+
+            df = pl.DataFrame(
+                [r.model_dump() for r in records],
+                schema_overrides=polars_schema(ScheduleRecord),
+            )
+
+            out_path = self.build_path(
+                "stage",
+                f"tournaments/{self.tournament.circuit.value}/{self.tournament.tournament_id}/{self.tournament.year}/schedule",
+                f"{html_path.stem}.parquet",
+            )
+            result = self.save_parquet(df, out_path, schema_hash=ScheduleRecord.SCHEMA_HASH)
+            if result is not None:
+                paths.append(result)
+
+        logger.info(
+            "Schedule stage: %d to process (%d skipped) for %s",
+            len(to_process),
+            len(html_files) - len(to_process),
+            self.tournament.logging_id,
+        )
+        return paths
+
     def run(self) -> Path | None:
         """Process schedule HTML files. Returns parquet path or None."""
         schedule_dir = self.build_path(
