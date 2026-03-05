@@ -475,23 +475,23 @@ class TestStyleBoolLabels:
         registry = get_registry()
         feat = registry.get("is_power_server")
         assert feat.mirror is True
-        assert "style_avg_1st_serve_speed_zscore" in feat.depends_on
+        assert "style_avg_1st_serve_speed" in feat.depends_on
         assert "svc_ace_pct" in feat.depends_on
 
     def test_is_power_server_computes(self):
         from mvp.model.features.style import is_power_server
         df = pl.DataFrame({
-            "player_style_avg_1st_serve_speed_zscore": [
-                2.0, 1.5, 0.5, 0.2, -0.3, -0.8, -1.2, -1.8,
+            "player_style_avg_1st_serve_speed": [
+                220.0, 215.0, 210.0, 205.0, 195.0, 190.0, 185.0, 180.0,
             ],
             "player_svc_ace_pct": [
                 0.25, 0.22, 0.18, 0.15, 0.12, 0.10, 0.08, 0.05,
             ],
         }).lazy()
         result = df.with_columns(is_power_server().alias("is_power_server")).collect()
-        # z>0 AND ace above median → power server
-        # Row 0: z=2.0>0, ace=0.25>median(~0.135) → 1
-        # Row 7: z=-1.8<0 → 0
+        # speed>median AND ace>median → power server
+        # Row 0: speed=220>median(~200), ace=0.25>median(~0.135) → 1
+        # Row 7: speed=180<median, ace=0.05<median → 0
         assert result["is_power_server"][0] == 1
         assert result["is_power_server"][7] == 0
 
@@ -505,128 +505,6 @@ class TestStyleBoolLabels:
         for name in labels:
             feat = registry.get(name)
             assert feat.mirror is True, f"{name} should mirror"
-
-
-class TestStyleZscoreFeatures:
-    """Tests for z-score style features."""
-
-    def test_zscore_features_registered(self):
-        """All 28 raw style metrics should have _zscore variants."""
-        from mvp.model.features.style import _STYLE_SINGLE_FEATURES
-        registry = get_registry()
-        for base in _STYLE_SINGLE_FEATURES:
-            zscore_name = f"{base}_zscore"
-            assert zscore_name in registry.list_features(), f"Missing {zscore_name}"
-
-    def test_zscore_depends_on_raw(self):
-        """Z-score features should depend on their raw metric."""
-        registry = get_registry()
-        feat = registry.get("style_avg_1st_serve_speed_zscore")
-        assert "style_avg_1st_serve_speed" in feat.depends_on
-
-    def test_zscore_is_mirrored(self):
-        """Z-score features should have mirror=True."""
-        registry = get_registry()
-        feat = registry.get("style_avg_1st_serve_speed_zscore")
-        assert feat.mirror is True
-
-
-class TestStyleZscoreDiffFeatures:
-    """Tests for z-score diff features."""
-
-    def test_zscore_diff_features_registered(self):
-        """All 28 z-score metrics should have _diff variants."""
-        from mvp.model.features.style import _STYLE_SINGLE_FEATURES
-        registry = get_registry()
-        for base in _STYLE_SINGLE_FEATURES:
-            diff_name = f"{base}_zscore_diff"
-            assert diff_name in registry.list_features(), f"Missing {diff_name}"
-
-    def test_zscore_diff_depends_on_zscore(self):
-        """Z-score diff should depend on the z-score feature."""
-        registry = get_registry()
-        feat = registry.get("style_avg_1st_serve_speed_zscore_diff")
-        assert "style_avg_1st_serve_speed_zscore" in feat.depends_on
-
-    def test_zscore_diff_not_mirrored(self):
-        """Diff features should not be mirrored (already directional)."""
-        registry = get_registry()
-        feat = registry.get("style_avg_1st_serve_speed_zscore_diff")
-        assert feat.mirror is False
-
-
-class TestStyleBoolZscoreWiring:
-    """Tests that bool labels depend on z-score features."""
-
-    def test_power_server_depends_on_zscore(self):
-        registry = get_registry()
-        feat = registry.get("is_power_server")
-        assert "style_avg_1st_serve_speed_zscore" in feat.depends_on
-
-    def test_counterpuncher_depends_on_zscore(self):
-        registry = get_registry()
-        feat = registry.get("is_counterpuncher")
-        assert "style_long_rally_win_pct_zscore" in feat.depends_on
-        assert "style_ue_rate_zscore" in feat.depends_on
-
-    def test_aggressive_baseliner_depends_on_zscore(self):
-        registry = get_registry()
-        feat = registry.get("is_aggressive_baseliner")
-        assert "style_winner_rate_zscore" in feat.depends_on
-
-    def test_net_rusher_depends_on_zscore(self):
-        registry = get_registry()
-        feat = registry.get("is_net_rusher")
-        assert "style_net_approach_frequency_zscore" in feat.depends_on
-
-
-class TestStyleZscoreComputation:
-    """Test that z-score features actually compute correctly."""
-
-    def test_zscore_computes_on_dataframe(self):
-        """Z-score feature should produce population-relative scores."""
-        from mvp.model.features.style import style_avg_1st_serve_speed_zscore
-
-        df = pl.DataFrame({
-            "player_id": ["A", "B", "C", "D", "E"],
-            "effective_match_date": [
-                date(2024, 1, 1),
-                date(2024, 1, 2),
-                date(2024, 1, 3),
-                date(2024, 1, 4),
-                date(2024, 1, 5),
-            ],
-            "player_style_avg_1st_serve_speed": [
-                200.0, 180.0, 210.0, 190.0, 220.0,
-            ],
-        }).sort("effective_match_date").lazy()
-
-        result = df.with_columns(
-            style_avg_1st_serve_speed_zscore().alias("z")
-        ).collect()
-
-        assert result["z"][0] is None
-        assert result["z"][1] is None
-        # Row 2: prior [200, 180], mean=190, std=14.14, val=210 → z≈1.41
-        assert result["z"][2] == pytest.approx(1.414, abs=0.01)
-        # Row 4: prior [200, 180, 210, 190], val=220 → positive z
-        assert result["z"][4] is not None
-        assert result["z"][4] > 0
-
-    def test_zscore_diff_computes(self):
-        """Z-score diff should be player_zscore - opp_zscore."""
-        from mvp.model.features.style import style_avg_1st_serve_speed_zscore_diff
-
-        df = pl.DataFrame({
-            "player_style_avg_1st_serve_speed_zscore": [1.5, -0.3, 0.0],
-            "opp_style_avg_1st_serve_speed_zscore": [0.5, 0.8, -1.2],
-        }).lazy()
-        result = df.with_columns(
-            style_avg_1st_serve_speed_zscore_diff().alias("d")
-        ).collect()
-        assert result["d"][0] == pytest.approx(1.0)
-        assert result["d"][1] == pytest.approx(-1.1)
-        assert result["d"][2] == pytest.approx(1.2)
 
 
 class TestStyleFeatureCount:
@@ -651,9 +529,9 @@ class TestStyleFeatureCount:
             n for n in registry.list_features()
             if self._is_style_feature(n)
         ]
-        # 28 single + 28 diff + 28 zscore + 28 zscore_diff + 15 matchup + 7 bool + 7 interaction = 141
-        assert len(style_features) == 141, (
-            f"Expected 141 style features, got {len(style_features)}: {sorted(style_features)}"
+        # 28 single + 28 diff + 15 matchup + 7 bool + 7 interaction = 85
+        assert len(style_features) == 85, (
+            f"Expected 85 style features, got {len(style_features)}: {sorted(style_features)}"
         )
 
     def test_no_duplicate_registrations(self):

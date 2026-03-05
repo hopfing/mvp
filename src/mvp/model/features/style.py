@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import polars as pl
 
-from mvp.model.primitives import expanding_zscore, ratio_feature, rolling_max, rolling_mean
+from mvp.model.primitives import ratio_feature, rolling_max, rolling_mean
 from mvp.model.registry import feature
 
 _DAYS = 365
@@ -470,49 +470,6 @@ for _base in _STYLE_SINGLE_FEATURES:
     _register_diff(_base)
 
 
-def _register_zscore(base_name: str) -> None:
-    """Register a z-score feature for a raw style metric."""
-    zscore_name = f"{base_name}_zscore"
-
-    @feature(
-        name=zscore_name,
-        params=[],
-        description=f"{base_name} z-score (population-relative)",
-        depends_on=[base_name],
-        mirror=True,
-    )
-    def _zscore() -> pl.Expr:
-        return expanding_zscore(f"player_{base_name}")
-
-    globals()[zscore_name] = _zscore
-
-
-for _base in _STYLE_SINGLE_FEATURES:
-    _register_zscore(_base)
-
-
-def _register_zscore_diff(base_name: str) -> None:
-    """Register a z-score diff feature."""
-    diff_name = f"{base_name}_zscore_diff"
-    zscore_name = f"{base_name}_zscore"
-
-    @feature(
-        name=diff_name,
-        params=[],
-        description=f"{base_name} z-score difference (player - opponent)",
-        depends_on=[zscore_name],
-        mirror=False,
-    )
-    def _diff() -> pl.Expr:
-        return pl.col(f"player_{zscore_name}") - pl.col(f"opp_{zscore_name}")
-
-    globals()[diff_name] = _diff
-
-
-for _base in _STYLE_SINGLE_FEATURES:
-    _register_zscore_diff(_base)
-
-
 # =============================================================================
 # Layer 1: Matchup Features (cross-domain player X vs opponent Y)
 # =============================================================================
@@ -610,21 +567,22 @@ for _m in _STYLE_MATCHUP_PAIRS:
 
 
 # =============================================================================
-# Layer 2: Bool Style Labels (z-score thresholds)
+# Layer 2: Bool Style Labels (population percentile thresholds)
 # =============================================================================
 
 
 @feature(
     name="is_power_server",
     params=[],
-    description="High serve speed AND high ace rate (both above historical average)",
-    depends_on=["style_avg_1st_serve_speed_zscore", "svc_ace_pct"],
+    description="High serve speed AND high ace rate (top quartile both)",
+    depends_on=["style_avg_1st_serve_speed", "svc_ace_pct"],
     mirror=True,
 )
 def is_power_server() -> pl.Expr:
+    speed_p50 = pl.col("player_style_avg_1st_serve_speed").quantile(0.50)
     ace_p50 = pl.col("player_svc_ace_pct").quantile(0.50)
     return (
-        (pl.col("player_style_avg_1st_serve_speed_zscore") > 0)
+        (pl.col("player_style_avg_1st_serve_speed") > speed_p50)
         & (pl.col("player_svc_ace_pct") > ace_p50)
     ).cast(pl.Int8)
 
@@ -633,29 +591,32 @@ def is_power_server() -> pl.Expr:
     name="is_placement_server",
     params=[],
     description="High ace rate but below-average speed (winning with angles, not power)",
-    depends_on=["style_avg_1st_serve_speed_zscore", "svc_ace_pct"],
+    depends_on=["style_avg_1st_serve_speed", "svc_ace_pct"],
     mirror=True,
 )
 def is_placement_server() -> pl.Expr:
+    speed_p50 = pl.col("player_style_avg_1st_serve_speed").quantile(0.50)
     ace_p50 = pl.col("player_svc_ace_pct").quantile(0.50)
     return (
         (pl.col("player_svc_ace_pct") > ace_p50)
-        & (pl.col("player_style_avg_1st_serve_speed_zscore") <= 0)
+        & (pl.col("player_style_avg_1st_serve_speed") <= speed_p50)
     ).cast(pl.Int8)
 
 
 @feature(
     name="is_counterpuncher",
     params=[],
-    description="Wins long rallies, few UEs, strong return (all above historical average)",
-    depends_on=["style_long_rally_win_pct_zscore", "style_ue_rate_zscore", "ret_first_serve_win_pct"],
+    description="Wins long rallies, few UEs, strong return (all above median)",
+    depends_on=["style_long_rally_win_pct", "style_ue_rate", "ret_first_serve_win_pct"],
     mirror=True,
 )
 def is_counterpuncher() -> pl.Expr:
+    rally_p50 = pl.col("player_style_long_rally_win_pct").quantile(0.50)
+    ue_p50 = pl.col("player_style_ue_rate").quantile(0.50)
     ret_p50 = pl.col("player_ret_first_serve_win_pct").quantile(0.50)
     return (
-        (pl.col("player_style_long_rally_win_pct_zscore") > 0)
-        & (pl.col("player_style_ue_rate_zscore") < 0)
+        (pl.col("player_style_long_rally_win_pct") > rally_p50)
+        & (pl.col("player_style_ue_rate") < ue_p50)
         & (pl.col("player_ret_first_serve_win_pct") > ret_p50)
     ).cast(pl.Int8)
 
@@ -663,27 +624,31 @@ def is_counterpuncher() -> pl.Expr:
 @feature(
     name="is_aggressive_baseliner",
     params=[],
-    description="High winner rate, efficient, strong ground strokes (all above historical average)",
-    depends_on=["style_winner_rate_zscore", "style_winner_ue_ratio_zscore", "style_ground_stroke_winner_rate_zscore"],
+    description="High winner rate, efficient, strong ground strokes (all above median)",
+    depends_on=["style_winner_rate", "style_winner_ue_ratio", "style_ground_stroke_winner_rate"],
     mirror=True,
 )
 def is_aggressive_baseliner() -> pl.Expr:
+    wr_p50 = pl.col("player_style_winner_rate").quantile(0.50)
+    wur_p50 = pl.col("player_style_winner_ue_ratio").quantile(0.50)
+    gswr_p50 = pl.col("player_style_ground_stroke_winner_rate").quantile(0.50)
     return (
-        (pl.col("player_style_winner_rate_zscore") > 0)
-        & (pl.col("player_style_winner_ue_ratio_zscore") > 0)
-        & (pl.col("player_style_ground_stroke_winner_rate_zscore") > 0)
+        (pl.col("player_style_winner_rate") > wr_p50)
+        & (pl.col("player_style_winner_ue_ratio") > wur_p50)
+        & (pl.col("player_style_ground_stroke_winner_rate") > gswr_p50)
     ).cast(pl.Int8)
 
 
 @feature(
     name="is_net_rusher",
     params=[],
-    description="Comes forward frequently (above 75th percentile equivalent)",
-    depends_on=["style_net_approach_frequency_zscore"],
+    description="Comes forward frequently (above 75th percentile)",
+    depends_on=["style_net_approach_frequency"],
     mirror=True,
 )
 def is_net_rusher() -> pl.Expr:
-    return (pl.col("player_style_net_approach_frequency_zscore") > 0.675).cast(pl.Int8)
+    p75 = pl.col("player_style_net_approach_frequency").quantile(0.75)
+    return (pl.col("player_style_net_approach_frequency") > p75).cast(pl.Int8)
 
 
 @feature(
