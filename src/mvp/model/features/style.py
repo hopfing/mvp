@@ -491,6 +491,28 @@ for _base in _STYLE_SINGLE_FEATURES:
     _register_zscore(_base)
 
 
+def _register_zscore_diff(base_name: str) -> None:
+    """Register a z-score diff feature."""
+    diff_name = f"{base_name}_zscore_diff"
+    zscore_name = f"{base_name}_zscore"
+
+    @feature(
+        name=diff_name,
+        params=[],
+        description=f"{base_name} z-score difference (player - opponent)",
+        depends_on=[zscore_name],
+        mirror=False,
+    )
+    def _diff() -> pl.Expr:
+        return pl.col(f"player_{zscore_name}") - pl.col(f"opp_{zscore_name}")
+
+    globals()[diff_name] = _diff
+
+
+for _base in _STYLE_SINGLE_FEATURES:
+    _register_zscore_diff(_base)
+
+
 # =============================================================================
 # Layer 1: Matchup Features (cross-domain player X vs opponent Y)
 # =============================================================================
