@@ -5,7 +5,7 @@ from mvp.atptour.pipeline_utils import activity_covers_tournament, get_active_pl
 
 class TestGetActivePlayers:
     def test_extracts_player_ids(self, tmp_path):
-        # Create a results.parquet with known player IDs
+        # Create a schedule.parquet with known player IDs
         stage_dir = tmp_path / "tournaments" / "tour" / "580" / "2023"
         stage_dir.mkdir(parents=True)
         df = pl.DataFrame({
@@ -15,7 +15,7 @@ class TestGetActivePlayers:
             "p1_id": ["S0AG", "N409"],
             "p2_id": ["N409", "D875"],
         })
-        df.write_parquet(stage_dir / "results.parquet")
+        df.write_parquet(stage_dir / "schedule.parquet")
 
         result = get_active_players(tmp_path)
         assert "S0AG" in result
@@ -33,7 +33,7 @@ class TestGetActivePlayers:
             "p1_id": ["S0AG"],
             "p2_id": ["0"],
         })
-        df.write_parquet(stage_dir / "results.parquet")
+        df.write_parquet(stage_dir / "schedule.parquet")
 
         result = get_active_players(tmp_path)
         assert "0" not in result
@@ -48,7 +48,7 @@ class TestGetActivePlayers:
             "p1_id": ["S0AG", "X123"],
             "p2_id": ["N409", "Y456"],
         })
-        df.write_parquet(stage_dir / "results.parquet")
+        df.write_parquet(stage_dir / "schedule.parquet")
 
         result = get_active_players(tmp_path)
         assert "S0AG" in result

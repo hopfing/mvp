@@ -96,9 +96,16 @@ class PlayerActivityStager(BaseJob):
     def __init__(self, data_root: Path | None = None):
         super().__init__(domain="atptour", data_root=data_root)
 
-    def run(self) -> list[tuple[str, str]]:
+    def run(self, player_ids: set[str] | None = None) -> list[tuple[str, str]]:
         raw_dir = self.build_path("raw", "activity")
-        raw_files = self.list_files(raw_dir, "*.json")
+        if player_ids is not None:
+            raw_files = [
+                raw_dir / f"{pid}.json"
+                for pid in player_ids
+                if (raw_dir / f"{pid}.json").exists()
+            ]
+        else:
+            raw_files = self.list_files(raw_dir, "*.json")
         if not raw_files:
             return []
 

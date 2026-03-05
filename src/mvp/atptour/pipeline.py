@@ -14,7 +14,7 @@ from mvp.atptour.extractors.player_bio import PlayerBioExtractor
 from mvp.atptour.extractors.rankings import RankingsExtractor
 from mvp.atptour.extractors.results import ResultsExtractor
 from mvp.atptour.extractors.schedule import ScheduleExtractor
-from mvp.atptour.pipeline_utils import get_active_players
+from mvp.atptour.pipeline_utils import get_active_players, get_players_with_results
 from mvp.atptour.transformers.match_beats import MatchBeatsTransformer
 from mvp.atptour.transformers.rally_analysis import RallyAnalysisTransformer
 from mvp.atptour.transformers.stroke_analysis import StrokeAnalysisTransformer
@@ -145,6 +145,7 @@ def run_player_data(
     *,
     run_tids: set[tuple[str, int]],
     data_root: Path | None = None,
+    live: bool = True,
 ) -> PlayerDataResult:
     """Extract and transform player bio + activity data, scoped to run tournaments."""
     if data_root is None:
@@ -153,7 +154,8 @@ def run_player_data(
         default_root = data_root
     tournaments_stage_dir = default_root / "stage" / "atptour" / "tournaments"
 
-    all_player_tournaments = get_active_players(tournaments_stage_dir)
+    source = "schedule" if live else "results"
+    all_player_tournaments = get_active_players(tournaments_stage_dir, source=source)
     player_tournaments: dict[str, set[tuple[str, int]]] = {}
     for pid, tid_years in all_player_tournaments.items():
         scoped = tid_years & run_tids
@@ -171,10 +173,26 @@ def run_player_data(
         PlayerBioTransformer(data_root=data_root).run()
 
     if player_tournaments:
+        players_with_results = get_players_with_results(
+            tournaments_stage_dir, run_tids
+        )
+        activity_tournaments = {
+            pid: tids
+            for pid, tids in player_tournaments.items()
+            if pid not in players_with_results
+        }
+        logger.info(
+            "Activity scope: %d scheduled, %d with results, %d need activity",
+            len(player_tournaments),
+            len(players_with_results & set(player_tournaments)),
+            len(activity_tournaments),
+        )
         result.failed_activity_fetch = PlayerActivityExtractor(
             data_root=data_root
-        ).run(player_tournaments)
-        result.failed_activity_stage = PlayerActivityStager(data_root=data_root).run()
+        ).run(activity_tournaments)
+        result.failed_activity_stage = PlayerActivityStager(
+            data_root=data_root
+        ).run(player_ids=set(activity_tournaments))
         PlayerActivityTransformer(data_root=data_root).run()
 
     return result

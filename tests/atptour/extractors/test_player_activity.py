@@ -1,6 +1,8 @@
 """Tests for PlayerActivityExtractor."""
 
 import json
+import os
+import time
 from unittest.mock import patch
 
 from mvp.atptour.extractors.player_activity import PlayerActivityExtractor
@@ -82,12 +84,14 @@ class TestPlayerActivityExtractorFetch:
         mock.assert_not_called()
         assert len(failed) == 0
 
-    def test_refetches_when_coverage_missing(self, tmp_path):
+    def test_refetches_when_coverage_missing_and_stale(self, tmp_path):
         raw_dir = tmp_path / "raw" / "atptour" / "activity"
         raw_dir.mkdir(parents=True)
-        (raw_dir / "N409.json").write_text(
-            json.dumps(SAMPLE_ACTIVITY), encoding="utf-8"
-        )
+        path = raw_dir / "N409.json"
+        path.write_text(json.dumps(SAMPLE_ACTIVITY), encoding="utf-8")
+        # Backdate mtime so file is older than 24h
+        old_time = time.time() - 25 * 60 * 60
+        os.utime(path, (old_time, old_time))
 
         extractor = PlayerActivityExtractor(data_root=tmp_path)
         with patch.object(
@@ -96,6 +100,21 @@ class TestPlayerActivityExtractorFetch:
             # Request tournament 999 which is NOT in the activity data
             failed = extractor.run({"N409": {("999", 2023)}})
         mock.assert_called_once()
+        assert len(failed) == 0
+
+    def test_skips_when_coverage_missing_but_fresh(self, tmp_path):
+        raw_dir = tmp_path / "raw" / "atptour" / "activity"
+        raw_dir.mkdir(parents=True)
+        (raw_dir / "N409.json").write_text(
+            json.dumps(SAMPLE_ACTIVITY), encoding="utf-8"
+        )
+
+        extractor = PlayerActivityExtractor(data_root=tmp_path)
+        with patch.object(extractor, "fetch_json") as mock:
+            # Request tournament 999 which is NOT in the activity data
+            # but the file is fresh (just written), so skip
+            failed = extractor.run({"N409": {("999", 2023)}})
+        mock.assert_not_called()
         assert len(failed) == 0
 
     def test_returns_failures(self, tmp_path):

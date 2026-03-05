@@ -1,6 +1,8 @@
 """PlayerActivityExtractor — fetch missing player activity JSON from ATP API."""
 
 import logging
+import time
+from pathlib import Path
 
 from mvp.atptour.pipeline_utils import activity_covers_tournament
 from mvp.common.base_extractor import BaseExtractor
@@ -8,6 +10,13 @@ from mvp.common.base_extractor import BaseExtractor
 logger = logging.getLogger(__name__)
 
 ACTIVITY_URL = "https://www.atptour.com/en/-/www/activity/sgl/{pid}/?v=1"
+
+ACTIVITY_MAX_AGE_SECONDS = 24 * 60 * 60
+
+
+def _is_fresh(path: Path, max_age: float = ACTIVITY_MAX_AGE_SECONDS) -> bool:
+    """Return True if the file was modified within max_age seconds."""
+    return (time.time() - path.stat().st_mtime) < max_age
 
 
 class PlayerActivityExtractor(BaseExtractor):
@@ -22,6 +31,7 @@ class PlayerActivityExtractor(BaseExtractor):
         raw_dir = self.build_path("raw", "activity")
         existing = {p.stem: p for p in self.list_files(raw_dir, "*.json")}
 
+        skipped_fresh = 0
         to_fetch = []
         for pid, tournaments in player_tournaments.items():
             path = existing.get(pid)
@@ -31,14 +41,18 @@ class PlayerActivityExtractor(BaseExtractor):
             data = self.read_json(path)
             for tid, year in tournaments:
                 if not activity_covers_tournament(data, year, tid):
-                    to_fetch.append(pid)
+                    if _is_fresh(path):
+                        skipped_fresh += 1
+                    else:
+                        to_fetch.append(pid)
                     break
 
         logger.info(
-            "Player activity: %d players, %d existing, %d to fetch",
+            "Player activity: %d players, %d existing, %d to fetch, %d skipped (fresh)",
             len(player_tournaments),
             len(existing),
             len(to_fetch),
+            skipped_fresh,
         )
 
         to_fetch.sort()

@@ -104,7 +104,7 @@ def cmd_backfill(args) -> None:
     failed = _process_tournaments(tournaments, data_root=None, refresh=False)
 
     run_tids = {(tid, yr) for tid, yr, _, _ in tournaments}
-    player_result = run_player_data(run_tids=run_tids)
+    player_result = run_player_data(run_tids=run_tids, live=False)
 
     _report_failures(tournaments, failed, player_result)
 
