@@ -302,7 +302,14 @@ def merge_predictions(
 
         merged = merged.with_columns(pl.Series("result", new_results))
 
-    # 4. Sort
+    # 4. Re-pad time column (Google Sheets strips leading zeros)
+    merged = merged.with_columns(
+        pl.col("time").map_elements(
+            lambda t: t.zfill(5) if t else t, return_dtype=pl.Utf8
+        )
+    )
+
+    # 5. Sort
     from mvp.atptour.aggregators.matches import ROUND_ORDER
 
     merged = merged.with_columns(

@@ -1,0 +1,13 @@
+active:
+  artifact: data/models/production.joblib
+  config: models/cmp_3elo_age_2020.yaml
+  filters:
+    circuit:
+    - tour
+    - chal
+    draw_type: singles
+  train_date_range:
+    end: '2024-12-31'
+    start: '2020-01-01'
+  trained_at: '2026-03-04T15:26:07.310159+00:00'
+history: []
