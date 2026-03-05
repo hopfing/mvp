@@ -19,7 +19,6 @@ from mvp.atptour.elo.ratings import (
     update_indoor_adj,
     update_rd,
     update_return_clutch,
-    update_return_elo,
     update_second_serve_reliability,
     update_serve_clutch,
     update_serve_elo,
@@ -291,22 +290,30 @@ def compute_elo_ratings(df: pl.DataFrame) -> pl.DataFrame:
                 player_rating.grass_adj = new_adj
                 opp_rating.grass_adj = opp_new_adj
 
-        # Update serve/return Elo
+        # Update serve/return Elo — two sub-games per match
+        # Sub-game 1: player serves, opponent returns
         serve_won = row.get("pts_service_pts_won")
         serve_played = row.get("pts_service_pts_played")
-        return_won = row.get("pts_return_pts_won")
-        return_played = row.get("pts_return_pts_played")
-
+        player_serve_pct = None
         if serve_won is not None and serve_played and serve_played > 0:
-            serve_pct = serve_won / serve_played
-            player_rating.serve_elo = update_serve_elo(
-                player_rating.serve_elo, serve_pct, surface, k_serve
-            )
-        if return_won is not None and return_played and return_played > 0:
-            return_pct = return_won / return_played
-            player_rating.return_elo = update_return_elo(
-                player_rating.return_elo, return_pct, surface, k_serve
-            )
+            player_serve_pct = serve_won / serve_played
+
+        player_rating.serve_elo, opp_rating.return_elo = update_serve_elo(
+            player_rating.serve_elo, opp_rating.return_elo,
+            player_serve_pct, surface, k_serve,
+        )
+
+        # Sub-game 2: opponent serves, player returns
+        opp_serve_won = row.get("opp_pts_service_pts_won")
+        opp_serve_played = row.get("opp_pts_service_pts_played")
+        opp_serve_pct = None
+        if opp_serve_won is not None and opp_serve_played and opp_serve_played > 0:
+            opp_serve_pct = opp_serve_won / opp_serve_played
+
+        opp_rating.serve_elo, player_rating.return_elo = update_serve_elo(
+            opp_rating.serve_elo, player_rating.return_elo,
+            opp_serve_pct, surface, k_serve,
+        )
 
         # Update style dimensions
         k_style = k * STYLE_K_MULT

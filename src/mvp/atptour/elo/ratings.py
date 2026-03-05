@@ -210,22 +210,27 @@ def update_serve_elo(
 
 
 def update_return_elo(
-    current_elo: float,
-    return_pct: float | None,
+    returner_return_elo: float,
+    server_serve_elo: float,
+    opp_serve_pct: float | None,
     surface: str,
     k: float,
-) -> float:
-    """Update return Elo based on return points won percentage.
+) -> tuple[float, float]:
+    """Update return and serve Elo for a return sub-game.
 
-    Uses EMA toward a target derived from observed return percentage.
-    Returns unchanged elo if return_pct is None.
+    This is the returner's perspective of a serve sub-game. The opponent's
+    serve% is the input — low opp_serve_pct means the returner did well.
+
+    Returns:
+        Tuple of (new_returner_return_elo, new_server_serve_elo).
     """
-    if return_pct is None:
-        return current_elo
+    if opp_serve_pct is None:
+        return returner_return_elo, server_serve_elo
 
-    baseline = RETURN_BASELINE.get(surface, 0.38)
-    target = DEFAULT_ELO + (return_pct - baseline) * SERVE_RETURN_SCALE
-    return current_elo + EMA_ALPHA * (target - current_elo)
+    new_server, new_returner = update_serve_elo(
+        server_serve_elo, returner_return_elo, opp_serve_pct, surface, k
+    )
+    return new_returner, new_server
 
 
 def initialize_player(ranking: int | None) -> PlayerRating:

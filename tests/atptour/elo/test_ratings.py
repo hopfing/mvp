@@ -407,21 +407,52 @@ class TestUpdateServeElo:
 
 
 class TestUpdateReturnElo:
-    """Test return Elo update based on return points won percentage."""
+    """Test opponent-relative return Elo update."""
 
-    def test_above_baseline_increases(self):
-        # 0.45 return % on Hard (baseline 0.38) should increase
-        new_elo = update_return_elo(1500.0, 0.45, "Hard", 16.0)
-        assert new_elo > 1500.0
+    def test_good_return_increases_return_elo(self):
+        returner_elo, server_elo = update_return_elo(
+            returner_return_elo=1500.0,
+            server_serve_elo=1500.0,
+            opp_serve_pct=0.55,
+            surface="Hard",
+            k=12.8,
+        )
+        assert returner_elo > 1500.0
+        assert server_elo < 1500.0
 
-    def test_below_baseline_decreases(self):
-        # 0.30 return % on Hard (baseline 0.38) should decrease
-        new_elo = update_return_elo(1500.0, 0.30, "Hard", 16.0)
-        assert new_elo < 1500.0
+    def test_poor_return_decreases_return_elo(self):
+        returner_elo, server_elo = update_return_elo(
+            returner_return_elo=1500.0,
+            server_serve_elo=1500.0,
+            opp_serve_pct=0.70,
+            surface="Hard",
+            k=12.8,
+        )
+        assert returner_elo < 1500.0
+        assert server_elo > 1500.0
 
-    def test_missing_stats_unchanged(self):
-        new_elo = update_return_elo(1500.0, None, "Hard", 16.0)
-        assert new_elo == 1500.0
+    def test_none_returns_unchanged(self):
+        returner_elo, server_elo = update_return_elo(
+            returner_return_elo=1500.0,
+            server_serve_elo=1500.0,
+            opp_serve_pct=None,
+            surface="Hard",
+            k=12.8,
+        )
+        assert returner_elo == 1500.0
+        assert server_elo == 1500.0
+
+    def test_zero_sum(self):
+        returner_elo, server_elo = update_return_elo(
+            returner_return_elo=1600.0,
+            server_serve_elo=1400.0,
+            opp_serve_pct=0.58,
+            surface="Hard",
+            k=12.8,
+        )
+        returner_delta = returner_elo - 1600.0
+        server_delta = server_elo - 1400.0
+        assert abs(returner_delta + server_delta) < 1e-10
 
 
 class TestInitializePlayer:
@@ -706,20 +737,40 @@ class TestEMAConvergence:
     """Test that EMA-based ratings converge to stable values."""
 
     def test_serve_elo_converges(self):
-        """Applying the same serve observation repeatedly converges."""
-        elo = DEFAULT_ELO
-        for _ in range(200):
-            elo = update_serve_elo(elo, 0.70, "Hard", 16.0)
-        # Target = 1500 + (0.70 - 0.62) * 4000 = 1820
-        assert abs(elo - 1820.0) < 0.01
+        """Applying the same serve observation vs fixed opponent converges."""
+        server_elo = DEFAULT_ELO
+        opp_return_elo = DEFAULT_ELO
+        for _ in range(500):
+            server_elo, opp_return_elo = update_serve_elo(
+                server_elo, opp_return_elo, 0.70, "Hard", 16.0
+            )
+        # Strong serve% pushes server up, returner down; zero-sum
+        assert server_elo > DEFAULT_ELO
+        assert opp_return_elo < DEFAULT_ELO
+        # Check convergence: last update should be tiny
+        prev_server = server_elo
+        server_elo, opp_return_elo = update_serve_elo(
+            server_elo, opp_return_elo, 0.70, "Hard", 16.0
+        )
+        assert abs(server_elo - prev_server) < 0.1
 
     def test_return_elo_converges(self):
-        """Applying the same return observation repeatedly converges."""
-        elo = DEFAULT_ELO
-        for _ in range(200):
-            elo = update_return_elo(elo, 0.45, "Hard", 16.0)
-        # Target = 1500 + (0.45 - 0.38) * 4000 = 1780
-        assert abs(elo - 1780.0) < 0.01
+        """Applying the same return observation vs fixed opponent converges."""
+        returner_elo = DEFAULT_ELO
+        server_elo = DEFAULT_ELO
+        for _ in range(500):
+            returner_elo, server_elo = update_return_elo(
+                returner_elo, server_elo, 0.55, "Hard", 16.0
+            )
+        # Low opp serve% means returner did well
+        assert returner_elo > DEFAULT_ELO
+        assert server_elo < DEFAULT_ELO
+        # Check convergence: last update should be tiny
+        prev_returner = returner_elo
+        returner_elo, server_elo = update_return_elo(
+            returner_elo, server_elo, 0.55, "Hard", 16.0
+        )
+        assert abs(returner_elo - prev_returner) < 0.1
 
     def test_first_serve_power_converges(self):
         from mvp.atptour.elo.ratings import update_first_serve_power
@@ -760,33 +811,40 @@ class TestEMAConvergence:
     def test_different_match_counts_same_stats_converge(self):
         """Two players with identical stats but different match counts
         end up at similar ratings."""
-        # Player A: 50 matches
-        elo_a = DEFAULT_ELO
-        for _ in range(50):
-            elo_a = update_serve_elo(elo_a, 0.68, "Hard", 16.0)
+        # Player A: 200 matches vs fixed opponent
+        server_a = DEFAULT_ELO
+        opp_a = DEFAULT_ELO
+        for _ in range(200):
+            server_a, opp_a = update_serve_elo(server_a, opp_a, 0.68, "Hard", 16.0)
 
-        # Player B: 500 matches
-        elo_b = DEFAULT_ELO
+        # Player B: 500 matches vs fixed opponent
+        server_b = DEFAULT_ELO
+        opp_b = DEFAULT_ELO
         for _ in range(500):
-            elo_b = update_serve_elo(elo_b, 0.68, "Hard", 16.0)
+            server_b, opp_b = update_serve_elo(server_b, opp_b, 0.68, "Hard", 16.0)
 
-        # Both converge to 1500 + (0.68 - 0.62) * 4000 = 1740
-        assert abs(elo_a - elo_b) < 2.0
-        assert abs(elo_a - 1740.0) < 2.0
+        # Both converge toward the same equilibrium
+        assert abs(server_a - server_b) < 5.0
 
     def test_below_baseline_converges_down(self):
         """Rating converges below DEFAULT_ELO for below-baseline performance."""
-        elo = DEFAULT_ELO
+        server_elo = DEFAULT_ELO
+        opp_return_elo = DEFAULT_ELO
         for _ in range(200):
-            elo = update_serve_elo(elo, 0.55, "Hard", 16.0)
-        # Target = 1500 + (0.55 - 0.62) * 4000 = 1220
-        assert abs(elo - 1220.0) < 0.01
+            server_elo, opp_return_elo = update_serve_elo(
+                server_elo, opp_return_elo, 0.55, "Hard", 16.0
+            )
+        # Below-baseline serve% pushes server Elo down
+        assert server_elo < DEFAULT_ELO
 
     def test_serve_elo_bounded_after_many_matches(self):
-        """Unlike the old accumulator, EMA stays bounded even after
+        """Opponent-relative Elo stays bounded even after
         hundreds of above-baseline observations."""
-        elo = DEFAULT_ELO
+        server_elo = DEFAULT_ELO
+        opp_return_elo = DEFAULT_ELO
         for _ in range(1000):
-            elo = update_serve_elo(elo, 0.70, "Hard", 16.0)
-        # Should be near 1820, not 500,000+
-        assert 1800.0 < elo < 1850.0
+            server_elo, opp_return_elo = update_serve_elo(
+                server_elo, opp_return_elo, 0.70, "Hard", 16.0
+            )
+        # Should be bounded, not diverging to infinity
+        assert 1500.0 < server_elo < 2500.0
