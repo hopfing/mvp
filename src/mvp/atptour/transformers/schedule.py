@@ -313,6 +313,11 @@ class ScheduleTransformer(BaseJob):
                 parsed_at=parsed_at,
             )
             if not records:
+                logger.info(
+                    "No records from %s, removing empty snapshot",
+                    html_path.name,
+                )
+                html_path.unlink()
                 continue
 
             df = pl.DataFrame(
