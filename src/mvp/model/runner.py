@@ -12,12 +12,12 @@ import polars as pl
 # Suppress numpy warnings about all-NaN slices during median imputation
 warnings.filterwarnings("ignore", message="All-NaN slice encountered")
 
-from mvp.model.config import ExperimentConfig
-from mvp.model.diagnostics import Diagnostics
+from mvp.model.config import EnsembleParams, ExperimentConfig
+from mvp.model.diagnostics import Diagnostics, EnsembleDiagnostics
 from mvp.model.engine import FeatureEngine, get_feature_columns
 from mvp.model.metrics import compute_metrics
 from mvp.model.mlflow_logger import ExperimentLogger
-from mvp.model.models import get_model
+from mvp.model.models import EnsembleModel, get_model
 from mvp.model.splitters import (
     BaseSplitter,
     ExpandingWindowSplitter,
@@ -96,6 +96,40 @@ class ExperimentRunner:
         else:
             raise ValueError(f"Unknown validation type: {val.type}")
 
+    def _resolve_ensemble(self) -> tuple[list[str], list[dict[str, Any]]]:
+        """Resolve ensemble config into union features and base model specs.
+
+        Returns:
+            (union_feature_specs, base_model_specs) where each spec has
+            type, params, weight, feature_indices.
+        """
+        ensemble_params = EnsembleParams.model_validate(self.config.model.params)
+
+        all_feature_specs: list[str] = []
+        base_model_specs: list[dict[str, Any]] = []
+
+        for ref in ensemble_params.base_models:
+            base_config = ExperimentConfig.from_file(ref.config)
+            if base_config.features is None:
+                raise ValueError(f"Base model {ref.config} has no features section")
+            for spec in base_config.features.include:
+                if spec not in all_feature_specs:
+                    all_feature_specs.append(spec)
+            base_model_specs.append({
+                "type": base_config.model.type,
+                "params": base_config.model.params or {},
+                "weight": ref.weight,
+                "feature_specs": base_config.features.include,
+            })
+
+        union_cols = get_feature_columns(all_feature_specs)
+        for spec in base_model_specs:
+            base_cols = get_feature_columns(spec["feature_specs"])
+            spec["feature_indices"] = [union_cols.index(c) for c in base_cols]
+            del spec["feature_specs"]
+
+        return all_feature_specs, base_model_specs
+
     def run(self) -> dict[str, Any]:
         """Execute the experiment.
 
@@ -112,8 +146,17 @@ class ExperimentRunner:
         else:
             logger = None
 
+        # Resolve ensemble or standard features
+        is_ensemble = self.config.model.type == "ensemble"
+        base_model_specs: list[dict[str, Any]] | None = None
+        if is_ensemble:
+            feature_specs, base_model_specs = self._resolve_ensemble()
+        else:
+            assert self.config.features is not None
+            feature_specs = self.config.features.include
+
         # Compute features
-        df = self.engine.compute(self.config.features.include)
+        df = self.engine.compute(feature_specs)
 
         # Filter by date range
         df = df.filter(
@@ -135,7 +178,7 @@ class ExperimentRunner:
         df = df.filter(pl.col("won").is_not_null())
 
         # Get feature columns from config
-        feature_cols = get_feature_columns(self.config.features.include)
+        feature_cols = get_feature_columns(feature_specs)
 
         if not feature_cols:
             raise ValueError("No feature columns found after computing features")
@@ -147,6 +190,7 @@ class ExperimentRunner:
         all_metrics: list[dict[str, float]] = []
         all_train_metrics: list[dict[str, float]] = []
         all_predictions: list[dict[str, Any]] = []
+        all_per_model_predictions: list[list[np.ndarray]] = [] if is_ensemble else []
 
         run_context = logger.start_run(run_name=self.run_name) if logger else None
         if run_context:
@@ -183,6 +227,9 @@ class ExperimentRunner:
                     self.config.model.type,
                     self.config.model.params or {},
                 )
+                if is_ensemble and base_model_specs is not None:
+                    assert isinstance(model, EnsembleModel)
+                    model.configure(base_model_specs)
                 model.fit(X_train, y_train)
 
                 # Predict and evaluate on test
@@ -201,6 +248,11 @@ class ExperimentRunner:
                     "y_true": y_test,
                     "y_prob": y_prob,
                 })
+
+                if is_ensemble and isinstance(model, EnsembleModel):
+                    all_per_model_predictions.append(
+                        model.predict_proba_per_model(X_test)
+                    )
 
                 # Log fold metrics
                 if logger:
@@ -221,6 +273,40 @@ class ExperimentRunner:
             # Compute diagnostics
             diagnostics = Diagnostics()
             diagnostic_results = diagnostics.compute_all(all_predictions)
+
+            # Compute ensemble-specific diagnostics
+            ensemble_diagnostic_results = None
+            if is_ensemble and all_per_model_predictions:
+                n_base = len(all_per_model_predictions[0])
+                per_model_preds = [
+                    np.concatenate([fold[i] for fold in all_per_model_predictions])
+                    for i in range(n_base)
+                ]
+                combined_y_true = np.concatenate(
+                    [p["y_true"] for p in all_predictions]
+                )
+                combined_y_prob = np.concatenate(
+                    [p["y_prob"] for p in all_predictions]
+                )
+                assert base_model_specs is not None
+                ensemble_params = EnsembleParams.model_validate(
+                    self.config.model.params
+                )
+                weights = np.array([s["weight"] for s in base_model_specs])
+                weights = weights / weights.sum()
+                base_names = [
+                    ref.config for ref in ensemble_params.base_models
+                ]
+                ediag = EnsembleDiagnostics()
+                ensemble_diagnostic_results = ediag.compute(
+                    combined_y_true,
+                    combined_y_prob,
+                    per_model_preds,
+                    weights,
+                    base_names,
+                    strategy=ensemble_params.strategy,
+                )
+                diagnostic_results.ensemble = ensemble_diagnostic_results
 
             # Merge diagnostic metrics (calibration_error, etc.) into avg_metrics
             avg_metrics.update(diagnostic_results.metrics)

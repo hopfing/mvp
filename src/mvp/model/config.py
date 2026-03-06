@@ -6,7 +6,7 @@ from datetime import date
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 
 
 class DateRange(BaseModel):
@@ -38,10 +38,24 @@ class FeaturesConfig(BaseModel):
     include: list[str]
 
 
+class EnsembleBaseModelRef(BaseModel):
+    """Reference to a base model in an ensemble."""
+
+    config: str
+    weight: float = 1.0
+
+
+class EnsembleParams(BaseModel):
+    """Ensemble-specific parameters."""
+
+    strategy: Literal["average", "weighted_average"] = "average"
+    base_models: list[EnsembleBaseModelRef]
+
+
 class ModelConfig(BaseModel):
     """Model configuration."""
 
-    type: Literal["xgboost", "logistic", "random_forest"]
+    type: Literal["xgboost", "logistic", "random_forest", "ensemble"]
     params: dict[str, Any] | None = None
 
 
@@ -72,10 +86,16 @@ class ExperimentConfig(BaseModel):
 
     description: str | None = None
     data: DataConfig
-    features: FeaturesConfig
+    features: FeaturesConfig | None = None
     model: ModelConfig
     validation: ValidationConfig = ValidationConfig()
     metrics: MetricsConfig = MetricsConfig()
+
+    @model_validator(mode="after")
+    def validate_features_required(self) -> ExperimentConfig:
+        if self.model.type != "ensemble" and self.features is None:
+            raise ValueError("features is required for non-ensemble models")
+        return self
 
     @classmethod
     def from_yaml(cls, yaml_str: str) -> ExperimentConfig:

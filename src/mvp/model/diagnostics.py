@@ -485,6 +485,172 @@ class Diagnostics:
         )
 
 
+class EnsembleDiagnostics:
+    """Compute ensemble-specific diagnostics."""
+
+    def compute(
+        self,
+        y_true: np.ndarray,
+        y_prob_ensemble: np.ndarray,
+        per_model_preds: list[np.ndarray],
+        weights: np.ndarray,
+        base_names: list[str],
+        strategy: str = "average",
+    ) -> dict[str, Any]:
+        """Compute all ensemble diagnostics.
+
+        Args:
+            y_true: True labels.
+            y_prob_ensemble: Combined ensemble predictions.
+            per_model_preds: List of prediction arrays, one per base model.
+            weights: Normalized weights for each base model.
+            base_names: Names/paths of base model configs.
+            strategy: Ensemble combining strategy.
+
+        Returns:
+            Dict with per_model_metrics, correlation, agreement, contribution.
+        """
+        result: dict[str, Any] = {}
+
+        result["per_model_metrics"] = self._per_model_metrics(
+            y_true, y_prob_ensemble, per_model_preds, base_names
+        )
+        result["correlation"] = self._prediction_correlation(
+            per_model_preds, base_names
+        )
+        result["agreement"] = self._agreement_analysis(
+            y_true, y_prob_ensemble, per_model_preds
+        )
+        result["contribution"] = self._contribution_analysis(
+            y_true, per_model_preds, weights, base_names, strategy
+        )
+
+        return result
+
+    def _per_model_metrics(
+        self,
+        y_true: np.ndarray,
+        y_prob_ensemble: np.ndarray,
+        per_model_preds: list[np.ndarray],
+        base_names: list[str],
+    ) -> dict[str, Any]:
+        """Compute independent metrics for each base model and the ensemble."""
+        results: dict[str, Any] = {}
+        for name, preds in zip(base_names, per_model_preds):
+            results[name] = _compute_metrics_for_segment(
+                y_true, preds, include_calibration=True
+            )
+        results["ensemble"] = _compute_metrics_for_segment(
+            y_true, y_prob_ensemble, include_calibration=True
+        )
+        return results
+
+    def _prediction_correlation(
+        self,
+        per_model_preds: list[np.ndarray],
+        base_names: list[str],
+    ) -> dict[str, Any]:
+        """Compute Pearson correlation matrix between base model predictions."""
+        n = len(per_model_preds)
+        matrix = np.zeros((n, n))
+        for i in range(n):
+            for j in range(n):
+                if i == j:
+                    matrix[i, j] = 1.0
+                elif i < j:
+                    corr = float(
+                        np.corrcoef(per_model_preds[i], per_model_preds[j])[0, 1]
+                    )
+                    matrix[i, j] = corr
+                    matrix[j, i] = corr
+        return {
+            "names": base_names,
+            "matrix": matrix.tolist(),
+        }
+
+    def _agreement_analysis(
+        self,
+        y_true: np.ndarray,
+        y_prob_ensemble: np.ndarray,
+        per_model_preds: list[np.ndarray],
+    ) -> dict[str, Any]:
+        """Categorize matches by model agreement and ensemble correctness."""
+        n_matches = len(y_true)
+        ensemble_pred = (y_prob_ensemble >= 0.5).astype(int)
+        ensemble_correct = ensemble_pred == y_true
+
+        model_preds = np.array([(p >= 0.5).astype(int) for p in per_model_preds])
+        all_agree = np.all(model_preds == model_preds[0], axis=0)
+
+        categories = {
+            "all_agree_correct": int((all_agree & ensemble_correct).sum()),
+            "all_agree_wrong": int((all_agree & ~ensemble_correct).sum()),
+            "disagree_ensemble_correct": int((~all_agree & ensemble_correct).sum()),
+            "disagree_ensemble_wrong": int((~all_agree & ~ensemble_correct).sum()),
+        }
+        categories["total"] = n_matches
+        for key in list(categories.keys()):
+            if key != "total":
+                categories[f"{key}_pct"] = (
+                    categories[key] / n_matches if n_matches > 0 else 0.0
+                )
+        return categories
+
+    def _contribution_analysis(
+        self,
+        y_true: np.ndarray,
+        per_model_preds: list[np.ndarray],
+        weights: np.ndarray,
+        base_names: list[str],
+        strategy: str,
+    ) -> dict[str, Any]:
+        """Leave-one-out analysis: what happens if we remove each model."""
+        results: dict[str, Any] = {}
+
+        full_preds = np.array(per_model_preds)
+        if strategy == "weighted_average":
+            ensemble_prob = np.average(full_preds, axis=0, weights=weights)
+        else:
+            ensemble_prob = np.mean(full_preds, axis=0)
+
+        ensemble_prob_clipped = np.clip(ensemble_prob, 1e-15, 1 - 1e-15)
+        if len(np.unique(y_true)) > 1:
+            full_ll = float(log_loss(y_true, ensemble_prob_clipped))
+        else:
+            full_ll = 0.0
+        full_cal = _compute_calibration_error(y_true, ensemble_prob)
+
+        for i, name in enumerate(base_names):
+            if len(per_model_preds) == 1:
+                results[name] = {"log_loss_delta": 0.0, "calibration_delta": 0.0}
+                continue
+
+            remaining_idx = [j for j in range(len(per_model_preds)) if j != i]
+            remaining_preds = full_preds[remaining_idx]
+            if strategy == "weighted_average":
+                remaining_weights = weights[remaining_idx]
+                remaining_weights = remaining_weights / remaining_weights.sum()
+                loo_prob = np.average(
+                    remaining_preds, axis=0, weights=remaining_weights
+                )
+            else:
+                loo_prob = np.mean(remaining_preds, axis=0)
+
+            loo_clipped = np.clip(loo_prob, 1e-15, 1 - 1e-15)
+            if len(np.unique(y_true)) > 1:
+                loo_ll = float(log_loss(y_true, loo_clipped))
+            else:
+                loo_ll = 0.0
+            loo_cal = _compute_calibration_error(y_true, loo_prob)
+
+            results[name] = {
+                "log_loss_delta": loo_ll - full_ll,
+                "calibration_delta": loo_cal - full_cal,
+            }
+
+        return results
+
+
 @dataclass
 class DiagnosticResults:
     """Container for all diagnostic results."""
@@ -493,6 +659,7 @@ class DiagnosticResults:
     calibration: dict[str, Any]
     errors: dict[str, Any]
     temporal: dict[str, Any]
+    ensemble: dict[str, Any] | None = None
 
     @property
     def metrics(self) -> dict[str, float]:
@@ -541,17 +708,28 @@ class DiagnosticResults:
         if "temporal_drift" in self.temporal:
             result["temporal_drift"] = self.temporal["temporal_drift"]
 
+        # Add ensemble metrics
+        if self.ensemble is not None:
+            agreement = self.ensemble.get("agreement", {})
+            for key in ["all_agree_correct_pct", "all_agree_wrong_pct",
+                        "disagree_ensemble_correct_pct", "disagree_ensemble_wrong_pct"]:
+                if key in agreement:
+                    result[f"ensemble_{key}"] = agreement[key]
+            correlation = self.ensemble.get("correlation", {})
+            matrix = correlation.get("matrix", [])
+            if len(matrix) >= 2:
+                result["ensemble_pred_correlation"] = matrix[0][1]
+
         return result
 
     def to_json(self) -> str:
         """Serialize full results to JSON."""
-        return json.dumps(
-            {
-                "segments": self.segments,
-                "calibration": self.calibration,
-                "errors": self.errors,
-                "temporal": self.temporal,
-            },
-            indent=2,
-            default=str,
-        )
+        data: dict[str, Any] = {
+            "segments": self.segments,
+            "calibration": self.calibration,
+            "errors": self.errors,
+            "temporal": self.temporal,
+        }
+        if self.ensemble is not None:
+            data["ensemble"] = self.ensemble
+        return json.dumps(data, indent=2, default=str)

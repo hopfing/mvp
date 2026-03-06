@@ -13,10 +13,10 @@ import numpy as np
 import polars as pl
 import yaml
 
-from mvp.model.config import ExperimentConfig
+from mvp.model.config import EnsembleParams, ExperimentConfig
 from mvp.model.engine import FeatureEngine, get_feature_columns
 from mvp.model.features.elo import surface_elo_expr
-from mvp.model.models import get_model
+from mvp.model.models import EnsembleModel, get_model
 
 logger = logging.getLogger(__name__)
 
@@ -51,15 +51,54 @@ class ProductionPredictor:
             self.config["active"]["config"]
         )
 
+    def _resolve_ensemble_features(self) -> tuple[list[str], list[dict]]:
+        """Resolve ensemble config to union features and base model specs."""
+        config = self._experiment_config
+        ensemble_params = EnsembleParams.model_validate(config.model.params)
+
+        all_feature_specs: list[str] = []
+        base_model_specs: list[dict] = []
+
+        for ref in ensemble_params.base_models:
+            base_config = ExperimentConfig.from_file(ref.config)
+            if base_config.features is None:
+                raise ValueError(f"Base model {ref.config} has no features section")
+            for spec in base_config.features.include:
+                if spec not in all_feature_specs:
+                    all_feature_specs.append(spec)
+            base_model_specs.append({
+                "type": base_config.model.type,
+                "params": base_config.model.params or {},
+                "weight": ref.weight,
+                "feature_specs": base_config.features.include,
+            })
+
+        union_cols = get_feature_columns(all_feature_specs)
+        for spec in base_model_specs:
+            base_cols = get_feature_columns(spec["feature_specs"])
+            spec["feature_indices"] = [union_cols.index(c) for c in base_cols]
+            del spec["feature_specs"]
+
+        return all_feature_specs, base_model_specs
+
     def train(self) -> None:
         """Train production model on all matching data and save artifact."""
         config = self._experiment_config
+        is_ensemble = config.model.type == "ensemble"
         engine = FeatureEngine(
             matches_path=self.matches_path, cache_dir=self.cache_dir
         )
 
+        # Resolve features
+        if is_ensemble:
+            feature_specs, base_model_specs = self._resolve_ensemble_features()
+        else:
+            assert config.features is not None
+            feature_specs = config.features.include
+            base_model_specs = None
+
         # Compute features
-        df = engine.compute(config.features.include)
+        df = engine.compute(feature_specs)
 
         # Apply training filters
         train_range = self.config["active"]["train_date_range"]
@@ -80,7 +119,7 @@ class ProductionPredictor:
         # Drop rows without outcomes
         df = df.filter(pl.col("won").is_not_null())
 
-        feature_cols = get_feature_columns(config.features.include)
+        feature_cols = get_feature_columns(feature_specs)
         X = df.select(pl.col(c).cast(pl.Float64) for c in feature_cols).to_numpy()
         y = df["won"].to_numpy().astype(int)
 
@@ -93,6 +132,9 @@ class ProductionPredictor:
 
         # Train
         model = get_model(config.model.type, config.model.params or {})
+        if is_ensemble and base_model_specs is not None:
+            assert isinstance(model, EnsembleModel)
+            model.configure(base_model_specs)
         model.fit(X, y)
 
         # Save artifact
@@ -150,7 +192,12 @@ class ProductionPredictor:
         )
 
         # Compute features on all data (needed for temporal features)
-        df = engine.compute(config.features.include)
+        if config.model.type == "ensemble":
+            feature_specs, _ = self._resolve_ensemble_features()
+        else:
+            assert config.features is not None
+            feature_specs = config.features.include
+        df = engine.compute(feature_specs)
 
         # Apply non-date filters (same as training, minus date range)
         if self.config["active"].get("filters"):

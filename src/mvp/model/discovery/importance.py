@@ -7,7 +7,7 @@ from typing import Any
 import numpy as np
 from sklearn.inspection import permutation_importance as sklearn_permutation_importance
 
-from mvp.model.models import BaseModel
+from mvp.model.models import BaseModel, EnsembleModel
 
 
 def gain_importance(
@@ -29,6 +29,12 @@ def gain_importance(
     Raises:
         ValueError: If model doesn't support gain importance.
     """
+    if isinstance(model, EnsembleModel):
+        raise ValueError(
+            "Gain importance is not supported for ensemble models. "
+            "Use permutation_importance instead."
+        )
+
     underlying = getattr(model, "_model", None)
     if underlying is None:
         raise ValueError("Model has no underlying _model attribute")
@@ -136,6 +142,12 @@ def shap_importance(
     Raises:
         ImportError: If shap package is not installed.
     """
+    if isinstance(model, EnsembleModel):
+        raise ValueError(
+            "SHAP importance is not supported for ensemble models. "
+            "Use permutation_importance instead."
+        )
+
     try:
         import shap
     except ImportError:
