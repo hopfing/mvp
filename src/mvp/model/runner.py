@@ -339,4 +339,7 @@ class ExperimentRunner:
             "feature_columns": feature_cols,
             "run_id": run_id,
             "diagnostics": diagnostic_results,
+            "last_fold_model": model,
+            "last_fold_X_test": X_test,
+            "last_fold_y_test": y_test,
         }

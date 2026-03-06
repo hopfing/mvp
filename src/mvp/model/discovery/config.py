@@ -44,6 +44,7 @@ class DiscoveryOptions(BaseModel):
     direction: Literal["minimize", "maximize"] = "minimize"
     min_features: int = 5
     max_features: int | None = None
+    importance_threshold: float = 0.05
     exclude_features: list[str] = []
     window_sizes: list[int] | None = None  # None = all defaults, 0 = alltime variant
 

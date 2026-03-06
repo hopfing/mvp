@@ -221,20 +221,21 @@ class FeatureDiscovery:
     def _create_importance_fn(
         self, features: list[str]
     ) -> callable:
-        """Create importance function for selection."""
+        """Create importance function for selection.
+
+        Uses the last fold's trained model from _run_experiment to compute
+        feature importance without retraining.
+        """
         method = self.config.discovery.importance_method
 
         def importance_fn(current_features: list[str]) -> dict[str, float]:
-            # Run experiment to get trained model
             result = self._run_experiment(current_features)
+            model = result["last_fold_model"]
+            X_test = result["last_fold_X_test"]
+            y_test = result["last_fold_y_test"]
+            feature_cols = result["feature_columns"]
 
-            # Get the last fold's model and data for importance
-            # This is a simplification - ideally we'd aggregate across folds
-            diagnostics = result.get("diagnostics")
-            feature_cols = result.get("feature_columns", [])
-
-            # Return uniform importance if we can't compute properly
-            return {f: 1.0 / len(current_features) for f in current_features}
+            return compute_importance(model, X_test, y_test, feature_cols, method=method)
 
         return importance_fn
 
@@ -273,6 +274,7 @@ class FeatureDiscovery:
             importance_fn=importance_fn,
             min_features=self.config.discovery.min_features,
             max_features=self.config.discovery.max_features,
+            importance_threshold=self.config.discovery.importance_threshold,
         )
 
         result = selector.run(verbose=self.verbose)

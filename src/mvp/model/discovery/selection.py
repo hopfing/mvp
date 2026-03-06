@@ -228,6 +228,7 @@ class FeatureSelector:
         """Select features by importance threshold.
 
         Computes importance once, keeps features above threshold.
+        Respects max_features by taking top-N if more pass the threshold.
         """
         if self.importance_fn is None:
             raise ValueError("threshold selection requires importance_fn")
@@ -235,19 +236,25 @@ class FeatureSelector:
         # Compute importance with all features
         importance = self.importance_fn(self.all_features)
 
+        # Sort by importance descending
+        sorted_features = sorted(
+            self.all_features,
+            key=lambda f: importance.get(f, 0),
+            reverse=True,
+        )
+
         # Filter by threshold
         selected = [
-            f for f in self.all_features
+            f for f in sorted_features
             if importance.get(f, 0) >= self.importance_threshold
         ]
 
+        # Enforce max_features
+        if len(selected) > self.max_features:
+            selected = selected[:self.max_features]
+
         # Ensure minimum features
         if len(selected) < self.min_features:
-            sorted_features = sorted(
-                self.all_features,
-                key=lambda f: importance.get(f, 0),
-                reverse=True,
-            )
             selected = sorted_features[:self.min_features]
 
         excluded = [f for f in self.all_features if f not in selected]
