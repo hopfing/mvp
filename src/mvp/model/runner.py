@@ -11,6 +11,7 @@ import polars as pl
 
 # Suppress numpy warnings about all-NaN slices during median imputation
 warnings.filterwarnings("ignore", message="All-NaN slice encountered")
+warnings.filterwarnings("ignore", message="`sklearn.utils.parallel.delayed`")
 
 from mvp.model.config import EnsembleParams, ExperimentConfig
 from mvp.model.diagnostics import Diagnostics, EnsembleDiagnostics

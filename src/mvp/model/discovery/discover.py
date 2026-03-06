@@ -280,6 +280,7 @@ class FeatureDiscovery:
             min_features=self.config.discovery.min_features,
             max_features=self.config.discovery.max_features,
             importance_threshold=self.config.discovery.importance_threshold,
+            base_features=self.config.discovery.base_features,
         )
 
         result = selector.run(verbose=self.verbose)

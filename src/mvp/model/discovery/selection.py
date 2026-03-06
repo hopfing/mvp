@@ -38,6 +38,7 @@ class FeatureSelector:
         max_features: int | None = None,
         importance_threshold: float = 0.05,
         importance_fn: Callable[[list[str]], dict[str, float]] | None = None,
+        base_features: list[str] | None = None,
     ) -> None:
         """Initialize selector.
 
@@ -59,6 +60,7 @@ class FeatureSelector:
         self.max_features = max_features or len(all_features)
         self.importance_threshold = importance_threshold
         self.importance_fn = importance_fn
+        self.base_features = list(base_features) if base_features else []
 
     def _is_better(self, new_val: float, old_val: float) -> bool:
         """Check if new value is better than old value."""
@@ -80,12 +82,21 @@ class FeatureSelector:
         """
         from tqdm import tqdm
 
-        selected: list[str] = []
-        remaining = set(self.all_features)
+        selected: list[str] = list(self.base_features)
+        remaining = set(self.all_features) - set(selected)
         history: list[dict[str, Any]] = []
 
-        # Baseline: empty feature set (use worst value)
-        best_metric = self._worst_value()
+        # Baseline: score the base features, or worst value if none
+        if selected:
+            best_metric = self.scorer(selected)
+            history.append({
+                "step": 0,
+                "action": "base",
+                "features": list(selected),
+                "metric": best_metric,
+            })
+        else:
+            best_metric = self._worst_value()
 
         while remaining and len(selected) < self.max_features:
             round_num = len(selected) + 1
