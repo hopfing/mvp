@@ -32,6 +32,7 @@ class PlayerActivityRecord(BaseModel):
     player_id: str
     year: int
     tournament_id: str
+    tournament_name: str | None = None
     event_type: ActivityEventType
     surface: Surface | None = None
     indoor: bool | None = None

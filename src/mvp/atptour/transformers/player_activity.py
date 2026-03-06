@@ -40,6 +40,7 @@ def _parse_activity_json(
         event_year = year_block["EventYear"]
         for t in year_block["Tournaments"]:
             event_id = t["EventId"]
+            event_name = t.get("EventName")
             event_type = t["EventType"]
             surface = t.get("Surface")
             in_outdoor = t.get("InOutdoor")
@@ -62,6 +63,7 @@ def _parse_activity_json(
                     player_id=player_id,
                     year=int(event_year),
                     tournament_id=str(event_id),
+                    tournament_name=event_name,
                     event_type=event_type,
                     surface=surface,
                     indoor=in_outdoor,
