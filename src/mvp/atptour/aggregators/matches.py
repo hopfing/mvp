@@ -57,6 +57,7 @@ def map_activity_to_matches_schema(df: pl.DataFrame) -> pl.DataFrame:
         "player_id",
         "opp_id",
         "tournament_id",
+        "tournament_name",
         "year",
         "circuit",
         pl.lit("singles").alias("draw_type"),
