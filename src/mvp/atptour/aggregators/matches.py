@@ -178,16 +178,13 @@ def fill_tournament_fields(df: pl.DataFrame) -> pl.DataFrame:
     propagate it to all rows. Only tournaments with ALL nulls remain null.
     """
     group_keys = ["tournament_id", "year"]
+    fill_cols = ["surface", "indoor", "event_type", "tournament_name", "country"]
     return df.with_columns([
-        pl.col("surface")
-        .fill_null(pl.col("surface").drop_nulls().first().over(group_keys))
-        .alias("surface"),
-        pl.col("indoor")
-        .fill_null(pl.col("indoor").drop_nulls().first().over(group_keys))
-        .alias("indoor"),
-        pl.col("event_type")
-        .fill_null(pl.col("event_type").drop_nulls().first().over(group_keys))
-        .alias("event_type"),
+        pl.col(c)
+        .fill_null(pl.col(c).drop_nulls().first().over(group_keys))
+        .alias(c)
+        for c in fill_cols
+        if c in df.columns
     ])
 
 
@@ -378,6 +375,7 @@ def add_partner_workload_rows(df: pl.DataFrame) -> pl.DataFrame:
     metadata_cols = [
         "match_uid", "tournament_id", "year", "circuit", "draw_type",
         "round", "round_order", "surface", "indoor", "event_type",
+        "tournament_name", "country",
         "tournament_start_date", "tournament_end_date",
         "effective_match_date", "won",
     ]
