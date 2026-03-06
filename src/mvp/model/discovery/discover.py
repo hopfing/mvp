@@ -438,13 +438,31 @@ class FeatureDiscovery:
             round_1 = selection_result.history[0]
             if round_1.get("action") == "add" and "round_ranking" in round_1:
                 ranking = round_1["round_ranking"]
+                # Show all features that beat the no-model baseline
+                # (predicting 50/50 for every match)
+                no_skill_baselines = {
+                    "log_loss": 0.693,
+                    "calibration_error": 0.50,
+                    "accuracy": 0.50,
+                    "roc_auc": 0.50,
+                }
+                metric_name = self.config.discovery.metric
+                baseline = no_skill_baselines.get(metric_name)
+                if baseline is None:
+                    # Unknown metric — show all
+                    with_signal = ranking
+                elif self.config.discovery.direction == "minimize":
+                    with_signal = [(f, m) for f, m in ranking if m < baseline]
+                else:
+                    with_signal = [(f, m) for f, m in ranking if m > baseline]
+                no_signal = len(ranking) - len(with_signal)
                 self._log("")
-                self._log("ROUND 1 FEATURE RANKING")
-                self._log("-" * 30)
-                for i, (feat, metric) in enumerate(ranking[:20], 1):
-                    self._log(f"  {i:2}. {feat}: {metric:.4f}")
-                if len(ranking) > 20:
-                    self._log(f"  ... and {len(ranking) - 20} more")
+                self._log(f"ROUND 1 FEATURE RANKING ({len(with_signal)} with signal)")
+                self._log("-" * 50)
+                for i, (feat, metric) in enumerate(with_signal, 1):
+                    self._log(f"  {i:3}. {feat}: {metric:.4f}")
+                if no_signal:
+                    self._log(f"  ({no_signal} features showed no signal)")
 
         # Summary
         self._log("")
