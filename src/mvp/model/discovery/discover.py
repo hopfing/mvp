@@ -42,27 +42,29 @@ class DiscoveryResult:
     recommended_config_path: Path | None = None
 
 
-DEFAULT_day_windows = [7, 14, 30, 60, 90, 180, 365]
+DEFAULT_day_windows = [0, 7, 14, 30, 60, 90, 180, 365]
 
 
 def get_all_feature_specs(window_sizes: list[int] | None = None) -> list[str]:
     """Get all registered features with parameter variants.
 
-    For features with a days parameter, generates:
-    - All-time variant (no params)
-    - Windowed variants for each window size in window_sizes
+    For features with a ``days`` parameter, generates variants based on
+    *window_sizes*.  Use ``0`` to represent the all-time (no window) variant.
 
     For mirrorable features (mirror=True), generates both player_* and opp_* versions.
     For diff-style features (mirror=False), only generates player_* version.
     For match-level features (match_level=True), generates unprefixed version.
 
     Args:
-        window_sizes: Window sizes to include. None = all defaults, [] = all-time only.
+        window_sizes: Window sizes to include.  ``0`` = all-time variant.
+            ``None`` = all defaults (alltime + 7…365d).
 
     Returns:
         List of feature specs like ["player_win_rate", "opp_win_rate", "is_clay", ...].
     """
     day_windows = DEFAULT_day_windows if window_sizes is None else window_sizes
+    include_alltime = 0 in day_windows
+    sized_windows = [d for d in day_windows if d > 0]
 
     registry = get_registry()
     feature_names = registry.list_features()
@@ -76,8 +78,9 @@ def get_all_feature_specs(window_sizes: list[int] | None = None) -> list[str]:
             if not feature_def.params:
                 specs.append(name)
             elif "days" in feature_def.params and len(feature_def.params) == 1:
-                specs.append(name)  # All-time
-                for days in day_windows:
+                if include_alltime:
+                    specs.append(name)
+                for days in sized_windows:
                     specs.append(f"{name}(days={days})")
             else:
                 default_params = {}
@@ -103,8 +106,9 @@ def get_all_feature_specs(window_sizes: list[int] | None = None) -> list[str]:
                 specs.append(f"{prefix}_{name}")
         elif "days" in feature_def.params and len(feature_def.params) == 1:
             for prefix in prefixes:
-                specs.append(f"{prefix}_{name}")  # All-time (days=None)
-                for days in day_windows:
+                if include_alltime:
+                    specs.append(f"{prefix}_{name}")
+                for days in sized_windows:
                     specs.append(f"{prefix}_{name}(days={days})")
         else:
             default_params = {}

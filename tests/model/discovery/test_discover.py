@@ -113,15 +113,57 @@ class TestGetAllFeatureSpecs:
 
     def test_returns_list(self):
         """Should return list of feature specs."""
-        # Import features to ensure they're registered
         import mvp.model.features  # noqa: F401
 
         specs = get_all_feature_specs()
 
         assert isinstance(specs, list)
         assert len(specs) > 0
-        # All specs should be strings
         assert all(isinstance(s, str) for s in specs)
+
+    def test_default_includes_alltime_and_windows(self):
+        import mvp.model.features  # noqa: F401
+
+        specs = get_all_feature_specs()
+
+        assert "player_win_pct_diff" in specs  # all-time
+        assert "player_win_pct_diff(days=365)" in specs  # windowed
+        assert "player_win_pct_diff(days=30)" in specs
+
+    def test_window_sizes_only_specific_window(self):
+        import mvp.model.features  # noqa: F401
+
+        specs = get_all_feature_specs(window_sizes=[365])
+
+        assert "player_win_pct_diff(days=365)" in specs
+        assert "player_win_pct_diff" not in specs  # no all-time
+        assert "player_win_pct_diff(days=30)" not in specs
+
+    def test_window_sizes_zero_means_alltime(self):
+        import mvp.model.features  # noqa: F401
+
+        specs = get_all_feature_specs(window_sizes=[0])
+
+        assert "player_win_pct_diff" in specs  # all-time
+        assert "player_win_pct_diff(days=365)" not in specs
+
+    def test_window_sizes_zero_plus_window(self):
+        import mvp.model.features  # noqa: F401
+
+        specs = get_all_feature_specs(window_sizes=[0, 365])
+
+        assert "player_win_pct_diff" in specs  # all-time
+        assert "player_win_pct_diff(days=365)" in specs
+        assert "player_win_pct_diff(days=30)" not in specs
+
+    def test_no_params_features_unaffected_by_window_sizes(self):
+        import mvp.model.features  # noqa: F401
+
+        specs_default = get_all_feature_specs()
+        specs_narrow = get_all_feature_specs(window_sizes=[365])
+
+        assert "player_elo_diff" in specs_default
+        assert "player_elo_diff" in specs_narrow
 
 
 class TestDiscoveryResult:
