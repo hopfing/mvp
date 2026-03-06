@@ -255,6 +255,11 @@ class FeatureDiscovery:
                 window_sizes=self.config.discovery.window_sizes
             )
 
+        if self.config.discovery.include_features:
+            included = set(self.config.discovery.include_features)
+            all_features = [f for f in all_features if f in included]
+            self._log(f"Restricted to {len(all_features)} features via include_features")
+
         if self.config.discovery.exclude_features:
             excluded = set(self.config.discovery.exclude_features)
             all_features = [f for f in all_features if f not in excluded]
