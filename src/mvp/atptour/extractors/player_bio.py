@@ -15,14 +15,15 @@ class PlayerBioExtractor(BaseExtractor):
     def __init__(self, data_root=None):
         super().__init__(domain="atptour", data_root=data_root)
 
-    def run(self, player_ids: list[str]) -> list[tuple[str, str]]:
+    def run(self, player_ids: list[str]) -> tuple[list[tuple[str, str]], int]:
         """Fetch bio JSON for players missing from raw storage.
 
         Args:
             player_ids: List of player IDs to ensure are fetched.
 
         Returns:
-            List of (player_id, error_message) tuples for failed fetches.
+            Tuple of (failed_list, new_count) where failed_list is
+            (player_id, error_message) tuples and new_count is total to fetch.
         """
         raw_dir = self.build_path("raw", "players")
         existing = {p.stem for p in self.list_files(raw_dir, "*.json")}
@@ -54,4 +55,4 @@ class PlayerBioExtractor(BaseExtractor):
             target = self.build_path("raw", "players", f"{pid}.json")
             self.save_json(data, target)
 
-        return failed
+        return failed, len(to_fetch)

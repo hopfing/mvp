@@ -141,7 +141,7 @@ class TestCmdLive:
         mock_player_data.return_value = MagicMock(has_failures=False)
         mock_predictor_cls.return_value.predict.return_value = MagicMock(__len__=lambda s: 0)
 
-        args = SimpleNamespace(tid=None, refresh=False)
+        args = SimpleNamespace(tid=None, refresh=False, refresh_players=False)
         result = cmd_live(args)
 
         mock_rankings.assert_called_once()
@@ -177,7 +177,7 @@ class TestCmdLive:
         mock_player_data.return_value = MagicMock(has_failures=False)
         mock_predictor_cls.return_value.predict.return_value = MagicMock(__len__=lambda s: 0)
 
-        args = SimpleNamespace(tid="580", refresh=False)
+        args = SimpleNamespace(tid="580", refresh=False, refresh_players=False)
         cmd_live(args)
 
         # Should only process the filtered tournament
@@ -194,7 +194,7 @@ class TestCmdLive:
             ("580", 2026)
         ]
 
-        args = SimpleNamespace(tid="999", refresh=False)
+        args = SimpleNamespace(tid="999", refresh=False, refresh_players=False)
         with pytest.raises(ValueError, match="not currently active"):
             cmd_live(args)
 
@@ -219,7 +219,7 @@ class TestCmdLive:
         mock_process.return_value = [("580", 2026, "boom")]
         mock_player_data.return_value = MagicMock(has_failures=False)
 
-        args = SimpleNamespace(tid=None, refresh=False)
+        args = SimpleNamespace(tid=None, refresh=False, refresh_players=False)
         with pytest.raises(RuntimeError, match="failed tournament"):
             cmd_live(args)
 
@@ -285,7 +285,7 @@ class TestCmdLiveSheets:
         mock_prepare.return_value = pl.DataFrame({"match_uid": ["M1"]})
         mock_merge.return_value = pl.DataFrame({"match_uid": ["M1"]})
 
-        args = SimpleNamespace(tid=None, refresh=False)
+        args = SimpleNamespace(tid=None, refresh=False, refresh_players=False)
         result = cmd_live(args)
 
         assert result == 0
@@ -337,7 +337,7 @@ class TestCmdLiveSheets:
         # SheetsSync constructor raises
         mock_sheets_cls.side_effect = ValueError("No credentials")
 
-        args = SimpleNamespace(tid=None, refresh=False)
+        args = SimpleNamespace(tid=None, refresh=False, refresh_players=False)
         result = cmd_live(args)
 
         # Should succeed despite Sheets failure

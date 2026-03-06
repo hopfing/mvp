@@ -19,8 +19,12 @@ class RankingsExtractor(BaseExtractor):
         super().__init__(domain="atptour", data_root=data_root)
         self.start_year = start_year
 
-    def run(self) -> None:
-        """Fetch all rankings pages not yet saved locally."""
+    def run(self) -> int:
+        """Fetch all rankings pages not yet saved locally.
+
+        Returns:
+            Number of new pages fetched.
+        """
         discovery_url = f"{RANKINGS_URL}?rankRange=0-100"
         html = self.fetch_html(discovery_url)
 
@@ -46,6 +50,7 @@ class RankingsExtractor(BaseExtractor):
             self.save_html(page_html, target)
 
         logger.info("Rankings: fetched %d new pages", len(to_fetch))
+        return len(to_fetch)
 
     def _get_available_dates(self, html: str) -> list[date]:
         """Parse the DateWeek dropdown from rankings discovery page."""

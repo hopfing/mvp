@@ -26,8 +26,9 @@ class TestPlayerBioExtractorFetch:
     def test_fetches_missing(self, tmp_path):
         extractor = PlayerBioExtractor(data_root=tmp_path)
         with patch.object(extractor, "fetch_json", return_value=SAMPLE_BIO):
-            failed = extractor.run(["N409"])
+            failed, new_count = extractor.run(["N409"])
         assert len(failed) == 0
+        assert new_count == 1
         saved = tmp_path / "raw" / "atptour" / "players" / "N409.json"
         assert saved.exists()
         data = json.loads(saved.read_text(encoding="utf-8"))
@@ -48,16 +49,18 @@ class TestPlayerBioExtractorFetch:
         with patch.object(
             extractor, "fetch_json", side_effect=Exception("timeout")
         ):
-            failed = extractor.run(["N409"])
+            failed, new_count = extractor.run(["N409"])
         assert len(failed) == 1
+        assert new_count == 1
         assert failed[0][0] == "N409"
         assert "timeout" in failed[0][1]
 
     def test_skips_empty_response(self, tmp_path):
         extractor = PlayerBioExtractor(data_root=tmp_path)
         with patch.object(extractor, "fetch_json", return_value=None):
-            failed = extractor.run(["N409"])
+            failed, new_count = extractor.run(["N409"])
         assert len(failed) == 0
+        assert new_count == 1
         saved = tmp_path / "raw" / "atptour" / "players" / "N409.json"
         assert not saved.exists()
 
@@ -68,8 +71,9 @@ class TestPlayerBioExtractorFetch:
 
         extractor = PlayerBioExtractor(data_root=tmp_path)
         with patch.object(extractor, "fetch_json", return_value=SAMPLE_BIO) as mock:
-            failed = extractor.run(["N409", "S0AG", "D875"])
+            failed, new_count = extractor.run(["N409", "S0AG", "D875"])
         assert len(failed) == 0
+        assert new_count == 2
         # Should only fetch S0AG and D875, not N409
         assert mock.call_count == 2
         assert (raw_dir / "S0AG.json").exists()
@@ -79,7 +83,8 @@ class TestPlayerBioExtractorFetch:
         """Player IDs should be uppercased for file naming."""
         extractor = PlayerBioExtractor(data_root=tmp_path)
         with patch.object(extractor, "fetch_json", return_value=SAMPLE_BIO):
-            failed = extractor.run(["n409"])
+            failed, new_count = extractor.run(["n409"])
         assert len(failed) == 0
+        assert new_count == 1
         saved = tmp_path / "raw" / "atptour" / "players" / "N409.json"
         assert saved.exists()

@@ -25,12 +25,16 @@ class MatchStatsExtractor(BaseExtractor):
             }
         )
 
-    def run(self, tournament: Tournament, refresh: bool = False) -> None:
-        """Fetch match stats for all match IDs found in staged results."""
+    def run(self, tournament: Tournament, refresh: bool = False) -> int:
+        """Fetch match stats for all match IDs found in staged results.
+
+        Returns:
+            Number of new match stats saved.
+        """
         match_ids = self._get_match_ids(tournament)
         if not match_ids:
             logger.info("No match IDs for %s", tournament.logging_id)
-            return
+            return 0
 
         stats_dir = self.build_path("raw", tournament.path, "match_stats")
         if refresh:
@@ -93,6 +97,7 @@ class MatchStatsExtractor(BaseExtractor):
             saved,
             failed,
         )
+        return saved
 
     def _get_match_ids(self, tournament: Tournament) -> list[str]:
         """Read match IDs from staged results parquet."""

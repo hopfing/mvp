@@ -264,6 +264,11 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
     live_parser.add_argument(
         "--refresh", action="store_true", help="Force re-extraction of all data"
     )
+    live_parser.add_argument(
+        "--refresh-players",
+        action="store_true",
+        help="Run activity extraction/staging (skipped by default)",
+    )
 
     return parser.parse_args(args)
 
@@ -366,7 +371,9 @@ def cmd_live(args: argparse.Namespace) -> int:
     failed = _process_tournaments(tournaments, data_root=None, refresh=args.refresh)
 
     run_tids = {(tid, yr) for tid, yr, _, _ in tournaments}
-    player_result = run_player_data(run_tids=run_tids)
+    player_result = run_player_data(
+        run_tids=run_tids, refresh_players=args.refresh_players
+    )
 
     logger.info("Running cross-tournament aggregation")
     MatchesAggregator().run()

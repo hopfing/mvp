@@ -77,13 +77,17 @@ class MatchCentreExtractor(BaseExtractor):
         super().__init__(domain="atptour", data_root=data_root)
         self.data_types = data_types or [DataType.MATCH_BEATS]
 
-    def run(self, tournament: Tournament, refresh: bool = False) -> None:
-        """Fetch Match Centre data for all matches in a tournament."""
+    def run(self, tournament: Tournament, refresh: bool = False) -> int:
+        """Fetch Match Centre data for all matches in a tournament.
+
+        Returns:
+            Total number of new files saved across all data types.
+        """
         if tournament.year < 2022:
             logger.debug(
                 "Skipping Match Centre for %s (pre-2022)", tournament.logging_id
             )
-            return
+            return 0
 
         match_ids = self._get_match_ids(tournament)
         if not match_ids:
@@ -109,7 +113,7 @@ class MatchCentreExtractor(BaseExtractor):
 
         if not all_to_fetch:
             logger.info("%s: all data already fetched", tournament.logging_id)
-            return
+            return 0
 
         logger.info(
             "%s: %d match IDs, checking %d for new data",
@@ -181,8 +185,10 @@ class MatchCentreExtractor(BaseExtractor):
                 stats[dt]["saved"] += 1
 
         # Log results
+        total_saved = 0
         for dt in self.data_types:
             s = stats[dt]
+            total_saved += s["saved"]
             logger.info(
                 "%s: %s - saved %d, skipped %d, failed %d",
                 tournament.logging_id,
@@ -191,6 +197,7 @@ class MatchCentreExtractor(BaseExtractor):
                 s["skipped"],
                 s["failed"],
             )
+        return total_saved
 
     def _get_match_ids(self, tournament: Tournament) -> list[str]:
         """Read match IDs from staged results parquet."""

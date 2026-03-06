@@ -100,13 +100,19 @@ def _process_tournaments(
                 tournament, refresh=results_refresh
             )
             ResultsTransformer(tournament, data_root=data_root).run()
-            MatchStatsExtractor(data_root=data_root).run(
+            new_stats = MatchStatsExtractor(data_root=data_root).run(
                 tournament, refresh=stats_refresh
             )
-            MatchStatsTransformer(tournament, data_root=data_root).run()
+            if new_stats > 0:
+                MatchStatsTransformer(tournament, data_root=data_root).run()
+            else:
+                logger.info(
+                    "%s: no new match stats, skipping transform",
+                    tournament.logging_id,
+                )
 
             # MatchBeats extraction + transformation (2022+ only, handled internally)
-            MatchCentreExtractor(
+            new_centre = MatchCentreExtractor(
                 data_root=data_root,
                 data_types=[
                     DataType.MATCH_BEATS,
@@ -114,9 +120,15 @@ def _process_tournaments(
                     DataType.RALLY_ANALYSIS,
                 ],
             ).run(tournament, refresh=stats_refresh)
-            MatchBeatsTransformer(tournament, data_root=data_root).run()
-            StrokeAnalysisTransformer(tournament, data_root=data_root).run()
-            RallyAnalysisTransformer(tournament, data_root=data_root).run()
+            if new_centre > 0:
+                MatchBeatsTransformer(tournament, data_root=data_root).run()
+                StrokeAnalysisTransformer(tournament, data_root=data_root).run()
+                RallyAnalysisTransformer(tournament, data_root=data_root).run()
+            else:
+                logger.info(
+                    "%s: no new match centre data, skipping transforms",
+                    tournament.logging_id,
+                )
 
             TournamentMatchesAggregator(
                 circuit=tournament.circuit,
@@ -135,7 +147,10 @@ def _process_tournaments(
 
 def run_rankings(*, start_year: int, data_root: Path | None = None) -> None:
     """Extract, transform, and consolidate rankings."""
-    RankingsExtractor(start_year=start_year, data_root=data_root).run()
+    new_pages = RankingsExtractor(start_year=start_year, data_root=data_root).run()
+    if new_pages == 0:
+        logger.info("Rankings: no new pages, skipping transform/consolidate")
+        return
     tx = RankingsTransformer(data_root=data_root)
     tx.run(start_year=start_year)
     tx.consolidate()
@@ -146,8 +161,15 @@ def run_player_data(
     run_tids: set[tuple[str, int]],
     data_root: Path | None = None,
     live: bool = True,
+    refresh_players: bool = False,
 ) -> PlayerDataResult:
-    """Extract and transform player bio + activity data, scoped to run tournaments."""
+    """Extract and transform player bio + activity data, scoped to run tournaments.
+
+    Args:
+        refresh_players: When True, run activity extraction/staging even if
+            it would normally be skipped. Also forces bio stager/transformer
+            even when no new bios were fetched.
+    """
     if data_root is None:
         default_root = Path(__file__).resolve().parents[3] / "data"
     else:
@@ -166,13 +188,16 @@ def run_player_data(
     result = PlayerDataResult()
 
     if player_ids:
-        result.failed_bio_fetch = PlayerBioExtractor(data_root=data_root).run(
-            player_ids
-        )
-        result.failed_bio_stage = PlayerBioStager(data_root=data_root).run()
-        PlayerBioTransformer(data_root=data_root).run()
+        result.failed_bio_fetch, new_bios = PlayerBioExtractor(
+            data_root=data_root
+        ).run(player_ids)
+        if new_bios > 0 or refresh_players:
+            result.failed_bio_stage = PlayerBioStager(data_root=data_root).run()
+            PlayerBioTransformer(data_root=data_root).run()
+        else:
+            logger.info("Player bios: no new fetches, skipping stager/transformer")
 
-    if player_tournaments:
+    if player_tournaments and refresh_players:
         players_with_results = get_players_with_results(
             tournaments_stage_dir, run_tids
         )
@@ -194,5 +219,9 @@ def run_player_data(
             data_root=data_root
         ).run(player_ids=set(activity_tournaments))
         PlayerActivityTransformer(data_root=data_root).run()
+    elif player_tournaments:
+        logger.info(
+            "Activity: skipped (use --refresh-players to run)"
+        )
 
     return result
