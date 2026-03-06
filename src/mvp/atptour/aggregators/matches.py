@@ -522,6 +522,14 @@ class MatchesAggregator(BaseJob):
             combined = join_player_bio(combined, bio)
             logger.info("Bio joined")
 
+        # Coalesce rank columns: rankings (weekly snapshot) preferred, activity as fallback
+        combined = combined.with_columns([
+            pl.coalesce(["player_rankings_rank", "activity_rank"]).alias("player_rank"),
+            pl.coalesce(["opp_rankings_rank", "activity_opp_rank"]).alias("opp_rank"),
+        ]).drop(["player_rankings_rank", "opp_rankings_rank",
+                 "activity_rank", "activity_opp_rank", "activity_points"])
+        logger.info("Rank columns coalesced")
+
         # Step 8: Fill tournament-level fields within each tournament, then compute
         # effective match date. Any row in a tournament can provide the values.
         combined = fill_tournament_dates(combined)

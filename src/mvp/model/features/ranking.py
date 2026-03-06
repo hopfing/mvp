@@ -36,7 +36,7 @@ def ranking_rank_diff() -> pl.Expr:
 
     Negative means player is ranked higher (better).
     """
-    return pl.col("player_rankings_rank") - pl.col("opp_rankings_rank")
+    return pl.col("player_rank") - pl.col("opp_rank")
 
 
 @feature(
@@ -50,7 +50,7 @@ def ranking_ratio() -> pl.Expr:
 
     < 1 means player is ranked higher (better).
     """
-    return pl.col("player_rankings_rank") / pl.col("opp_rankings_rank")
+    return pl.col("player_rank") / pl.col("opp_rank")
 
 
 @feature(
@@ -61,7 +61,7 @@ def ranking_ratio() -> pl.Expr:
 )
 def ranking_ratio_capped(cap: float = 3.0) -> pl.Expr:
     """Ranking ratio capped symmetrically at [1/cap, cap]."""
-    ratio = pl.col("player_rankings_rank") / pl.col("opp_rankings_rank")
+    ratio = pl.col("player_rank") / pl.col("opp_rank")
     return ratio.clip(lower_bound=1/cap, upper_bound=cap)
 
 
@@ -78,5 +78,5 @@ def avg_opp_ranking(days: int | None = None) -> pl.Expr:
     Lower means player has faced stronger opponents (better rankings).
     """
     if days is None:
-        return cumulative_mean("opp_rankings_rank", group_by="player_id")
-    return rolling_mean("opp_rankings_rank", days=days, group_by="player_id")
+        return cumulative_mean("opp_rank", group_by="player_id")
+    return rolling_mean("opp_rank", days=days, group_by="player_id")

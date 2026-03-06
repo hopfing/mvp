@@ -137,10 +137,10 @@ def compute_elo_ratings(df: pl.DataFrame) -> pl.DataFrame:
 
         # Initialize players if new
         if player_id not in ratings:
-            ranking = row.get("player_rankings_rank")
+            ranking = row.get("player_rank")
             ratings[player_id] = initialize_player(ranking)
         if opp_id not in ratings:
-            opp_ranking = row.get("opp_rankings_rank")
+            opp_ranking = row.get("opp_rank")
             ratings[opp_id] = initialize_player(opp_ranking)
 
         player_rating = ratings[player_id]

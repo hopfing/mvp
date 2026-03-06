@@ -117,6 +117,7 @@ class TestActivityMapping:
         assert result["activity_rank"][0] == 50
         assert result["activity_opp_rank"][0] == 100
         assert result["activity_points"][0] == 45
+        # Note: these columns are pre-coalesce; the aggregator merges them into player_rank/opp_rank
         # Stats columns should not be present (they get added as null during concat)
         assert "svc_aces" not in result.columns
 
@@ -456,22 +457,19 @@ class TestMatchesAggregator:
         # 4 tournament match rows + 1 gap-fill row = 5 rows
         assert len(result) == 5
         assert "round_order" in result.columns
-        assert "player_rankings_rank" in result.columns
+        assert "player_rank" in result.columns
         assert "player_first_name" in result.columns
 
-        # Verify gap-fill row
+        # Verify gap-fill row (activity_rank coalesced into player_rank)
         itf_rows = result.filter(pl.col("tournament_id") == "9999")
         assert len(itf_rows) == 1
-        assert itf_rows["activity_rank"][0] == 500
+        assert itf_rows["player_rank"][0] == 500
 
-        # Verify Activity enrichment on overlap
+        # Verify coalesced rank on overlap (rankings preferred over activity)
         a001_r32 = result.filter(
             (pl.col("player_id") == "A001") & (pl.col("round") == "R32")
         )
-        assert a001_r32["activity_rank"][0] == 50
-
-        # Verify Rankings enrichment
-        assert a001_r32["player_rankings_rank"][0] == 10
+        assert a001_r32["player_rank"][0] == 10
 
         # Verify Bio enrichment
         assert a001_r32["player_first_name"][0] == "Alice"
