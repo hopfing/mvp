@@ -65,11 +65,30 @@ class LogisticModel(BaseModel):
         return self._model.predict_proba(X)[:, 1]
 
 
+class RandomForestModel(BaseModel):
+    """Random forest classifier wrapper."""
+
+    def __init__(self, params: dict[str, Any]) -> None:
+        self.params = {"random_state": 42, "n_jobs": -1, **params}
+        self._model = None
+
+    def fit(self, X: np.ndarray, y: np.ndarray) -> None:
+        from sklearn.ensemble import RandomForestClassifier
+
+        self._model = RandomForestClassifier(**self.params)
+        self._model.fit(X, y)
+
+    def predict_proba(self, X: np.ndarray) -> np.ndarray:
+        if self._model is None:
+            raise RuntimeError("Model not fitted")
+        return self._model.predict_proba(X)[:, 1]
+
+
 def get_model(model_type: str, params: dict[str, Any]) -> BaseModel:
     """Factory function to get model wrapper.
 
     Args:
-        model_type: Type of model ("xgboost", "logistic").
+        model_type: Type of model ("xgboost", "logistic", "random_forest").
         params: Model parameters.
 
     Returns:
@@ -82,5 +101,7 @@ def get_model(model_type: str, params: dict[str, Any]) -> BaseModel:
         return XGBoostModel(params)
     elif model_type == "logistic":
         return LogisticModel(params)
+    elif model_type == "random_forest":
+        return RandomForestModel(params)
     else:
         raise ValueError(f"Unknown model type: {model_type}")

@@ -41,7 +41,7 @@ class FeaturesConfig(BaseModel):
 class ModelConfig(BaseModel):
     """Model configuration."""
 
-    type: Literal["xgboost", "logistic"]
+    type: Literal["xgboost", "logistic", "random_forest"]
     params: dict[str, Any] | None = None
 
 
