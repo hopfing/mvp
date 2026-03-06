@@ -1,6 +1,8 @@
 """ATP Tour data pipeline — extraction, transformation, and orchestration."""
 
 import logging
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -35,6 +37,41 @@ from mvp.common.enums import Circuit
 
 logger = logging.getLogger(__name__)
 
+MAX_TOURNAMENT_WORKERS = 3
+
+
+class _WorkerThreadFilter(logging.Filter):
+    """Blocks log records from registered worker threads on main handlers."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._blocked: set[int] = set()
+        self._lock = threading.Lock()
+
+    def register(self, thread_id: int) -> None:
+        with self._lock:
+            self._blocked.add(thread_id)
+
+    def unregister(self, thread_id: int) -> None:
+        with self._lock:
+            self._blocked.discard(thread_id)
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.thread not in self._blocked
+
+
+class _BufferHandler(logging.Handler):
+    """Captures log records from a specific thread for later replay."""
+
+    def __init__(self, thread_id: int) -> None:
+        super().__init__()
+        self._thread_id = thread_id
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if record.thread == self._thread_id:
+            self.records.append(record)
+
 
 def _current_year() -> int:
     return datetime.now().year
@@ -68,79 +105,167 @@ class PlayerDataResult:
         )
 
 
+def _process_single_tournament(
+    tid: str,
+    year: int,
+    is_archive: bool,
+    circuit: Circuit | None,
+    *,
+    data_root: Path | None,
+    refresh: bool,
+    thread_filter: _WorkerThreadFilter,
+    replay_lock: threading.Lock,
+) -> tuple[str, int, str] | None:
+    """Process one tournament with suppressed logging.
+
+    Detail logs are captured in a buffer and suppressed from the console.
+    Only WARNING+ records are replayed after completion. A concise progress
+    line is printed to stdout for each tournament.
+
+    Returns ``(tid, year, error_str)`` on failure, ``None`` on success.
+    """
+    thread_id = threading.current_thread().ident
+    thread_filter.register(thread_id)
+    buffer = _BufferHandler(thread_id)
+    logging.getLogger().addHandler(buffer)
+
+    logging_id = f"{tid} ({year})"
+    error_result = None
+
+    try:
+        tournament = OverviewExtractor(data_root=data_root).run(
+            tournament_id=tid,
+            year=year,
+            is_archive=is_archive,
+            refresh=refresh,
+            circuit=circuit,
+        )
+        logging_id = tournament.logging_id
+        logger.info("Processing %s", logging_id)
+
+        OverviewTransformer(tournament, data_root=data_root).run()
+        ScheduleExtractor(data_root=data_root).run(tournament)
+        ScheduleTransformer(tournament, data_root=data_root).run()
+
+        results_refresh = True  # Always refresh results
+        stats_refresh = refresh  # Only refresh stats when explicitly requested
+
+        ResultsExtractor(data_root=data_root).run(
+            tournament, refresh=results_refresh
+        )
+        ResultsTransformer(tournament, data_root=data_root).run()
+        new_stats = MatchStatsExtractor(data_root=data_root).run(
+            tournament, refresh=stats_refresh
+        )
+        if new_stats > 0:
+            MatchStatsTransformer(tournament, data_root=data_root).run()
+        else:
+            logger.info(
+                "%s: no new match stats, skipping transform",
+                logging_id,
+            )
+
+        new_centre = MatchCentreExtractor(
+            data_root=data_root,
+            data_types=[
+                DataType.MATCH_BEATS,
+                DataType.STROKE_ANALYSIS,
+                DataType.RALLY_ANALYSIS,
+            ],
+        ).run(tournament, refresh=stats_refresh)
+        if new_centre > 0:
+            MatchBeatsTransformer(tournament, data_root=data_root).run()
+            StrokeAnalysisTransformer(tournament, data_root=data_root).run()
+            RallyAnalysisTransformer(tournament, data_root=data_root).run()
+        else:
+            logger.info(
+                "%s: no new match centre data, skipping transforms",
+                logging_id,
+            )
+
+        TournamentMatchesAggregator(
+            circuit=tournament.circuit,
+            tid=tournament.tournament_id,
+            year=tournament.year,
+            data_root=data_root,
+        ).run()
+
+        return None
+    except Exception as e:
+        logger.exception("Failed processing tournament %s (%d)", tid, year)
+        error_result = (tid, year, str(e))
+        return error_result
+    finally:
+        logging.getLogger().removeHandler(buffer)
+        thread_filter.unregister(thread_id)
+        with replay_lock:
+            # Progress line
+            if error_result is None:
+                print(f"  Completed {logging_id}")
+            else:
+                print(f"  FAILED {logging_id}")
+            # Only surface warnings/errors
+            for record in buffer.records:
+                if record.levelno >= logging.WARNING:
+                    for handler in logging.getLogger().handlers:
+                        handler.emit(record)
+
+
 def _process_tournaments(
     tournaments: list[tuple[str, int, bool, Circuit | None]],
     *,
     data_root: Path | None,
     refresh: bool,
 ) -> list[tuple[str, int, str]]:
-    """Per-tournament extraction + transformation loop."""
-    failed: list[tuple[str, int, str]] = []
+    """Per-tournament extraction + transformation loop (parallel)."""
+    if not tournaments:
+        return []
+
     total = len(tournaments)
+    logger.info(
+        "Processing %d tournaments in parallel (%d workers)",
+        total,
+        MAX_TOURNAMENT_WORKERS,
+    )
 
-    for idx, (tid, year, is_archive, circuit) in enumerate(tournaments, 1):
-        try:
-            tournament = OverviewExtractor(data_root=data_root).run(
-                tournament_id=tid,
-                year=year,
-                is_archive=is_archive,
-                refresh=refresh,
-                circuit=circuit,
-            )
-            logger.info("[%d/%d] Processing %s", idx, total, tournament.logging_id)
+    thread_filter = _WorkerThreadFilter()
+    replay_lock = threading.Lock()
 
-            OverviewTransformer(tournament, data_root=data_root).run()
-            ScheduleExtractor(data_root=data_root).run(tournament)
-            ScheduleTransformer(tournament, data_root=data_root).run()
+    for handler in logging.getLogger().handlers:
+        handler.addFilter(thread_filter)
 
-            results_refresh = True  # Always refresh results
-            stats_refresh = refresh  # Only refresh stats when explicitly requested
+    failed: list[tuple[str, int, str]] = []
+    try:
+        with ThreadPoolExecutor(max_workers=MAX_TOURNAMENT_WORKERS) as pool:
+            futures = {
+                pool.submit(
+                    _process_single_tournament,
+                    tid,
+                    year,
+                    is_archive,
+                    circuit,
+                    data_root=data_root,
+                    refresh=refresh,
+                    thread_filter=thread_filter,
+                    replay_lock=replay_lock,
+                ): (tid, year)
+                for tid, year, is_archive, circuit in tournaments
+            }
+            for future in as_completed(futures):
+                result = future.result()
+                if result is not None:
+                    failed.append(result)
+    finally:
+        for handler in logging.getLogger().handlers:
+            handler.removeFilter(thread_filter)
 
-            ResultsExtractor(data_root=data_root).run(
-                tournament, refresh=results_refresh
-            )
-            ResultsTransformer(tournament, data_root=data_root).run()
-            new_stats = MatchStatsExtractor(data_root=data_root).run(
-                tournament, refresh=stats_refresh
-            )
-            if new_stats > 0:
-                MatchStatsTransformer(tournament, data_root=data_root).run()
-            else:
-                logger.info(
-                    "%s: no new match stats, skipping transform",
-                    tournament.logging_id,
-                )
-
-            # MatchBeats extraction + transformation (2022+ only, handled internally)
-            new_centre = MatchCentreExtractor(
-                data_root=data_root,
-                data_types=[
-                    DataType.MATCH_BEATS,
-                    DataType.STROKE_ANALYSIS,
-                    DataType.RALLY_ANALYSIS,
-                ],
-            ).run(tournament, refresh=stats_refresh)
-            if new_centre > 0:
-                MatchBeatsTransformer(tournament, data_root=data_root).run()
-                StrokeAnalysisTransformer(tournament, data_root=data_root).run()
-                RallyAnalysisTransformer(tournament, data_root=data_root).run()
-            else:
-                logger.info(
-                    "%s: no new match centre data, skipping transforms",
-                    tournament.logging_id,
-                )
-
-            TournamentMatchesAggregator(
-                circuit=tournament.circuit,
-                tid=tournament.tournament_id,
-                year=tournament.year,
-                data_root=data_root,
-            ).run()
-
-            logger.info("[%d/%d] Completed %s", idx, total, tournament.logging_id)
-        except Exception as e:
-            logger.exception("Failed processing tournament %s (%d)", tid, year)
-            failed.append((tid, year, str(e)))
+    n_failed = len(failed)
+    logger.info(
+        "Completed %d/%d tournaments (%d failed)",
+        total - n_failed,
+        total,
+        n_failed,
+    )
 
     return failed
 

@@ -94,13 +94,17 @@ class TestProcessTournaments:
     ):
         from mvp.atptour.pipeline import _process_tournaments
 
-        # First tournament fails, second succeeds
+        # "580" fails, "339" succeeds — use argument-based side_effect
+        # so thread execution order doesn't matter
         mock_tournament = MagicMock()
         mock_tournament.logging_id = "ATP Test 2023 (339)"
-        MockOverviewExt.return_value.run.side_effect = [
-            ValueError("API error"),
-            mock_tournament,
-        ]
+
+        def overview_side_effect(**kwargs):
+            if kwargs.get("tournament_id") == "580":
+                raise ValueError("API error")
+            return mock_tournament
+
+        MockOverviewExt.return_value.run.side_effect = overview_side_effect
         MockMatchStatsExt.return_value.run.return_value = 1
         MockMatchCentreExt.return_value.run.return_value = 1
 

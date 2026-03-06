@@ -341,8 +341,28 @@ def cmd_experiment(args: argparse.Namespace) -> int:
     return 0
 
 
+def _fetch_dk_quiet() -> int:
+    """Run DK odds fetch with logging suppressed (runs in background thread)."""
+    import logging as _logging
+
+    dk_logger = _logging.getLogger("mvp.draftkings")
+    ext_logger = _logging.getLogger("mvp.common.base_extractor")
+    job_logger = _logging.getLogger("mvp.common.base_job")
+    prev_levels = dk_logger.level, ext_logger.level, job_logger.level
+    dk_logger.setLevel(_logging.WARNING)
+    ext_logger.setLevel(_logging.WARNING)
+    job_logger.setLevel(_logging.WARNING)
+    try:
+        return fetch_and_save()
+    finally:
+        dk_logger.setLevel(prev_levels[0])
+        ext_logger.setLevel(prev_levels[1])
+        job_logger.setLevel(prev_levels[2])
+
+
 def cmd_live(args: argparse.Namespace) -> int:
     """Run live pipeline: extract, aggregate, predict."""
+    from concurrent.futures import ThreadPoolExecutor
     from datetime import datetime
 
     from mvp.atptour.aggregators.matches import MatchesAggregator
@@ -355,63 +375,83 @@ def cmd_live(args: argparse.Namespace) -> int:
     from mvp.model.predictor import ProductionPredictor
 
     current_year = datetime.now().year
-    run_rankings(start_year=current_year - 1)
 
-    # Resolve active tournaments
-    discovery = TournamentDiscovery()
-    pairs = discovery.get_active_tournaments()
-    if args.tid is not None:
-        pairs = [(t, y) for t, y in pairs if t == args.tid]
-        if not pairs:
-            raise ValueError(f"Tournament {args.tid} is not currently active")
+    # Start DK odds fetch in background (fully independent of pipeline).
+    # Suppress its logs — result is reported after collection.
+    dk_pool = ThreadPoolExecutor(max_workers=1)
+    dk_future = dk_pool.submit(_fetch_dk_quiet)
 
-    tournaments = [(t, year, False, None) for t, year in pairs]
-    logger.info("Processing %d active tournaments", len(tournaments))
-
-    failed = _process_tournaments(tournaments, data_root=None, refresh=args.refresh)
-
-    run_tids = {(tid, yr) for tid, yr, _, _ in tournaments}
-    player_result = run_player_data(
-        run_tids=run_tids, refresh_players=args.refresh_players
-    )
-
-    logger.info("Running cross-tournament aggregation")
-    MatchesAggregator().run()
-
-    # Report extraction/aggregation failures
-    if failed or player_result.has_failures:
-        error_parts = []
-        if failed:
-            error_parts.append(f"{len(failed)} failed tournament(s)")
-            for tid, year, error in failed:
-                logger.error("  FAILED: tournament %s (%d): %s", tid, year, error)
-        if player_result.has_failures:
-            error_parts.append(
-                f"{len(player_result.all_failures)} failed player operation(s)"
-            )
-        raise RuntimeError(f"Pipeline finished with {', '.join(error_parts)}")
-
-    # Predict with production model
-    predictor = ProductionPredictor()
-    predictions = predictor.predict(tournament_keys=pairs)
-
-    if len(predictions) == 0:
-        print("\nNo pending matches to predict.")
-        return 0
-
-    predictor.save_predictions(predictions)
-    print_predictions(predictions)
-
-    # Fetch DraftKings odds (best-effort)
     try:
-        n = fetch_and_save()
-        if n:
-            print(f"Fetched {n} DK moneyline odds entries")
-    except Exception as e:
-        logger.error("DK odds fetch failed: %s", e)
-        print(f"Warning: DK odds fetch failed ({e})")
+        # Rankings + discovery in parallel
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            rankings_future = pool.submit(
+                run_rankings, start_year=current_year - 1
+            )
+            discovery = TournamentDiscovery()
+            discovery_future = pool.submit(discovery.get_active_tournaments)
+            rankings_future.result()
+            pairs = discovery_future.result()
 
-    # Sync to Google Sheets (best-effort)
+        if args.tid is not None:
+            pairs = [(t, y) for t, y in pairs if t == args.tid]
+            if not pairs:
+                raise ValueError(f"Tournament {args.tid} is not currently active")
+
+        tournaments = [(t, year, False, None) for t, year in pairs]
+        logger.info("Processing %d active tournaments", len(tournaments))
+
+        failed = _process_tournaments(
+            tournaments, data_root=None, refresh=args.refresh
+        )
+
+        run_tids = {(tid, yr) for tid, yr, _, _ in tournaments}
+        player_result = run_player_data(
+            run_tids=run_tids, refresh_players=args.refresh_players
+        )
+
+        logger.info("Running cross-tournament aggregation")
+        MatchesAggregator().run()
+
+        # Report extraction/aggregation failures
+        if failed or player_result.has_failures:
+            error_parts = []
+            if failed:
+                error_parts.append(f"{len(failed)} failed tournament(s)")
+                for tid, year, error in failed:
+                    logger.error(
+                        "  FAILED: tournament %s (%d): %s", tid, year, error
+                    )
+            if player_result.has_failures:
+                error_parts.append(
+                    f"{len(player_result.all_failures)} failed player operation(s)"
+                )
+            raise RuntimeError(
+                f"Pipeline finished with {', '.join(error_parts)}"
+            )
+
+        # Predict with production model
+        predictor = ProductionPredictor()
+        predictions = predictor.predict(tournament_keys=pairs)
+
+        if len(predictions) == 0:
+            print("\nNo pending matches to predict.")
+            return 0
+
+        predictor.save_predictions(predictions)
+        print_predictions(predictions)
+
+    finally:
+        # Collect DK odds (best-effort, always runs)
+        try:
+            n = dk_future.result(timeout=30)
+            if n:
+                print(f"Fetched {n} DK moneyline odds entries")
+        except Exception as e:
+            logger.error("DK odds fetch failed: %s", e)
+            print(f"Warning: DK odds fetch failed ({e})")
+        dk_pool.shutdown(wait=False)
+
+    # Sync to Google Sheets (best-effort, must be last)
     try:
         import polars as pl
 

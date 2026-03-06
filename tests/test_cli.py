@@ -117,6 +117,7 @@ class TestCmdTrain:
 
 
 class TestCmdLive:
+    @patch("mvp.cli._fetch_dk_quiet", return_value=0)
     @patch("mvp.model.predictor.ProductionPredictor")
     @patch("mvp.atptour.aggregators.matches.MatchesAggregator")
     @patch("mvp.atptour.pipeline.run_player_data")
@@ -131,6 +132,7 @@ class TestCmdLive:
         mock_player_data,
         mock_aggregator,
         mock_predictor_cls,
+        mock_dk,
     ):
         from mvp.cli import cmd_live
 
@@ -152,6 +154,7 @@ class TestCmdLive:
         mock_predictor_cls.return_value.predict.assert_called_once()
         assert result == 0
 
+    @patch("mvp.cli._fetch_dk_quiet", return_value=0)
     @patch("mvp.model.predictor.ProductionPredictor")
     @patch("mvp.atptour.aggregators.matches.MatchesAggregator")
     @patch("mvp.atptour.pipeline.run_player_data")
@@ -166,6 +169,7 @@ class TestCmdLive:
         mock_player_data,
         mock_aggregator,
         mock_predictor_cls,
+        mock_dk,
     ):
         from mvp.cli import cmd_live
 
@@ -185,9 +189,10 @@ class TestCmdLive:
         assert len(call_args) == 1
         assert call_args[0][0] == "580"
 
+    @patch("mvp.cli._fetch_dk_quiet", return_value=0)
     @patch("mvp.atptour.discovery.TournamentDiscovery")
     @patch("mvp.atptour.pipeline.run_rankings")
-    def test_live_tid_not_found_raises(self, mock_rankings, mock_discovery):
+    def test_live_tid_not_found_raises(self, mock_rankings, mock_discovery, mock_dk):
         from mvp.cli import cmd_live
 
         mock_discovery.return_value.get_active_tournaments.return_value = [
@@ -198,6 +203,7 @@ class TestCmdLive:
         with pytest.raises(ValueError, match="not currently active"):
             cmd_live(args)
 
+    @patch("mvp.cli._fetch_dk_quiet", return_value=0)
     @patch("mvp.atptour.aggregators.matches.MatchesAggregator")
     @patch("mvp.atptour.pipeline.run_player_data")
     @patch("mvp.atptour.pipeline._process_tournaments")
@@ -210,6 +216,7 @@ class TestCmdLive:
         mock_process,
         mock_player_data,
         mock_aggregator,
+        mock_dk,
     ):
         from mvp.cli import cmd_live
 
@@ -227,6 +234,7 @@ class TestCmdLive:
 class TestCmdLiveSheets:
     """Tests for Sheets sync integration in cmd_live."""
 
+    @patch("mvp.cli._fetch_dk_quiet", return_value=0)
     @patch("mvp.integrations.sheets.SheetsSync")
     @patch("mvp.integrations.base.merge_predictions")
     @patch("mvp.integrations.base.prepare_predictions")
@@ -247,6 +255,7 @@ class TestCmdLiveSheets:
         mock_prepare,
         mock_merge,
         mock_sheets_cls,
+        mock_dk,
     ):
         """Sheets sync is called after predictions are saved."""
         import polars as pl
@@ -291,6 +300,7 @@ class TestCmdLiveSheets:
         assert result == 0
         mock_sheets.write.assert_called_once()
 
+    @patch("mvp.cli._fetch_dk_quiet", return_value=0)
     @patch("mvp.integrations.sheets.SheetsSync")
     @patch("mvp.model.predictor.ProductionPredictor")
     @patch("mvp.atptour.aggregators.matches.MatchesAggregator")
@@ -307,6 +317,7 @@ class TestCmdLiveSheets:
         mock_aggregator,
         mock_predictor_cls,
         mock_sheets_cls,
+        mock_dk,
     ):
         """Pipeline completes even if Sheets sync raises."""
         import polars as pl
