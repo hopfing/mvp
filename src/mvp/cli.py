@@ -5,8 +5,12 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+import warnings
 from pathlib import Path
 from typing import Any
+
+warnings.filterwarnings("ignore", message="All-NaN slice encountered")
+warnings.filterwarnings("ignore", message="`sklearn.utils.parallel.delayed`")
 
 from mvp.draftkings.odds import fetch_and_save
 
