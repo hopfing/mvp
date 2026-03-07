@@ -1,7 +1,10 @@
 """Experiment runner for training and evaluating models."""
 
-
+import warnings
 from pathlib import Path
+
+warnings.filterwarnings("ignore", message="All-NaN slice encountered")
+warnings.filterwarnings("ignore", message="sklearn.utils.parallel.delayed")
 from typing import Any
 
 import numpy as np
