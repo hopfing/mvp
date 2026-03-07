@@ -352,6 +352,50 @@ def add_effective_match_date(df: pl.DataFrame) -> pl.DataFrame:
     return df.drop(temp_cols)
 
 
+def add_tournament_level(df: pl.DataFrame) -> pl.DataFrame:
+    """Derive tournament_level from event_type + event_type_detail."""
+    has_detail = "event_type_detail" in df.columns
+    if has_detail:
+        return df.with_columns(
+            pl.when(pl.col("event_type") == "CH")
+            .then(
+                pl.when(pl.col("event_type_detail") == 175).then(pl.lit("CH175"))
+                .when(pl.col("event_type_detail") == 125).then(pl.lit("CH125"))
+                .when(pl.col("event_type_detail") == 110).then(pl.lit("CH100"))
+                .when(pl.col("event_type_detail") == 100).then(pl.lit("CH100"))
+                .when(pl.col("event_type_detail") == 90).then(pl.lit("CH75"))
+                .when(pl.col("event_type_detail") == 80).then(pl.lit("CH75"))
+                .when(pl.col("event_type_detail") == 75).then(pl.lit("CH75"))
+                .when(pl.col("event_type_detail") == 50).then(pl.lit("CH50"))
+                .otherwise(pl.lit("CH75"))
+            )
+            .when(pl.col("event_type") == "FU").then(pl.lit("FU"))
+            .when(pl.col("event_type") == "GS").then(pl.lit("GS"))
+            .when(pl.col("event_type") == "1000").then(pl.lit("1000"))
+            .when(pl.col("event_type").is_in(["CS", "WC"])).then(pl.lit("1000"))
+            .when(pl.col("event_type") == "500").then(pl.lit("500"))
+            .when(pl.col("event_type") == "GP").then(pl.lit("500"))
+            .when(pl.col("event_type") == "OL").then(pl.lit("500"))
+            .when(pl.col("event_type") == "250").then(pl.lit("250"))
+            .otherwise(pl.lit("250"))
+            .alias("tournament_level")
+        )
+    # No detail column — map from event_type alone
+    return df.with_columns(
+        pl.when(pl.col("event_type") == "CH").then(pl.lit("CH75"))
+        .when(pl.col("event_type") == "FU").then(pl.lit("FU"))
+        .when(pl.col("event_type") == "GS").then(pl.lit("GS"))
+        .when(pl.col("event_type") == "1000").then(pl.lit("1000"))
+        .when(pl.col("event_type").is_in(["CS", "WC"])).then(pl.lit("1000"))
+        .when(pl.col("event_type") == "500").then(pl.lit("500"))
+        .when(pl.col("event_type") == "GP").then(pl.lit("500"))
+        .when(pl.col("event_type") == "OL").then(pl.lit("500"))
+        .when(pl.col("event_type") == "250").then(pl.lit("250"))
+        .otherwise(pl.lit("250"))
+        .alias("tournament_level")
+    )
+
+
 def add_partner_workload_rows(df: pl.DataFrame) -> pl.DataFrame:
     """Add rows for doubles partners so workload features count their appearances.
 
@@ -537,6 +581,7 @@ class MatchesAggregator(BaseJob):
         combined = fill_tournament_fields(combined)
         combined = add_round_order(combined)
         combined = add_effective_match_date(combined)
+        combined = add_tournament_level(combined)
 
         # Compute Elo ratings for singles matches only
         singles = combined.filter(pl.col("draw_type") == "singles")

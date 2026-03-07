@@ -32,6 +32,7 @@ from mvp.atptour.elo.constants import (
     SERVE_RETURN_SCALE,
     STYLE_SCALE,
     TB_CLUTCH_BASELINE,
+    TOURNAMENT_IMPORTANCE,
 )
 
 
@@ -77,7 +78,7 @@ class PlayerRating:
         return self.elo + self.get_surface_adj(surface)
 
 
-def get_k_factor(player: PlayerRating, round_name: str) -> float:
+def get_k_factor(player: PlayerRating, round_name: str, tournament_level: str = "250") -> float:
     """Calculate dynamic K-factor based on player state and match importance."""
     k = BASE_K
 
@@ -89,9 +90,9 @@ def get_k_factor(player: PlayerRating, round_name: str) -> float:
     if player.rd > HIGH_RD_THRESHOLD:
         k *= HIGH_RD_K_MULT
 
-    # Match importance multiplier
-    importance = ROUND_IMPORTANCE.get(round_name, 1.0)
-    k *= importance
+    # Match importance multipliers
+    k *= ROUND_IMPORTANCE.get(round_name, 1.0)
+    k *= TOURNAMENT_IMPORTANCE.get(tournament_level, 1.0)
 
     return k
 

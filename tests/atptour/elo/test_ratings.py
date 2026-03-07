@@ -9,6 +9,7 @@ from mvp.atptour.elo.constants import (
     HIGH_RD_K_MULT,
     MIN_RD,
     NEW_PLAYER_K_MULT,
+    TOURNAMENT_IMPORTANCE,
 )
 from mvp.atptour.elo.ratings import (
     PlayerRating,
@@ -168,6 +169,38 @@ class TestKFactor:
         player = PlayerRating(match_count=30, rd=200.0)
         k = get_k_factor(player, "UNKNOWN")
         assert k == BASE_K
+
+    def test_grand_slam_tournament_importance(self):
+        """Grand Slam gets 1.2x tournament importance."""
+        player = PlayerRating(match_count=30, rd=200.0)
+        k = get_k_factor(player, "R32", "GS")
+        assert k == BASE_K * TOURNAMENT_IMPORTANCE["GS"]
+
+    def test_challenger_tournament_importance(self):
+        """Challenger 75 gets 0.65x tournament importance."""
+        player = PlayerRating(match_count=30, rd=200.0)
+        k = get_k_factor(player, "R32", "CH75")
+        assert k == BASE_K * TOURNAMENT_IMPORTANCE["CH75"]
+
+    def test_default_tournament_level_is_250(self):
+        """Omitting tournament_level defaults to 250 (1.0x)."""
+        player = PlayerRating(match_count=30, rd=200.0)
+        k_default = get_k_factor(player, "R32")
+        k_250 = get_k_factor(player, "R32", "250")
+        assert k_default == k_250
+
+    def test_unknown_tournament_level_uses_default(self):
+        """Unknown tournament_level falls back to 1.0."""
+        player = PlayerRating(match_count=30, rd=200.0)
+        k = get_k_factor(player, "R32", "UNKNOWN")
+        assert k == BASE_K
+
+    def test_combined_round_and_tournament(self):
+        """Finals at Grand Slam combines round (1.3) and tournament (1.2)."""
+        player = PlayerRating(match_count=30, rd=200.0)
+        k = get_k_factor(player, "F", "GS")
+        expected = BASE_K * 1.3 * TOURNAMENT_IMPORTANCE["GS"]
+        assert k == pytest.approx(expected)
 
 
 class TestExpectedScore:

@@ -26,8 +26,22 @@ ROUND_IMPORTANCE = {
     "RR": 1.0,
 }
 
+# K-factor by tournament level
+TOURNAMENT_IMPORTANCE = {
+    "GS": 1.2,
+    "1000": 1.1,
+    "500": 1.05,
+    "250": 1.0,
+    "CH175": 0.90,
+    "CH125": 0.80,
+    "CH100": 0.75,
+    "CH75": 0.65,
+    "CH50": 0.55,
+    "FU": 0.5,
+}
+
 # Surface K-factor (more stable than overall)
-SURFACE_K_MULT = 0.5
+SURFACE_K_MULT = 0.3
 
 # Serve/Return K-factor
 SERVE_RETURN_K_MULT = 1.0

@@ -736,3 +736,95 @@ class TestMatchesAggregatorSort:
         )
         assert result["match_uid"].to_list() == expected["match_uid"].to_list()
         assert result["player_id"].to_list() == expected["player_id"].to_list()
+
+
+class TestAddTournamentLevel:
+    """Test add_tournament_level derivation."""
+
+    def test_grand_slam(self):
+        from mvp.atptour.aggregators.matches import add_tournament_level
+
+        df = pl.DataFrame({"event_type": ["GS"], "event_type_detail": [2000]})
+        result = add_tournament_level(df)
+        assert result["tournament_level"][0] == "GS"
+
+    def test_masters_1000(self):
+        from mvp.atptour.aggregators.matches import add_tournament_level
+
+        df = pl.DataFrame({"event_type": ["1000"], "event_type_detail": [1000]})
+        result = add_tournament_level(df)
+        assert result["tournament_level"][0] == "1000"
+
+    def test_cs_wc_map_to_1000(self):
+        from mvp.atptour.aggregators.matches import add_tournament_level
+
+        df = pl.DataFrame({"event_type": ["CS", "WC"], "event_type_detail": [0, 0]})
+        result = add_tournament_level(df)
+        assert result["tournament_level"].to_list() == ["1000", "1000"]
+
+    def test_atp_500(self):
+        from mvp.atptour.aggregators.matches import add_tournament_level
+
+        df = pl.DataFrame({"event_type": ["500"], "event_type_detail": [500]})
+        result = add_tournament_level(df)
+        assert result["tournament_level"][0] == "500"
+
+    def test_gp_ol_map_to_500(self):
+        from mvp.atptour.aggregators.matches import add_tournament_level
+
+        df = pl.DataFrame({"event_type": ["GP", "OL"], "event_type_detail": [0, 0]})
+        result = add_tournament_level(df)
+        assert result["tournament_level"].to_list() == ["500", "500"]
+
+    def test_atp_250(self):
+        from mvp.atptour.aggregators.matches import add_tournament_level
+
+        df = pl.DataFrame({"event_type": ["250"], "event_type_detail": [250]})
+        result = add_tournament_level(df)
+        assert result["tournament_level"][0] == "250"
+
+    def test_challenger_tiers(self):
+        from mvp.atptour.aggregators.matches import add_tournament_level
+
+        df = pl.DataFrame({
+            "event_type": ["CH"] * 8,
+            "event_type_detail": [175, 125, 110, 100, 90, 80, 75, 50],
+        })
+        result = add_tournament_level(df)
+        assert result["tournament_level"].to_list() == [
+            "CH175", "CH125", "CH100", "CH100", "CH75", "CH75", "CH75", "CH50",
+        ]
+
+    def test_challenger_null_detail_defaults_to_ch75(self):
+        from mvp.atptour.aggregators.matches import add_tournament_level
+
+        df = pl.DataFrame({
+            "event_type": ["CH"],
+            "event_type_detail": [None],
+        }).cast({"event_type_detail": pl.Int64})
+        result = add_tournament_level(df)
+        assert result["tournament_level"][0] == "CH75"
+
+    def test_futures(self):
+        from mvp.atptour.aggregators.matches import add_tournament_level
+
+        df = pl.DataFrame({"event_type": ["FU"], "event_type_detail": [0]})
+        result = add_tournament_level(df)
+        assert result["tournament_level"][0] == "FU"
+
+    def test_fallback_event_types_map_to_250(self):
+        from mvp.atptour.aggregators.matches import add_tournament_level
+
+        df = pl.DataFrame({
+            "event_type": ["WS", "ATPC", "UC", "XXI", "LVR", "GC"],
+            "event_type_detail": [0] * 6,
+        })
+        result = add_tournament_level(df)
+        assert result["tournament_level"].to_list() == ["250"] * 6
+
+    def test_without_detail_column(self):
+        from mvp.atptour.aggregators.matches import add_tournament_level
+
+        df = pl.DataFrame({"event_type": ["GS", "CH", "250"]})
+        result = add_tournament_level(df)
+        assert result["tournament_level"].to_list() == ["GS", "CH75", "250"]

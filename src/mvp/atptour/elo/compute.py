@@ -137,6 +137,7 @@ def compute_elo_ratings(df: pl.DataFrame) -> pl.DataFrame:
         opp_id = row["opp_id"]
         surface = row.get("surface") or "Hard"
         round_name = row.get("round") or "R32"
+        tournament_level = row.get("tournament_level") or "250"
         match_date = row["effective_match_date"]
         won = row["won"]
 
@@ -269,8 +270,8 @@ def compute_elo_ratings(df: pl.DataFrame) -> pl.DataFrame:
         processed_matches.add(match_uid)
 
         # Per-player K-factors
-        k_player = get_k_factor(player_rating, round_name)
-        k_opp = get_k_factor(opp_rating, round_name)
+        k_player = get_k_factor(player_rating, round_name, tournament_level)
+        k_opp = get_k_factor(opp_rating, round_name, tournament_level)
 
         # Snapshot pre-match effective Elos
         player_effective = player_rating.effective_surface_elo(surface)
