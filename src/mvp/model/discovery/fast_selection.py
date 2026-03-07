@@ -115,6 +115,7 @@ class FastForwardSelector:
         fold_medians = self.fold_medians
         model_type = self.config.model.type
         model_params = self.config.model.params or {}
+        scale = model_type in ("logistic",)
 
         def scorer(features: list[str]) -> float:
             if not features:
@@ -135,6 +136,13 @@ class FastForwardSelector:
                 medians = fold_medians[fold_idx][col_indices]
                 X_train = np.where(np.isnan(X_train), medians, X_train)
                 X_test = np.where(np.isnan(X_test), medians, X_test)
+
+                if scale:
+                    mean = X_train.mean(axis=0)
+                    std = X_train.std(axis=0)
+                    std[std == 0] = 1.0
+                    X_train = (X_train - mean) / std
+                    X_test = (X_test - mean) / std
 
                 model = get_model(model_type, model_params)
                 model.fit(X_train, y_train)
