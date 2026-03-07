@@ -72,6 +72,46 @@ def circuit_win_pct_diff(days: int | None = None) -> pl.Expr:
 
 
 @feature(
+    name="tour_match_pct",
+    params=["days"],
+    description="Fraction of recent matches played on ATP Tour circuit",
+    mirror=True,
+)
+def tour_match_pct(days: int | None = None) -> pl.Expr:
+    """Fraction of a player's matches on the Tour circuit in a rolling window."""
+    group_by = ["player_id"]
+    tour_indicator = (pl.col("circuit") == "tour").cast(pl.Int64)
+    if days is None:
+        tour_count = (
+            tour_indicator.cum_sum().shift(1).over(group_by, order_by="effective_match_date").fill_null(0)
+        )
+        total = cumulative_count(group_by=group_by)
+    else:
+        tour_count = (
+            tour_indicator
+            .rolling_sum_by(by="effective_match_date", window_size=f"{days}d", closed="left")
+            .over(group_by)
+            .fill_null(0)
+        )
+        total = rolling_count(days=days, group_by=group_by)
+    return pl.when(total > 0).then(tour_count / total).otherwise(None)
+
+
+@feature(
+    name="tour_match_pct_diff",
+    params=["days"],
+    description="Player tour match pct minus opponent tour match pct",
+    depends_on=["tour_match_pct"],
+    mirror=False,
+)
+def tour_match_pct_diff(days: int | None = None) -> pl.Expr:
+    """Tour match percentage difference between player and opponent."""
+    if days is None:
+        return pl.col("player_tour_match_pct") - pl.col("opp_tour_match_pct")
+    return pl.col(f"player_tour_match_pct_{days}d") - pl.col(f"opp_tour_match_pct_{days}d")
+
+
+@feature(
     name="is_seeded",
     params=[],
     description="1 if player is seeded, 0 otherwise",
