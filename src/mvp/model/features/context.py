@@ -8,13 +8,13 @@ from mvp.model.registry import feature
 
 
 @feature(
-    name="indoor_win_pct",
+    name="venue_win_pct",
     params=["days"],
-    description="Win percentage on indoor courts",
+    description="Win percentage on current venue type (indoor/outdoor)",
     mirror=True,
 )
-def indoor_win_pct(days: int | None = None) -> pl.Expr:
-    """Win percentage on indoor courts."""
+def venue_win_pct(days: int | None = None) -> pl.Expr:
+    """Win percentage on current venue type (indoor/outdoor)."""
     group_by = ["player_id", "indoor"]
     if days is None:
         wins = cumulative_sum("won", group_by=group_by)
@@ -26,17 +26,17 @@ def indoor_win_pct(days: int | None = None) -> pl.Expr:
 
 
 @feature(
-    name="indoor_win_pct_diff",
+    name="venue_win_pct_diff",
     params=["days"],
-    description="Player indoor win pct minus opponent indoor win pct",
-    depends_on=["indoor_win_pct"],
+    description="Player venue win pct minus opponent venue win pct",
+    depends_on=["venue_win_pct"],
     mirror=False,
 )
-def indoor_win_pct_diff(days: int | None = None) -> pl.Expr:
-    """Indoor win percentage difference."""
+def venue_win_pct_diff(days: int | None = None) -> pl.Expr:
+    """Venue win percentage difference (indoor/outdoor)."""
     if days is None:
-        return pl.col("player_indoor_win_pct") - pl.col("opp_indoor_win_pct")
-    return pl.col(f"player_indoor_win_pct_{days}d") - pl.col(f"opp_indoor_win_pct_{days}d")
+        return pl.col("player_venue_win_pct") - pl.col("opp_venue_win_pct")
+    return pl.col(f"player_venue_win_pct_{days}d") - pl.col(f"opp_venue_win_pct_{days}d")
 
 
 @feature(

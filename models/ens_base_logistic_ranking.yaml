@@ -11,7 +11,7 @@ features:
     - ranking_rank_diff
     - h2h_win_pct
     - surface_win_pct_diff
-    - indoor_win_pct_diff
+    - venue_win_pct_diff
 model:
   type: logistic
 validation:
