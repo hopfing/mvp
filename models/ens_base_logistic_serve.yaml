@@ -1,0 +1,21 @@
+data:
+  date_range:
+    start: 2020-01-01
+    end: 2025-12-31
+  filters:
+    draw_type: singles
+    circuit: [tour, chal]
+
+features:
+  include:
+    - svc_first_serve_win_pct_diff
+    - svc_ace_pct_diff
+    - svc_bp_save_pct_diff
+    - ret_first_serve_win_pct_diff
+    - ret_bp_convert_pct_diff
+model:
+  type: logistic
+validation:
+  type: expanding_window
+  initial_train_size: 30000
+  step_size: 15000

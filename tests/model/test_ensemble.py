@@ -294,6 +294,101 @@ class TestEnsembleDiagnostics:
         )
         assert total == agreement["total"]
 
+    def test_consensus_buckets(self, ensemble_data):
+        y_true, ensemble_prob, per_model = ensemble_data
+        diag = EnsembleDiagnostics()
+        result = diag.compute(
+            y_true,
+            ensemble_prob,
+            per_model,
+            np.array([0.5, 0.5]),
+            ["model_a", "model_b"],
+        )
+        consensus = result["consensus"]
+        buckets = consensus["buckets"]
+        assert len(buckets) > 0
+        # All buckets have required fields
+        for b in buckets:
+            assert "label" in b
+            assert "count" in b
+            assert "accuracy" in b
+            assert 0 <= b["accuracy"] <= 1
+        # Counts sum to total matches
+        total = sum(b["count"] for b in buckets)
+        assert total == len(y_true)
+
+    def test_consensus_with_three_models(self):
+        np.random.seed(42)
+        n = 200
+        y_true = np.random.randint(0, 2, n)
+        # Three models with varying noise
+        model_a = np.clip(y_true + np.random.randn(n) * 0.2, 0.05, 0.95)
+        model_b = np.clip(y_true + np.random.randn(n) * 0.3, 0.05, 0.95)
+        model_c = np.clip(y_true + np.random.randn(n) * 0.5, 0.05, 0.95)
+        per_model = [model_a, model_b, model_c]
+        ensemble_prob = np.mean(per_model, axis=0)
+
+        diag = EnsembleDiagnostics()
+        result = diag.compute(
+            y_true,
+            ensemble_prob,
+            per_model,
+            np.array([1 / 3, 1 / 3, 1 / 3]),
+            ["a", "b", "c"],
+        )
+        buckets = result["consensus"]["buckets"]
+        labels = [b["label"] for b in buckets]
+        # With 3 models, possible labels are 3-0, 2-1, 1-2
+        assert all(l in ["3-0", "2-1", "1-2"] for l in labels)
+        # Higher consensus should generally have higher accuracy
+        acc_by_label = {b["label"]: b["accuracy"] for b in buckets}
+        if "3-0" in acc_by_label and "2-1" in acc_by_label:
+            assert acc_by_label["3-0"] >= acc_by_label["2-1"]
+
+    def test_dissenter_with_three_models(self):
+        np.random.seed(42)
+        n = 500
+        y_true = np.random.randint(0, 2, n)
+        # model_c is much noisier — will be lone dissenter more often
+        model_a = np.clip(y_true + np.random.randn(n) * 0.15, 0.05, 0.95)
+        model_b = np.clip(y_true + np.random.randn(n) * 0.15, 0.05, 0.95)
+        model_c = np.clip(y_true + np.random.randn(n) * 0.6, 0.05, 0.95)
+        per_model = [model_a, model_b, model_c]
+        ensemble_prob = np.mean(per_model, axis=0)
+
+        diag = EnsembleDiagnostics()
+        result = diag.compute(
+            y_true,
+            ensemble_prob,
+            per_model,
+            np.array([1 / 3, 1 / 3, 1 / 3]),
+            ["a", "b", "c"],
+        )
+        dissenter = result["dissenter"]
+        assert "a" in dissenter
+        assert "b" in dissenter
+        assert "c" in dissenter
+        # model_c should be lone dissenter more often
+        assert dissenter["c"]["count"] > dissenter["a"]["count"]
+        # Each entry has required fields
+        for d in dissenter.values():
+            assert "count" in d
+            assert "dissenter_correct" in d
+            assert "majority_correct" in d
+
+    def test_dissenter_skipped_with_two_models(self, ensemble_data):
+        y_true, ensemble_prob, per_model = ensemble_data
+        diag = EnsembleDiagnostics()
+        result = diag.compute(
+            y_true,
+            ensemble_prob,
+            per_model,
+            np.array([0.5, 0.5]),
+            ["model_a", "model_b"],
+        )
+        # Dissenter analysis requires 3+ models
+        assert result["dissenter"] == {}
+
     def test_contribution(self, ensemble_data):
         y_true, ensemble_prob, per_model = ensemble_data
         diag = EnsembleDiagnostics()
@@ -469,7 +564,7 @@ class TestEnsembleRunnerIntegration:
             str(ensemble_path)
         )
 
-        specs, base_specs = runner._resolve_ensemble()
+        specs, base_specs, date_ranges = runner._resolve_ensemble()
 
         assert specs == ["elo", "serve"]
         assert len(base_specs) == 2
@@ -477,3 +572,225 @@ class TestEnsembleRunnerIntegration:
         assert base_specs[1]["type"] == "random_forest"
         assert "feature_indices" in base_specs[0]
         assert "feature_indices" in base_specs[1]
+
+    def test_resolve_ensemble_extracts_date_ranges(self, tmp_path):
+        """Date ranges from base configs are returned."""
+        base1 = {
+            "data": {"date_range": {"start": "2010-01-01", "end": "2025-12-31"}},
+            "features": {"include": ["elo"]},
+            "model": {"type": "logistic"},
+        }
+        base2 = {
+            "data": {"date_range": {"start": "2020-01-01", "end": "2025-12-31"}},
+            "features": {"include": ["elo"]},
+            "model": {"type": "logistic"},
+        }
+        base1_path = tmp_path / "base1.yaml"
+        base2_path = tmp_path / "base2.yaml"
+        with open(base1_path, "w") as f:
+            yaml.dump(base1, f)
+        with open(base2_path, "w") as f:
+            yaml.dump(base2, f)
+
+        ensemble = {
+            "data": {"date_range": {"start": "2020-01-01", "end": "2025-12-31"}},
+            "model": {
+                "type": "ensemble",
+                "params": {
+                    "strategy": "average",
+                    "base_models": [
+                        {"config": str(base1_path)},
+                        {"config": str(base2_path)},
+                    ],
+                },
+            },
+        }
+        ensemble_path = tmp_path / "ensemble.yaml"
+        with open(ensemble_path, "w") as f:
+            yaml.dump(ensemble, f)
+
+        from datetime import date
+
+        from mvp.model.runner import ExperimentRunner
+
+        runner = ExperimentRunner.__new__(ExperimentRunner)
+        runner.config_path = ensemble_path
+        runner.config = ExperimentConfig.from_file(str(ensemble_path))
+
+        _, _, date_ranges = runner._resolve_ensemble()
+
+        assert len(date_ranges) == 2
+        assert date_ranges[0].start == date(2010, 1, 1)
+        assert date_ranges[1].start == date(2020, 1, 1)
+
+    def test_resolve_ensemble_warns_on_filter_mismatch(self, tmp_path):
+        """Warning emitted when base config filters differ from ensemble."""
+        base = {
+            "data": {
+                "date_range": {"start": "2020-01-01", "end": "2025-12-31"},
+                "filters": {"draw_type": "doubles"},
+            },
+            "features": {"include": ["elo"]},
+            "model": {"type": "logistic"},
+        }
+        base_path = tmp_path / "base.yaml"
+        with open(base_path, "w") as f:
+            yaml.dump(base, f)
+
+        ensemble = {
+            "data": {
+                "date_range": {"start": "2020-01-01", "end": "2025-12-31"},
+                "filters": {"draw_type": "singles"},
+            },
+            "model": {
+                "type": "ensemble",
+                "params": {
+                    "strategy": "average",
+                    "base_models": [{"config": str(base_path)}],
+                },
+            },
+        }
+        ensemble_path = tmp_path / "ensemble.yaml"
+        with open(ensemble_path, "w") as f:
+            yaml.dump(ensemble, f)
+
+        import warnings
+
+        from mvp.model.runner import ExperimentRunner
+
+        runner = ExperimentRunner.__new__(ExperimentRunner)
+        runner.config_path = ensemble_path
+        runner.config = ExperimentConfig.from_file(str(ensemble_path))
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            runner._resolve_ensemble()
+            assert len(w) == 1
+            assert "filters" in str(w[0].message)
+
+    def test_resolve_ensemble_no_warning_when_filters_match(self, tmp_path):
+        """No warning when base and ensemble filters are the same."""
+        base = {
+            "data": {
+                "date_range": {"start": "2020-01-01", "end": "2025-12-31"},
+                "filters": {"draw_type": "singles"},
+            },
+            "features": {"include": ["elo"]},
+            "model": {"type": "logistic"},
+        }
+        base_path = tmp_path / "base.yaml"
+        with open(base_path, "w") as f:
+            yaml.dump(base, f)
+
+        ensemble = {
+            "data": {
+                "date_range": {"start": "2020-01-01", "end": "2025-12-31"},
+                "filters": {"draw_type": "singles"},
+            },
+            "model": {
+                "type": "ensemble",
+                "params": {
+                    "strategy": "average",
+                    "base_models": [{"config": str(base_path)}],
+                },
+            },
+        }
+        ensemble_path = tmp_path / "ensemble.yaml"
+        with open(ensemble_path, "w") as f:
+            yaml.dump(ensemble, f)
+
+        import warnings
+
+        from mvp.model.runner import ExperimentRunner
+
+        runner = ExperimentRunner.__new__(ExperimentRunner)
+        runner.config_path = ensemble_path
+        runner.config = ExperimentConfig.from_file(str(ensemble_path))
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            runner._resolve_ensemble()
+            filter_warnings = [x for x in w if "filters" in str(x.message)]
+            assert len(filter_warnings) == 0
+
+
+class TestEnsemblePerModelData:
+    """Tests for per-model date ranges in ensemble training."""
+
+    def test_per_model_data_used(self, sample_data):
+        """Sub-models train on custom data when per_model_data provided."""
+        X, y = sample_data
+        model = EnsembleModel({"strategy": "average"})
+        model.configure([
+            _spec("logistic", [0, 1, 2]),
+            _spec("logistic", [0, 3, 4]),
+        ])
+
+        # Train with default data
+        model.fit(X, y)
+        probs_default = model.predict_proba(X).copy()
+
+        # Train with per-model data (smaller dataset for model 0)
+        model2 = EnsembleModel({"strategy": "average"})
+        model2.configure([
+            _spec("logistic", [0, 1, 2]),
+            _spec("logistic", [0, 3, 4]),
+        ])
+        X_small = X[:50]
+        y_small = y[:50]
+        model2.fit(X, y, per_model_data=[(X_small, y_small), None])
+        probs_custom = model2.predict_proba(X)
+
+        # Predictions should differ because model 0 was trained on different data
+        assert not np.allclose(probs_default, probs_custom)
+
+    def test_per_model_data_none_unchanged(self, sample_data):
+        """per_model_data=None preserves existing behavior."""
+        X, y = sample_data
+
+        model1 = EnsembleModel({"strategy": "average"})
+        model1.configure([
+            _spec("logistic", [0, 1, 2]),
+            _spec("logistic", [0, 3, 4]),
+        ])
+        model1.fit(X, y)
+
+        model2 = EnsembleModel({"strategy": "average"})
+        model2.configure([
+            _spec("logistic", [0, 1, 2]),
+            _spec("logistic", [0, 3, 4]),
+        ])
+        model2.fit(X, y, per_model_data=None)
+
+        np.testing.assert_allclose(
+            model1.predict_proba(X),
+            model2.predict_proba(X),
+        )
+
+    def test_per_model_data_mixed(self, sample_data):
+        """Mixed per_model_data: None entries use default X/y."""
+        X, y = sample_data
+
+        # All default
+        model_all_default = EnsembleModel({"strategy": "average"})
+        model_all_default.configure([
+            _spec("logistic", [0, 1, 2]),
+            _spec("logistic", [0, 3, 4]),
+        ])
+        model_all_default.fit(X, y)
+
+        # Only model 1 gets custom data
+        model_mixed = EnsembleModel({"strategy": "average"})
+        model_mixed.configure([
+            _spec("logistic", [0, 1, 2]),
+            _spec("logistic", [0, 3, 4]),
+        ])
+        X_alt = X[:100]
+        y_alt = y[:100]
+        model_mixed.fit(X, y, per_model_data=[None, (X_alt, y_alt)])
+
+        probs_default = model_all_default.predict_proba(X)
+        probs_mixed = model_mixed.predict_proba(X)
+
+        # Should differ (model 1 trained on different data)
+        assert not np.allclose(probs_default, probs_mixed)

@@ -94,17 +94,23 @@ class ExperimentRunner:
         else:
             raise ValueError(f"Unknown validation type: {val.type}")
 
-    def _resolve_ensemble(self) -> tuple[list[str], list[dict[str, Any]]]:
+    def _resolve_ensemble(
+        self,
+    ) -> tuple[list[str], list[dict[str, Any]], list["DateRange"]]:
         """Resolve ensemble config into union features and base model specs.
 
         Returns:
-            (union_feature_specs, base_model_specs) where each spec has
-            type, params, weight, feature_indices.
+            (union_feature_specs, base_model_specs, model_date_ranges) where
+            each spec has type, params, weight, feature_indices, and
+            model_date_ranges[i] is the DateRange from base config i.
         """
+        from mvp.model.config import DateRange
+
         ensemble_params = EnsembleParams.model_validate(self.config.model.params)
 
         all_feature_specs: list[str] = []
         base_model_specs: list[dict[str, Any]] = []
+        model_date_ranges: list[DateRange] = []
 
         for ref in ensemble_params.base_models:
             base_config = ExperimentConfig.from_file(ref.config)
@@ -119,6 +125,13 @@ class ExperimentRunner:
                 "weight": ref.weight,
                 "feature_specs": base_config.features.include,
             })
+            model_date_ranges.append(base_config.data.date_range)
+
+            if base_config.data.filters != self.config.data.filters:
+                warnings.warn(
+                    f"Base model '{ref.config}' has filters {base_config.data.filters} "
+                    f"but ensemble filters {self.config.data.filters} will be used"
+                )
 
         union_cols = get_feature_columns(all_feature_specs)
         for spec in base_model_specs:
@@ -126,7 +139,7 @@ class ExperimentRunner:
             spec["feature_indices"] = [union_cols.index(c) for c in base_cols]
             del spec["feature_specs"]
 
-        return all_feature_specs, base_model_specs
+        return all_feature_specs, base_model_specs, model_date_ranges
 
     def run(self) -> dict[str, Any]:
         """Execute the experiment.
@@ -147,20 +160,17 @@ class ExperimentRunner:
         # Resolve ensemble or standard features
         is_ensemble = self.config.model.type == "ensemble"
         base_model_specs: list[dict[str, Any]] | None = None
+        model_date_ranges: list | None = None
         if is_ensemble:
-            feature_specs, base_model_specs = self._resolve_ensemble()
+            feature_specs, base_model_specs, model_date_ranges = (
+                self._resolve_ensemble()
+            )
         else:
             assert self.config.features is not None
             feature_specs = self.config.features.include
 
         # Compute features
         df = self.engine.compute(feature_specs)
-
-        # Filter by date range
-        df = df.filter(
-            (pl.col("effective_match_date") >= self.config.data.date_range.start)
-            & (pl.col("effective_match_date") <= self.config.data.date_range.end)
-        )
 
         # Apply additional filters (e.g., draw_type: "singles")
         # These are applied AFTER feature computation so workload features
@@ -171,6 +181,23 @@ class ExperimentRunner:
                     df = df.filter(pl.col(col).is_in(value))
                 else:
                     df = df.filter(pl.col(col) == value)
+
+        # Build wide date range df for per-model training (ensemble only)
+        df_wide = None
+        if is_ensemble and model_date_ranges:
+            earliest = min(dr.start for dr in model_date_ranges)
+            if earliest < self.config.data.date_range.start:
+                df_wide = df.filter(
+                    (pl.col("effective_match_date") >= earliest)
+                    & (pl.col("effective_match_date") <= self.config.data.date_range.end)
+                    & (pl.col("won").is_not_null())
+                )
+
+        # Filter by ensemble's date range (evaluation window)
+        df = df.filter(
+            (pl.col("effective_match_date") >= self.config.data.date_range.start)
+            & (pl.col("effective_match_date") <= self.config.data.date_range.end)
+        )
 
         # Drop rows with no outcome (e.g., future/unfinished matches)
         df = df.filter(pl.col("won").is_not_null())
@@ -220,6 +247,28 @@ class ExperimentRunner:
                 X_train = np.where(np.isnan(X_train), medians, X_train)
                 X_test = np.where(np.isnan(X_test), medians, X_test)
 
+                # Build per-model training data for ensemble date ranges
+                per_model_data = None
+                if is_ensemble and df_wide is not None and model_date_ranges:
+                    test_start_date = test_df["effective_match_date"].min()
+                    per_model_data = []
+                    for dr in model_date_ranges:
+                        if dr.start < self.config.data.date_range.start:
+                            model_train_df = df_wide.filter(
+                                (pl.col("effective_match_date") >= dr.start)
+                                & (pl.col("effective_match_date") < test_start_date)
+                            )
+                            X_m = model_train_df.select(
+                                pl.col(c).cast(pl.Float64) for c in feature_cols
+                            ).to_numpy()
+                            y_m = model_train_df["won"].to_numpy().astype(int)
+                            medians_m = np.nanmedian(X_m, axis=0)
+                            medians_m = np.where(np.isnan(medians_m), 0.0, medians_m)
+                            X_m = np.where(np.isnan(X_m), medians_m, X_m)
+                            per_model_data.append((X_m, y_m))
+                        else:
+                            per_model_data.append(None)
+
                 # Train model
                 model = get_model(
                     self.config.model.type,
@@ -228,7 +277,9 @@ class ExperimentRunner:
                 if is_ensemble and base_model_specs is not None:
                     assert isinstance(model, EnsembleModel)
                     model.configure(base_model_specs)
-                model.fit(X_train, y_train)
+                    model.fit(X_train, y_train, per_model_data=per_model_data)
+                else:
+                    model.fit(X_train, y_train)
 
                 # Predict and evaluate on test
                 y_prob = model.predict_proba(X_test)

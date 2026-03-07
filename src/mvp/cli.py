@@ -132,6 +132,69 @@ def print_run_summary(results: dict[str, Any], name: str | None = None) -> None:
     if temporal and temporal.get("temporal_drift", 0) > 0:
         print(f"Temporal drift: ±{temporal['temporal_drift']:.1%} from average")
 
+    # Ensemble diagnostics
+    if diagnostics.ensemble:
+        ediag = diagnostics.ensemble
+        per_model = ediag.get("per_model_metrics", {})
+        if per_model:
+            print("\nPer-Model Comparison:")
+            print(f"  {'Model':40} {'Acc':>7} {'AUC':>7} {'LL':>7} {'Cal':>7}")
+            print(f"  {'─' * 68}")
+            for model_name, m in per_model.items():
+                label = model_name
+                if model_name != "ensemble":
+                    # Shorten path to just filename stem
+                    label = Path(model_name).stem
+                else:
+                    label = "ENSEMBLE"
+                acc = m.get("accuracy", 0)
+                auc = m.get("roc_auc", 0)
+                ll = m.get("log_loss", 0)
+                cal = m.get("calibration_error", 0)
+                print(f"  {label:40} {acc:6.1%} {auc:7.3f} {ll:7.3f} {cal:6.1%}")
+
+        corr = ediag.get("correlation", {})
+        matrix = corr.get("matrix", [])
+        names = corr.get("names", [])
+        if len(matrix) >= 2:
+            print("\n  Prediction Correlations:")
+            for i in range(len(names)):
+                for j in range(i + 1, len(names)):
+                    n_i = Path(names[i]).stem
+                    n_j = Path(names[j]).stem
+                    print(f"    {n_i} ↔ {n_j}: {matrix[i][j]:.3f}")
+
+        consensus = ediag.get("consensus", {})
+        buckets = consensus.get("buckets", [])
+        if buckets:
+            print("\n  Consensus Strength:")
+            for b in buckets:
+                print(f"    {b['label']:6} {b['accuracy']:5.1%} acc  n={b['count']:,} ({b['pct']:.1%})")
+
+        dissenter = ediag.get("dissenter", {})
+        if dissenter:
+            print("\n  Lone Dissenter Accuracy:")
+            for model_name, d in dissenter.items():
+                label = Path(model_name).stem
+                count = d.get("count", 0)
+                if count == 0:
+                    print(f"    {label:35} never lone dissenter")
+                else:
+                    d_acc = d.get("dissenter_correct", 0)
+                    m_acc = d.get("majority_correct", 0)
+                    print(f"    {label:35} {d_acc:5.1%} vs majority {m_acc:5.1%}  (n={count:,})")
+
+        contrib = ediag.get("contribution", {})
+        if contrib:
+            print("\n  Leave-One-Out (positive = removing hurts):")
+            for model_name, c in contrib.items():
+                label = Path(model_name).stem
+                ll_delta = c.get("log_loss_delta", 0)
+                cal_delta = c.get("calibration_delta", 0)
+                ll_sign = "+" if ll_delta >= 0 else ""
+                cal_sign = "+" if cal_delta >= 0 else ""
+                print(f"    Remove {label:35} LL {ll_sign}{ll_delta:.4f}  Cal {cal_sign}{cal_delta:.4f}")
+
     print(f"\nMLflow run: {results.get('run_id', 'N/A')}")
     print("=" * 70 + "\n")
 

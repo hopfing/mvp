@@ -520,6 +520,12 @@ class EnsembleDiagnostics:
         result["agreement"] = self._agreement_analysis(
             y_true, y_prob_ensemble, per_model_preds
         )
+        result["consensus"] = self._consensus_analysis(
+            y_true, y_prob_ensemble, per_model_preds
+        )
+        result["dissenter"] = self._dissenter_analysis(
+            y_true, per_model_preds, base_names
+        )
         result["contribution"] = self._contribution_analysis(
             y_true, per_model_preds, weights, base_names, strategy
         )
@@ -594,6 +600,85 @@ class EnsembleDiagnostics:
                     categories[key] / n_matches if n_matches > 0 else 0.0
                 )
         return categories
+
+    def _consensus_analysis(
+        self,
+        y_true: np.ndarray,
+        y_prob_ensemble: np.ndarray,
+        per_model_preds: list[np.ndarray],
+    ) -> dict[str, Any]:
+        """Bucket predictions by consensus strength (N-0, N-1, ...) with accuracy."""
+        n_models = len(per_model_preds)
+        n_matches = len(y_true)
+        if n_models < 2 or n_matches == 0:
+            return {"buckets": []}
+
+        model_preds = np.array([(p >= 0.5).astype(int) for p in per_model_preds])
+        ensemble_pred = (y_prob_ensemble >= 0.5).astype(int)
+        ensemble_correct = ensemble_pred == y_true
+
+        # Count how many models agree with the ensemble's prediction per match
+        agree_with_ensemble = np.sum(model_preds == ensemble_pred, axis=0)
+
+        buckets = []
+        for n_agree in range(n_models, 0, -1):
+            n_disagree = n_models - n_agree
+            mask = agree_with_ensemble == n_agree
+            count = int(mask.sum())
+            if count == 0:
+                continue
+            acc = float(ensemble_correct[mask].mean())
+            buckets.append({
+                "label": f"{n_agree}-{n_disagree}",
+                "n_agree": n_agree,
+                "n_disagree": n_disagree,
+                "count": count,
+                "pct": count / n_matches,
+                "accuracy": acc,
+            })
+
+        return {"buckets": buckets}
+
+    def _dissenter_analysis(
+        self,
+        y_true: np.ndarray,
+        per_model_preds: list[np.ndarray],
+        base_names: list[str],
+    ) -> dict[str, Any]:
+        """When each model is the lone dissenter from majority, how often is it right?"""
+        n_models = len(per_model_preds)
+        if n_models < 3:
+            return {}
+
+        model_preds = np.array([(p >= 0.5).astype(int) for p in per_model_preds])
+        majority = (model_preds.mean(axis=0) >= 0.5).astype(int)
+
+        results: dict[str, Any] = {}
+        for i, name in enumerate(base_names):
+            disagrees = model_preds[i] != majority
+            others_agree = np.all(
+                np.delete(model_preds, i, axis=0) == majority, axis=0
+            )
+            lone_dissenter = disagrees & others_agree
+            count = int(lone_dissenter.sum())
+            if count == 0:
+                results[name] = {
+                    "count": 0,
+                    "dissenter_correct": 0.0,
+                    "majority_correct": 0.0,
+                }
+                continue
+            dissenter_pred = model_preds[i][lone_dissenter]
+            actual = y_true[lone_dissenter]
+            dissenter_correct = float((dissenter_pred == actual).mean())
+            majority_correct = float((majority[lone_dissenter] == actual).mean())
+            results[name] = {
+                "count": count,
+                "dissenter_correct": dissenter_correct,
+                "majority_correct": majority_correct,
+            }
+
+        return results
 
     def _contribution_analysis(
         self,
@@ -718,6 +803,11 @@ class DiagnosticResults:
             matrix = correlation.get("matrix", [])
             if len(matrix) >= 2:
                 result["ensemble_pred_correlation"] = matrix[0][1]
+            consensus = self.ensemble.get("consensus", {})
+            for bucket in consensus.get("buckets", []):
+                label = bucket["label"].replace("-", "v")
+                result[f"ensemble_consensus_{label}_accuracy"] = bucket["accuracy"]
+                result[f"ensemble_consensus_{label}_pct"] = bucket["pct"]
 
         return result
 

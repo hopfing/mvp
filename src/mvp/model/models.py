@@ -139,11 +139,20 @@ class EnsembleModel(BaseModel):
         w = np.array(weights, dtype=np.float64)
         self._weights = w / w.sum()
 
-    def fit(self, X: np.ndarray, y: np.ndarray) -> None:
+    def fit(
+        self,
+        X: np.ndarray,
+        y: np.ndarray,
+        per_model_data: list[tuple[np.ndarray, np.ndarray] | None] | None = None,
+    ) -> None:
         if not self._sub_models:
             raise RuntimeError("EnsembleModel not configured. Call configure() first.")
-        for sub, indices in zip(self._sub_models, self._feature_indices):
-            sub.fit(X[:, indices], y)
+        for i, (sub, indices) in enumerate(zip(self._sub_models, self._feature_indices)):
+            if per_model_data and per_model_data[i] is not None:
+                X_sub, y_sub = per_model_data[i]
+                sub.fit(X_sub[:, indices], y_sub)
+            else:
+                sub.fit(X[:, indices], y)
         self._fitted = True
 
     def predict_proba(self, X: np.ndarray) -> np.ndarray:

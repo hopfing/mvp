@@ -1,0 +1,22 @@
+data:
+  date_range:
+    start: 2020-01-01
+    end: 2025-12-31
+  filters:
+    draw_type: singles
+    circuit: [tour, chal]
+
+model:
+  type: ensemble
+  params:
+    strategy: average
+    base_models:
+      - config: models/ens_base_logistic_elo.yaml
+      - config: models/ens_base_rf_elo.yaml
+      - config: models/ens_base_logistic_serve.yaml
+      - config: models/ens_base_logistic_ranking.yaml
+      - config: models/ens_base_logistic_form.yaml
+validation:
+  type: expanding_window
+  initial_train_size: 30000
+  step_size: 15000
