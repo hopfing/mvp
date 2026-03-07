@@ -225,6 +225,14 @@ class ExperimentRunner:
                 X_train = np.where(np.isnan(X_train), medians, X_train)
                 X_test = np.where(np.isnan(X_test), medians, X_test)
 
+                # Standardize features for gradient-based models
+                if self.config.model.type in ("logistic",):
+                    mean = X_train.mean(axis=0)
+                    std = X_train.std(axis=0)
+                    std[std == 0] = 1.0
+                    X_train = (X_train - mean) / std
+                    X_test = (X_test - mean) / std
+
                 # Build per-model training data for ensemble date ranges
                 per_model_data = None
                 if is_ensemble and df_wide is not None and model_date_ranges:
