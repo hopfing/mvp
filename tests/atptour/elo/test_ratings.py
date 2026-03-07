@@ -186,76 +186,80 @@ class TestExpectedScore:
 
 
 class TestUpdateElo:
-    """Test update_elo calculation."""
+    """Test update_elo calculation (pure function)."""
 
     def test_winner_gains_points(self):
-        player = PlayerRating(elo=1500.0, rd=100.0, match_count=50)
-        opponent = PlayerRating(elo=1500.0)
-        new_elo = update_elo(player, opponent, won=True, k=32.0)
+        new_elo = update_elo(
+            player_elo=1500.0, player_effective_elo=1500.0,
+            opponent_effective_elo=1500.0, won=True, k=32.0,
+        )
         assert new_elo > 1500.0
 
     def test_loser_loses_points(self):
-        player = PlayerRating(elo=1500.0, rd=100.0, match_count=50)
-        opponent = PlayerRating(elo=1500.0)
-        new_elo = update_elo(player, opponent, won=False, k=32.0)
+        new_elo = update_elo(
+            player_elo=1500.0, player_effective_elo=1500.0,
+            opponent_effective_elo=1500.0, won=False, k=32.0,
+        )
         assert new_elo < 1500.0
 
     def test_upset_larger_swing(self):
-        # Underdog wins - should gain more than favorite winning
-        underdog = PlayerRating(elo=1400.0)
-        favorite = PlayerRating(elo=1600.0)
-        underdog_win_gain = update_elo(underdog, favorite, won=True, k=32.0) - 1400.0
-        favorite_win_gain = update_elo(favorite, underdog, won=True, k=32.0) - 1600.0
+        underdog_win_gain = update_elo(
+            player_elo=1400.0, player_effective_elo=1400.0,
+            opponent_effective_elo=1600.0, won=True, k=32.0,
+        ) - 1400.0
+        favorite_win_gain = update_elo(
+            player_elo=1600.0, player_effective_elo=1600.0,
+            opponent_effective_elo=1400.0, won=True, k=32.0,
+        ) - 1600.0
         assert underdog_win_gain > favorite_win_gain
 
     def test_surface_elo_used_when_provided(self):
-        # Player has clay advantage
-        player = PlayerRating(elo=1500.0, clay_adj=100.0)
-        opponent = PlayerRating(elo=1600.0)
-        # Without surface: player is underdog
-        # With clay: player has 1600 vs 1600 - even match
-        gain_no_surface = update_elo(player, opponent, won=True, k=32.0) - 1500.0
-        gain_clay = (
-            update_elo(player, opponent, won=True, k=32.0, surface="Clay") - 1500.0
-        )
+        # Without surface adj: player is underdog (1500 vs 1600)
+        gain_no_surface = update_elo(
+            player_elo=1500.0, player_effective_elo=1500.0,
+            opponent_effective_elo=1600.0, won=True, k=32.0,
+        ) - 1500.0
+        # With clay adj: player effective is 1600 vs 1600 - even match
+        gain_clay = update_elo(
+            player_elo=1500.0, player_effective_elo=1600.0,
+            opponent_effective_elo=1600.0, won=True, k=32.0,
+        ) - 1500.0
         assert gain_no_surface > gain_clay  # Upset gives more points
 
 
 class TestUpdateSurfaceAdj:
-    """Test update_surface_adj calculation."""
+    """Test update_surface_adj calculation (pure function)."""
 
     def test_clay_specialist_gains_on_clay_win(self):
         from mvp.atptour.elo.ratings import update_surface_adj
 
-        player = PlayerRating(elo=1600.0, clay_adj=50.0)
-        opponent = PlayerRating(elo=1600.0, clay_adj=0.0)
-        new_adj = update_surface_adj(player, opponent, won=True, surface="Clay", k=16.0)
+        # Player: elo=1600 + clay_adj=50 -> effective=1650
+        # Opponent: elo=1600 + clay_adj=0 -> effective=1600
+        new_adj = update_surface_adj(
+            current_adj=50.0, player_effective_elo=1650.0,
+            opponent_effective_elo=1600.0, won=True, k=16.0,
+        )
         assert new_adj > 50.0
 
     def test_clay_specialist_loses_on_hard(self):
         from mvp.atptour.elo.ratings import update_surface_adj
 
-        player = PlayerRating(elo=1600.0, hard_adj=-20.0)
-        opponent = PlayerRating(elo=1600.0)
-        new_adj = update_surface_adj(player, opponent, won=False, surface="Hard", k=16.0)
+        # Player: elo=1600 + hard_adj=-20 -> effective=1580
+        # Opponent: elo=1600 + hard_adj=0 -> effective=1600
+        new_adj = update_surface_adj(
+            current_adj=-20.0, player_effective_elo=1580.0,
+            opponent_effective_elo=1600.0, won=False, k=16.0,
+        )
         assert new_adj < -20.0
 
-    def test_unknown_surface_returns_zero(self):
+    def test_equal_players_win_increases_adj(self):
         from mvp.atptour.elo.ratings import update_surface_adj
 
-        player = PlayerRating()
-        opponent = PlayerRating()
-        new_adj = update_surface_adj(player, opponent, won=True, surface="Carpet", k=16.0)
-        assert new_adj == 0.0
-
-    def test_all_surfaces_work(self):
-        from mvp.atptour.elo.ratings import update_surface_adj
-
-        player = PlayerRating()
-        opponent = PlayerRating()
-        for surface in ["Hard", "Clay", "Grass"]:
-            adj = update_surface_adj(player, opponent, won=True, surface=surface, k=16.0)
-            assert adj > 0.0  # Win from even position should increase adj
+        new_adj = update_surface_adj(
+            current_adj=0.0, player_effective_elo=1500.0,
+            opponent_effective_elo=1500.0, won=True, k=16.0,
+        )
+        assert new_adj > 0.0
 
 
 class TestUpdateRD:

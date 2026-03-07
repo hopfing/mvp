@@ -81,3 +81,7 @@ INDOOR_EMA_SCALE = 500.0
 # Score normalization for serve/return Elo
 # Maps ±10pp from surface baseline to the full [0,1] range
 SERVE_RETURN_DEVIATION_SCALE = 0.10
+
+# Mean reversion — counteracts inflation from player turnover
+# 1% pull per match toward DEFAULT_ELO for base Elo, toward 0 for surface adjs
+REVERSION_RATE = 0.005

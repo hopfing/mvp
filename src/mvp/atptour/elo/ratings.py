@@ -112,52 +112,57 @@ def normalize_serve_score(serve_pct: float, surface: str) -> float:
 
 
 def update_elo(
-    player: PlayerRating,
-    opponent: PlayerRating,
+    player_elo: float,
+    player_effective_elo: float,
+    opponent_effective_elo: float,
     won: bool,
     k: float,
-    surface: str | None = None,
 ) -> float:
     """Calculate new Elo after a match.
 
-    If surface is provided, uses effective surface Elo for calculation.
-    Returns the new overall Elo value.
-    """
-    if surface:
-        player_elo = player.effective_surface_elo(surface)
-        opponent_elo = opponent.effective_surface_elo(surface)
-    else:
-        player_elo = player.elo
-        opponent_elo = opponent.elo
+    Uses pre-computed effective Elos (base + surface adj) for expected score,
+    but applies the delta to the base Elo. Pure function — no mutable state.
 
-    expected = expected_score(player_elo, opponent_elo)
+    Args:
+        player_elo: Player's base Elo (before match).
+        player_effective_elo: Player's effective Elo (base + surface adj).
+        opponent_effective_elo: Opponent's effective Elo (base + surface adj).
+        won: Whether the player won.
+        k: K-factor for this update.
+
+    Returns:
+        New base Elo value.
+    """
+    expected = expected_score(player_effective_elo, opponent_effective_elo)
     outcome = 1.0 if won else 0.0
 
-    return player.elo + k * (outcome - expected)
+    return player_elo + k * (outcome - expected)
 
 
 def update_surface_adj(
-    player: PlayerRating,
-    opponent: PlayerRating,
+    current_adj: float,
+    player_effective_elo: float,
+    opponent_effective_elo: float,
     won: bool,
-    surface: str,
     k: float,
 ) -> float:
     """Calculate new surface adjustment after a match.
 
-    Returns the new adjustment value for the given surface.
-    Returns 0.0 for unknown surfaces.
+    Pure function — caller provides pre-computed effective Elos and current adj.
+
+    Args:
+        current_adj: Current surface adjustment value.
+        player_effective_elo: Player's effective Elo (base + surface adj).
+        opponent_effective_elo: Opponent's effective Elo (base + surface adj).
+        won: Whether the player won.
+        k: K-factor for this update.
+
+    Returns:
+        New surface adjustment value.
     """
-    if surface not in ("Hard", "Clay", "Grass"):
-        return 0.0
-
-    player_effective = player.effective_surface_elo(surface)
-    opponent_effective = opponent.effective_surface_elo(surface)
-
-    expected = expected_score(player_effective, opponent_effective)
+    expected = expected_score(player_effective_elo, opponent_effective_elo)
     outcome = 1.0 if won else 0.0
 
-    current_adj = player.get_surface_adj(surface)
     return current_adj + k * (outcome - expected)
 
 
@@ -238,7 +243,7 @@ def initialize_player(ranking: int | None) -> PlayerRating:
 
     Mapping: #1 -> ~2400, #100 -> ~1800, #500 -> ~1400, unranked -> 1300
     """
-    if ranking is not None:
+    if ranking is not None and ranking > 0:
         elo = SEED_ELO_MAX - math.sqrt(ranking) * SEED_RANK_COEFF
         elo = max(SEED_ELO_MIN, min(SEED_ELO_MAX, elo))
     else:

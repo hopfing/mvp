@@ -6,7 +6,13 @@ from datetime import date
 
 import polars as pl
 
-from mvp.atptour.elo.constants import SERVE_RETURN_K_MULT, STYLE_K_MULT, SURFACE_K_MULT
+from mvp.atptour.elo.constants import (
+    DEFAULT_ELO,
+    REVERSION_RATE,
+    SERVE_RETURN_K_MULT,
+    STYLE_K_MULT,
+    SURFACE_K_MULT,
+)
 from mvp.atptour.elo.ratings import (
     PlayerRating,
     apply_inactivity_rd,
@@ -262,22 +268,33 @@ def compute_elo_ratings(df: pl.DataFrame) -> pl.DataFrame:
         # Mark as processed and update ratings
         processed_matches.add(match_uid)
 
-        # Calculate K-factors
-        k = get_k_factor(player_rating, round_name)
-        k_surface = k * SURFACE_K_MULT
-        k_serve = k * SERVE_RETURN_K_MULT
+        # Per-player K-factors
+        k_player = get_k_factor(player_rating, round_name)
+        k_opp = get_k_factor(opp_rating, round_name)
 
-        # Update overall Elo
-        player_rating.elo = update_elo(player_rating, opp_rating, won, k, surface)
-        opp_rating.elo = update_elo(opp_rating, player_rating, not won, k, surface)
+        # Snapshot pre-match effective Elos
+        player_effective = player_rating.effective_surface_elo(surface)
+        opp_effective = opp_rating.effective_surface_elo(surface)
 
-        # Update surface adjustments
+        # Update base Elo (both use pre-match snapshot)
+        player_rating.elo = update_elo(
+            player_rating.elo, player_effective, opp_effective, won, k_player
+        )
+        opp_rating.elo = update_elo(
+            opp_rating.elo, opp_effective, player_effective, not won, k_opp
+        )
+
+        # Update surface adjustments (using same pre-match snapshot)
         if surface in ("Hard", "Clay", "Grass"):
+            k_surface_player = k_player * SURFACE_K_MULT
+            k_surface_opp = k_opp * SURFACE_K_MULT
             new_adj = update_surface_adj(
-                player_rating, opp_rating, won, surface, k_surface
+                player_rating.get_surface_adj(surface),
+                player_effective, opp_effective, won, k_surface_player,
             )
             opp_new_adj = update_surface_adj(
-                opp_rating, player_rating, not won, surface, k_surface
+                opp_rating.get_surface_adj(surface),
+                opp_effective, player_effective, not won, k_surface_opp,
             )
             if surface == "Hard":
                 player_rating.hard_adj = new_adj
@@ -290,6 +307,9 @@ def compute_elo_ratings(df: pl.DataFrame) -> pl.DataFrame:
                 opp_rating.grass_adj = opp_new_adj
 
         # Update serve/return Elo — two sub-games per match
+        # Averaged K keeps serve/return zero-sum
+        k_serve = (k_player + k_opp) / 2 * SERVE_RETURN_K_MULT
+
         # Sub-game 1: player serves, opponent returns
         serve_won = row.get("pts_service_pts_won")
         serve_played = row.get("pts_service_pts_played")
@@ -314,8 +334,8 @@ def compute_elo_ratings(df: pl.DataFrame) -> pl.DataFrame:
             opp_serve_pct, surface, k_serve,
         )
 
-        # Update style dimensions
-        k_style = k * STYLE_K_MULT
+        # Update style dimensions (per-player K, only updates one player by design)
+        k_style = k_player * STYLE_K_MULT
 
         # First serve power: aces / first_serve_pts_won
         svc_aces = row.get("svc_aces")
@@ -391,6 +411,14 @@ def compute_elo_ratings(df: pl.DataFrame) -> pl.DataFrame:
             player_rating.indoor_adj = update_indoor_adj(
                 player_rating.indoor_adj, won, k_style
             )
+
+        # Mean reversion — counteract inflation from player turnover
+        player_rating.elo += REVERSION_RATE * (DEFAULT_ELO - player_rating.elo)
+        opp_rating.elo += REVERSION_RATE * (DEFAULT_ELO - opp_rating.elo)
+
+        for attr in ("hard_adj", "clay_adj", "grass_adj"):
+            setattr(player_rating, attr, getattr(player_rating, attr) * (1 - REVERSION_RATE))
+            setattr(opp_rating, attr, getattr(opp_rating, attr) * (1 - REVERSION_RATE))
 
         # Update RD (decreases after match)
         player_rating.rd = update_rd(player_rating.rd)
