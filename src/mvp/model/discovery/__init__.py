@@ -6,6 +6,7 @@ from mvp.model.discovery.discover import (
     FeatureDiscovery,
     get_all_feature_specs,
 )
+from mvp.model.discovery.fast_selection import FastForwardSelector
 from mvp.model.discovery.importance import (
     compute_importance,
     gain_importance,
@@ -39,6 +40,7 @@ __all__ = [
     "DEFAULT_SWEEP_RANGES",
     "DiscoveryConfig",
     "DiscoveryResult",
+    "FastForwardSelector",
     "FeatureDiscovery",
     "FeatureSelector",
     "gain_importance",

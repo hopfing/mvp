@@ -170,5 +170,55 @@ class SlidingWindowSplitter(BaseSplitter):
             train_start += self.step_size
 
 
+def make_splitter(
+    val_type: str,
+    n_splits: int = 5,
+    min_train_size: int = 50000,
+    test_size: int = 10000,
+    initial_train_size: int | None = None,
+    step_size: int | None = None,
+    train_size: int | None = None,
+) -> BaseSplitter:
+    """Create a splitter from validation parameters.
+
+    Args:
+        val_type: One of "walk_forward", "expanding_window", "sliding_window".
+        n_splits: Number of folds (walk_forward mode).
+        min_train_size: Minimum training size (walk_forward mode).
+        test_size: Test set size.
+        initial_train_size: Initial training size (expanding_window mode).
+        step_size: Step size between folds.
+        train_size: Fixed training window size (sliding_window mode).
+
+    Returns:
+        Configured splitter instance.
+    """
+    if val_type == "walk_forward":
+        return ExpandingWindowSplitter(
+            n_splits=n_splits,
+            min_train_size=min_train_size,
+            test_size=test_size,
+        )
+    elif val_type == "expanding_window":
+        if initial_train_size is None or step_size is None:
+            raise ValueError(
+                "expanding_window requires initial_train_size and step_size"
+            )
+        return ExpandingWindowSplitter(
+            initial_train_size=initial_train_size,
+            step_size=step_size,
+        )
+    elif val_type == "sliding_window":
+        if train_size is None:
+            raise ValueError("sliding_window requires train_size")
+        return SlidingWindowSplitter(
+            train_size=train_size,
+            test_size=test_size,
+            step_size=step_size,
+        )
+    else:
+        raise ValueError(f"Unknown validation type: {val_type}")
+
+
 # Backwards compatibility alias
 WalkForwardSplitter = ExpandingWindowSplitter

@@ -16,11 +16,7 @@ from mvp.model.engine import FeatureEngine, get_feature_columns
 from mvp.model.metrics import compute_metrics
 from mvp.model.mlflow_logger import ExperimentLogger
 from mvp.model.models import EnsembleModel, get_model
-from mvp.model.splitters import (
-    BaseSplitter,
-    ExpandingWindowSplitter,
-    SlidingWindowSplitter,
-)
+from mvp.model.splitters import BaseSplitter, make_splitter
 
 
 class ExperimentRunner:
@@ -66,33 +62,15 @@ class ExperimentRunner:
     def _get_splitter(self) -> BaseSplitter:
         """Get the appropriate splitter for validation strategy."""
         val = self.config.validation
-        if val.type == "walk_forward":
-            # n_splits mode of ExpandingWindowSplitter
-            return ExpandingWindowSplitter(
-                n_splits=val.n_splits,
-                min_train_size=val.min_train_size,
-                test_size=val.test_size,
-            )
-        elif val.type == "expanding_window":
-            # step_size mode of ExpandingWindowSplitter
-            if val.initial_train_size is None or val.step_size is None:
-                raise ValueError(
-                    "expanding_window requires initial_train_size and step_size"
-                )
-            return ExpandingWindowSplitter(
-                initial_train_size=val.initial_train_size,
-                step_size=val.step_size,
-            )
-        elif val.type == "sliding_window":
-            if val.train_size is None:
-                raise ValueError("sliding_window requires train_size")
-            return SlidingWindowSplitter(
-                train_size=val.train_size,
-                test_size=val.test_size,
-                step_size=val.step_size,
-            )
-        else:
-            raise ValueError(f"Unknown validation type: {val.type}")
+        return make_splitter(
+            val_type=val.type,
+            n_splits=val.n_splits,
+            min_train_size=val.min_train_size,
+            test_size=val.test_size,
+            initial_train_size=val.initial_train_size,
+            step_size=val.step_size,
+            train_size=val.train_size,
+        )
 
     def _resolve_ensemble(
         self,

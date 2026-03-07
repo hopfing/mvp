@@ -9,6 +9,7 @@ from typing import Any
 import yaml
 
 from mvp.model.discovery.config import DiscoveryConfig
+from mvp.model.discovery.fast_selection import FastForwardSelector
 from mvp.model.discovery.importance import compute_importance
 from mvp.model.discovery.segments import (
     SegmentAnalyzer,
@@ -199,6 +200,24 @@ class FeatureDiscovery:
         finally:
             temp_path.unlink(missing_ok=True)
 
+    def _create_fast_scorer(
+        self, all_features: list[str], metric: str | None = None
+    ) -> callable:
+        """Create a fast scorer for forward selection.
+
+        Precomputes all candidate features into one numpy matrix so each
+        candidate evaluation is just column slicing + model fit.
+        """
+        target_metric = metric or self.config.discovery.metric
+        fast = FastForwardSelector(
+            config=self.config,
+            all_feature_specs=all_features,
+            matches_path=self.matches_path,
+            cache_dir=self.cache_dir,
+        )
+        fast.precompute()
+        return fast.create_scorer(target_metric)
+
     def _create_scorer(self, metric: str | None = None) -> callable:
         """Create scorer function for selection."""
         target_metric = metric or self.config.discovery.metric
@@ -267,7 +286,10 @@ class FeatureDiscovery:
         self._log(f"PHASE 1: Feature Selection")
         self._log(f"Starting with {len(all_features)} features from registry...")
 
-        scorer = self._create_scorer()
+        if self.config.discovery.selection_method == "forward":
+            scorer = self._create_fast_scorer(all_features)
+        else:
+            scorer = self._create_scorer()
         importance_fn = self._create_importance_fn(all_features)
 
         selector = FeatureSelector(
