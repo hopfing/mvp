@@ -4,7 +4,6 @@ These features use the pre-computed Elo columns from the aggregator
 (player_elo, opp_elo, player_serve_elo, etc.).
 """
 
-from __future__ import annotations
 
 import polars as pl
 

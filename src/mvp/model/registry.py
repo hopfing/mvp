@@ -4,7 +4,6 @@ Features are registered via the @feature decorator and can be retrieved
 by name for computation.
 """
 
-from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field

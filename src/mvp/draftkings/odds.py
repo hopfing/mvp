@@ -1,6 +1,5 @@
 """DraftKings odds scraper for tennis markets."""
 
-from __future__ import annotations
 
 import json
 import logging

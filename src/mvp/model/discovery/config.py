@@ -1,6 +1,5 @@
 """Configuration schema for feature discovery."""
 
-from __future__ import annotations
 
 from datetime import date
 from pathlib import Path
@@ -80,14 +79,14 @@ class DiscoveryConfig(BaseModel):
     validation: ValidationConfig = ValidationConfig()
 
     @classmethod
-    def from_yaml(cls, yaml_str: str) -> DiscoveryConfig:
+    def from_yaml(cls, yaml_str: str) -> "DiscoveryConfig":
         """Parse config from YAML string."""
         data = yaml.safe_load(yaml_str)
         data.pop("name", None)  # Ignore legacy name field
         return cls.model_validate(data)
 
     @classmethod
-    def from_file(cls, path: str | Path) -> DiscoveryConfig:
+    def from_file(cls, path: str | Path) -> "DiscoveryConfig":
         """Load config from YAML file."""
         with open(path) as f:
             return cls.from_yaml(f.read())

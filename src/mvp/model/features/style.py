@@ -8,7 +8,6 @@ Layer 2: Bool style labels via population percentile thresholds (7)
 Layer 3: Explicit matchup interaction terms (7)
 """
 
-from __future__ import annotations
 
 import polars as pl
 

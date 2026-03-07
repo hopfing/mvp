@@ -1,6 +1,5 @@
 """Experiment configuration schema."""
 
-from __future__ import annotations
 
 from datetime import date
 from typing import Any, Literal
@@ -92,20 +91,20 @@ class ExperimentConfig(BaseModel):
     metrics: MetricsConfig = MetricsConfig()
 
     @model_validator(mode="after")
-    def validate_features_required(self) -> ExperimentConfig:
+    def validate_features_required(self) -> "ExperimentConfig":
         if self.model.type != "ensemble" and self.features is None:
             raise ValueError("features is required for non-ensemble models")
         return self
 
     @classmethod
-    def from_yaml(cls, yaml_str: str) -> ExperimentConfig:
+    def from_yaml(cls, yaml_str: str) -> "ExperimentConfig":
         """Parse config from YAML string."""
         data = yaml.safe_load(yaml_str)
         data.pop("name", None)  # Ignore legacy name field
         return cls.model_validate(data)
 
     @classmethod
-    def from_file(cls, path: str) -> ExperimentConfig:
+    def from_file(cls, path: str) -> "ExperimentConfig":
         """Load config from YAML file."""
         with open(path) as f:
             return cls.from_yaml(f.read())

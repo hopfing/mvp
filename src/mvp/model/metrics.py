@@ -1,6 +1,5 @@
 """Metrics calculation for experiments."""
 
-from __future__ import annotations
 
 import numpy as np
 from sklearn.metrics import (

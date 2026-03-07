@@ -1,6 +1,5 @@
 """Parameter sweep for feature tuning."""
 
-from __future__ import annotations
 
 import itertools
 import re

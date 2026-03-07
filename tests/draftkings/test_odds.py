@@ -1,6 +1,5 @@
 """Tests for DraftKings odds scraper."""
 
-from __future__ import annotations
 
 import json
 from datetime import datetime, timezone

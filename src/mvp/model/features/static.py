@@ -1,6 +1,5 @@
 """Static player attributes (height, age, experience, handedness)."""
 
-from __future__ import annotations
 
 import polars as pl
 

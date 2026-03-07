@@ -1,6 +1,5 @@
 """Serve-related features."""
 
-from __future__ import annotations
 
 import polars as pl
 

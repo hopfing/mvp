@@ -1,6 +1,5 @@
 """Google Sheets implementation of PredictionSync."""
 
-from __future__ import annotations
 
 import json
 import logging

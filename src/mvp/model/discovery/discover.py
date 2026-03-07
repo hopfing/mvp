@@ -1,6 +1,5 @@
 """Main discovery orchestration."""
 
-from __future__ import annotations
 
 import tempfile
 from dataclasses import dataclass, field

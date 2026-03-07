@@ -1,6 +1,5 @@
 """Feature Engine for computing features from matches data."""
 
-from __future__ import annotations
 
 import hashlib
 import json

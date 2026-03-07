@@ -1,6 +1,5 @@
 """Pipeline utility functions for player activity lookups."""
 
-from __future__ import annotations
 
 from pathlib import Path
 

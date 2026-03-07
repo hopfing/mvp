@@ -1,6 +1,5 @@
 """Prediction sync protocol and shared merge logic."""
 
-from __future__ import annotations
 
 import logging
 import string

@@ -1,6 +1,5 @@
 """Diagnostics for experiment analysis."""
 
-from __future__ import annotations
 
 import json
 from dataclasses import dataclass
@@ -440,7 +439,7 @@ class Diagnostics:
 
     def compute_all(
         self, predictions: list[dict[str, Any]]
-    ) -> DiagnosticResults:
+    ) -> "DiagnosticResults":
         """Compute all diagnostics on aggregated predictions.
 
         Args:

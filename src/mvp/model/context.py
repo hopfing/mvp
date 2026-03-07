@@ -4,7 +4,6 @@ Provides a wrapper around primitives with pre-configured parameters,
 making feature definitions cleaner and more consistent.
 """
 
-from __future__ import annotations
 
 import polars as pl
 

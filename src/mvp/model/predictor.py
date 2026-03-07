@@ -1,6 +1,5 @@
 """Production model: train, save, load, and predict."""
 
-from __future__ import annotations
 
 import logging
 import warnings

@@ -1,6 +1,5 @@
 """Compute Elo ratings for a DataFrame of matches."""
 
-from __future__ import annotations
 
 import logging
 from datetime import date

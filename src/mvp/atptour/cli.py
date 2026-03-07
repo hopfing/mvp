@@ -1,6 +1,5 @@
 """CLI entry point for atptour backfill operations."""
 
-from __future__ import annotations
 
 import argparse
 import logging

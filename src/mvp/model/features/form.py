@@ -1,6 +1,5 @@
 """Form and momentum features."""
 
-from __future__ import annotations
 
 import polars as pl
 

@@ -4,7 +4,6 @@ All primitives enforce temporal safety: for any row, only data from rows
 with strictly earlier effective_match_date is included.
 """
 
-from __future__ import annotations
 
 import polars as pl
 

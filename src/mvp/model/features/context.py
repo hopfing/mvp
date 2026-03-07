@@ -1,6 +1,5 @@
 """Match context features (indoor, circuit, event type, seeding)."""
 
-from __future__ import annotations
 
 import polars as pl
 

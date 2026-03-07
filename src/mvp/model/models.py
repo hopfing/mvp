@@ -1,6 +1,5 @@
 """Model wrappers for experiments."""
 
-from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from typing import Any
@@ -89,11 +88,11 @@ class _SklearnWrapper:
 
     _estimator_type = "classifier"
 
-    def __init__(self, ensemble: EnsembleModel) -> None:
+    def __init__(self, ensemble: "EnsembleModel") -> None:
         self._ensemble = ensemble
         self.classes_ = np.array([0, 1])
 
-    def fit(self, X: np.ndarray, y: np.ndarray) -> _SklearnWrapper:
+    def fit(self, X: np.ndarray, y: np.ndarray) -> "_SklearnWrapper":
         self._ensemble.fit(X, y)
         return self
 
