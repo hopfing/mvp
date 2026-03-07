@@ -279,10 +279,10 @@ class TestFieldCount:
         #   match_id, round, win_loss, reason, player_rank (15)
         # Opponent: opp_id, opp_first_name, opp_last_name, opp_natl_id, opp_rank (5)
         # Set scores: 5 sets * 4 fields = 20
-        # Flags: has_stats, match_stats_url, is_bye (3)
+        # Flags: has_stats, match_stats_url, is_bye, indoor (4)
         # Traceability: source_file, parsed_at (2)
-        # Total: 15 + 5 + 20 + 3 + 2 = 45
-        assert len(PlayerActivityRecord.model_fields) == 45
+        # Total: 15 + 5 + 20 + 4 + 2 = 46
+        assert len(PlayerActivityRecord.model_fields) == 46
 
 
 class TestSchemaHash:
