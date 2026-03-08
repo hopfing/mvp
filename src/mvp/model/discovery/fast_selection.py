@@ -40,15 +40,26 @@ class FastForwardSelector:
 
         self.X_wide: np.ndarray | None = None
         self.y: np.ndarray | None = None
+        self.sample_weights: np.ndarray | None = None
         self.col_to_idx: dict[str, int] = {}
         self.folds: list[tuple[list[int], list[int]]] = []
         self.fold_medians: list[np.ndarray] = []
 
-    def precompute(self) -> None:
+    def precompute(
+        self,
+        override_y: np.ndarray | None = None,
+        row_mask: np.ndarray | None = None,
+        sample_weights: np.ndarray | None = None,
+    ) -> None:
         """Run the expensive one-time computation.
 
         Loads data, computes all features, applies filters/date range,
         generates fold indices, and precomputes per-fold medians.
+
+        Args:
+            override_y: Replace target variable after loading.
+            row_mask: Boolean mask to filter rows after loading.
+            sample_weights: Per-sample weights for model fitting.
         """
         engine = FeatureEngine(
             matches_path=self.matches_path,
@@ -80,6 +91,16 @@ class FastForwardSelector:
         )
         self.y = df["won"].to_numpy().astype(int)
 
+        if override_y is not None:
+            self.y = override_y
+        if row_mask is not None:
+            self.X_wide = self.X_wide[row_mask]
+            self.y = self.y[row_mask]
+            if sample_weights is not None:
+                sample_weights = sample_weights[row_mask]
+            df = df.filter(pl.Series(row_mask))
+        self.sample_weights = sample_weights
+
         val = self.config.validation
         splitter = make_splitter(
             val_type=val.type,
@@ -110,6 +131,7 @@ class FastForwardSelector:
         """
         X_wide = self.X_wide
         y = self.y
+        sample_weights = self.sample_weights
         col_to_idx = self.col_to_idx
         folds = self.folds
         fold_medians = self.fold_medians
@@ -145,7 +167,10 @@ class FastForwardSelector:
                     X_test = (X_test - mean) / std
 
                 model = get_model(model_type, model_params)
-                model.fit(X_train, y_train)
+                if sample_weights is not None:
+                    model.fit(X_train, y_train, sample_weight=sample_weights[train_idx])
+                else:
+                    model.fit(X_train, y_train)
                 y_prob = model.predict_proba(X_test)
                 fold_metrics.append(compute_metrics(y_test, y_prob)[metric])
 

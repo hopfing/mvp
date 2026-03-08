@@ -461,4 +461,6 @@ class ExperimentRunner:
             "last_fold_model": model,
             "last_fold_X_test": X_test,
             "last_fold_y_test": y_test,
+            "all_predictions": all_predictions,
+            "per_model_oof": all_per_model_predictions if is_ensemble else [],
         }

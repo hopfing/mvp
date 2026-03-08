@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import yaml
 
 from mvp.model.discovery.config import DiscoveryConfig
@@ -40,6 +41,40 @@ class DiscoveryResult:
     final_metric: float = 0.0
     n_experiments: int = 0
     recommended_config_path: Path | None = None
+
+
+def _build_disagreement_dataset(
+    y_true: np.ndarray,
+    pred_0: np.ndarray,
+    pred_1: np.ndarray,
+    weighting: str = "magnitude",
+) -> tuple[np.ndarray, np.ndarray | None, np.ndarray | None]:
+    """Build target and mask/weights from two models' OOF predictions.
+
+    Args:
+        y_true: True outcomes (0/1).
+        pred_0: Model 0 predicted probabilities.
+        pred_1: Model 1 predicted probabilities.
+        weighting: "binary" (filter to disagreements) or "magnitude" (weight all).
+
+    Returns:
+        (target, row_mask, sample_weights) where:
+        - target: 1 if model 0 was right/closer, 0 if model 1
+        - row_mask: boolean mask for binary mode, None for magnitude
+        - sample_weights: |pred_0 - pred_1| for magnitude mode, None for binary
+    """
+    if weighting == "binary":
+        side_0 = (pred_0 > 0.5).astype(int)
+        side_1 = (pred_1 > 0.5).astype(int)
+        mask = side_0 != side_1
+        target = (side_0 == y_true).astype(int)
+        return target, mask, None
+    else:
+        err_0 = (pred_0 - y_true) ** 2
+        err_1 = (pred_1 - y_true) ** 2
+        target = (err_0 < err_1).astype(int)
+        weights = np.abs(pred_0 - pred_1)
+        return target, None, weights
 
 
 DEFAULT_day_windows = [0, 7, 14, 30, 60, 90, 180, 365]
@@ -200,6 +235,38 @@ class FeatureDiscovery:
         finally:
             temp_path.unlink(missing_ok=True)
 
+    def _collect_oof_predictions(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Run ensemble and collect per-model OOF predictions.
+
+        Returns:
+            (y_true, pred_0, pred_1) arrays concatenated across folds.
+        """
+        from mvp.model.runner import ExperimentRunner
+
+        meta_config = self.config.discovery.meta_discovery
+        runner = ExperimentRunner(
+            config_path=meta_config.ensemble_config,
+            matches_path=self.matches_path,
+            cache_dir=self.cache_dir,
+            log_to_mlflow=False,
+        )
+        result = runner.run()
+
+        per_model_oof = result["per_model_oof"]
+        all_predictions = result["all_predictions"]
+
+        n_base = len(per_model_oof[0])
+        if n_base != 2:
+            raise ValueError(
+                f"Meta-discovery requires exactly 2 base models, got {n_base}"
+            )
+
+        pred_0 = np.concatenate([fold[0] for fold in per_model_oof])
+        pred_1 = np.concatenate([fold[1] for fold in per_model_oof])
+        y_true = np.concatenate([p["y_true"] for p in all_predictions])
+
+        return y_true, pred_0, pred_1
+
     def _create_fast_scorer(
         self, all_features: list[str], metric: str | None = None
     ) -> callable:
@@ -215,7 +282,28 @@ class FeatureDiscovery:
             matches_path=self.matches_path,
             cache_dir=self.cache_dir,
         )
-        fast.precompute()
+
+        if self.config.discovery.meta_discovery is not None:
+            meta_config = self.config.discovery.meta_discovery
+            self._log("Collecting OOF predictions from ensemble...")
+            y_true, pred_0, pred_1 = self._collect_oof_predictions()
+
+            self._log(f"Building disagreement dataset (weighting={meta_config.weighting})...")
+            target, mask, weights = _build_disagreement_dataset(
+                y_true, pred_0, pred_1, weighting=meta_config.weighting
+            )
+
+            if mask is not None:
+                n_disagree = int(mask.sum())
+                self._log(
+                    f"  {n_disagree}/{len(y_true)} matches with disagreement "
+                    f"({n_disagree / len(y_true):.1%})"
+                )
+
+            fast.precompute(override_y=target, row_mask=mask, sample_weights=weights)
+        else:
+            fast.precompute()
+
         return fast.create_scorer(target_metric)
 
     def _create_scorer(self, metric: str | None = None) -> callable:

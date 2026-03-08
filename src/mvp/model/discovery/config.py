@@ -32,6 +32,13 @@ class DataConfig(BaseModel):
     filters: dict[str, Any] | None = None
 
 
+class MetaDiscoveryConfig(BaseModel):
+    """Configuration for meta-feature discovery via model disagreement."""
+
+    ensemble_config: str
+    weighting: Literal["binary", "magnitude"] = "magnitude"
+
+
 class DiscoveryOptions(BaseModel):
     """Discovery-specific options."""
 
@@ -48,6 +55,7 @@ class DiscoveryOptions(BaseModel):
     exclude_features: list[str] = []
     base_features: list[str] = []
     window_sizes: list[int] | None = None  # None = all defaults, 0 = alltime variant
+    meta_discovery: MetaDiscoveryConfig | None = None
 
 
 class ModelConfig(BaseModel):

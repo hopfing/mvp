@@ -11,7 +11,7 @@ class BaseModel(ABC):
     """Base class for model wrappers."""
 
     @abstractmethod
-    def fit(self, X: np.ndarray, y: np.ndarray) -> None:
+    def fit(self, X: np.ndarray, y: np.ndarray, sample_weight: np.ndarray | None = None) -> None:
         """Fit the model."""
         pass
 
@@ -33,11 +33,11 @@ class XGBoostModel(BaseModel):
         }
         self._model = None
 
-    def fit(self, X: np.ndarray, y: np.ndarray) -> None:
+    def fit(self, X: np.ndarray, y: np.ndarray, sample_weight: np.ndarray | None = None) -> None:
         import xgboost as xgb
 
         self._model = xgb.XGBClassifier(**self.params)
-        self._model.fit(X, y)
+        self._model.fit(X, y, sample_weight=sample_weight)
 
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
         if self._model is None:
@@ -54,7 +54,7 @@ class LogisticModel(BaseModel):
         self._mean: np.ndarray | None = None
         self._std: np.ndarray | None = None
 
-    def fit(self, X: np.ndarray, y: np.ndarray) -> None:
+    def fit(self, X: np.ndarray, y: np.ndarray, sample_weight: np.ndarray | None = None) -> None:
         from sklearn.linear_model import LogisticRegression
 
         self._mean = X.mean(axis=0)
@@ -62,7 +62,7 @@ class LogisticModel(BaseModel):
         self._std[self._std == 0] = 1.0
         X = (X - self._mean) / self._std
         self._model = LogisticRegression(**self.params)
-        self._model.fit(X, y)
+        self._model.fit(X, y, sample_weight=sample_weight)
 
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
         if self._model is None:
@@ -78,11 +78,11 @@ class RandomForestModel(BaseModel):
         self.params = {"random_state": 42, "n_jobs": -1, **params}
         self._model = None
 
-    def fit(self, X: np.ndarray, y: np.ndarray) -> None:
+    def fit(self, X: np.ndarray, y: np.ndarray, sample_weight: np.ndarray | None = None) -> None:
         from sklearn.ensemble import RandomForestClassifier
 
         self._model = RandomForestClassifier(**self.params)
-        self._model.fit(X, y)
+        self._model.fit(X, y, sample_weight=sample_weight)
 
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
         if self._model is None:
@@ -154,6 +154,7 @@ class EnsembleModel(BaseModel):
         self,
         X: np.ndarray,
         y: np.ndarray,
+        sample_weight: np.ndarray | None = None,
         per_model_data: list[tuple[np.ndarray, np.ndarray] | None] | None = None,
     ) -> None:
         if not self._sub_models:
