@@ -71,10 +71,11 @@ class LogisticModel(BaseModel):
     def fit(self, X: np.ndarray, y: np.ndarray, sample_weight: np.ndarray | None = None) -> None:
         from sklearn.linear_model import LogisticRegression
 
-        self._mean = X.mean(axis=0)
-        self._std = X.std(axis=0)
+        self._mean = np.nanmean(X, axis=0)
+        self._std = np.nanstd(X, axis=0)
         self._std[self._std == 0] = 1.0
         X = (X - self._mean) / self._std
+        np.nan_to_num(X, copy=False, nan=0.0)
         self._model = LogisticRegression(**self.params)
         self._model.fit(X, y, sample_weight=sample_weight)
 
@@ -82,6 +83,7 @@ class LogisticModel(BaseModel):
         if self._model is None:
             raise RuntimeError("Model not fitted")
         X = (X - self._mean) / self._std
+        np.nan_to_num(X, copy=False, nan=0.0)
         return self._model.predict_proba(X)[:, 1]
 
 

@@ -381,9 +381,17 @@ class FeatureDiscovery:
             self._log(f"Excluding {len(excluded)} features: {list(excluded)}")
 
         self._log(f"PHASE 1: Feature Selection")
-        self._log(f"Starting with {len(all_features)} features from registry...")
 
-        if self.config.discovery.selection_method == "forward":
+        base = self.config.discovery.base_features
+        method = self.config.discovery.selection_method
+
+        if method == "recursive" and base:
+            all_features = list(base)
+            self._log(f"Starting recursive elimination from {len(all_features)} base features...")
+        else:
+            self._log(f"Starting with {len(all_features)} features from registry...")
+
+        if method == "forward":
             scorer = self._create_fast_scorer(all_features)
         else:
             scorer = self._create_scorer()
@@ -392,13 +400,13 @@ class FeatureDiscovery:
         selector = FeatureSelector(
             scorer=scorer,
             all_features=all_features,
-            method=self.config.discovery.selection_method,
+            method=method,
             direction=self.config.discovery.direction,
             importance_fn=importance_fn,
             min_features=self.config.discovery.min_features,
             max_features=self.config.discovery.max_features,
             importance_threshold=self.config.discovery.importance_threshold,
-            base_features=self.config.discovery.base_features,
+            base_features=base,
         )
 
         result = selector.run(verbose=self.verbose)
