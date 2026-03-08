@@ -278,13 +278,17 @@ def print_run_summary(results: dict[str, Any], name: str | None = None) -> None:
 _CIRCUIT_LABELS = {"tour": "ATP", "chal": "Challenger"}
 
 
-def print_predictions(predictions: Any) -> None:
+def print_predictions(
+    predictions: Any,
+    odds_map: dict[str, dict[str, float]] | None = None,
+) -> None:
     """Print human-readable prediction summary."""
     import polars as pl
 
-    print("\n" + "=" * 78)
-    print(f"{'PREDICTIONS':^78}")
-    print("=" * 78)
+    width = 90 if odds_map else 78
+    print("\n" + "=" * width)
+    print(f"{'PREDICTIONS':^{width}}")
+    print("=" * width)
     print(f"\n{len(predictions)} matches\n")
 
     # Pre-compute min date per tournament for headers
@@ -318,9 +322,22 @@ def print_predictions(predictions: Any) -> None:
         p2_prob = row.get("p2_win_prob") or 0.5
         rnd = row.get("round") or ""
 
-        print(f"  {rnd:5} {p1:25} {p1_prob:5.1%}  vs  {p2_prob:5.1%} {p2}")
+        line = f"  {rnd:5} {p1:25} {p1_prob:5.1%}  vs  {p2_prob:5.1%} {p2}"
 
-    print("\n" + "=" * 78 + "\n")
+        if odds_map:
+            match_uid = row.get("match_uid") or ""
+            p1_id = row.get("p1_id") or ""
+            match_odds = odds_map.get(match_uid)
+            if match_odds and p1_id:
+                p2_id = row.get("p2_id") or ""
+                o1 = match_odds.get(p1_id)
+                o2 = match_odds.get(p2_id)
+                if o1 is not None and o2 is not None:
+                    line += f"    DK: {o1:.2f} / {o2:.2f}"
+
+        print(line)
+
+    print("\n" + "=" * width + "\n")
 
 
 # Default directories for each command
@@ -524,7 +541,7 @@ def cmd_live(args: argparse.Namespace) -> int:
     dk_pool = ThreadPoolExecutor(max_workers=1)
     dk_future = dk_pool.submit(_fetch_dk_quiet)
 
-    try:
+    try:  # ensure dk_pool cleanup on early failure
         # Rankings + discovery in parallel
         with ThreadPoolExecutor(max_workers=2) as pool:
             rankings_future = pool.submit(
@@ -581,18 +598,36 @@ def cmd_live(args: argparse.Namespace) -> int:
             return 0
 
         predictor.save_predictions(predictions)
-        print_predictions(predictions)
 
-    finally:
-        # Collect DK odds (best-effort, always runs)
+        # Collect DK odds and match to predictions
+        odds_map: dict[str, dict[str, float]] | None = None
         try:
             n = dk_future.result(timeout=30)
             if n:
                 print(f"Fetched {n} DK moneyline odds entries")
+            from mvp.integrations.odds_matching import (
+                get_latest_odds,
+                load_aliases,
+                match_odds_to_predictions,
+            )
+            odds_path = Path("data/stage/draftkings/moneyline.parquet")
+            aliases_path = Path("data/odds/player_aliases.yaml")
+            odds_df = get_latest_odds(odds_path)
+            aliases = load_aliases(aliases_path)
+            odds_map = match_odds_to_predictions(odds_df, predictions, aliases)
+            if odds_map:
+                print(f"Matched odds for {len(odds_map)}/{len(predictions)} predictions")
         except Exception as e:
-            logger.error("DK odds fetch failed: %s", e)
-            print(f"Warning: DK odds fetch failed ({e})")
+            logger.error("DK odds matching failed: %s", e)
+            print(f"Warning: DK odds fetch/match failed ({e})")
+        finally:
+            dk_pool.shutdown(wait=False)
+
+        print_predictions(predictions, odds_map=odds_map)
+
+    except Exception:
         dk_pool.shutdown(wait=False)
+        raise
 
     # Sync to Google Sheets (best-effort, must be last)
     try:
