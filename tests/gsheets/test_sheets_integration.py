@@ -3,14 +3,14 @@
 import pytest
 import polars as pl
 
-from mvp.integrations.base import COLUMN_NAMES
+from mvp.gsheets.base import COLUMN_NAMES
 
 
 @pytest.mark.integration
 class TestSheetsIntegration:
     def test_round_trip(self):
         """Write data then read it back."""
-        from mvp.integrations.sheets import SheetsSync
+        from mvp.gsheets.sheets import SheetsSync
 
         sync = SheetsSync()
 

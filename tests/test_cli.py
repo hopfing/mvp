@@ -234,9 +234,9 @@ class TestCmdLiveSheets:
     """Tests for Sheets sync integration in cmd_live."""
 
     @patch("mvp.cli._fetch_dk_quiet", return_value=0)
-    @patch("mvp.integrations.sheets.SheetsSync")
-    @patch("mvp.integrations.base.merge_predictions")
-    @patch("mvp.integrations.base.prepare_predictions")
+    @patch("mvp.gsheets.sheets.SheetsSync")
+    @patch("mvp.gsheets.base.merge_predictions")
+    @patch("mvp.gsheets.base.prepare_predictions")
     @patch("mvp.model.predictor.ProductionPredictor")
     @patch("mvp.atptour.aggregators.matches.MatchesAggregator")
     @patch("mvp.atptour.pipeline.run_player_data")
@@ -259,7 +259,7 @@ class TestCmdLiveSheets:
         """Sheets sync is called after predictions are saved."""
         import polars as pl
         from mvp.cli import cmd_live
-        from mvp.integrations.base import COLUMN_NAMES
+        from mvp.gsheets.base import COLUMN_NAMES
 
         mock_discovery.return_value.get_active_tournaments.return_value = [("580", 2026)]
         mock_process.return_value = []
@@ -300,7 +300,7 @@ class TestCmdLiveSheets:
         mock_sheets.write.assert_called_once()
 
     @patch("mvp.cli._fetch_dk_quiet", return_value=0)
-    @patch("mvp.integrations.sheets.SheetsSync")
+    @patch("mvp.gsheets.sheets.SheetsSync")
     @patch("mvp.model.predictor.ProductionPredictor")
     @patch("mvp.atptour.aggregators.matches.MatchesAggregator")
     @patch("mvp.atptour.pipeline.run_player_data")

@@ -5,7 +5,7 @@ from datetime import date, datetime
 
 import polars as pl
 
-from mvp.integrations.base import (
+from mvp.gsheets.base import (
     COL_LETTERS,
     COLUMN_NAMES,
     COLUMN_SCHEMA,

@@ -632,8 +632,8 @@ def cmd_live(args: argparse.Namespace) -> int:
     try:
         import polars as pl
 
-        from mvp.integrations.base import merge_predictions, prepare_predictions
-        from mvp.integrations.sheets import SheetsSync
+        from mvp.gsheets.base import merge_predictions, prepare_predictions
+        from mvp.gsheets.sheets import SheetsSync
 
         matches_path = Path("data/aggregate/atptour/matches.parquet")
         sheets = SheetsSync()

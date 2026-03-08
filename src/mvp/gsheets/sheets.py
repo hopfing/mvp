@@ -10,7 +10,7 @@ import gspread
 import polars as pl
 from dotenv import load_dotenv
 
-from mvp.integrations.base import (
+from mvp.gsheets.base import (
     COLUMN_NAMES,
     _col_letter,
     generate_formulas,

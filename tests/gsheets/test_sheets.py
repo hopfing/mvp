@@ -5,14 +5,14 @@ from unittest.mock import MagicMock, patch
 import polars as pl
 import pytest
 
-from mvp.integrations.base import COLUMN_NAMES, generate_formulas
+from mvp.gsheets.base import COLUMN_NAMES, generate_formulas
 
 
 class TestSheetsSync:
     def test_read_existing_empty_sheet(self):
         """Empty sheet (no data at all) returns empty DataFrame with correct columns."""
-        with patch("mvp.integrations.sheets.gspread"):
-            from mvp.integrations.sheets import SheetsSync
+        with patch("mvp.gsheets.sheets.gspread"):
+            from mvp.gsheets.sheets import SheetsSync
 
             sync = SheetsSync.__new__(SheetsSync)
             mock_ws = MagicMock()
@@ -25,8 +25,8 @@ class TestSheetsSync:
 
     def test_read_existing_header_only(self):
         """Sheet with header but no data rows returns empty DataFrame."""
-        with patch("mvp.integrations.sheets.gspread"):
-            from mvp.integrations.sheets import SheetsSync
+        with patch("mvp.gsheets.sheets.gspread"):
+            from mvp.gsheets.sheets import SheetsSync
 
             sync = SheetsSync.__new__(SheetsSync)
             mock_ws = MagicMock()
@@ -44,8 +44,8 @@ class TestSheetsSync:
         row[COLUMN_NAMES.index("p1")] = "John"
         row[COLUMN_NAMES.index("p2")] = "Jane"
 
-        with patch("mvp.integrations.sheets.gspread"):
-            from mvp.integrations.sheets import SheetsSync
+        with patch("mvp.gsheets.sheets.gspread"):
+            from mvp.gsheets.sheets import SheetsSync
 
             sync = SheetsSync.__new__(SheetsSync)
             mock_ws = MagicMock()
@@ -59,8 +59,8 @@ class TestSheetsSync:
 
     def test_write_clears_and_updates(self):
         """Write clears the sheet then updates with header + data."""
-        with patch("mvp.integrations.sheets.gspread"):
-            from mvp.integrations.sheets import SheetsSync
+        with patch("mvp.gsheets.sheets.gspread"):
+            from mvp.gsheets.sheets import SheetsSync
 
             sync = SheetsSync.__new__(SheetsSync)
             mock_ws = MagicMock()
@@ -76,8 +76,8 @@ class TestSheetsSync:
 
     def test_write_injects_formulas_when_empty(self):
         """Write injects formulas into empty formula cells."""
-        with patch("mvp.integrations.sheets.gspread"):
-            from mvp.integrations.sheets import SheetsSync
+        with patch("mvp.gsheets.sheets.gspread"):
+            from mvp.gsheets.sheets import SheetsSync
 
             sync = SheetsSync.__new__(SheetsSync)
             mock_ws = MagicMock()
@@ -97,8 +97,8 @@ class TestSheetsSync:
 
     def test_write_preserves_manual_formula_overrides(self):
         """Write does not overwrite non-empty formula cells with formulas."""
-        with patch("mvp.integrations.sheets.gspread"):
-            from mvp.integrations.sheets import SheetsSync
+        with patch("mvp.gsheets.sheets.gspread"):
+            from mvp.gsheets.sheets import SheetsSync
 
             sync = SheetsSync.__new__(SheetsSync)
             mock_ws = MagicMock()
@@ -117,8 +117,8 @@ class TestSheetsSync:
 
     def test_write_header_is_column_names(self):
         """Write puts COLUMN_NAMES as the header row."""
-        with patch("mvp.integrations.sheets.gspread"):
-            from mvp.integrations.sheets import SheetsSync
+        with patch("mvp.gsheets.sheets.gspread"):
+            from mvp.gsheets.sheets import SheetsSync
 
             sync = SheetsSync.__new__(SheetsSync)
             mock_ws = MagicMock()
@@ -133,8 +133,8 @@ class TestSheetsSync:
 
     def test_schema_validation_on_read(self):
         """Reading a sheet with wrong columns raises ValueError."""
-        with patch("mvp.integrations.sheets.gspread"):
-            from mvp.integrations.sheets import SheetsSync
+        with patch("mvp.gsheets.sheets.gspread"):
+            from mvp.gsheets.sheets import SheetsSync
 
             sync = SheetsSync.__new__(SheetsSync)
             mock_ws = MagicMock()
@@ -147,19 +147,19 @@ class TestSheetsSync:
     def test_init_missing_env_vars(self):
         """SheetsSync.__init__ raises ValueError if env vars missing."""
         with (
-            patch("mvp.integrations.sheets.gspread"),
-            patch("mvp.integrations.sheets.load_dotenv"),
+            patch("mvp.gsheets.sheets.gspread"),
+            patch("mvp.gsheets.sheets.load_dotenv"),
             patch.dict("os.environ", {}, clear=True),
         ):
-            from mvp.integrations.sheets import SheetsSync
+            from mvp.gsheets.sheets import SheetsSync
 
             with pytest.raises(ValueError, match="Missing"):
                 SheetsSync()
 
     def test_write_multiple_rows(self):
         """Write handles multiple data rows with correct formula row numbers."""
-        with patch("mvp.integrations.sheets.gspread"):
-            from mvp.integrations.sheets import SheetsSync
+        with patch("mvp.gsheets.sheets.gspread"):
+            from mvp.gsheets.sheets import SheetsSync
 
             sync = SheetsSync.__new__(SheetsSync)
             mock_ws = MagicMock()
