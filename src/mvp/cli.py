@@ -477,7 +477,7 @@ def cmd_experiment(args: argparse.Namespace) -> int:
         discovery._last_result = result
         discovery.save_config(output_path)
         print(f"\nSaved config to: {output_path}")
-        print(f"Run with: python -m mvp model {output_path.stem}")
+        print(f"Run with: poetry run py -m mvp model {output_path.stem}")
     else:
         print("\nNo features selected - no config saved")
 
