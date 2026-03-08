@@ -382,6 +382,52 @@ class TestMergePredictions:
         assert len(result) == 1
 
 
+    def test_bet_result_derived_win(self):
+        row = _make_sheet_row(match_uid="M1", result="P1", bet_side="P1", bet_result="")
+        existing = _sheet_df([row])
+        new = prepare_predictions(_make_predictions(match_uid="OTHER"))
+        matches = _matches_df({"match_uid": [], "won": [], "player_id": [], "opp_id": []})
+        result = merge_predictions(existing, new, matches)
+        m1 = result.filter(pl.col("match_uid") == "M1")
+        assert m1["bet_result"][0] == "W"
+
+    def test_bet_result_derived_loss(self):
+        row = _make_sheet_row(match_uid="M1", result="P2", bet_side="P1", bet_result="")
+        existing = _sheet_df([row])
+        new = prepare_predictions(_make_predictions(match_uid="OTHER"))
+        matches = _matches_df({"match_uid": [], "won": [], "player_id": [], "opp_id": []})
+        result = merge_predictions(existing, new, matches)
+        m1 = result.filter(pl.col("match_uid") == "M1")
+        assert m1["bet_result"][0] == "L"
+
+    def test_bet_result_not_overwritten(self):
+        row = _make_sheet_row(match_uid="M1", result="P1", bet_side="P2", bet_result="V")
+        existing = _sheet_df([row])
+        new = prepare_predictions(_make_predictions(match_uid="OTHER"))
+        matches = _matches_df({"match_uid": [], "won": [], "player_id": [], "opp_id": []})
+        result = merge_predictions(existing, new, matches)
+        m1 = result.filter(pl.col("match_uid") == "M1")
+        assert m1["bet_result"][0] == "V"
+
+    def test_bet_result_skipped_when_no_bet_side(self):
+        row = _make_sheet_row(match_uid="M1", result="P1", bet_side="", bet_result="")
+        existing = _sheet_df([row])
+        new = prepare_predictions(_make_predictions(match_uid="OTHER"))
+        matches = _matches_df({"match_uid": [], "won": [], "player_id": [], "opp_id": []})
+        result = merge_predictions(existing, new, matches)
+        m1 = result.filter(pl.col("match_uid") == "M1")
+        assert m1["bet_result"][0] == ""
+
+    def test_bet_result_skipped_when_no_result(self):
+        row = _make_sheet_row(match_uid="M1", result="", bet_side="P1", bet_result="")
+        existing = _sheet_df([row])
+        new = prepare_predictions(_make_predictions(match_uid="OTHER"))
+        matches = _matches_df({"match_uid": [], "won": [], "player_id": [], "opp_id": []})
+        result = merge_predictions(existing, new, matches)
+        m1 = result.filter(pl.col("match_uid") == "M1")
+        assert m1["bet_result"][0] == ""
+
+
 class TestColLetters:
     def test_first_column_is_A(self):
         assert COL_LETTERS[COLUMN_NAMES[0]] == "A"

@@ -301,6 +301,22 @@ def merge_predictions(
 
         merged = merged.with_columns(pl.Series("result", new_results))
 
+    # 3b. Auto-fill bet_result from result + bet_side (don't overwrite user entries)
+    if len(merged) > 0:
+        new_bet_results = []
+        for row in merged.iter_rows(named=True):
+            current_bet_result = (row.get("bet_result") or "").strip()
+            if current_bet_result:
+                new_bet_results.append(current_bet_result)
+                continue
+            bet_side = (row.get("bet_side") or "").strip()
+            result_val = (row.get("result") or "").strip()
+            if bet_side in ("P1", "P2") and result_val in ("P1", "P2"):
+                new_bet_results.append("W" if bet_side == result_val else "L")
+            else:
+                new_bet_results.append(current_bet_result)
+        merged = merged.with_columns(pl.Series("bet_result", new_bet_results))
+
     # 4. Re-pad time column (Google Sheets strips leading zeros)
     merged = merged.with_columns(
         pl.col("time").map_elements(
