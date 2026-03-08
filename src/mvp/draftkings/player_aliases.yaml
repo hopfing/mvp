@@ -1,4 +1,6 @@
 # DK player name aliases: maps DK display names to our player IDs.
 # Add entries when live pipeline logs unmatched players.
 # Format:
-#   "DK Display Name": "OUR_PLAYER_ID"
+#   "DK Display Name": "PLAYER_ID"
+# Example:
+#   "J.J. Wolf": "WOLF_JJ"
