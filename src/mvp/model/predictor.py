@@ -142,24 +142,24 @@ class ProductionPredictor:
         model.fit(X, y)
 
         # Fit Platt calibrator via 5-fold CV on OOF predictions
-        if is_ensemble:
-            calibrator = PlattCalibrator()  # unfitted no-op for ensembles
-        else:
-            from sklearn.model_selection import StratifiedKFold
+        from sklearn.model_selection import StratifiedKFold
 
-            oof_probs = np.zeros(len(y))
-            skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-            for train_idx, val_idx in skf.split(X, y):
-                fold_model = get_model(config.model.type, config.model.params or {})
-                fold_model.fit(X[train_idx], y[train_idx])
-                oof_probs[val_idx] = fold_model.predict_proba(X[val_idx])
-            calibrator = PlattCalibrator()
-            calibrator.fit(oof_probs, y)
-            logger.info(
-                "Platt calibrator: slope=%.4f, intercept=%.4f",
-                calibrator.slope,
-                calibrator.intercept,
-            )
+        oof_probs = np.zeros(len(y))
+        skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+        for train_idx, val_idx in skf.split(X, y):
+            fold_model = get_model(config.model.type, config.model.params or {})
+            if is_ensemble and base_model_specs is not None:
+                assert isinstance(fold_model, EnsembleModel)
+                fold_model.configure(base_model_specs)
+            fold_model.fit(X[train_idx], y[train_idx])
+            oof_probs[val_idx] = fold_model.predict_proba(X[val_idx])
+        calibrator = PlattCalibrator()
+        calibrator.fit(oof_probs, y)
+        logger.info(
+            "Platt calibrator: slope=%.4f, intercept=%.4f",
+            calibrator.slope,
+            calibrator.intercept,
+        )
 
         # Save artifact
         artifact_path = Path(self.config["active"]["artifact"])
