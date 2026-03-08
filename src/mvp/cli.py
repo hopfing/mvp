@@ -215,8 +215,8 @@ def print_run_summary(results: dict[str, Any], name: str | None = None) -> None:
                 print(f"    {label:40} {coef:+.4f}")
 
         correction = ediag.get("correction_analysis", {})
-        corr_conds = correction.get("conditions", [])
-        if corr_conds:
+        corr_sections = correction.get("sections", [])
+        if corr_sections:
             from mvp.model.config import EnsembleParams
             ens_params = None
             try:
@@ -227,20 +227,13 @@ def print_run_summary(results: dict[str, Any], name: str | None = None) -> None:
                 pass
             primary_label = Path(ens_params.base_models[0].config).stem if ens_params else "primary"
             print(f"\n  Correction Analysis (primary={primary_label}):")
-            print(f"    {'Condition':35} {'Matches':>8} {'Primary':>8} {'Ensemble':>9} {'Improv':>8}")
-            for c in corr_conds:
-                imp = c['improvement']
-                sign = "+" if imp >= 0 else ""
-                print(f"    {c['label']:35} {c['n_matches']:>8,} {c['primary_accuracy']:>7.1%} {c['ensemble_accuracy']:>8.1%} {sign}{imp:>7.1%}")
-
-        corr_drilldown = correction.get("drilldown", [])
-        if corr_drilldown:
-            print(f"\n  Small Elo Gap Drilldown:")
-            print(f"    {'Cross-Condition':35} {'Matches':>8} {'Primary':>8} {'Ensemble':>9} {'Improv':>8}")
-            for c in corr_drilldown:
-                imp = c['improvement']
-                sign = "+" if imp >= 0 else ""
-                print(f"    {c['label']:35} {c['n_matches']:>8,} {c['primary_accuracy']:>7.1%} {c['ensemble_accuracy']:>8.1%} {sign}{imp:>7.1%}")
+            for section in corr_sections:
+                print(f"\n    {section['section']}:")
+                print(f"      {'':25} {'Matches':>8} {'Primary':>8} {'Ensemble':>9} {'Improv':>8}")
+                for r in section["rows"]:
+                    imp = r['improvement']
+                    sign = "+" if imp >= 0 else ""
+                    print(f"      {r['label']:25} {r['n_matches']:>8,} {r['primary_accuracy']:>7.1%} {r['ensemble_accuracy']:>8.1%} {sign}{imp:>7.1%}")
 
     print(f"\nMLflow run: {results.get('run_id', 'N/A')}")
     print("=" * 70 + "\n")

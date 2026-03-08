@@ -21,6 +21,7 @@ from mvp.model.diagnostics import (
     Diagnostics,
     EnsembleDiagnostics,
     _build_conditions,
+    _build_correction_breakdowns,
     _build_cross_conditions,
     _resolve_column,
 )
@@ -1016,7 +1017,7 @@ class TestErrorConditions:
         assert result["conditions"] == []
         assert result["total_errors"] >= 0
 
-    def test_correction_analysis_with_drilldown(self):
+    def test_correction_analysis_breakdowns(self):
         np.random.seed(42)
         n = 500
         y_true = np.random.randint(0, 2, n)
@@ -1024,27 +1025,32 @@ class TestErrorConditions:
         ensemble_preds = np.clip(y_true + np.random.randn(n) * 0.2, 0.05, 0.95)
 
         df = pl.DataFrame({
-            "player_elo_surface_diff": np.random.randn(n) * 50,  # mostly small gaps
-            "svc_pts_won_pct_matchup_365d": np.random.randn(n) * 0.05,
+            "player_elo_surface_diff": np.random.randn(n) * 100,
             "player_age_diff": np.random.randn(n) * 5,
+            "is_hard": np.random.choice([0.0, 1.0], n),
+            "is_clay": np.random.choice([0.0, 1.0], n),
+            "player_svc_elo_matchup": np.random.randn(n) * 50,
+            "player_ret_elo_matchup": np.random.randn(n) * 50,
         })
 
         ediag = EnsembleDiagnostics()
         result = ediag._correction_analysis(y_true, primary_preds, ensemble_preds, df)
 
-        assert "conditions" in result
-        assert "drilldown" in result
-        for c in result["conditions"]:
-            assert "label" in c
-            assert "primary_accuracy" in c
-            assert "improvement" in c
-            assert abs(c["improvement"] - (c["ensemble_accuracy"] - c["primary_accuracy"])) < 1e-10
+        assert "sections" in result
+        section_names = [s["section"] for s in result["sections"]]
+        assert "By Surface" in section_names
+        assert "By Elo Gap" in section_names
+        assert "By Age Gap" in section_names
+        assert "By Svc Elo Matchup" in section_names
+        assert "By Ret Elo Matchup" in section_names
 
-        # Drilldown should have cross-conditions
-        if result["drilldown"]:
-            for d in result["drilldown"]:
-                assert d["label"].startswith("Small gap")
-                assert d["n_matches"] > 0
+        for section in result["sections"]:
+            for r in section["rows"]:
+                assert "label" in r
+                assert "n_matches" in r
+                assert "primary_accuracy" in r
+                assert "ensemble_accuracy" in r
+                assert abs(r["improvement"] - (r["ensemble_accuracy"] - r["primary_accuracy"])) < 1e-10
 
     def test_correction_analysis_via_compute(self):
         np.random.seed(42)
@@ -1054,7 +1060,10 @@ class TestErrorConditions:
         model_b = np.clip(y_true + np.random.randn(n) * 0.2, 0.05, 0.95)
         ensemble_prob = (model_a + model_b) / 2
 
-        df = pl.DataFrame({"player_elo_surface_diff": np.random.randn(n) * 100})
+        df = pl.DataFrame({
+            "player_elo_surface_diff": np.random.randn(n) * 100,
+            "player_age_diff": np.random.randn(n) * 5,
+        })
 
         diag = EnsembleDiagnostics()
         result = diag.compute(
@@ -1066,8 +1075,7 @@ class TestErrorConditions:
             combined_df=df,
         )
         assert "correction_analysis" in result
-        assert "conditions" in result["correction_analysis"]
-        assert "drilldown" in result["correction_analysis"]
+        assert "sections" in result["correction_analysis"]
 
     def test_resolve_column_exact_match(self):
         df = pl.DataFrame({"player_elo_surface_diff": [1.0]})
@@ -1095,6 +1103,35 @@ class TestErrorConditions:
         # No elo column → no cross conditions
         conditions = _build_cross_conditions(df)
         assert conditions == []
+
+    def test_build_correction_breakdowns(self):
+        np.random.seed(42)
+        n = 200
+        df = pl.DataFrame({
+            "is_hard": np.random.choice([0.0, 1.0], n),
+            "is_clay": np.random.choice([0.0, 1.0], n),
+            "is_grass": np.random.choice([0.0, 1.0], n),
+            "player_elo_surface_diff": np.random.randn(n) * 100,
+            "player_age_diff": np.random.randn(n) * 5,
+            "player_svc_elo_matchup": np.random.randn(n) * 50,
+            "player_ret_elo_matchup": np.random.randn(n) * 50,
+        })
+        sections = _build_correction_breakdowns(df)
+        section_names = [s[0] for s in sections]
+        assert "By Surface" in section_names
+        assert "By Elo Gap" in section_names
+        assert "By Age Gap" in section_names
+        assert "By Svc Elo Matchup" in section_names
+        assert "By Ret Elo Matchup" in section_names
+        # Tertile sections should have 3 buckets each
+        for name, buckets in sections:
+            if name.startswith("By Svc") or name.startswith("By Ret"):
+                assert len(buckets) == 3
+
+    def test_build_correction_breakdowns_missing_columns(self):
+        df = pl.DataFrame({"unrelated": [1.0, 2.0]})
+        sections = _build_correction_breakdowns(df)
+        assert sections == []
 
     def test_fixed_conditions_extensible(self):
         assert isinstance(FIXED_CONDITIONS, list)

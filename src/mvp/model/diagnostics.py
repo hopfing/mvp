@@ -177,6 +177,64 @@ def _build_cross_conditions(df: pl.DataFrame) -> list[tuple[str, np.ndarray]]:
     return conditions
 
 
+# Correction analysis breakdown dimensions
+CORRECTION_BREAKDOWNS: list[tuple[str, list[tuple[str, str, Any]]]] = [
+    ("By Surface", [
+        ("Hard", "is_hard", lambda a: a > 0.5),
+        ("Clay", "is_clay", lambda a: a > 0.5),
+        ("Grass", "is_grass", lambda a: a > 0.5),
+    ]),
+    ("By Elo Gap", [
+        ("Large (>150)", "player_elo_surface_diff", lambda a: np.abs(a) > 150),
+        ("Medium (75-150)", "player_elo_surface_diff", lambda a: (np.abs(a) >= 75) & (np.abs(a) <= 150)),
+        ("Small (<75)", "player_elo_surface_diff", lambda a: np.abs(a) < 75),
+    ]),
+    ("By Age Gap", [
+        ("Small (<3)", "player_age_diff", lambda a: np.abs(a) < 3),
+        ("Medium (3-6)", "player_age_diff", lambda a: (np.abs(a) >= 3) & (np.abs(a) <= 6)),
+        ("Large (>6)", "player_age_diff", lambda a: np.abs(a) > 6),
+    ]),
+]
+
+# Tertile breakdown dimensions (computed from data percentiles)
+CORRECTION_TERTILE_FEATURES: list[tuple[str, str]] = [
+    ("By Svc Elo Matchup", "player_svc_elo_matchup"),
+    ("By Ret Elo Matchup", "player_ret_elo_matchup"),
+]
+
+
+def _build_correction_breakdowns(
+    df: pl.DataFrame,
+) -> list[tuple[str, list[tuple[str, np.ndarray]]]]:
+    """Build grouped breakdown dimensions for correction analysis."""
+    sections: list[tuple[str, list[tuple[str, np.ndarray]]]] = []
+
+    for section_label, bucket_specs in CORRECTION_BREAKDOWNS:
+        buckets: list[tuple[str, np.ndarray]] = []
+        for bucket_label, col_prefix, predicate_fn in bucket_specs:
+            result = _get_column_values(df, col_prefix)
+            if result is None:
+                continue
+            buckets.append((bucket_label, predicate_fn(result[1])))
+        if buckets:
+            sections.append((section_label, buckets))
+
+    for section_label, col_prefix in CORRECTION_TERTILE_FEATURES:
+        result = _get_column_values(df, col_prefix)
+        if result is None:
+            continue
+        vals = result[1]
+        p33, p67 = np.percentile(vals, [33, 67])
+        buckets = [
+            (f"Low (≤p33: {p33:.0f})", vals <= p33),
+            (f"Mid (p33-p67)", (vals > p33) & (vals < p67)),
+            (f"High (≥p67: {p67:.0f})", vals >= p67),
+        ]
+        sections.append((section_label, buckets))
+
+    return sections
+
+
 def _compute_metrics_for_segment(
     y_true: np.ndarray, y_prob: np.ndarray, include_calibration: bool = False
 ) -> dict[str, float]:
@@ -724,43 +782,27 @@ class EnsembleDiagnostics:
         ensemble_preds: np.ndarray,
         df: pl.DataFrame,
     ) -> dict[str, Any]:
-        """Compare primary model vs ensemble accuracy per condition."""
-        conditions = []
-        for label, mask in _build_conditions(df):
-            n_matches = int(mask.sum())
-            if n_matches == 0:
-                continue
-            primary_correct = ((primary_preds[mask] >= 0.5).astype(int) == y_true[mask])
-            ensemble_correct = ((ensemble_preds[mask] >= 0.5).astype(int) == y_true[mask])
-            primary_acc = float(primary_correct.mean())
-            ensemble_acc = float(ensemble_correct.mean())
-            conditions.append({
-                "label": label,
-                "n_matches": n_matches,
-                "primary_accuracy": primary_acc,
-                "ensemble_accuracy": ensemble_acc,
-                "improvement": ensemble_acc - primary_acc,
-            })
-
-        # Small-Elo-gap drilldown cross-conditions
-        drilldown = []
-        for label, mask in _build_cross_conditions(df):
-            n_matches = int(mask.sum())
-            if n_matches == 0:
-                continue
-            primary_correct = ((primary_preds[mask] >= 0.5).astype(int) == y_true[mask])
-            ensemble_correct = ((ensemble_preds[mask] >= 0.5).astype(int) == y_true[mask])
-            primary_acc = float(primary_correct.mean())
-            ensemble_acc = float(ensemble_correct.mean())
-            drilldown.append({
-                "label": label,
-                "n_matches": n_matches,
-                "primary_accuracy": primary_acc,
-                "ensemble_accuracy": ensemble_acc,
-                "improvement": ensemble_acc - primary_acc,
-            })
-
-        return {"conditions": conditions, "drilldown": drilldown}
+        """Compare primary model vs ensemble accuracy per breakdown dimension."""
+        breakdowns = _build_correction_breakdowns(df)
+        sections: list[dict[str, Any]] = []
+        for section_label, buckets in breakdowns:
+            rows = []
+            for bucket_label, mask in buckets:
+                n = int(mask.sum())
+                if n == 0:
+                    continue
+                p_acc = float(((primary_preds[mask] >= 0.5).astype(int) == y_true[mask]).mean())
+                e_acc = float(((ensemble_preds[mask] >= 0.5).astype(int) == y_true[mask]).mean())
+                rows.append({
+                    "label": bucket_label,
+                    "n_matches": n,
+                    "primary_accuracy": p_acc,
+                    "ensemble_accuracy": e_acc,
+                    "improvement": e_acc - p_acc,
+                })
+            if rows:
+                sections.append({"section": section_label, "rows": rows})
+        return {"sections": sections}
 
     def _per_model_metrics(
         self,
