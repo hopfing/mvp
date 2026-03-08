@@ -2,6 +2,7 @@
 
 import logging
 import unicodedata
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import polars as pl
@@ -72,11 +73,19 @@ def get_latest_odds(odds_path: Path) -> pl.DataFrame:
     )
 
 
+@dataclass
+class OddsMatchResult:
+    """Result of matching DK odds to predictions."""
+
+    odds: dict[str, dict[str, float]] = field(default_factory=dict)
+    unmatched_names: set[str] = field(default_factory=set)
+
+
 def match_odds_to_predictions(
     odds_df: pl.DataFrame,
     predictions: pl.DataFrame,
     aliases: dict[str, str],
-) -> dict[str, dict[str, float]]:
+) -> OddsMatchResult:
     """Match DK odds to predictions by player pair.
 
     Args:
@@ -85,10 +94,10 @@ def match_odds_to_predictions(
         aliases: DK name -> our player_id mapping.
 
     Returns:
-        {match_uid: {player_id: decimal_odds}} for matched predictions.
+        OddsMatchResult with odds map and unmatched DK names.
     """
     if len(odds_df) == 0 or len(predictions) == 0:
-        return {}
+        return OddsMatchResult()
 
     # Build normalized name -> player_id lookup from predictions
     name_to_id: dict[str, str] = {}
@@ -174,4 +183,4 @@ def match_odds_to_predictions(
             ", ".join(sorted(unmatched_names)),
         )
 
-    return result
+    return OddsMatchResult(odds=result, unmatched_names=unmatched_names)

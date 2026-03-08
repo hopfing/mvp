@@ -4,6 +4,7 @@ import polars as pl
 import pytest
 
 from mvp.integrations.odds_matching import (
+    OddsMatchResult,
     get_latest_odds,
     load_aliases,
     match_odds_to_predictions,
@@ -142,9 +143,9 @@ class TestMatchOddsToPredictions:
         odds = self._make_odds()
         result = match_odds_to_predictions(odds, predictions, {})
 
-        assert "m1" in result
-        assert result["m1"]["PLAYER_A"] == 1.5
-        assert result["m1"]["PLAYER_B"] == 2.5
+        assert "m1" in result.odds
+        assert result.odds["m1"]["PLAYER_A"] == 1.5
+        assert result.odds["m1"]["PLAYER_B"] == 2.5
 
     def test_accent_matching(self):
         """DK 'Carlos Lopez' matches our 'Carlos López' via normalization."""
@@ -152,9 +153,9 @@ class TestMatchOddsToPredictions:
         odds = self._make_odds()
         result = match_odds_to_predictions(odds, predictions, {})
 
-        assert "m2" in result
-        assert result["m2"]["PLAYER_C"] == 1.8
-        assert result["m2"]["PLAYER_D"] == 2.0
+        assert "m2" in result.odds
+        assert result.odds["m2"]["PLAYER_C"] == 1.8
+        assert result.odds["m2"]["PLAYER_D"] == 2.0
 
     def test_alias_override(self):
         predictions = pl.DataFrame({
@@ -188,21 +189,21 @@ class TestMatchOddsToPredictions:
             "B. Jonesy": "PLAYER_B",
         }
         result = match_odds_to_predictions(odds, predictions, aliases)
-        assert "m1" in result
-        assert result["m1"]["PLAYER_A"] == 1.5
+        assert "m1" in result.odds
+        assert result.odds["m1"]["PLAYER_A"] == 1.5
 
     def test_empty_odds(self):
         predictions = self._make_predictions()
         result = match_odds_to_predictions(pl.DataFrame(), predictions, {})
-        assert result == {}
+        assert result.odds == {}
 
     def test_empty_predictions(self):
         odds = self._make_odds()
         result = match_odds_to_predictions(odds, pl.DataFrame(), {})
-        assert result == {}
+        assert result.odds == {}
 
-    def test_unmatched_names_dont_crash(self):
-        """DK names with no prediction match are silently logged, not errors."""
+    def test_unmatched_names_reported(self):
+        """DK names with no prediction match are returned in unmatched_names."""
         from datetime import datetime, timezone
 
         predictions = self._make_predictions()
@@ -222,4 +223,5 @@ class TestMatchOddsToPredictions:
             "points": [None] * 2,
         })
         result = match_odds_to_predictions(odds, predictions, {})
-        assert result == {}
+        assert result.odds == {}
+        assert result.unmatched_names == {"Unknown Player", "Another Unknown"}

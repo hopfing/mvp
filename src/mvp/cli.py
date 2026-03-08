@@ -614,9 +614,15 @@ def cmd_live(args: argparse.Namespace) -> int:
             aliases_path = Path(__file__).resolve().parent / "draftkings" / "player_aliases.yaml"
             odds_df = get_latest_odds(odds_path)
             aliases = load_aliases(aliases_path)
-            odds_map = match_odds_to_predictions(odds_df, predictions, aliases)
+            match_result = match_odds_to_predictions(odds_df, predictions, aliases)
+            odds_map = match_result.odds or None
             if odds_map:
                 print(f"Matched odds for {len(odds_map)}/{len(predictions)} predictions")
+            if match_result.unmatched_names:
+                print(f"Unmatched DK names ({len(match_result.unmatched_names)}):")
+                for name in sorted(match_result.unmatched_names):
+                    print(f"  {name}")
+                print(f"Add aliases to: {aliases_path}")
         except Exception as e:
             logger.error("DK odds matching failed: %s", e)
             print(f"Warning: DK odds fetch/match failed ({e})")
