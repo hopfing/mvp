@@ -577,7 +577,7 @@ class TestEnsembleRunnerIntegration:
             str(ensemble_path)
         )
 
-        specs, base_specs, date_ranges = runner._resolve_ensemble()
+        specs, base_specs, date_ranges, meta_indices = runner._resolve_ensemble()
 
         assert specs == ["elo", "serve"]
         assert len(base_specs) == 2
@@ -585,6 +585,7 @@ class TestEnsembleRunnerIntegration:
         assert base_specs[1]["type"] == "random_forest"
         assert "feature_indices" in base_specs[0]
         assert "feature_indices" in base_specs[1]
+        assert meta_indices == []
 
     def test_resolve_ensemble_extracts_date_ranges(self, tmp_path):
         """Date ranges from base configs are returned."""
@@ -630,7 +631,7 @@ class TestEnsembleRunnerIntegration:
         runner.config_path = ensemble_path
         runner.config = ExperimentConfig.from_file(str(ensemble_path))
 
-        _, _, date_ranges = runner._resolve_ensemble()
+        _, _, date_ranges, _ = runner._resolve_ensemble()
 
         assert len(date_ranges) == 2
         assert date_ranges[0].start == date(2010, 1, 1)
@@ -1140,3 +1141,148 @@ class TestErrorConditions:
         assert len(FIXED_CONDITIONS) == original_len + 1
         FIXED_CONDITIONS.pop()
         assert len(FIXED_CONDITIONS) == original_len
+
+
+class TestMetaFeatures:
+    def test_stacking_config_meta_features(self):
+        params = EnsembleParams(
+            strategy="stacking",
+            base_models=[
+                EnsembleBaseModelRef(config="a.yaml"),
+                EnsembleBaseModelRef(config="b.yaml"),
+            ],
+            meta_features=["elo", "round_ordinal"],
+        )
+        assert params.meta_features == ["elo", "round_ordinal"]
+
+    def test_meta_features_rejected_for_non_stacking(self):
+        with pytest.raises(ValueError, match="meta_features is only allowed"):
+            EnsembleParams(
+                strategy="average",
+                base_models=[
+                    EnsembleBaseModelRef(config="a.yaml"),
+                ],
+                meta_features=["elo"],
+            )
+
+        with pytest.raises(ValueError, match="meta_features is only allowed"):
+            EnsembleParams(
+                strategy="weighted_average",
+                base_models=[
+                    EnsembleBaseModelRef(config="a.yaml"),
+                ],
+                meta_features=["elo"],
+            )
+
+    def test_stacking_with_meta_features_fit_predict(self, sample_data):
+        X, y = sample_data
+        model = EnsembleModel({"strategy": "stacking"})
+        model.configure([
+            _spec("logistic", [0, 1, 2]),
+            _spec("logistic", [0, 3, 4]),
+        ])
+        model.fit(X, y)
+
+        per_model = model.predict_proba_per_model(X)
+        X_meta_base = np.column_stack(per_model)
+
+        # Add meta-features (columns 2, 3 from X)
+        meta_feature_indices = [2, 3]
+        meta_raw = X[:, meta_feature_indices]
+        meta_mean = meta_raw.mean(axis=0)
+        meta_std = meta_raw.std(axis=0)
+        meta_std[meta_std == 0] = 1.0
+        meta_std_vals = (meta_raw - meta_mean) / meta_std
+
+        X_meta = np.hstack([X_meta_base, meta_std_vals])
+        model.set_meta_feature_indices(meta_feature_indices)
+        model._meta_scaler = (meta_mean, meta_std)
+        model.set_meta_feature_names(["model_a", "model_b", "feat_2", "feat_3"])
+        model.fit_meta(X_meta, y)
+
+        probs = model.predict_proba(X)
+        assert probs.shape == (200,)
+        assert np.all((probs >= 0) & (probs <= 1))
+
+    def test_meta_scaler_stored(self, sample_data):
+        X, y = sample_data
+        model = EnsembleModel({"strategy": "stacking"})
+        model.configure([
+            _spec("logistic", [0, 1, 2]),
+            _spec("logistic", [0, 3, 4]),
+        ])
+        model.fit(X, y)
+
+        meta_feature_indices = [2, 3]
+        meta_raw = X[:, meta_feature_indices]
+        meta_mean = meta_raw.mean(axis=0)
+        meta_std = meta_raw.std(axis=0)
+        meta_std[meta_std == 0] = 1.0
+
+        model._meta_scaler = (meta_mean, meta_std)
+        model.set_meta_feature_indices(meta_feature_indices)
+
+        assert model._meta_scaler is not None
+        np.testing.assert_allclose(model._meta_scaler[0], meta_mean)
+        np.testing.assert_allclose(model._meta_scaler[1], meta_std)
+
+    def test_meta_feature_coefficients_reported(self, sample_data):
+        X, y = sample_data
+        model = EnsembleModel({"strategy": "stacking"})
+        model.configure([
+            _spec("logistic", [0, 1, 2]),
+            _spec("logistic", [0, 3, 4]),
+        ])
+        model.fit(X, y)
+
+        per_model = model.predict_proba_per_model(X)
+        X_meta_base = np.column_stack(per_model)
+
+        meta_feature_indices = [2]
+        meta_raw = X[:, meta_feature_indices]
+        meta_mean = meta_raw.mean(axis=0)
+        meta_std = meta_raw.std(axis=0)
+        meta_std[meta_std == 0] = 1.0
+        meta_std_vals = (meta_raw - meta_mean) / meta_std
+
+        X_meta = np.hstack([X_meta_base, meta_std_vals])
+        model.set_meta_feature_indices(meta_feature_indices)
+        model._meta_scaler = (meta_mean, meta_std)
+        model.set_meta_feature_names(["model_a", "model_b", "player_elo_surface_diff"])
+        model.fit_meta(X_meta, y)
+
+        intercept, coefs = model.get_meta_coefficients()
+        assert isinstance(intercept, float)
+        assert set(coefs.keys()) == {"model_a", "model_b", "player_elo_surface_diff"}
+
+    def test_stacking_without_meta_features_unchanged(self, sample_data):
+        X, y = sample_data
+
+        # Stacking without meta-features
+        model1 = EnsembleModel({"strategy": "stacking"})
+        model1.configure([
+            _spec("logistic", [0, 1, 2]),
+            _spec("logistic", [0, 3, 4]),
+        ])
+        model1.fit(X, y)
+        per_model = model1.predict_proba_per_model(X)
+        X_meta = np.column_stack(per_model)
+        model1.set_meta_feature_names(["model_a", "model_b"])
+        model1.fit_meta(X_meta, y)
+        probs1 = model1.predict_proba(X)
+
+        # Stacking with empty meta_features (same thing)
+        model2 = EnsembleModel({"strategy": "stacking"})
+        model2.configure([
+            _spec("logistic", [0, 1, 2]),
+            _spec("logistic", [0, 3, 4]),
+        ])
+        model2.fit(X, y)
+        per_model2 = model2.predict_proba_per_model(X)
+        X_meta2 = np.column_stack(per_model2)
+        model2.set_meta_feature_indices([])
+        model2.set_meta_feature_names(["model_a", "model_b"])
+        model2.fit_meta(X_meta2, y)
+        probs2 = model2.predict_proba(X)
+
+        np.testing.assert_allclose(probs1, probs2)

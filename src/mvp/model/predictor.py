@@ -72,6 +72,10 @@ class ProductionPredictor:
                 "feature_specs": base_config.features.include,
             })
 
+        for spec in ensemble_params.meta_features:
+            if spec not in all_feature_specs:
+                all_feature_specs.append(spec)
+
         union_cols = get_feature_columns(all_feature_specs)
         for spec in base_model_specs:
             base_cols = get_feature_columns(spec["feature_specs"])

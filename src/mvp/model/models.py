@@ -51,16 +51,23 @@ class LogisticModel(BaseModel):
     def __init__(self, params: dict[str, Any]) -> None:
         self.params = {"random_state": 42, "max_iter": 1000, **params}
         self._model = None
+        self._mean: np.ndarray | None = None
+        self._std: np.ndarray | None = None
 
     def fit(self, X: np.ndarray, y: np.ndarray) -> None:
         from sklearn.linear_model import LogisticRegression
 
+        self._mean = X.mean(axis=0)
+        self._std = X.std(axis=0)
+        self._std[self._std == 0] = 1.0
+        X = (X - self._mean) / self._std
         self._model = LogisticRegression(**self.params)
         self._model.fit(X, y)
 
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
         if self._model is None:
             raise RuntimeError("Model not fitted")
+        X = (X - self._mean) / self._std
         return self._model.predict_proba(X)[:, 1]
 
 
@@ -124,6 +131,8 @@ class EnsembleModel(BaseModel):
         self._fitted = False
         self._meta_model = None
         self._meta_feature_names: list[str] = []
+        self._meta_feature_indices: list[int] = []
+        self._meta_scaler: tuple[np.ndarray, np.ndarray] | None = None
 
     def configure(self, base_model_specs: list[dict[str, Any]]) -> None:
         """Set up sub-models from resolved specs.
@@ -157,6 +166,10 @@ class EnsembleModel(BaseModel):
                 sub.fit(X[:, indices], y)
         self._fitted = True
 
+    def set_meta_feature_indices(self, indices: list[int]) -> None:
+        """Store indices into X for meta-feature columns."""
+        self._meta_feature_indices = indices
+
     def set_meta_feature_names(self, names: list[str]) -> None:
         """Store base model names for coefficient reporting."""
         self._meta_feature_names = names
@@ -187,7 +200,14 @@ class EnsembleModel(BaseModel):
         if self._strategy == "stacking":
             if self._meta_model is None:
                 raise RuntimeError("Meta-model not fitted. Call fit_meta() first.")
-            return self._meta_model.predict_proba(np.column_stack(preds))[:, 1]
+            parts = list(preds)
+            if self._meta_feature_indices:
+                meta_feat = X[:, self._meta_feature_indices]
+                if self._meta_scaler is not None:
+                    mean, std = self._meta_scaler
+                    meta_feat = (meta_feat - mean) / std
+                parts.append(meta_feat)
+            return self._meta_model.predict_proba(np.column_stack(parts))[:, 1]
         if self._strategy == "weighted_average":
             return np.average(preds, axis=0, weights=self._weights)
         return np.mean(preds, axis=0)

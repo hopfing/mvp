@@ -74,13 +74,15 @@ class ExperimentRunner:
 
     def _resolve_ensemble(
         self,
-    ) -> tuple[list[str], list[dict[str, Any]], list["DateRange"]]:
+    ) -> tuple[list[str], list[dict[str, Any]], list["DateRange"], list[int]]:
         """Resolve ensemble config into union features and base model specs.
 
         Returns:
-            (union_feature_specs, base_model_specs, model_date_ranges) where
-            each spec has type, params, weight, feature_indices, and
-            model_date_ranges[i] is the DateRange from base config i.
+            (union_feature_specs, base_model_specs, model_date_ranges,
+             meta_feature_indices) where each spec has type, params, weight,
+             feature_indices, model_date_ranges[i] is the DateRange from
+             base config i, and meta_feature_indices maps meta-features
+             into the union column list.
         """
         from mvp.model.config import DateRange
 
@@ -111,13 +113,20 @@ class ExperimentRunner:
                     f"but ensemble filters {self.config.data.filters} will be used"
                 )
 
+        for spec in ensemble_params.meta_features:
+            if spec not in all_feature_specs:
+                all_feature_specs.append(spec)
+
         union_cols = get_feature_columns(all_feature_specs)
         for spec in base_model_specs:
             base_cols = get_feature_columns(spec["feature_specs"])
             spec["feature_indices"] = [union_cols.index(c) for c in base_cols]
             del spec["feature_specs"]
 
-        return all_feature_specs, base_model_specs, model_date_ranges
+        meta_feature_cols = get_feature_columns(ensemble_params.meta_features)
+        meta_feature_indices = [union_cols.index(c) for c in meta_feature_cols]
+
+        return all_feature_specs, base_model_specs, model_date_ranges, meta_feature_indices
 
     def run(self) -> dict[str, Any]:
         """Execute the experiment.
@@ -139,8 +148,9 @@ class ExperimentRunner:
         is_ensemble = self.config.model.type == "ensemble"
         base_model_specs: list[dict[str, Any]] | None = None
         model_date_ranges: list | None = None
+        meta_feature_indices: list[int] = []
         if is_ensemble:
-            feature_specs, base_model_specs, model_date_ranges = (
+            feature_specs, base_model_specs, model_date_ranges, meta_feature_indices = (
                 self._resolve_ensemble()
             )
         else:
@@ -224,14 +234,6 @@ class ExperimentRunner:
                 medians = np.where(np.isnan(medians), 0.0, medians)
                 X_train = np.where(np.isnan(X_train), medians, X_train)
                 X_test = np.where(np.isnan(X_test), medians, X_test)
-
-                # Standardize features for gradient-based models
-                if self.config.model.type in ("logistic",):
-                    mean = X_train.mean(axis=0)
-                    std = X_train.std(axis=0)
-                    std[std == 0] = 1.0
-                    X_train = (X_train - mean) / std
-                    X_test = (X_test - mean) / std
 
                 # Build per-model training data for ensemble date ranges
                 per_model_data = None
@@ -329,7 +331,34 @@ class ExperimentRunner:
 
                 ensemble_params = EnsembleParams.model_validate(self.config.model.params)
                 base_names = [ref.config for ref in ensemble_params.base_models]
-                model.set_meta_feature_names(base_names)
+                meta_feature_col_names: list[str] = []
+
+                if meta_feature_indices:
+                    meta_feature_col_names = get_feature_columns(
+                        ensemble_params.meta_features
+                    )
+                    combined_X = np.concatenate([
+                        p["df"].select(
+                            pl.col(c).cast(pl.Float64) for c in feature_cols
+                        ).to_numpy()
+                        for p in all_predictions
+                    ])
+                    X_meta_raw = combined_X[:, meta_feature_indices]
+
+                    medians_meta = np.nanmedian(X_meta_raw, axis=0)
+                    medians_meta = np.where(np.isnan(medians_meta), 0.0, medians_meta)
+                    X_meta_raw = np.where(np.isnan(X_meta_raw), medians_meta, X_meta_raw)
+
+                    meta_mean = X_meta_raw.mean(axis=0)
+                    meta_std = X_meta_raw.std(axis=0)
+                    meta_std[meta_std == 0] = 1.0
+                    X_meta_std = (X_meta_raw - meta_mean) / meta_std
+
+                    X_meta = np.hstack([X_meta, X_meta_std])
+                    model._meta_scaler = (meta_mean, meta_std)
+
+                model.set_meta_feature_indices(meta_feature_indices)
+                model.set_meta_feature_names(base_names + meta_feature_col_names)
                 model.fit_meta(X_meta, y_meta)
 
                 y_prob_stacked = model._meta_model.predict_proba(X_meta)[:, 1]

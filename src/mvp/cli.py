@@ -209,10 +209,27 @@ def print_run_summary(results: dict[str, Any], name: str | None = None) -> None:
         meta_coefs = ediag.get("meta_coefficients")
         if meta_coefs is not None:
             meta_intercept = ediag.get("meta_intercept", 0.0)
-            print(f"\n  Stacking Meta-Model Coefficients (intercept={meta_intercept:+.4f}):")
+            base_coefs = {}
+            feat_coefs = {}
             for name, coef in meta_coefs.items():
-                label = Path(name).stem
-                print(f"    {label:40} {coef:+.4f}")
+                if "/" in name or name.endswith(".yaml"):
+                    base_coefs[name] = coef
+                else:
+                    feat_coefs[name] = coef
+            print(f"\n  Stacking Meta-Model Coefficients (intercept={meta_intercept:+.4f}):")
+            if base_coefs:
+                print("    Base models:")
+                for name, coef in base_coefs.items():
+                    label = Path(name).stem
+                    print(f"      {label:40} {coef:+.4f}")
+            if feat_coefs:
+                print("    Meta-features:")
+                for name, coef in feat_coefs.items():
+                    print(f"      {name:40} {coef:+.4f}")
+            if not base_coefs and not feat_coefs:
+                for name, coef in meta_coefs.items():
+                    label = Path(name).stem
+                    print(f"    {label:40} {coef:+.4f}")
 
         correction = ediag.get("correction_analysis", {})
         corr_sections = correction.get("sections", [])
