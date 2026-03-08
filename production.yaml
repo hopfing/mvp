@@ -1,6 +1,6 @@
 active:
   artifact: data/models/production.joblib
-  config: models/cmp_3elo_age_2020.yaml
+  config: models/logistic_10f_ew_2020.yaml
   filters:
     circuit:
     - tour
