@@ -18,6 +18,8 @@ features:
     - opp_elo_surface_consistency
     - player_avg_opp_ranking(days=90)
     - opp_avg_opp_ranking(days=90)
+    - player_match_count_diff(days=30)
+    - player_deciding_set_win_pct_diff(days=30)
 model:
   type: logistic
 
