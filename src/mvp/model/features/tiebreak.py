@@ -109,3 +109,15 @@ def deciding_set_win_pct() -> pl.Expr:
     wins = deciding_won.cum_sum().shift(1).over("player_id", order_by=DATE_COL).fill_null(0)
     played = deciding.cum_sum().shift(1).over("player_id", order_by=DATE_COL).fill_null(0)
     return pl.when(played > 0).then(wins / played).otherwise(None)
+
+
+@feature(
+    name="deciding_set_win_pct_diff",
+    params=[],
+    description="Player deciding set win pct minus opponent deciding set win pct",
+    depends_on=["deciding_set_win_pct"],
+    mirror=False,
+)
+def deciding_set_win_pct_diff() -> pl.Expr:
+    """Deciding set win percentage difference."""
+    return pl.col("player_deciding_set_win_pct") - pl.col("opp_deciding_set_win_pct")
