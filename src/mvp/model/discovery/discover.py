@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import polars as pl
 import yaml
 
 from mvp.model.discovery.config import DiscoveryConfig
@@ -264,8 +265,11 @@ class FeatureDiscovery:
         pred_0 = np.concatenate([fold[0] for fold in per_model_oof])
         pred_1 = np.concatenate([fold[1] for fold in per_model_oof])
         y_true = np.concatenate([p["y_true"] for p in all_predictions])
+        row_keys = pl.concat([
+            p["df"].select("match_uid", "player_id") for p in all_predictions
+        ])
 
-        return y_true, pred_0, pred_1
+        return y_true, pred_0, pred_1, row_keys
 
     def _create_fast_scorer(
         self, all_features: list[str], metric: str | None = None
@@ -286,7 +290,7 @@ class FeatureDiscovery:
         if self.config.discovery.meta_discovery is not None:
             meta_config = self.config.discovery.meta_discovery
             self._log("Collecting OOF predictions from ensemble...")
-            y_true, pred_0, pred_1 = self._collect_oof_predictions()
+            y_true, pred_0, pred_1, row_keys = self._collect_oof_predictions()
 
             self._log(f"Building disagreement dataset (weighting={meta_config.weighting})...")
             target, mask, weights = _build_disagreement_dataset(
@@ -300,7 +304,12 @@ class FeatureDiscovery:
                     f"({n_disagree / len(y_true):.1%})"
                 )
 
-            fast.precompute(override_y=target, row_mask=mask, sample_weights=weights)
+            fast.precompute(
+                override_y=target,
+                row_mask=mask,
+                sample_weights=weights,
+                row_keys=row_keys,
+            )
         else:
             fast.precompute()
 

@@ -50,6 +50,7 @@ class FastForwardSelector:
         override_y: np.ndarray | None = None,
         row_mask: np.ndarray | None = None,
         sample_weights: np.ndarray | None = None,
+        row_keys: pl.DataFrame | None = None,
     ) -> None:
         """Run the expensive one-time computation.
 
@@ -60,6 +61,9 @@ class FastForwardSelector:
             override_y: Replace target variable after loading.
             row_mask: Boolean mask to filter rows after loading.
             sample_weights: Per-sample weights for model fitting.
+            row_keys: DataFrame with (match_uid, player_id) to filter
+                and reorder rows. override_y/row_mask/sample_weights
+                are aligned to these rows (applied after filtering).
         """
         engine = FeatureEngine(
             matches_path=self.matches_path,
@@ -81,6 +85,14 @@ class FastForwardSelector:
         )
 
         df = df.filter(pl.col("won").is_not_null())
+
+        if row_keys is not None:
+            keyed = row_keys.with_row_index("_order")
+            df = (
+                df.join(keyed, on=["match_uid", "player_id"], how="inner")
+                .sort("_order")
+                .drop("_order")
+            )
 
         all_col_names = get_feature_columns(self.all_feature_specs)
         self.col_to_idx = {c: i for i, c in enumerate(all_col_names)}
