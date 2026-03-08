@@ -611,7 +611,7 @@ def cmd_live(args: argparse.Namespace) -> int:
                 match_odds_to_predictions,
             )
             odds_path = Path("data/stage/draftkings/moneyline.parquet")
-            aliases_path = Path("data/odds/player_aliases.yaml")
+            aliases_path = Path(__file__).resolve().parent / "draftkings" / "player_aliases.yaml"
             odds_df = get_latest_odds(odds_path)
             aliases = load_aliases(aliases_path)
             odds_map = match_odds_to_predictions(odds_df, predictions, aliases)
