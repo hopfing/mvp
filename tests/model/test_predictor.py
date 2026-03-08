@@ -147,7 +147,7 @@ def production_config(tmp_path: Path, sample_matches: Path) -> Path:
             "filters": {"draw_type": "singles", "circuit": ["tour", "chal"]},
         },
         "features": {
-            "include": ["elo_surface_diff", "svc_elo_diff", "ret_elo_diff", "age_diff"]
+            "include": ["player_elo_surface_diff", "player_svc_elo_diff", "player_ret_elo_diff", "player_age_diff"]
         },
         "model": {"type": "logistic"},
     }
@@ -415,7 +415,7 @@ class TestPredictMatches:
                 "date_range": {"start": "2024-01-01", "end": "2024-12-31"},
                 "filters": {"draw_type": "singles"},
             },
-            "features": {"include": ["elo_surface_diff", "svc_elo_diff", "ret_elo_diff", "age_diff"]},
+            "features": {"include": ["player_elo_surface_diff", "player_svc_elo_diff", "player_ret_elo_diff", "player_age_diff"]},
             "model": {"type": "logistic"},
         }
         model_config_path = tmp_path / "draw_model.yaml"

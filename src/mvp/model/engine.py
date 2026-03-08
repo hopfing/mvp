@@ -303,6 +303,17 @@ class FeatureEngine:
         Returns:
             DataFrame with match data and computed feature columns.
         """
+        # Validate: diff/matchup features must use player_ prefix
+        for spec in feature_specs:
+            prefix, base_name, full_name, params = parse_feature_spec(spec)
+            if prefix is None and (
+                base_name.endswith("_diff") or base_name.endswith("_matchup")
+            ):
+                raise ValueError(
+                    f"Feature '{spec}' requires a 'player_' prefix "
+                    f"(use 'player_{spec}' instead)"
+                )
+
         # Resolve dependencies first
         feature_specs = self._resolve_dependencies(feature_specs)
 
