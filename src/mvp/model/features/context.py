@@ -237,3 +237,25 @@ def is_grass() -> pl.Expr:
 def is_indoor() -> pl.Expr:
     """Whether match is played indoors."""
     return pl.col("indoor").cast(pl.Float64)
+
+
+@feature(
+    name="round_ordinal",
+    params=[],
+    description="Round as ordinal from round_order column (Q1=1 through F=12)",
+    match_level=True,
+)
+def round_ordinal() -> pl.Expr:
+    """Round encoded as ordinal progression. Uses existing round_order column."""
+    return pl.col("round_order").cast(pl.Float64)
+
+
+@feature(
+    name="is_qualifying",
+    params=[],
+    description="1 if qualifying round (Q1/Q2/Q3), 0 otherwise",
+    match_level=True,
+)
+def is_qualifying() -> pl.Expr:
+    """Whether match is in qualifying rounds."""
+    return pl.col("round").is_in(["Q1", "Q2", "Q3"]).cast(pl.Float64)
