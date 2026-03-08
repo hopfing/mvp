@@ -2,6 +2,7 @@
 
 
 import hashlib
+import inspect
 import json
 import re
 from pathlib import Path
@@ -182,7 +183,7 @@ class FeatureEngine:
         if self._manifest_path.exists():
             with open(self._manifest_path) as f:
                 return json.load(f)
-        return {"matches_hash": None, "features": {}}
+        return {"cache_key": None, "features": {}}
 
     def _save_manifest(self) -> None:
         """Save the cache manifest to disk."""
@@ -191,20 +192,41 @@ class FeatureEngine:
 
     def _compute_matches_hash(self) -> str:
         """Compute a hash of the matches file for cache invalidation."""
-        # Use file size and modification time for quick hash
         stat = self.matches_path.stat()
         content = f"{stat.st_size}:{stat.st_mtime}"
         return hashlib.md5(content.encode()).hexdigest()
 
+    def _compute_registry_hash(self) -> str:
+        """Compute a hash of all feature function source code.
+
+        Detects when feature implementations change so cached values
+        from old code are not served.
+        """
+        sources = []
+        for name in sorted(self._registry.list_features()):
+            feat = self._registry.get(name)
+            sources.append(f"{name}:{inspect.getsource(feat.func)}")
+        return hashlib.md5("\n".join(sources).encode()).hexdigest()
+
+    def _compute_cache_key(self) -> str:
+        """Combined key: matches data + feature code."""
+        return f"{self._compute_matches_hash()}:{self._compute_registry_hash()}"
+
+    def _invalidate_cache(self) -> None:
+        """Delete all cached feature files and reset the manifest."""
+        for f in self.cache_dir.glob("*.parquet"):
+            f.unlink()
+        self._manifest = {"cache_key": None, "features": {}}
+        self._save_manifest()
+
     def _get_cache_path(self, spec: str) -> Path:
         """Get the cache file path for a feature spec."""
-        # Create a safe filename from the spec
         safe_name = re.sub(r"[^\w]", "_", spec)
         return self.cache_dir / f"{safe_name}.parquet"
 
-    def _is_cached(self, spec: str, matches_hash: str) -> bool:
+    def _is_cached(self, spec: str, cache_key: str) -> bool:
         """Check if a feature is cached and valid."""
-        if self._manifest.get("matches_hash") != matches_hash:
+        if self._manifest.get("cache_key") != cache_key:
             return False
         if spec not in self._manifest.get("features", {}):
             return False
@@ -217,16 +239,14 @@ class FeatureEngine:
         return pl.read_parquet(cache_path)
 
     def _cache_feature(
-        self, spec: str, df: pl.DataFrame, columns: list[str], matches_hash: str
+        self, spec: str, df: pl.DataFrame, columns: list[str], cache_key: str
     ) -> None:
         """Cache a computed feature to disk."""
         cache_path = self._get_cache_path(spec)
-        # Save only the key columns and feature columns
         key_cols = ["match_uid", "player_id"]
         df.select(key_cols + columns).write_parquet(cache_path)
 
-        # Update manifest
-        self._manifest["matches_hash"] = matches_hash
+        self._manifest["cache_key"] = cache_key
         if "features" not in self._manifest:
             self._manifest["features"] = {}
         self._manifest["features"][spec] = {
@@ -342,8 +362,10 @@ class FeatureEngine:
         # Load matches data
         df = pl.read_parquet(self.matches_path)
 
-        # Check cache validity
-        matches_hash = self._compute_matches_hash()
+        # Check cache validity — wipe everything if data or code changed
+        cache_key = self._compute_cache_key()
+        if self._manifest.get("cache_key") != cache_key:
+            self._invalidate_cache()
 
         # Phase 0: compute match-level features (no prefix)
         computed_match_level: set[str] = set()
@@ -358,7 +380,7 @@ class FeatureEngine:
                     param_str = ",".join(f"{k}={v}" for k, v in params.items())
                     cache_spec = f"{base_name}({param_str})"
 
-                if self._is_cached(cache_spec, matches_hash):
+                if self._is_cached(cache_spec, cache_key):
                     cached = self._load_cached_feature(cache_spec)
                     df = df.join(
                         cached,
@@ -368,7 +390,7 @@ class FeatureEngine:
                 else:
                     expr = feature_def.func(**params)
                     df = df.with_columns(expr.alias(col_name))
-                    self._cache_feature(cache_spec, df, [col_name], matches_hash)
+                    self._cache_feature(cache_spec, df, [col_name], cache_key)
                 computed_match_level.add(col_name)
 
         # Track which player_* columns we've computed (needed for mirroring)
@@ -394,7 +416,7 @@ class FeatureEngine:
                         param_str = ",".join(f"{k}={v}" for k, v in params.items())
                         cache_spec = f"player_{base_name}({param_str})"
 
-                    if self._is_cached(cache_spec, matches_hash):
+                    if self._is_cached(cache_spec, cache_key):
                         cached = self._load_cached_feature(cache_spec)
                         df = df.join(
                             cached,
@@ -405,7 +427,7 @@ class FeatureEngine:
                         expr = feature_def.func(**params)
                         df = df.with_columns(expr.alias(player_col))
                         self._cache_feature(
-                            cache_spec, df, [player_col], matches_hash
+                            cache_spec, df, [player_col], cache_key
                         )
                     computed_player_cols.add(player_col)
 
@@ -424,7 +446,7 @@ class FeatureEngine:
                         param_str = ",".join(f"{k}={v}" for k, v in params.items())
                         cache_spec = f"player_{base_name}({param_str})"
 
-                    if self._is_cached(cache_spec, matches_hash):
+                    if self._is_cached(cache_spec, cache_key):
                         cached = self._load_cached_feature(cache_spec)
                         df = df.join(
                             cached,
@@ -435,7 +457,7 @@ class FeatureEngine:
                         expr = feature_def.func(**params)
                         df = df.with_columns(expr.alias(player_col))
                         self._cache_feature(
-                            cache_spec, df, [player_col], matches_hash
+                            cache_spec, df, [player_col], cache_key
                         )
                     computed_player_cols.add(player_col)
 
@@ -487,7 +509,7 @@ class FeatureEngine:
 
                 df = self._compute_player_derived(
                     df, base_name, col_name, params, feature_def,
-                    matches_hash, computed_player_cols,
+                    cache_key, computed_player_cols,
                 )
 
         # Phase 4: mirror derived features that need opp_* columns
@@ -504,7 +526,7 @@ class FeatureEngine:
             if col_name not in computed_player_cols:
                 df = self._compute_player_derived(
                     df, base_name, col_name, params, feature_def,
-                    matches_hash, computed_player_cols,
+                    cache_key, computed_player_cols,
                 )
 
         # Phase 6: compute match-level derived features (no prefix, has depends_on).
@@ -520,7 +542,7 @@ class FeatureEngine:
                     param_str = ",".join(f"{k}={v}" for k, v in params.items())
                     cache_spec = f"{base_name}({param_str})"
 
-                if self._is_cached(cache_spec, matches_hash):
+                if self._is_cached(cache_spec, cache_key):
                     cached = self._load_cached_feature(cache_spec)
                     df = df.join(
                         cached,
@@ -530,7 +552,7 @@ class FeatureEngine:
                 else:
                     expr = feature_def.func(**params)
                     df = df.with_columns(expr.alias(col_name))
-                    self._cache_feature(cache_spec, df, [col_name], matches_hash)
+                    self._cache_feature(cache_spec, df, [col_name], cache_key)
                 computed_match_level.add(col_name)
 
         return df
@@ -542,7 +564,7 @@ class FeatureEngine:
         col_name: str,
         params: dict,
         feature_def: "FeatureDef",
-        matches_hash: str,
+        cache_key: str,
         computed_player_cols: set[str],
     ) -> pl.DataFrame:
         """Compute a single player-prefixed derived feature."""
@@ -551,7 +573,7 @@ class FeatureEngine:
             param_str = ",".join(f"{k}={v}" for k, v in params.items())
             cache_spec = f"player_{base_name}({param_str})"
 
-        if self._is_cached(cache_spec, matches_hash):
+        if self._is_cached(cache_spec, cache_key):
             cached = self._load_cached_feature(cache_spec)
             df = df.join(
                 cached,
@@ -561,7 +583,7 @@ class FeatureEngine:
         else:
             expr = feature_def.func(**params)
             df = df.with_columns(expr.alias(col_name))
-            self._cache_feature(cache_spec, df, [col_name], matches_hash)
+            self._cache_feature(cache_spec, df, [col_name], cache_key)
         computed_player_cols.add(col_name)
         return df
 
