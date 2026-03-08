@@ -37,15 +37,144 @@ RANKING_BUCKETS: list[tuple[str, int, int | None]] = [
     ("201+", 201, None),
 ]
 
-DIAGNOSTIC_CONDITIONS: list[tuple[str, str, Any]] = [
+# Fixed-threshold conditions (physically meaningful cutoffs)
+FIXED_CONDITIONS: list[tuple[str, str, Any]] = [
     ("Large Elo gap (>150)", "player_elo_surface_diff", lambda a: np.abs(a) > 150),
     ("Medium Elo gap (75-150)", "player_elo_surface_diff", lambda a: (np.abs(a) >= 75) & (np.abs(a) <= 150)),
     ("Small Elo gap (<75)", "player_elo_surface_diff", lambda a: np.abs(a) < 75),
-    ("Serve mismatch (>75)", "player_svc_elo_matchup", lambda a: np.abs(a) > 75),
-    ("Return mismatch (>75)", "player_ret_elo_matchup", lambda a: np.abs(a) > 75),
     ("Age gap >6 years", "player_age_diff", lambda a: np.abs(a) > 6),
     ("High uncertainty (RD>150)", "elo_rd_sum", lambda a: a > 150),
 ]
+
+# Extreme magnitude conditions — |feature| at p90/p95/p99
+MAGNITUDE_FEATURES: list[tuple[str, str]] = [
+    ("Svc pts matchup", "svc_pts_won_pct_matchup"),
+    ("Ret pts matchup", "ret_pts_won_pct_matchup"),
+    ("Svc 1st serve matchup", "svc_first_serve_win_pct_matchup"),
+    ("Ret 2nd serve matchup", "ret_second_serve_win_pct_matchup"),
+]
+
+# Signed quintile bucket features (directional analysis)
+SIGNED_BUCKET_FEATURES: list[tuple[str, str]] = [
+    ("Svc Elo matchup", "player_svc_elo_matchup"),
+    ("Ret Elo matchup", "player_ret_elo_matchup"),
+]
+
+# Cross-conditions: small Elo gap + extreme factor (ensemble drilldown)
+CROSS_CONDITIONS: list[tuple[str, str, str]] = [
+    ("+ extreme svc matchup", "svc_pts_won_pct_matchup", "percentile"),
+    ("+ extreme ret matchup", "ret_pts_won_pct_matchup", "percentile"),
+    ("+ extreme BP matchup", "ret_bp_pct_matchup", "percentile"),
+    ("+ age gap >6", "player_age_diff", "abs_threshold_6"),
+    ("+ high uncertainty", "elo_rd_sum", "threshold_150"),
+]
+
+
+def _resolve_column(df: pl.DataFrame, prefix: str) -> str | None:
+    """Find the best matching column for a feature prefix.
+
+    Checks exact match first, then looks for parameterized variants
+    (e.g., prefix_365d, prefix_180d) and picks the longest horizon.
+    """
+    if prefix in df.columns:
+        return prefix
+
+    best_col = None
+    best_horizon = -1
+    suffix_start = len(prefix) + 1
+    for col in df.columns:
+        if not col.startswith(prefix + "_"):
+            continue
+        suffix = col[suffix_start:]
+        if suffix.endswith("d") and suffix[:-1].isdigit():
+            horizon = int(suffix[:-1])
+            if horizon > best_horizon:
+                best_horizon = horizon
+                best_col = col
+
+    return best_col
+
+
+def _get_column_values(df: pl.DataFrame, prefix: str) -> tuple[str, np.ndarray] | None:
+    """Resolve column and extract values. Returns (col_name, values) or None."""
+    col = _resolve_column(df, prefix)
+    if col is None:
+        return None
+    return col, df[col].fill_null(0).to_numpy().astype(float)
+
+
+def _build_conditions(df: pl.DataFrame) -> list[tuple[str, np.ndarray]]:
+    """Build all diagnostic condition masks from the data."""
+    conditions: list[tuple[str, np.ndarray]] = []
+
+    # Fixed threshold conditions
+    for label, col_prefix, predicate_fn in FIXED_CONDITIONS:
+        result = _get_column_values(df, col_prefix)
+        if result is None:
+            continue
+        conditions.append((label, predicate_fn(result[1])))
+
+    # Magnitude conditions: |feature| ≥ p90/p95/p99
+    for feat_label, col_prefix in MAGNITUDE_FEATURES:
+        result = _get_column_values(df, col_prefix)
+        if result is None:
+            continue
+        abs_vals = np.abs(result[1])
+        for pct_label, pct in [("≥p90", 90), ("≥p95", 95), ("≥p99", 99)]:
+            threshold = float(np.percentile(abs_vals, pct))
+            if threshold == 0:
+                continue
+            conditions.append((f"{feat_label} {pct_label}", abs_vals >= threshold))
+
+    # Signed quintile buckets
+    for feat_label, col_prefix in SIGNED_BUCKET_FEATURES:
+        result = _get_column_values(df, col_prefix)
+        if result is None:
+            continue
+        vals = result[1]
+        p10, p25, p75, p90 = np.percentile(vals, [10, 25, 75, 90])
+        for bucket_label, mask in [
+            ("≤p10", vals <= p10),
+            ("p10-p25", (vals > p10) & (vals <= p25)),
+            ("p25-p75", (vals > p25) & (vals < p75)),
+            ("p75-p90", (vals >= p75) & (vals < p90)),
+            ("≥p90", vals >= p90),
+        ]:
+            conditions.append((f"{feat_label} {bucket_label}", mask))
+
+    return conditions
+
+
+def _build_cross_conditions(df: pl.DataFrame) -> list[tuple[str, np.ndarray]]:
+    """Build small-Elo-gap cross-condition masks for ensemble drilldown."""
+    conditions: list[tuple[str, np.ndarray]] = []
+
+    elo_result = _get_column_values(df, "player_elo_surface_diff")
+    if elo_result is None:
+        return conditions
+    small_gap = np.abs(elo_result[1]) < 75
+
+    for cross_label, col_prefix, mode in CROSS_CONDITIONS:
+        result = _get_column_values(df, col_prefix)
+        if result is None:
+            continue
+        vals = result[1]
+        if mode == "percentile":
+            abs_vals = np.abs(vals)
+            threshold = float(np.percentile(abs_vals, 90))
+            if threshold == 0:
+                continue
+            extreme = abs_vals >= threshold
+        elif mode == "abs_threshold_6":
+            extreme = np.abs(vals) > 6
+        elif mode == "threshold_150":
+            extreme = vals > 150
+        else:
+            continue
+        mask = small_gap & extreme
+        conditions.append((f"Small gap {cross_label}", mask))
+
+    return conditions
 
 
 def _compute_metrics_for_segment(
@@ -456,11 +585,7 @@ class Diagnostics:
         total_errors = int(is_error.sum())
 
         conditions = []
-        for label, col_name, predicate_fn in DIAGNOSTIC_CONDITIONS:
-            if col_name not in df.columns:
-                continue
-            col_vals = df[col_name].fill_null(0).to_numpy().astype(float)
-            mask = predicate_fn(col_vals)
+        for label, mask in _build_conditions(df):
             n_matches = int(mask.sum())
             if n_matches == 0:
                 continue
@@ -601,11 +726,7 @@ class EnsembleDiagnostics:
     ) -> dict[str, Any]:
         """Compare primary model vs ensemble accuracy per condition."""
         conditions = []
-        for label, col_name, predicate_fn in DIAGNOSTIC_CONDITIONS:
-            if col_name not in df.columns:
-                continue
-            col_vals = df[col_name].fill_null(0).to_numpy().astype(float)
-            mask = predicate_fn(col_vals)
+        for label, mask in _build_conditions(df):
             n_matches = int(mask.sum())
             if n_matches == 0:
                 continue
@@ -620,7 +741,26 @@ class EnsembleDiagnostics:
                 "ensemble_accuracy": ensemble_acc,
                 "improvement": ensemble_acc - primary_acc,
             })
-        return {"conditions": conditions}
+
+        # Small-Elo-gap drilldown cross-conditions
+        drilldown = []
+        for label, mask in _build_cross_conditions(df):
+            n_matches = int(mask.sum())
+            if n_matches == 0:
+                continue
+            primary_correct = ((primary_preds[mask] >= 0.5).astype(int) == y_true[mask])
+            ensemble_correct = ((ensemble_preds[mask] >= 0.5).astype(int) == y_true[mask])
+            primary_acc = float(primary_correct.mean())
+            ensemble_acc = float(ensemble_correct.mean())
+            drilldown.append({
+                "label": label,
+                "n_matches": n_matches,
+                "primary_accuracy": primary_acc,
+                "ensemble_accuracy": ensemble_acc,
+                "improvement": ensemble_acc - primary_acc,
+            })
+
+        return {"conditions": conditions, "drilldown": drilldown}
 
     def _per_model_metrics(
         self,

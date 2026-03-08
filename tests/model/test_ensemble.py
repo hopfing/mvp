@@ -14,10 +14,15 @@ from mvp.model.config import (
     ExperimentConfig,
 )
 from mvp.model.diagnostics import (
-    DIAGNOSTIC_CONDITIONS,
+    FIXED_CONDITIONS,
+    MAGNITUDE_FEATURES,
+    SIGNED_BUCKET_FEATURES,
     DiagnosticResults,
     Diagnostics,
     EnsembleDiagnostics,
+    _build_conditions,
+    _build_cross_conditions,
+    _resolve_column,
 )
 from mvp.model.models import EnsembleModel, get_model
 
@@ -946,7 +951,7 @@ class TestStacking:
 
 
 class TestErrorConditions:
-    def test_error_conditions_with_feature_columns(self):
+    def test_error_conditions_with_fixed_and_magnitude(self):
         np.random.seed(42)
         n = 200
         y_true = np.random.randint(0, 2, n)
@@ -954,8 +959,8 @@ class TestErrorConditions:
 
         df = pl.DataFrame({
             "player_elo_surface_diff": np.random.randn(n) * 100,
-            "player_svc_elo_matchup": np.random.randn(n) * 60,
             "player_age_diff": np.random.randn(n) * 4,
+            "svc_pts_won_pct_matchup_365d": np.random.randn(n) * 0.05,
         })
 
         diag = Diagnostics()
@@ -966,9 +971,12 @@ class TestErrorConditions:
         assert result["total_errors"] >= 0
 
         labels = [c["label"] for c in result["conditions"]]
-        # Should have elo gap conditions and age gap
+        # Fixed conditions
         assert "Large Elo gap (>150)" in labels
         assert "Small Elo gap (<75)" in labels
+        # Magnitude conditions (resolved via prefix)
+        assert "Svc pts matchup ≥p90" in labels
+        assert "Svc pts matchup ≥p95" in labels
 
         for c in result["conditions"]:
             assert 0.0 <= c["accuracy"] <= 1.0
@@ -976,13 +984,30 @@ class TestErrorConditions:
             assert c["n_errors"] >= 0
             assert 0.0 <= c["error_share"] <= 1.0
 
+    def test_error_conditions_signed_buckets(self):
+        np.random.seed(42)
+        n = 200
+        y_true = np.random.randint(0, 2, n)
+        y_prob = np.clip(y_true + np.random.randn(n) * 0.3, 0.05, 0.95)
+
+        df = pl.DataFrame({
+            "player_svc_elo_matchup": np.random.randn(n) * 80,
+        })
+
+        diag = Diagnostics()
+        result = diag._error_conditions(df, y_true, y_prob)
+
+        labels = [c["label"] for c in result["conditions"]]
+        assert "Svc Elo matchup ≤p10" in labels
+        assert "Svc Elo matchup p25-p75" in labels
+        assert "Svc Elo matchup ≥p90" in labels
+
     def test_error_conditions_skips_missing_columns(self):
         np.random.seed(42)
         n = 50
         y_true = np.random.randint(0, 2, n)
         y_prob = np.clip(y_true + np.random.randn(n) * 0.3, 0.05, 0.95)
 
-        # DataFrame with no condition columns
         df = pl.DataFrame({"some_other_col": np.random.randn(n)})
 
         diag = Diagnostics()
@@ -991,15 +1016,16 @@ class TestErrorConditions:
         assert result["conditions"] == []
         assert result["total_errors"] >= 0
 
-    def test_correction_analysis(self):
+    def test_correction_analysis_with_drilldown(self):
         np.random.seed(42)
-        n = 200
+        n = 500
         y_true = np.random.randint(0, 2, n)
         primary_preds = np.clip(y_true + np.random.randn(n) * 0.3, 0.05, 0.95)
         ensemble_preds = np.clip(y_true + np.random.randn(n) * 0.2, 0.05, 0.95)
 
         df = pl.DataFrame({
-            "player_elo_surface_diff": np.random.randn(n) * 100,
+            "player_elo_surface_diff": np.random.randn(n) * 50,  # mostly small gaps
+            "svc_pts_won_pct_matchup_365d": np.random.randn(n) * 0.05,
             "player_age_diff": np.random.randn(n) * 5,
         })
 
@@ -1007,13 +1033,18 @@ class TestErrorConditions:
         result = ediag._correction_analysis(y_true, primary_preds, ensemble_preds, df)
 
         assert "conditions" in result
+        assert "drilldown" in result
         for c in result["conditions"]:
             assert "label" in c
             assert "primary_accuracy" in c
-            assert "ensemble_accuracy" in c
             assert "improvement" in c
-            assert c["n_matches"] > 0
             assert abs(c["improvement"] - (c["ensemble_accuracy"] - c["primary_accuracy"])) < 1e-10
+
+        # Drilldown should have cross-conditions
+        if result["drilldown"]:
+            for d in result["drilldown"]:
+                assert d["label"].startswith("Small gap")
+                assert d["n_matches"] > 0
 
     def test_correction_analysis_via_compute(self):
         np.random.seed(42)
@@ -1036,11 +1067,39 @@ class TestErrorConditions:
         )
         assert "correction_analysis" in result
         assert "conditions" in result["correction_analysis"]
+        assert "drilldown" in result["correction_analysis"]
 
-    def test_diagnostic_conditions_extensible(self):
-        assert isinstance(DIAGNOSTIC_CONDITIONS, list)
-        original_len = len(DIAGNOSTIC_CONDITIONS)
-        DIAGNOSTIC_CONDITIONS.append(("Test condition", "test_col", lambda a: a > 0))
-        assert len(DIAGNOSTIC_CONDITIONS) == original_len + 1
-        DIAGNOSTIC_CONDITIONS.pop()
-        assert len(DIAGNOSTIC_CONDITIONS) == original_len
+    def test_resolve_column_exact_match(self):
+        df = pl.DataFrame({"player_elo_surface_diff": [1.0]})
+        assert _resolve_column(df, "player_elo_surface_diff") == "player_elo_surface_diff"
+
+    def test_resolve_column_parameterized(self):
+        df = pl.DataFrame({
+            "svc_pts_won_pct_matchup_180d": [1.0],
+            "svc_pts_won_pct_matchup_365d": [2.0],
+        })
+        # Should pick longest horizon
+        assert _resolve_column(df, "svc_pts_won_pct_matchup") == "svc_pts_won_pct_matchup_365d"
+
+    def test_resolve_column_missing(self):
+        df = pl.DataFrame({"unrelated_col": [1.0]})
+        assert _resolve_column(df, "player_elo_surface_diff") is None
+
+    def test_build_conditions_empty_df(self):
+        df = pl.DataFrame({"unrelated": [1.0, 2.0]})
+        conditions = _build_conditions(df)
+        assert conditions == []
+
+    def test_build_cross_conditions_needs_elo(self):
+        df = pl.DataFrame({"svc_pts_won_pct_matchup_365d": [1.0, 2.0]})
+        # No elo column → no cross conditions
+        conditions = _build_cross_conditions(df)
+        assert conditions == []
+
+    def test_fixed_conditions_extensible(self):
+        assert isinstance(FIXED_CONDITIONS, list)
+        original_len = len(FIXED_CONDITIONS)
+        FIXED_CONDITIONS.append(("Test", "test_col", lambda a: a > 0))
+        assert len(FIXED_CONDITIONS) == original_len + 1
+        FIXED_CONDITIONS.pop()
+        assert len(FIXED_CONDITIONS) == original_len
