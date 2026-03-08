@@ -14,14 +14,12 @@ from mvp.model.splitters import make_splitter
 
 
 @pytest.fixture(autouse=True)
-def ensure_features_registered():
+def ensure_features_registered(isolated_registry):
     """Re-register features before each test."""
     import mvp.model.features.ranking
     import mvp.model.features.serve
     import mvp.model.features.win_rate
-    from mvp.model.registry import get_registry
 
-    get_registry().clear()
     importlib.reload(mvp.model.features.ranking)
     importlib.reload(mvp.model.features.serve)
     importlib.reload(mvp.model.features.win_rate)

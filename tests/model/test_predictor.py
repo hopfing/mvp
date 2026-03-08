@@ -13,13 +13,11 @@ import yaml
 
 
 @pytest.fixture(autouse=True)
-def ensure_features_registered():
+def ensure_features_registered(isolated_registry):
     """Re-register features before each test."""
     import mvp.model.features.elo
     import mvp.model.features.static
-    from mvp.model.registry import get_registry
 
-    get_registry().clear()
     importlib.reload(mvp.model.features.elo)
     importlib.reload(mvp.model.features.static)
 

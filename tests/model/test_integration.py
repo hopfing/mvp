@@ -14,16 +14,11 @@ from mvp.model.registry import get_registry
 
 @pytest.fixture(scope="module", autouse=True)
 def ensure_features_registered():
-    """Ensure features are registered for all tests in this module.
-
-    The registry may be cleared by other tests, so we need to re-import
-    the feature modules to re-register them.
-    """
-    # Clear and reimport to ensure clean registration
+    """Ensure features are registered for all tests in this module."""
     registry = get_registry()
+    saved = dict(registry._features)
     registry.clear()
 
-    # Import (or reimport) feature modules to trigger registration
     from mvp.model.features import h2h, ranking, win_rate
 
     reload(h2h)
@@ -32,7 +27,8 @@ def ensure_features_registered():
 
     yield
 
-    # Don't clear after - other tests may depend on features
+    registry.clear()
+    registry._features.update(saved)
 
 
 @pytest.fixture

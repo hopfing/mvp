@@ -15,19 +15,13 @@ class TestRunnerIntegration:
     """Integration tests with realistic data."""
 
     @pytest.fixture(autouse=True)
-    def ensure_features_registered(self):
-        """Ensure features are registered before each test.
-
-        Other tests may clear the registry, so we clear it and reload
-        the feature modules to re-run the @feature decorators.
-        """
+    def ensure_features_registered(self, isolated_registry):
+        """Ensure features are registered before each test."""
         import mvp.model.features.h2h
         import mvp.model.features.ranking
         import mvp.model.features.serve
         import mvp.model.features.win_rate
-        from mvp.model.registry import get_registry
 
-        get_registry().clear()
         importlib.reload(mvp.model.features.h2h)
         importlib.reload(mvp.model.features.ranking)
         importlib.reload(mvp.model.features.serve)

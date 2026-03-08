@@ -161,19 +161,15 @@ def matches_parquet(tmp_path: Path, sample_matches_df):
 
 
 @pytest.fixture
-def test_feature_registry():
+def test_feature_registry(isolated_registry):
     """Clear and populate registry with test feature."""
-    registry = get_registry()
-    registry.clear()
-
     @feature(name="test_win_rate", params=["days"], mirror=True)
     def test_win_rate(days: int) -> pl.Expr:
         from mvp.model.primitives import rolling_mean
 
         return rolling_mean("won", days=days, group_by="player_id")
 
-    yield registry
-    registry.clear()
+    yield isolated_registry
 
 
 class TestFeatureEngineCompute:
@@ -286,12 +282,9 @@ class TestFeatureEngineMirroring:
         assert "opp_test_win_rate_30d" not in result.columns
 
     def test_mirror_derived_features(
-        self, matches_parquet: Path, tmp_path: Path
+        self, matches_parquet: Path, tmp_path: Path, isolated_registry
     ):
         """Derived features with mirror=True get opp_* columns via second mirror pass."""
-        registry = get_registry()
-        registry.clear()
-
         # Base feature (no depends_on)
         @feature(name="test_base", params=[], mirror=True)
         def test_base() -> pl.Expr:
@@ -320,23 +313,20 @@ class TestFeatureEngineMirroring:
                 & (pl.col("opp_test_derived_bool") == 1)
             ).cast(pl.Int8)
 
-        try:
-            cache_dir = tmp_path / "cache"
-            engine = FeatureEngine(matches_path=matches_parquet, cache_dir=cache_dir)
+        cache_dir = tmp_path / "cache"
+        engine = FeatureEngine(matches_path=matches_parquet, cache_dir=cache_dir)
 
-            result = engine.compute([
-                "player_test_base",
-                "opp_test_base",
-                "player_test_derived_bool",
-                "opp_test_derived_bool",
-                "player_test_matchup_bool",
-            ])
+        result = engine.compute([
+            "player_test_base",
+            "opp_test_base",
+            "player_test_derived_bool",
+            "opp_test_derived_bool",
+            "player_test_matchup_bool",
+        ])
 
-            assert "player_test_derived_bool" in result.columns
-            assert "opp_test_derived_bool" in result.columns
-            assert "player_test_matchup_bool" in result.columns
-        finally:
-            registry.clear()
+        assert "player_test_derived_bool" in result.columns
+        assert "opp_test_derived_bool" in result.columns
+        assert "player_test_matchup_bool" in result.columns
 
 
 class TestFeatureEngineCaching:
@@ -453,11 +443,8 @@ class TestFeatureEngineCoverageReport:
         assert "null_pct" in player_stats
         assert "total_rows" in player_stats
 
-    def test_coverage_report_computes_correct_stats(self, tmp_path: Path):
+    def test_coverage_report_computes_correct_stats(self, tmp_path: Path, isolated_registry):
         """Coverage report computes correct null statistics."""
-        registry = get_registry()
-        registry.clear()
-
         @feature(name="simple_feature", params=[], mirror=False)
         def simple_feature() -> pl.Expr:
             # Return a column that has some nulls
@@ -491,5 +478,3 @@ class TestFeatureEngineCoverageReport:
         assert stats["null_count"] == 4
         assert stats["null_pct"] == 100.0
         assert stats["total_rows"] == 4
-
-        registry.clear()
