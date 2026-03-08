@@ -4,8 +4,30 @@
 from datetime import date
 from typing import Any, Literal
 
+import polars as pl
 import yaml
 from pydantic import BaseModel, field_validator, model_validator
+
+
+def apply_filters(df: pl.DataFrame, filters: dict[str, Any]) -> pl.DataFrame:
+    """Apply equality, list, and range filters to a DataFrame.
+
+    Filter types by value:
+      - scalar: equality (col == value)
+      - list: membership (col in values)
+      - dict with min/max: range (col >= min, col <= max)
+    """
+    for col, value in filters.items():
+        if isinstance(value, list):
+            df = df.filter(pl.col(col).is_in(value))
+        elif isinstance(value, dict):
+            if "min" in value:
+                df = df.filter(pl.col(col) >= value["min"])
+            if "max" in value:
+                df = df.filter(pl.col(col) <= value["max"])
+        else:
+            df = df.filter(pl.col(col) == value)
+    return df
 
 
 class DateRange(BaseModel):

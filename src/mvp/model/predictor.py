@@ -13,7 +13,7 @@ import polars as pl
 import yaml
 
 from mvp.model.calibration import PlattCalibrator
-from mvp.model.config import EnsembleParams, ExperimentConfig
+from mvp.model.config import EnsembleParams, ExperimentConfig, apply_filters
 from mvp.model.engine import FeatureEngine, get_feature_columns
 from mvp.model.features.elo import surface_elo_expr
 from mvp.model.models import EnsembleModel, get_model
@@ -114,11 +114,7 @@ class ProductionPredictor:
         )
 
         if self.config["active"].get("filters"):
-            for col, value in self.config["active"]["filters"].items():
-                if isinstance(value, list):
-                    df = df.filter(pl.col(col).is_in(value))
-                else:
-                    df = df.filter(pl.col(col) == value)
+            df = apply_filters(df, self.config["active"]["filters"])
 
         # Drop rows without outcomes
         df = df.filter(pl.col("won").is_not_null())
@@ -229,11 +225,7 @@ class ProductionPredictor:
 
         # Apply non-date filters (same as training, minus date range)
         if self.config["active"].get("filters"):
-            for col, value in self.config["active"]["filters"].items():
-                if isinstance(value, list):
-                    df = df.filter(pl.col(col).is_in(value))
-                else:
-                    df = df.filter(pl.col(col) == value)
+            df = apply_filters(df, self.config["active"]["filters"])
 
         # Scope to specific tournaments if requested
         if tournament_keys is not None:

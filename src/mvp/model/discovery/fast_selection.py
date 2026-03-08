@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 
+from mvp.model.config import apply_filters
 from mvp.model.discovery.config import DiscoveryConfig
 from mvp.model.engine import FeatureEngine, get_feature_columns
 from mvp.model.metrics import compute_metrics
@@ -72,11 +73,7 @@ class FastForwardSelector:
         df = engine.compute(self.all_feature_specs)
 
         if self.config.data.filters:
-            for col, value in self.config.data.filters.items():
-                if isinstance(value, list):
-                    df = df.filter(pl.col(col).is_in(value))
-                else:
-                    df = df.filter(pl.col(col) == value)
+            df = apply_filters(df, self.config.data.filters)
 
         dr = self.config.data.date_range
         df = df.filter(

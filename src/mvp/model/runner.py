@@ -11,7 +11,7 @@ import numpy as np
 import polars as pl
 
 from mvp.model.calibration import PlattCalibrator
-from mvp.model.config import EnsembleParams, ExperimentConfig
+from mvp.model.config import EnsembleParams, ExperimentConfig, apply_filters
 from mvp.model.diagnostics import Diagnostics, EnsembleDiagnostics, _compute_calibration_error
 from mvp.model.engine import FeatureEngine, get_feature_columns
 from mvp.model.metrics import compute_metrics
@@ -165,11 +165,7 @@ class ExperimentRunner:
         # These are applied AFTER feature computation so workload features
         # include doubles appearances before filtering to singles-only
         if self.config.data.filters:
-            for col, value in self.config.data.filters.items():
-                if isinstance(value, list):
-                    df = df.filter(pl.col(col).is_in(value))
-                else:
-                    df = df.filter(pl.col(col) == value)
+            df = apply_filters(df, self.config.data.filters)
 
         # Build wide date range df for per-model training (ensemble only)
         df_wide = None
@@ -225,7 +221,13 @@ class ExperimentRunner:
                     logger.log_params({f"model_{k}": v})
             if self.config.data.filters:
                 for k, v in self.config.data.filters.items():
-                    logger.log_params({f"filter_{k}": v})
+                    if isinstance(v, dict):
+                        if "min" in v:
+                            logger.log_params({f"filter_{k}_min": v["min"]})
+                        if "max" in v:
+                            logger.log_params({f"filter_{k}_max": v["max"]})
+                    else:
+                        logger.log_params({f"filter_{k}": v})
             # Log feature list (MLflow truncates long param values, so use one per feature)
             for i, feat in enumerate(feature_cols):
                 logger.log_params({f"feature_{i}": feat})
