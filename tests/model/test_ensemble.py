@@ -577,7 +577,7 @@ class TestEnsembleRunnerIntegration:
             str(ensemble_path)
         )
 
-        specs, base_specs, date_ranges, meta_indices = runner._resolve_ensemble()
+        specs, base_specs, date_ranges, meta_indices, _ = runner._resolve_ensemble()
 
         assert specs == ["elo", "serve"]
         assert len(base_specs) == 2
@@ -631,14 +631,71 @@ class TestEnsembleRunnerIntegration:
         runner.config_path = ensemble_path
         runner.config = ExperimentConfig.from_file(str(ensemble_path))
 
-        _, _, date_ranges, _ = runner._resolve_ensemble()
+        _, _, date_ranges, _, _ = runner._resolve_ensemble()
 
         assert len(date_ranges) == 2
         assert date_ranges[0].start == date(2010, 1, 1)
         assert date_ranges[1].start == date(2020, 1, 1)
 
-    def test_resolve_ensemble_warns_on_filter_mismatch(self, tmp_path):
-        """Warning emitted when base config filters differ from ensemble."""
+    def test_resolve_ensemble_returns_model_filters(self, tmp_path):
+        """Filters from base configs are returned, None when matching ensemble."""
+        base_filtered = {
+            "data": {
+                "date_range": {"start": "2020-01-01", "end": "2025-12-31"},
+                "filters": {"elo_surface_diff": {"min": -75, "max": 75}},
+            },
+            "features": {"include": ["elo"]},
+            "model": {"type": "logistic"},
+        }
+        base_same = {
+            "data": {
+                "date_range": {"start": "2020-01-01", "end": "2025-12-31"},
+                "filters": {"draw_type": "singles"},
+            },
+            "features": {"include": ["elo"]},
+            "model": {"type": "logistic"},
+        }
+        base_filtered_path = tmp_path / "base_filtered.yaml"
+        base_same_path = tmp_path / "base_same.yaml"
+        with open(base_filtered_path, "w") as f:
+            yaml.dump(base_filtered, f)
+        with open(base_same_path, "w") as f:
+            yaml.dump(base_same, f)
+
+        ensemble = {
+            "data": {
+                "date_range": {"start": "2020-01-01", "end": "2025-12-31"},
+                "filters": {"draw_type": "singles"},
+            },
+            "model": {
+                "type": "ensemble",
+                "params": {
+                    "strategy": "average",
+                    "base_models": [
+                        {"config": str(base_filtered_path)},
+                        {"config": str(base_same_path)},
+                    ],
+                },
+            },
+        }
+        ensemble_path = tmp_path / "ensemble.yaml"
+        with open(ensemble_path, "w") as f:
+            yaml.dump(ensemble, f)
+
+        from mvp.model.runner import ExperimentRunner
+
+        runner = ExperimentRunner.__new__(ExperimentRunner)
+        runner.config_path = ensemble_path
+        runner.config = ExperimentConfig.from_file(str(ensemble_path))
+
+        _, _, _, _, model_filters = runner._resolve_ensemble()
+
+        assert len(model_filters) == 2
+        assert model_filters[0] == {"elo_surface_diff": {"min": -75, "max": 75}}
+        assert model_filters[1] is None
+
+    def test_resolve_ensemble_no_warning_on_filter_mismatch(self, tmp_path):
+        """No warning when base config filters differ — per-model filters expected."""
         base = {
             "data": {
                 "date_range": {"start": "2020-01-01", "end": "2025-12-31"},
@@ -679,11 +736,11 @@ class TestEnsembleRunnerIntegration:
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
             runner._resolve_ensemble()
-            assert len(w) == 1
-            assert "filters" in str(w[0].message)
+            filter_warnings = [x for x in w if "filters" in str(x.message)]
+            assert len(filter_warnings) == 0
 
-    def test_resolve_ensemble_no_warning_when_filters_match(self, tmp_path):
-        """No warning when base and ensemble filters are the same."""
+    def test_resolve_ensemble_filters_none_when_matching(self, tmp_path):
+        """Matching filters produce None entry in model_filters."""
         base = {
             "data": {
                 "date_range": {"start": "2020-01-01", "end": "2025-12-31"},
@@ -713,19 +770,14 @@ class TestEnsembleRunnerIntegration:
         with open(ensemble_path, "w") as f:
             yaml.dump(ensemble, f)
 
-        import warnings
-
         from mvp.model.runner import ExperimentRunner
 
         runner = ExperimentRunner.__new__(ExperimentRunner)
         runner.config_path = ensemble_path
         runner.config = ExperimentConfig.from_file(str(ensemble_path))
 
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            runner._resolve_ensemble()
-            filter_warnings = [x for x in w if "filters" in str(x.message)]
-            assert len(filter_warnings) == 0
+        _, _, _, _, model_filters = runner._resolve_ensemble()
+        assert model_filters == [None]
 
 
 class TestEnsemblePerModelData:
@@ -808,6 +860,77 @@ class TestEnsemblePerModelData:
 
         # Should differ (model 1 trained on different data)
         assert not np.allclose(probs_default, probs_mixed)
+
+    def test_per_model_filters_reduce_training_data(self, sample_data):
+        """Model with restrictive filter trains on fewer rows."""
+        X, y = sample_data
+        # Add a "filter column" as the last feature
+        filter_col = np.concatenate([np.ones(100), np.zeros(100)])
+        X_with_filter = np.column_stack([X, filter_col])
+
+        # Model 0 uses all data, model 1 uses filtered (fewer rows)
+        model = EnsembleModel({"strategy": "average"})
+        model.configure([
+            _spec("logistic", [0, 1, 2]),
+            _spec("logistic", [0, 3, 4]),
+        ])
+
+        # Simulate what runner does: filter training data for model 1
+        mask = filter_col == 1
+        X_filtered = X_with_filter[mask]
+        y_filtered = y[mask]
+
+        model.fit(
+            X_with_filter, y,
+            per_model_data=[None, (X_filtered, y_filtered)],
+        )
+
+        # Model 1 trained on 100 rows, model 0 on 200
+        # Verify predictions differ from all-data baseline
+        model_baseline = EnsembleModel({"strategy": "average"})
+        model_baseline.configure([
+            _spec("logistic", [0, 1, 2]),
+            _spec("logistic", [0, 3, 4]),
+        ])
+        model_baseline.fit(X_with_filter, y)
+
+        assert not np.allclose(
+            model.predict_proba(X_with_filter),
+            model_baseline.predict_proba(X_with_filter),
+        )
+
+    def test_per_model_filters_combined_with_date_range(self, sample_data):
+        """per_model_data supports both date range and filter differences."""
+        X, y = sample_data
+        model = EnsembleModel({"strategy": "average"})
+        model.configure([
+            _spec("logistic", [0, 1, 2]),
+            _spec("logistic", [0, 3, 4]),
+        ])
+
+        # Model 0: wider date range (more data), model 1: filtered (fewer rows)
+        X_wider = np.vstack([X, X[:50]])
+        y_wider = np.concatenate([y, y[:50]])
+        X_filtered = X[:80]
+        y_filtered = y[:80]
+
+        model.fit(
+            X, y,
+            per_model_data=[(X_wider, y_wider), (X_filtered, y_filtered)],
+        )
+
+        # Both models got custom data — predictions should differ from default
+        model_default = EnsembleModel({"strategy": "average"})
+        model_default.configure([
+            _spec("logistic", [0, 1, 2]),
+            _spec("logistic", [0, 3, 4]),
+        ])
+        model_default.fit(X, y)
+
+        assert not np.allclose(
+            model.predict_proba(X),
+            model_default.predict_proba(X),
+        )
 
 
 class TestStacking:

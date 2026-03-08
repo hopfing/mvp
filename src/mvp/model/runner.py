@@ -75,15 +75,16 @@ class ExperimentRunner:
 
     def _resolve_ensemble(
         self,
-    ) -> tuple[list[str], list[dict[str, Any]], list["DateRange"], list[int]]:
+    ) -> tuple[list[str], list[dict[str, Any]], list["DateRange"], list[int], list[dict[str, Any] | None]]:
         """Resolve ensemble config into union features and base model specs.
 
         Returns:
             (union_feature_specs, base_model_specs, model_date_ranges,
-             meta_feature_indices) where each spec has type, params, weight,
-             feature_indices, model_date_ranges[i] is the DateRange from
-             base config i, and meta_feature_indices maps meta-features
-             into the union column list.
+             meta_feature_indices, model_filters) where each spec has type,
+             params, weight, feature_indices, model_date_ranges[i] is the
+             DateRange from base config i, meta_feature_indices maps
+             meta-features into the union column list, and model_filters[i]
+             is the filter dict from base config i (or None if matching ensemble).
         """
         from mvp.model.config import DateRange
 
@@ -92,6 +93,7 @@ class ExperimentRunner:
         all_feature_specs: list[str] = []
         base_model_specs: list[dict[str, Any]] = []
         model_date_ranges: list[DateRange] = []
+        model_filters: list[dict[str, Any] | None] = []
 
         for ref in ensemble_params.base_models:
             base_config = ExperimentConfig.from_file(ref.config)
@@ -107,12 +109,10 @@ class ExperimentRunner:
                 "feature_specs": base_config.features.include,
             })
             model_date_ranges.append(base_config.data.date_range)
-
             if base_config.data.filters != self.config.data.filters:
-                warnings.warn(
-                    f"Base model '{ref.config}' has filters {base_config.data.filters} "
-                    f"but ensemble filters {self.config.data.filters} will be used"
-                )
+                model_filters.append(base_config.data.filters)
+            else:
+                model_filters.append(None)
 
         for spec in ensemble_params.meta_features:
             if spec not in all_feature_specs:
@@ -127,7 +127,7 @@ class ExperimentRunner:
         meta_feature_cols = get_feature_columns(ensemble_params.meta_features)
         meta_feature_indices = [union_cols.index(c) for c in meta_feature_cols]
 
-        return all_feature_specs, base_model_specs, model_date_ranges, meta_feature_indices
+        return all_feature_specs, base_model_specs, model_date_ranges, meta_feature_indices, model_filters
 
     def run(self) -> dict[str, Any]:
         """Execute the experiment.
@@ -149,9 +149,10 @@ class ExperimentRunner:
         is_ensemble = self.config.model.type == "ensemble"
         base_model_specs: list[dict[str, Any]] | None = None
         model_date_ranges: list | None = None
+        model_filters: list[dict[str, Any] | None] | None = None
         meta_feature_indices: list[int] = []
         if is_ensemble:
-            feature_specs, base_model_specs, model_date_ranges, meta_feature_indices = (
+            feature_specs, base_model_specs, model_date_ranges, meta_feature_indices, model_filters = (
                 self._resolve_ensemble()
             )
         else:
@@ -166,6 +167,15 @@ class ExperimentRunner:
         # include doubles appearances before filtering to singles-only
         if self.config.data.filters:
             df = apply_filters(df, self.config.data.filters)
+
+        # Determine if per-model custom training is needed
+        needs_per_model = False
+        if is_ensemble and model_date_ranges and model_filters:
+            for dr, filt in zip(model_date_ranges, model_filters):
+                if dr.start < self.config.data.date_range.start:
+                    needs_per_model = True
+                if filt is not None:
+                    needs_per_model = True
 
         # Build wide date range df for per-model training (ensemble only)
         df_wide = None
@@ -261,17 +271,24 @@ class ExperimentRunner:
                 X_train = np.where(np.isnan(X_train), medians, X_train)
                 X_test = np.where(np.isnan(X_test), medians, X_test)
 
-                # Build per-model training data for ensemble date ranges
+                # Build per-model training data for ensemble date/filter differences
                 per_model_data = None
-                if is_ensemble and df_wide is not None and model_date_ranges:
+                if is_ensemble and needs_per_model and model_date_ranges and model_filters:
                     test_start_date = test_df["effective_match_date"].min()
                     per_model_data = []
-                    for dr in model_date_ranges:
-                        if dr.start < self.config.data.date_range.start:
-                            model_train_df = df_wide.filter(
-                                (pl.col("effective_match_date") >= dr.start)
-                                & (pl.col("effective_match_date") < test_start_date)
-                            )
+                    for dr, filt in zip(model_date_ranges, model_filters):
+                        has_wider_dates = dr.start < self.config.data.date_range.start
+                        has_custom_filters = filt is not None
+                        if has_wider_dates or has_custom_filters:
+                            if has_wider_dates and df_wide is not None:
+                                model_train_df = df_wide.filter(
+                                    (pl.col("effective_match_date") >= dr.start)
+                                    & (pl.col("effective_match_date") < test_start_date)
+                                )
+                            else:
+                                model_train_df = train_df
+                            if has_custom_filters:
+                                model_train_df = apply_filters(model_train_df, filt)
                             X_m = model_train_df.select(
                                 pl.col(c).cast(pl.Float64) for c in feature_cols
                             ).to_numpy()
