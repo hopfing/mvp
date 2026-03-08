@@ -121,6 +121,18 @@ def print_run_summary(results: dict[str, Any], name: str | None = None) -> None:
             print(f"  {low:.0%}-{high:.0%}  pred={b['predicted_mean']:.1%}  "
                   f"actual={b['actual']:.1%}  err={b['error']:.1%}  n={b['n']:,}  "
                   f"errors={n_bucket_errors:,}{marker}")
+        under = sum(1 for b in buckets if b["predicted_mean"] < b["actual"])
+        over = sum(1 for b in buckets if b["predicted_mean"] > b["actual"])
+        tied = len(buckets) - under - over
+        parts = []
+        if under:
+            parts.append(f"{under} underconfident")
+        if over:
+            parts.append(f"{over} overconfident")
+        if tied:
+            parts.append(f"{tied} exact")
+        label = "UNDERCONFIDENT" if under > over else "OVERCONFIDENT" if over > under else "BALANCED"
+        print(f"  Direction: {label} ({', '.join(parts)})")
 
     # High-confidence errors
     errors = diagnostics.errors
