@@ -92,7 +92,7 @@ class MatchCentreExtractor(BaseExtractor):
         match_ids = self._get_match_ids(tournament)
         if not match_ids:
             logger.info("No match IDs for %s", tournament.logging_id)
-            return
+            return 0
 
         # Determine which matches need fetching for each data type
         to_fetch_by_type = {}

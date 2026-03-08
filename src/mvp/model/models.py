@@ -28,16 +28,30 @@ class XGBoostModel(BaseModel):
         self.params = {
             "objective": "binary:logistic",
             "eval_metric": "logloss",
+            "n_jobs": -1,
             "random_state": 42,
             **params,
         }
         self._model = None
 
-    def fit(self, X: np.ndarray, y: np.ndarray, sample_weight: np.ndarray | None = None) -> None:
+    def fit(
+        self,
+        X: np.ndarray,
+        y: np.ndarray,
+        sample_weight: np.ndarray | None = None,
+        eval_set: list[tuple[np.ndarray, np.ndarray]] | None = None,
+        early_stopping_rounds: int | None = 10,
+    ) -> None:
         import xgboost as xgb
 
         self._model = xgb.XGBClassifier(**self.params)
-        self._model.fit(X, y, sample_weight=sample_weight)
+        fit_kwargs: dict[str, Any] = {"sample_weight": sample_weight}
+        if eval_set is not None:
+            fit_kwargs["eval_set"] = eval_set
+            fit_kwargs["verbose"] = False
+            if early_stopping_rounds is not None:
+                self._model.set_params(early_stopping_rounds=early_stopping_rounds)
+        self._model.fit(X, y, **fit_kwargs)
 
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
         if self._model is None:
