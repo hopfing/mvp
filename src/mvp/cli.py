@@ -605,16 +605,9 @@ def cmd_live(args: argparse.Namespace) -> int:
             n = dk_future.result(timeout=30)
             if n:
                 print(f"Fetched {n} DK moneyline odds entries")
-            from mvp.integrations.odds_matching import (
-                get_latest_odds,
-                load_aliases,
-                match_odds_to_predictions,
-            )
-            odds_path = Path("data/stage/draftkings/moneyline.parquet")
-            aliases_path = Path(__file__).resolve().parent / "draftkings" / "player_aliases.yaml"
-            odds_df = get_latest_odds(odds_path)
-            aliases = load_aliases(aliases_path)
-            match_result = match_odds_to_predictions(odds_df, predictions, aliases)
+            from mvp.draftkings.matcher import DraftKingsOddsMatcher
+            matcher = DraftKingsOddsMatcher()
+            match_result = matcher.match(predictions)
             odds_map = match_result.odds or None
             if odds_map:
                 print(f"Matched odds for {len(odds_map)}/{len(predictions)} predictions")
@@ -622,7 +615,7 @@ def cmd_live(args: argparse.Namespace) -> int:
                 print(f"Unmatched DK names ({len(match_result.unmatched_names)}):")
                 for name in sorted(match_result.unmatched_names):
                     print(f"  {name}")
-                print(f"Add aliases to: {aliases_path}")
+                print(f"Add aliases to: {matcher.ALIASES_PATH}")
         except Exception as e:
             logger.error("DK odds matching failed: %s", e)
             print(f"Warning: DK odds fetch/match failed ({e})")
