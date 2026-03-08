@@ -224,10 +224,12 @@ class TestLoadProductionModel:
         )
         predictor.train()
 
-        model, medians, feature_cols = predictor.load()
+        model, medians, feature_cols, calibrator = predictor.load()
         assert model is not None
         assert len(medians) == 4
         assert len(feature_cols) == 4
+        assert calibrator is not None
+        assert calibrator.is_fitted
 
     def test_load_without_train_raises(self, production_config, sample_matches, tmp_path):
         from mvp.model.predictor import ProductionPredictor

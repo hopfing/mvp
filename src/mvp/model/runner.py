@@ -10,8 +10,9 @@ from typing import Any
 import numpy as np
 import polars as pl
 
+from mvp.model.calibration import PlattCalibrator
 from mvp.model.config import EnsembleParams, ExperimentConfig
-from mvp.model.diagnostics import Diagnostics, EnsembleDiagnostics
+from mvp.model.diagnostics import Diagnostics, EnsembleDiagnostics, _compute_calibration_error
 from mvp.model.engine import FeatureEngine, get_feature_columns
 from mvp.model.metrics import compute_metrics
 from mvp.model.mlflow_logger import ExperimentLogger
@@ -393,6 +394,35 @@ class ExperimentRunner:
                     pred_dict["y_prob"] = y_prob_stacked[offset:offset + n]
                     offset += n
 
+            # Platt scaling calibration on concatenated OOF predictions
+            combined_y_true_oof = np.concatenate(
+                [p["y_true"] for p in all_predictions]
+            )
+            combined_y_prob_oof = np.concatenate(
+                [p["y_prob"] for p in all_predictions]
+            )
+            raw_metrics = compute_metrics(combined_y_true_oof, combined_y_prob_oof)
+            raw_metrics["calibration_error"] = _compute_calibration_error(
+                combined_y_true_oof, combined_y_prob_oof
+            )
+
+            calibrator = PlattCalibrator()
+            calibrator.fit(combined_y_prob_oof, combined_y_true_oof)
+
+            # Apply calibration to each fold's predictions
+            for pred_dict in all_predictions:
+                pred_dict["y_prob"] = calibrator.transform(pred_dict["y_prob"])
+
+            # Recompute avg_metrics on calibrated predictions
+            calibrated_y_prob = np.concatenate(
+                [p["y_prob"] for p in all_predictions]
+            )
+            avg_metrics = compute_metrics(combined_y_true_oof, calibrated_y_prob)
+
+            # Merge raw (pre-calibration) metrics with raw_ prefix
+            for k, v in raw_metrics.items():
+                avg_metrics[f"raw_{k}"] = v
+
             # Compute diagnostics
             diagnostics = Diagnostics()
             diagnostic_results = diagnostics.compute_all(all_predictions)
@@ -458,6 +488,11 @@ class ExperimentRunner:
                 logger.log_metrics(avg_metrics)
                 logger.log_metrics({f"train_{k}": v for k, v in avg_train_metrics.items()})
                 logger.log_metrics(diagnostic_results.metrics)
+                if calibrator.is_fitted:
+                    logger.log_params({
+                        "platt_slope": f"{calibrator.slope:.6f}",
+                        "platt_intercept": f"{calibrator.intercept:.6f}",
+                    })
 
                 # Log diagnostic JSON artifact
                 import tempfile
@@ -481,6 +516,7 @@ class ExperimentRunner:
             "feature_columns": feature_cols,
             "run_id": run_id,
             "diagnostics": diagnostic_results,
+            "calibrator": calibrator,
             "last_fold_model": model,
             "last_fold_X_test": X_test,
             "last_fold_y_test": y_test,

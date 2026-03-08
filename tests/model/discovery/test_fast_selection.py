@@ -224,7 +224,7 @@ class TestFastForwardSelector:
             log_to_mlflow=False,
         )
         result = runner.run()
-        runner_metric = result["metrics"]["log_loss"]
+        runner_metric = result["metrics"]["raw_log_loss"]
 
         assert fast_metric == pytest.approx(runner_metric, abs=1e-10)
 

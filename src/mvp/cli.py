@@ -113,7 +113,11 @@ def print_run_summary(results: dict[str, Any], name: str | None = None) -> None:
     if cal_data and cal_data.get("buckets"):
         buckets = cal_data["buckets"]
         worst_err = max(b["error"] for b in buckets)
-        print(f"\nCalibration ({cal_data['calibration_error']:.1%} mean error):")
+        raw_cal = metrics.get("raw_calibration_error")
+        if raw_cal is not None:
+            print(f"\nCalibration ({cal_data['calibration_error']:.1%} mean error, {raw_cal:.1%} raw):")
+        else:
+            print(f"\nCalibration ({cal_data['calibration_error']:.1%} mean error):")
         for b in buckets:
             low, high = b["range"]
             marker = " <- worst" if b["error"] == worst_err else ""
@@ -133,6 +137,10 @@ def print_run_summary(results: dict[str, Any], name: str | None = None) -> None:
             parts.append(f"{tied} exact")
         label = "UNDERCONFIDENT" if under > over else "OVERCONFIDENT" if over > under else "BALANCED"
         print(f"  Direction: {label} ({', '.join(parts)})")
+
+        calibrator = results.get("calibrator")
+        if calibrator is not None and calibrator.is_fitted:
+            print(f"  Platt: slope={calibrator.slope:.4f}, intercept={calibrator.intercept:.4f}")
 
     # High-confidence errors
     errors = diagnostics.errors

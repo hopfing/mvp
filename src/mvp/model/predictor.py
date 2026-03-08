@@ -12,6 +12,7 @@ import numpy as np
 import polars as pl
 import yaml
 
+from mvp.model.calibration import PlattCalibrator
 from mvp.model.config import EnsembleParams, ExperimentConfig
 from mvp.model.engine import FeatureEngine, get_feature_columns
 from mvp.model.features.elo import surface_elo_expr
@@ -140,6 +141,26 @@ class ProductionPredictor:
             model.configure(base_model_specs)
         model.fit(X, y)
 
+        # Fit Platt calibrator via 5-fold CV on OOF predictions
+        if is_ensemble:
+            calibrator = PlattCalibrator()  # unfitted no-op for ensembles
+        else:
+            from sklearn.model_selection import StratifiedKFold
+
+            oof_probs = np.zeros(len(y))
+            skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+            for train_idx, val_idx in skf.split(X, y):
+                fold_model = get_model(config.model.type, config.model.params or {})
+                fold_model.fit(X[train_idx], y[train_idx])
+                oof_probs[val_idx] = fold_model.predict_proba(X[val_idx])
+            calibrator = PlattCalibrator()
+            calibrator.fit(oof_probs, y)
+            logger.info(
+                "Platt calibrator: slope=%.4f, intercept=%.4f",
+                calibrator.slope,
+                calibrator.intercept,
+            )
+
         # Save artifact
         artifact_path = Path(self.config["active"]["artifact"])
         artifact_path.parent.mkdir(parents=True, exist_ok=True)
@@ -148,6 +169,7 @@ class ProductionPredictor:
                 "model": model,
                 "medians": medians,
                 "feature_cols": feature_cols,
+                "calibrator": calibrator,
             },
             artifact_path,
         )
@@ -159,11 +181,11 @@ class ProductionPredictor:
 
         logger.info("Model saved to %s", artifact_path)
 
-    def load(self) -> tuple[Any, np.ndarray, list[str]]:
+    def load(self) -> tuple[Any, np.ndarray, list[str], PlattCalibrator | None]:
         """Load the trained production model.
 
         Returns:
-            Tuple of (model, medians, feature_cols).
+            Tuple of (model, medians, feature_cols, calibrator).
 
         Raises:
             FileNotFoundError: If no trained artifact exists.
@@ -175,7 +197,10 @@ class ProductionPredictor:
             )
 
         artifact = joblib.load(artifact_path)
-        return artifact["model"], artifact["medians"], artifact["feature_cols"]
+        calibrator = artifact.get("calibrator")
+        if calibrator is None:
+            logger.warning("No calibrator in artifact — predictions will be uncalibrated")
+        return artifact["model"], artifact["medians"], artifact["feature_cols"], calibrator
 
     def predict(
         self, tournament_keys: list[tuple[str, int]] | None = None
@@ -188,7 +213,7 @@ class ProductionPredictor:
         Returns:
             DataFrame with one row per match, containing prediction columns.
         """
-        model, medians, feature_cols = self.load()
+        model, medians, feature_cols, calibrator = self.load()
         config = self._experiment_config
         engine = FeatureEngine(
             matches_path=self.matches_path, cache_dir=self.cache_dir
@@ -233,6 +258,8 @@ class ProductionPredictor:
         ).to_numpy()
         X = np.where(np.isnan(X), medians, X)
         probs = model.predict_proba(X)
+        if calibrator is not None:
+            probs = calibrator.transform(probs)
 
         # Add probabilities to pending matches
         pending = pending.with_columns(pl.Series("_p1_win_prob", probs))
