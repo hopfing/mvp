@@ -213,7 +213,30 @@ class ExperimentRunner:
                 "validation_type": self.config.validation.type,
                 "n_features": len(feature_cols),
                 "n_splits": self.config.validation.n_splits,
+                "date_range_start": str(self.config.data.date_range.start),
+                "date_range_end": str(self.config.data.date_range.end),
+                "n_rows": len(df),
             })
+            if self.config.model.params:
+                for k, v in self.config.model.params.items():
+                    if k == "base_models":
+                        continue
+                    logger.log_params({f"model_{k}": v})
+            if self.config.data.filters:
+                for k, v in self.config.data.filters.items():
+                    logger.log_params({f"filter_{k}": v})
+            # Log feature list (MLflow truncates long param values, so use one per feature)
+            for i, feat in enumerate(feature_cols):
+                logger.log_params({f"feature_{i}": feat})
+            # Log config YAML as artifact
+            logger.log_artifact(str(self.config_path))
+            # Log ensemble base model configs as artifacts
+            if is_ensemble and self.config.model.params:
+                ens = EnsembleParams.model_validate(self.config.model.params)
+                for i, bm in enumerate(ens.base_models):
+                    bm_path = self.config_path.parent / bm.config
+                    if bm_path.exists():
+                        logger.log_artifact(str(bm_path))
 
         try:
             for fold_idx, (train_idx, test_idx) in enumerate(splitter.split(df)):
