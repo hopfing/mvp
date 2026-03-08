@@ -37,6 +37,16 @@ RANKING_BUCKETS: list[tuple[str, int, int | None]] = [
     ("201+", 201, None),
 ]
 
+DIAGNOSTIC_CONDITIONS: list[tuple[str, str, Any]] = [
+    ("Large Elo gap (>150)", "player_elo_surface_diff", lambda a: np.abs(a) > 150),
+    ("Medium Elo gap (75-150)", "player_elo_surface_diff", lambda a: (np.abs(a) >= 75) & (np.abs(a) <= 150)),
+    ("Small Elo gap (<75)", "player_elo_surface_diff", lambda a: np.abs(a) < 75),
+    ("Serve mismatch (>75)", "player_svc_elo_matchup", lambda a: np.abs(a) > 75),
+    ("Return mismatch (>75)", "player_ret_elo_matchup", lambda a: np.abs(a) > 75),
+    ("Age gap >6 years", "player_age_diff", lambda a: np.abs(a) > 6),
+    ("High uncertainty (RD>150)", "elo_rd_sum", lambda a: a > 150),
+]
+
 
 def _compute_metrics_for_segment(
     y_true: np.ndarray, y_prob: np.ndarray, include_calibration: bool = False
@@ -437,6 +447,36 @@ class Diagnostics:
             "temporal_drift": temporal_drift,
         }
 
+    def _error_conditions(
+        self, df: pl.DataFrame, y_true: np.ndarray, y_prob: np.ndarray
+    ) -> dict[str, Any]:
+        """Analyze model errors grouped by feature-based conditions."""
+        y_pred = (y_prob >= 0.5).astype(int)
+        is_error = y_pred != y_true
+        total_errors = int(is_error.sum())
+
+        conditions = []
+        for label, col_name, predicate_fn in DIAGNOSTIC_CONDITIONS:
+            if col_name not in df.columns:
+                continue
+            col_vals = df[col_name].fill_null(0).to_numpy().astype(float)
+            mask = predicate_fn(col_vals)
+            n_matches = int(mask.sum())
+            if n_matches == 0:
+                continue
+            n_errors = int((mask & is_error).sum())
+            accuracy = 1.0 - (n_errors / n_matches)
+            error_share = n_errors / total_errors if total_errors > 0 else 0.0
+            conditions.append({
+                "label": label,
+                "n_matches": n_matches,
+                "accuracy": accuracy,
+                "n_errors": n_errors,
+                "error_share": error_share,
+            })
+
+        return {"conditions": conditions, "total_errors": total_errors}
+
     def compute_all(
         self, predictions: list[dict[str, Any]]
     ) -> "DiagnosticResults":
@@ -475,12 +515,16 @@ class Diagnostics:
         temporal = self._temporal_stability(
             combined_df, combined_y_true, combined_y_prob
         )
+        error_conditions = self._error_conditions(
+            combined_df, combined_y_true, combined_y_prob
+        )
 
         return DiagnosticResults(
             segments=segments,
             calibration=calibration,
             errors=errors,
             temporal=temporal,
+            error_conditions=error_conditions,
         )
 
 
@@ -495,6 +539,9 @@ class EnsembleDiagnostics:
         weights: np.ndarray,
         base_names: list[str],
         strategy: str = "average",
+        meta_intercept: float | None = None,
+        meta_coefficients: dict[str, float] | None = None,
+        combined_df: pl.DataFrame | None = None,
     ) -> dict[str, Any]:
         """Compute all ensemble diagnostics.
 
@@ -505,6 +552,9 @@ class EnsembleDiagnostics:
             weights: Normalized weights for each base model.
             base_names: Names/paths of base model configs.
             strategy: Ensemble combining strategy.
+            meta_intercept: Stacking meta-model intercept (stacking only).
+            meta_coefficients: Stacking meta-model coefficients (stacking only).
+            combined_df: Combined DataFrame for correction analysis.
 
         Returns:
             Dict with per_model_metrics, correlation, agreement, contribution.
@@ -530,7 +580,47 @@ class EnsembleDiagnostics:
             y_true, per_model_preds, weights, base_names, strategy
         )
 
+        if strategy == "stacking" and meta_coefficients is not None:
+            result["meta_intercept"] = meta_intercept
+            result["meta_coefficients"] = meta_coefficients
+            result["meta_feature_names"] = list(meta_coefficients.keys())
+
+        if combined_df is not None:
+            result["correction_analysis"] = self._correction_analysis(
+                y_true, per_model_preds[0], y_prob_ensemble, combined_df
+            )
+
         return result
+
+    def _correction_analysis(
+        self,
+        y_true: np.ndarray,
+        primary_preds: np.ndarray,
+        ensemble_preds: np.ndarray,
+        df: pl.DataFrame,
+    ) -> dict[str, Any]:
+        """Compare primary model vs ensemble accuracy per condition."""
+        conditions = []
+        for label, col_name, predicate_fn in DIAGNOSTIC_CONDITIONS:
+            if col_name not in df.columns:
+                continue
+            col_vals = df[col_name].fill_null(0).to_numpy().astype(float)
+            mask = predicate_fn(col_vals)
+            n_matches = int(mask.sum())
+            if n_matches == 0:
+                continue
+            primary_correct = ((primary_preds[mask] >= 0.5).astype(int) == y_true[mask])
+            ensemble_correct = ((ensemble_preds[mask] >= 0.5).astype(int) == y_true[mask])
+            primary_acc = float(primary_correct.mean())
+            ensemble_acc = float(ensemble_correct.mean())
+            conditions.append({
+                "label": label,
+                "n_matches": n_matches,
+                "primary_accuracy": primary_acc,
+                "ensemble_accuracy": ensemble_acc,
+                "improvement": ensemble_acc - primary_acc,
+            })
+        return {"conditions": conditions}
 
     def _per_model_metrics(
         self,
@@ -692,7 +782,9 @@ class EnsembleDiagnostics:
         results: dict[str, Any] = {}
 
         full_preds = np.array(per_model_preds)
-        if strategy == "weighted_average":
+        if strategy == "stacking":
+            ensemble_prob = self._stacking_predict(full_preds, y_true)
+        elif strategy == "weighted_average":
             ensemble_prob = np.average(full_preds, axis=0, weights=weights)
         else:
             ensemble_prob = np.mean(full_preds, axis=0)
@@ -711,7 +803,9 @@ class EnsembleDiagnostics:
 
             remaining_idx = [j for j in range(len(per_model_preds)) if j != i]
             remaining_preds = full_preds[remaining_idx]
-            if strategy == "weighted_average":
+            if strategy == "stacking":
+                loo_prob = self._stacking_predict(remaining_preds, y_true)
+            elif strategy == "weighted_average":
                 remaining_weights = weights[remaining_idx]
                 remaining_weights = remaining_weights / remaining_weights.sum()
                 loo_prob = np.average(
@@ -734,6 +828,17 @@ class EnsembleDiagnostics:
 
         return results
 
+    def _stacking_predict(
+        self, preds: np.ndarray, y_true: np.ndarray
+    ) -> np.ndarray:
+        """Fit a fresh logistic regression on preds and return predictions."""
+        from sklearn.linear_model import LogisticRegression
+
+        X = preds.T  # (n_samples, n_models)
+        lr = LogisticRegression(max_iter=1000, random_state=42)
+        lr.fit(X, y_true)
+        return lr.predict_proba(X)[:, 1]
+
 
 @dataclass
 class DiagnosticResults:
@@ -743,6 +848,7 @@ class DiagnosticResults:
     calibration: dict[str, Any]
     errors: dict[str, Any]
     temporal: dict[str, Any]
+    error_conditions: dict[str, Any] | None = None
     ensemble: dict[str, Any] | None = None
 
     @property
@@ -819,6 +925,8 @@ class DiagnosticResults:
             "errors": self.errors,
             "temporal": self.temporal,
         }
+        if self.error_conditions is not None:
+            data["error_conditions"] = self.error_conditions
         if self.ensemble is not None:
             data["ensemble"] = self.ensemble
         return json.dumps(data, indent=2, default=str)

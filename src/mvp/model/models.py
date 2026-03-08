@@ -122,6 +122,8 @@ class EnsembleModel(BaseModel):
         strategy = params.get("strategy", "average")
         self._strategy = strategy
         self._fitted = False
+        self._meta_model = None
+        self._meta_feature_names: list[str] = []
 
     def configure(self, base_model_specs: list[dict[str, Any]]) -> None:
         """Set up sub-models from resolved specs.
@@ -155,10 +157,37 @@ class EnsembleModel(BaseModel):
                 sub.fit(X[:, indices], y)
         self._fitted = True
 
+    def set_meta_feature_names(self, names: list[str]) -> None:
+        """Store base model names for coefficient reporting."""
+        self._meta_feature_names = names
+
+    def fit_meta(self, X_meta: np.ndarray, y_meta: np.ndarray) -> None:
+        """Fit stacking meta-model on out-of-fold base predictions."""
+        if X_meta.shape[0] < 2:
+            raise ValueError("Need at least 2 OOF samples to fit meta-model")
+        from sklearn.linear_model import LogisticRegression
+
+        self._meta_model = LogisticRegression(max_iter=1000, random_state=42)
+        self._meta_model.fit(X_meta, y_meta)
+
+    def get_meta_coefficients(self) -> tuple[float, dict[str, float]]:
+        """Return meta-model intercept and per-base-model coefficients."""
+        if self._meta_model is None:
+            raise RuntimeError("Meta-model not fitted")
+        intercept = float(self._meta_model.intercept_[0])
+        coefs = {}
+        for name, coef in zip(self._meta_feature_names, self._meta_model.coef_[0]):
+            coefs[name] = float(coef)
+        return intercept, coefs
+
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
         if not self._fitted:
             raise RuntimeError("Model not fitted")
         preds = self._predict_all(X)
+        if self._strategy == "stacking":
+            if self._meta_model is None:
+                raise RuntimeError("Meta-model not fitted. Call fit_meta() first.")
+            return self._meta_model.predict_proba(np.column_stack(preds))[:, 1]
         if self._strategy == "weighted_average":
             return np.average(preds, axis=0, weights=self._weights)
         return np.mean(preds, axis=0)

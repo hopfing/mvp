@@ -6,12 +6,19 @@ import numpy as np
 import pytest
 import yaml
 
+import polars as pl
+
 from mvp.model.config import (
     EnsembleBaseModelRef,
     EnsembleParams,
     ExperimentConfig,
 )
-from mvp.model.diagnostics import DiagnosticResults, EnsembleDiagnostics
+from mvp.model.diagnostics import (
+    DIAGNOSTIC_CONDITIONS,
+    DiagnosticResults,
+    Diagnostics,
+    EnsembleDiagnostics,
+)
 from mvp.model.models import EnsembleModel, get_model
 
 
@@ -794,3 +801,246 @@ class TestEnsemblePerModelData:
 
         # Should differ (model 1 trained on different data)
         assert not np.allclose(probs_default, probs_mixed)
+
+
+class TestStacking:
+    def test_stacking_config_rejects_weights(self):
+        with pytest.raises(ValueError, match="weight is not allowed"):
+            EnsembleParams(
+                strategy="stacking",
+                base_models=[
+                    EnsembleBaseModelRef(config="a.yaml", weight=2.0),
+                    EnsembleBaseModelRef(config="b.yaml"),
+                ],
+            )
+
+    def test_stacking_config_accepts_default_weights(self):
+        params = EnsembleParams(
+            strategy="stacking",
+            base_models=[
+                EnsembleBaseModelRef(config="a.yaml"),
+                EnsembleBaseModelRef(config="b.yaml"),
+            ],
+        )
+        assert params.strategy == "stacking"
+
+    def test_stacking_fit_meta(self, sample_data):
+        X, y = sample_data
+        model = EnsembleModel({"strategy": "stacking"})
+        model.configure([
+            _spec("logistic", [0, 1, 2]),
+            _spec("logistic", [0, 3, 4]),
+        ])
+        model.fit(X, y)
+
+        per_model = model.predict_proba_per_model(X)
+        X_meta = np.column_stack(per_model)
+        model.set_meta_feature_names(["model_a", "model_b"])
+        model.fit_meta(X_meta, y)
+        assert model._meta_model is not None
+
+    def test_stacking_predict_proba_without_fit_meta_raises(self, sample_data):
+        X, y = sample_data
+        model = EnsembleModel({"strategy": "stacking"})
+        model.configure([_spec("logistic", [0, 1, 2])])
+        model.fit(X, y)
+        with pytest.raises(RuntimeError, match="Meta-model not fitted"):
+            model.predict_proba(X)
+
+    def test_stacking_predict_proba_returns_valid(self, sample_data):
+        X, y = sample_data
+        model = EnsembleModel({"strategy": "stacking"})
+        model.configure([
+            _spec("logistic", [0, 1, 2]),
+            _spec("logistic", [0, 3, 4]),
+        ])
+        model.fit(X, y)
+
+        per_model = model.predict_proba_per_model(X)
+        X_meta = np.column_stack(per_model)
+        model.set_meta_feature_names(["model_a", "model_b"])
+        model.fit_meta(X_meta, y)
+
+        probs = model.predict_proba(X)
+        assert probs.shape == (200,)
+        assert np.all((probs >= 0) & (probs <= 1))
+
+    def test_stacking_get_meta_coefficients(self, sample_data):
+        X, y = sample_data
+        model = EnsembleModel({"strategy": "stacking"})
+        model.configure([
+            _spec("logistic", [0, 1, 2]),
+            _spec("logistic", [0, 3, 4]),
+        ])
+        model.fit(X, y)
+
+        per_model = model.predict_proba_per_model(X)
+        X_meta = np.column_stack(per_model)
+        model.set_meta_feature_names(["model_a", "model_b"])
+        model.fit_meta(X_meta, y)
+
+        intercept, coefs = model.get_meta_coefficients()
+        assert isinstance(intercept, float)
+        assert set(coefs.keys()) == {"model_a", "model_b"}
+        assert all(isinstance(v, float) for v in coefs.values())
+
+    def test_stacking_get_meta_coefficients_before_fit_raises(self):
+        model = EnsembleModel({"strategy": "stacking"})
+        with pytest.raises(RuntimeError, match="Meta-model not fitted"):
+            model.get_meta_coefficients()
+
+    def test_stacking_fit_meta_too_few_samples(self, sample_data):
+        X, y = sample_data
+        model = EnsembleModel({"strategy": "stacking"})
+        model.configure([_spec("logistic", [0, 1, 2])])
+        model.fit(X, y)
+        with pytest.raises(ValueError, match="at least 2"):
+            model.fit_meta(np.array([[0.5]]), np.array([1]))
+
+    def test_stacking_diagnostics_include_meta_coefficients(self):
+        np.random.seed(42)
+        n = 100
+        y_true = np.random.randint(0, 2, n)
+        model_a = np.clip(y_true + np.random.randn(n) * 0.2, 0.05, 0.95)
+        model_b = np.clip(y_true + np.random.randn(n) * 0.3, 0.05, 0.95)
+        ensemble_prob = (model_a + model_b) / 2
+
+        diag = EnsembleDiagnostics()
+        result = diag.compute(
+            y_true,
+            ensemble_prob,
+            [model_a, model_b],
+            np.array([0.5, 0.5]),
+            ["model_a", "model_b"],
+            strategy="stacking",
+            meta_intercept=-0.5,
+            meta_coefficients={"model_a": 1.2, "model_b": 0.8},
+        )
+        assert result["meta_intercept"] == -0.5
+        assert result["meta_coefficients"] == {"model_a": 1.2, "model_b": 0.8}
+        assert result["meta_feature_names"] == ["model_a", "model_b"]
+
+    def test_stacking_contribution_refits_meta(self):
+        np.random.seed(42)
+        n = 200
+        y_true = np.random.randint(0, 2, n)
+        model_a = np.clip(y_true + np.random.randn(n) * 0.2, 0.05, 0.95)
+        model_b = np.clip(y_true + np.random.randn(n) * 0.3, 0.05, 0.95)
+        model_c = np.clip(y_true + np.random.randn(n) * 0.4, 0.05, 0.95)
+        ensemble_prob = np.mean([model_a, model_b, model_c], axis=0)
+
+        diag = EnsembleDiagnostics()
+        result = diag.compute(
+            y_true,
+            ensemble_prob,
+            [model_a, model_b, model_c],
+            np.array([1 / 3, 1 / 3, 1 / 3]),
+            ["a", "b", "c"],
+            strategy="stacking",
+        )
+        contrib = result["contribution"]
+        assert "a" in contrib
+        assert "b" in contrib
+        assert "c" in contrib
+        assert "log_loss_delta" in contrib["a"]
+
+
+class TestErrorConditions:
+    def test_error_conditions_with_feature_columns(self):
+        np.random.seed(42)
+        n = 200
+        y_true = np.random.randint(0, 2, n)
+        y_prob = np.clip(y_true + np.random.randn(n) * 0.3, 0.05, 0.95)
+
+        df = pl.DataFrame({
+            "player_elo_surface_diff": np.random.randn(n) * 100,
+            "player_svc_elo_matchup": np.random.randn(n) * 60,
+            "player_age_diff": np.random.randn(n) * 4,
+        })
+
+        diag = Diagnostics()
+        result = diag._error_conditions(df, y_true, y_prob)
+
+        assert "conditions" in result
+        assert "total_errors" in result
+        assert result["total_errors"] >= 0
+
+        labels = [c["label"] for c in result["conditions"]]
+        # Should have elo gap conditions and age gap
+        assert "Large Elo gap (>150)" in labels
+        assert "Small Elo gap (<75)" in labels
+
+        for c in result["conditions"]:
+            assert 0.0 <= c["accuracy"] <= 1.0
+            assert c["n_matches"] > 0
+            assert c["n_errors"] >= 0
+            assert 0.0 <= c["error_share"] <= 1.0
+
+    def test_error_conditions_skips_missing_columns(self):
+        np.random.seed(42)
+        n = 50
+        y_true = np.random.randint(0, 2, n)
+        y_prob = np.clip(y_true + np.random.randn(n) * 0.3, 0.05, 0.95)
+
+        # DataFrame with no condition columns
+        df = pl.DataFrame({"some_other_col": np.random.randn(n)})
+
+        diag = Diagnostics()
+        result = diag._error_conditions(df, y_true, y_prob)
+
+        assert result["conditions"] == []
+        assert result["total_errors"] >= 0
+
+    def test_correction_analysis(self):
+        np.random.seed(42)
+        n = 200
+        y_true = np.random.randint(0, 2, n)
+        primary_preds = np.clip(y_true + np.random.randn(n) * 0.3, 0.05, 0.95)
+        ensemble_preds = np.clip(y_true + np.random.randn(n) * 0.2, 0.05, 0.95)
+
+        df = pl.DataFrame({
+            "player_elo_surface_diff": np.random.randn(n) * 100,
+            "player_age_diff": np.random.randn(n) * 5,
+        })
+
+        ediag = EnsembleDiagnostics()
+        result = ediag._correction_analysis(y_true, primary_preds, ensemble_preds, df)
+
+        assert "conditions" in result
+        for c in result["conditions"]:
+            assert "label" in c
+            assert "primary_accuracy" in c
+            assert "ensemble_accuracy" in c
+            assert "improvement" in c
+            assert c["n_matches"] > 0
+            assert abs(c["improvement"] - (c["ensemble_accuracy"] - c["primary_accuracy"])) < 1e-10
+
+    def test_correction_analysis_via_compute(self):
+        np.random.seed(42)
+        n = 100
+        y_true = np.random.randint(0, 2, n)
+        model_a = np.clip(y_true + np.random.randn(n) * 0.3, 0.05, 0.95)
+        model_b = np.clip(y_true + np.random.randn(n) * 0.2, 0.05, 0.95)
+        ensemble_prob = (model_a + model_b) / 2
+
+        df = pl.DataFrame({"player_elo_surface_diff": np.random.randn(n) * 100})
+
+        diag = EnsembleDiagnostics()
+        result = diag.compute(
+            y_true,
+            ensemble_prob,
+            [model_a, model_b],
+            np.array([0.5, 0.5]),
+            ["model_a", "model_b"],
+            combined_df=df,
+        )
+        assert "correction_analysis" in result
+        assert "conditions" in result["correction_analysis"]
+
+    def test_diagnostic_conditions_extensible(self):
+        assert isinstance(DIAGNOSTIC_CONDITIONS, list)
+        original_len = len(DIAGNOSTIC_CONDITIONS)
+        DIAGNOSTIC_CONDITIONS.append(("Test condition", "test_col", lambda a: a > 0))
+        assert len(DIAGNOSTIC_CONDITIONS) == original_len + 1
+        DIAGNOSTIC_CONDITIONS.pop()
+        assert len(DIAGNOSTIC_CONDITIONS) == original_len

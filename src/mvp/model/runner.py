@@ -268,12 +268,23 @@ class ExperimentRunner:
                     model.fit(X_train, y_train)
 
                 # Predict and evaluate on test
-                y_prob = model.predict_proba(X_test)
+                is_stacking = (
+                    is_ensemble
+                    and self.config.model.params.get("strategy") == "stacking"
+                )
+                if is_stacking:
+                    assert isinstance(model, EnsembleModel)
+                    per_model = model.predict_proba_per_model(X_test)
+                    y_prob = np.mean(per_model, axis=0)
+                    per_model_train = model.predict_proba_per_model(X_train)
+                    y_prob_train = np.mean(per_model_train, axis=0)
+                else:
+                    y_prob = model.predict_proba(X_test)
+                    y_prob_train = model.predict_proba(X_train)
                 metrics = compute_metrics(y_test, y_prob)
                 all_metrics.append(metrics)
 
                 # Predict and evaluate on train (for overfitting detection)
-                y_prob_train = model.predict_proba(X_train)
                 train_metrics = compute_metrics(y_train, y_prob_train)
                 all_train_metrics.append(train_metrics)
 
@@ -305,6 +316,31 @@ class ExperimentRunner:
                 for k in all_train_metrics[0].keys()
             }
 
+            # Fit stacking meta-model on concatenated OOF predictions
+            if is_ensemble and self.config.model.params.get("strategy") == "stacking":
+                assert isinstance(model, EnsembleModel)
+                n_base = len(all_per_model_predictions[0])
+
+                X_meta = np.column_stack([
+                    np.concatenate([fold[i] for fold in all_per_model_predictions])
+                    for i in range(n_base)
+                ])
+                y_meta = np.concatenate([p["y_true"] for p in all_predictions])
+
+                ensemble_params = EnsembleParams.model_validate(self.config.model.params)
+                base_names = [ref.config for ref in ensemble_params.base_models]
+                model.set_meta_feature_names(base_names)
+                model.fit_meta(X_meta, y_meta)
+
+                y_prob_stacked = model._meta_model.predict_proba(X_meta)[:, 1]
+                avg_metrics = compute_metrics(y_meta, y_prob_stacked)
+
+                offset = 0
+                for pred_dict in all_predictions:
+                    n = len(pred_dict["y_true"])
+                    pred_dict["y_prob"] = y_prob_stacked[offset:offset + n]
+                    offset += n
+
             # Compute diagnostics
             diagnostics = Diagnostics()
             diagnostic_results = diagnostics.compute_all(all_predictions)
@@ -332,6 +368,16 @@ class ExperimentRunner:
                 base_names = [
                     ref.config for ref in ensemble_params.base_models
                 ]
+                meta_intercept = None
+                meta_coefficients = None
+                if (
+                    ensemble_params.strategy == "stacking"
+                    and isinstance(model, EnsembleModel)
+                    and model._meta_model is not None
+                ):
+                    meta_intercept, meta_coefficients = model.get_meta_coefficients()
+
+                combined_df = pl.concat([p["df"] for p in all_predictions])
                 ediag = EnsembleDiagnostics()
                 ensemble_diagnostic_results = ediag.compute(
                     combined_y_true,
@@ -340,8 +386,17 @@ class ExperimentRunner:
                     weights,
                     base_names,
                     strategy=ensemble_params.strategy,
+                    meta_intercept=meta_intercept,
+                    meta_coefficients=meta_coefficients,
+                    combined_df=combined_df,
                 )
                 diagnostic_results.ensemble = ensemble_diagnostic_results
+
+                # Error conditions for primary model (first base model)
+                primary_diag = Diagnostics()
+                diagnostic_results.error_conditions = primary_diag._error_conditions(
+                    combined_df, combined_y_true, per_model_preds[0]
+                )
 
             # Merge diagnostic metrics (calibration_error, etc.) into avg_metrics
             avg_metrics.update(diagnostic_results.metrics)

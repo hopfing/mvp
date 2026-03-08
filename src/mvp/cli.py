@@ -117,8 +117,10 @@ def print_run_summary(results: dict[str, Any], name: str | None = None) -> None:
         for b in buckets:
             low, high = b["range"]
             marker = " <- worst" if b["error"] == worst_err else ""
+            n_bucket_errors = int(round(b['n'] * (1.0 - b['actual']))) if b['actual'] < 1.0 else 0
             print(f"  {low:.0%}-{high:.0%}  pred={b['predicted_mean']:.1%}  "
-                  f"actual={b['actual']:.1%}  err={b['error']:.1%}  n={b['n']:,}{marker}")
+                  f"actual={b['actual']:.1%}  err={b['error']:.1%}  n={b['n']:,}  "
+                  f"errors={n_bucket_errors:,}{marker}")
 
     # High-confidence errors
     errors = diagnostics.errors
@@ -126,6 +128,15 @@ def print_run_summary(results: dict[str, Any], name: str | None = None) -> None:
         e80 = errors["summary"].get("80plus", {})
         if e80.get("total", 0) > 0:
             print(f"High-conf errors: {e80['error_rate']:.1%} of {e80['total']:,} predictions at 80%+ were wrong")
+
+    # Error conditions
+    error_conds = diagnostics.error_conditions
+    if error_conds and error_conds.get("conditions"):
+        total_err = error_conds.get("total_errors", 0)
+        print(f"\nError Conditions (total errors: {total_err:,}):")
+        print(f"  {'Condition':30} {'Matches':>8}  {'Accuracy':>8}  {'Errors':>7}  {'Error Share':>11}")
+        for c in error_conds["conditions"]:
+            print(f"  {c['label']:30} {c['n_matches']:>8,}  {c['accuracy']:>7.1%}  {c['n_errors']:>7,}  {c['error_share']:>10.1%}")
 
     # Temporal
     temporal = diagnostics.temporal
@@ -194,6 +205,33 @@ def print_run_summary(results: dict[str, Any], name: str | None = None) -> None:
                 ll_sign = "+" if ll_delta >= 0 else ""
                 cal_sign = "+" if cal_delta >= 0 else ""
                 print(f"    Remove {label:35} LL {ll_sign}{ll_delta:.4f}  Cal {cal_sign}{cal_delta:.4f}")
+
+        meta_coefs = ediag.get("meta_coefficients")
+        if meta_coefs is not None:
+            meta_intercept = ediag.get("meta_intercept", 0.0)
+            print(f"\n  Stacking Meta-Model Coefficients (intercept={meta_intercept:+.4f}):")
+            for name, coef in meta_coefs.items():
+                label = Path(name).stem
+                print(f"    {label:40} {coef:+.4f}")
+
+        correction = ediag.get("correction_analysis", {})
+        corr_conds = correction.get("conditions", [])
+        if corr_conds:
+            from mvp.model.config import EnsembleParams
+            ens_params = None
+            try:
+                config = results.get("_config")
+                if config and config.model.params:
+                    ens_params = EnsembleParams.model_validate(config.model.params)
+            except Exception:
+                pass
+            primary_label = Path(ens_params.base_models[0].config).stem if ens_params else "primary"
+            print(f"\n  Correction Analysis (primary={primary_label}):")
+            print(f"    {'Condition':30} {'Primary Acc':>12} {'Ensemble Acc':>13} {'Improvement':>12}")
+            for c in corr_conds:
+                imp = c['improvement']
+                sign = "+" if imp >= 0 else ""
+                print(f"    {c['label']:30} {c['primary_accuracy']:>11.1%} {c['ensemble_accuracy']:>12.1%} {sign}{imp:>10.1%}")
 
     print(f"\nMLflow run: {results.get('run_id', 'N/A')}")
     print("=" * 70 + "\n")

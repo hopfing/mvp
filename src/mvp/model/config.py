@@ -47,8 +47,19 @@ class EnsembleBaseModelRef(BaseModel):
 class EnsembleParams(BaseModel):
     """Ensemble-specific parameters."""
 
-    strategy: Literal["average", "weighted_average"] = "average"
+    strategy: Literal["average", "weighted_average", "stacking"] = "average"
     base_models: list[EnsembleBaseModelRef]
+
+    @model_validator(mode="after")
+    def validate_stacking_no_weights(self) -> "EnsembleParams":
+        if self.strategy == "stacking":
+            for ref in self.base_models:
+                if ref.weight != 1.0:
+                    raise ValueError(
+                        "weight is not allowed with strategy='stacking' "
+                        "(meta-model learns coefficients)"
+                    )
+        return self
 
 
 class ModelConfig(BaseModel):
