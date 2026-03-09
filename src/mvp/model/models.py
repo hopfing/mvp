@@ -1,6 +1,7 @@
 """Model wrappers for experiments."""
 
 
+import warnings
 from abc import ABC, abstractmethod
 from typing import Any
 
@@ -71,8 +72,10 @@ class LogisticModel(BaseModel):
     def fit(self, X: np.ndarray, y: np.ndarray, sample_weight: np.ndarray | None = None) -> None:
         from sklearn.linear_model import LogisticRegression
 
-        self._mean = np.nanmean(X, axis=0)
-        self._std = np.nanstd(X, axis=0)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            self._mean = np.nanmean(X, axis=0)
+            self._std = np.nanstd(X, axis=0)
         self._std[self._std == 0] = 1.0
         X = (X - self._mean) / self._std
         np.nan_to_num(X, copy=False, nan=0.0)

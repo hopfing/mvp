@@ -169,11 +169,13 @@ class FastForwardSelector:
                 X_test = np.where(np.isnan(X_test), medians, X_test)
 
                 if scale:
-                    mean = X_train.mean(axis=0)
-                    std = X_train.std(axis=0)
-                    std[std == 0] = 1.0
-                    X_train = (X_train - mean) / std
-                    X_test = (X_test - mean) / std
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore", RuntimeWarning)
+                        mean = X_train.mean(axis=0)
+                        std = X_train.std(axis=0)
+                        std[std == 0] = 1.0
+                        X_train = (X_train - mean) / std
+                        X_test = (X_test - mean) / std
 
                 model = get_model(model_type, model_params)
                 fit_kwargs: dict = {}
