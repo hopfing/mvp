@@ -1,10 +1,17 @@
 """Tests for BetRivers odds scraper."""
 
 from datetime import datetime, timezone
+from unittest.mock import MagicMock, patch
 
+import polars as pl
 import pytest
 
-from mvp.betrivers.odds import BetRiversOddsEntry, _is_atp_challenger, _parse_response
+from mvp.betrivers.odds import (
+    BetRiversOddsEntry,
+    BetRiversOddsScraper,
+    _is_atp_challenger,
+    _parse_response,
+)
 
 
 class TestCircuitFiltering:
@@ -282,3 +289,68 @@ class TestParseResponse:
         }
         entries = _parse_response(response, now)
         assert entries == []
+
+
+class TestBetRiversOddsScraper:
+    @patch("mvp.betrivers.odds.BaseExtractor._create_session")
+    def test_fetch_all_odds(self, mock_create_session):
+        mock_session = MagicMock()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = SAMPLE_RESPONSE
+        mock_session.get.return_value = mock_resp
+        mock_create_session.return_value = mock_session
+
+        scraper = BetRiversOddsScraper()
+        entries, raw = scraper.fetch_all_odds()
+
+        assert len(entries) == 4  # 2 ATP + 2 Challenger, WTA filtered
+        assert raw == SAMPLE_RESPONSE
+
+    @patch("mvp.betrivers.odds.BaseExtractor._create_session")
+    def test_fetch_and_save(self, mock_create_session, tmp_path):
+        mock_session = MagicMock()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = SAMPLE_RESPONSE
+        mock_session.get.return_value = mock_resp
+        mock_create_session.return_value = mock_session
+
+        scraper = BetRiversOddsScraper(data_root=tmp_path)
+        count = scraper.fetch_and_save()
+
+        assert count == 4
+        # Check stage parquet was created
+        stage_path = tmp_path / "stage" / "betrivers" / "moneyline.parquet"
+        assert stage_path.exists()
+        df = pl.read_parquet(stage_path)
+        assert len(df) == 4
+        assert "odds" in df.columns
+        assert "br_event_id" in df.columns
+
+    @patch("mvp.betrivers.odds.BaseExtractor._create_session")
+    def test_fetch_and_save_appends(self, mock_create_session, tmp_path):
+        """Second fetch appends to existing parquet."""
+        mock_session = MagicMock()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = SAMPLE_RESPONSE
+        mock_session.get.return_value = mock_resp
+        mock_create_session.return_value = mock_session
+
+        scraper = BetRiversOddsScraper(data_root=tmp_path)
+        scraper.fetch_and_save()
+        scraper.fetch_and_save()
+
+        stage_path = tmp_path / "stage" / "betrivers" / "moneyline.parquet"
+        df = pl.read_parquet(stage_path)
+        assert len(df) == 8  # 4 + 4
+
+    @patch("mvp.betrivers.odds.BaseExtractor._create_session")
+    def test_empty_response_returns_zero(self, mock_create_session, tmp_path):
+        mock_session = MagicMock()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"events": []}
+        mock_session.get.return_value = mock_resp
+        mock_create_session.return_value = mock_session
+
+        scraper = BetRiversOddsScraper(data_root=tmp_path)
+        count = scraper.fetch_and_save()
+        assert count == 0

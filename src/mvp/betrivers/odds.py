@@ -107,3 +107,65 @@ def _parse_response(
                 ))
 
     return entries
+
+
+class BetRiversOddsScraper(BaseExtractor):
+    """Scraper for BetRivers tennis odds via Kambi API."""
+
+    def __init__(self, data_root=None):
+        super().__init__(domain="betrivers", data_root=data_root)
+
+    def fetch_all_odds(self) -> tuple[list[BetRiversOddsEntry], dict]:
+        """Fetch all tennis odds from Kambi API."""
+        url = f"{TENNIS_ENDPOINT}?lang=en_US&market=US-IL"
+        resp = self._fetch(url)
+        data = resp.json()
+        now = datetime.now(timezone.utc)
+        entries = _parse_response(data, now)
+        logger.info("Fetched %d BR odds entries", len(entries))
+        return entries, data
+
+    def fetch_and_save(self) -> int:
+        """Fetch odds, save raw JSON + stage parquet."""
+        entries, raw = self.fetch_all_odds()
+
+        if not entries:
+            logger.info("No BR odds entries found")
+            return 0
+
+        raw_path = self.build_path("raw", "moneyline", "odds.json", version="datetime")
+        self.save_json([raw], raw_path)
+
+        stage_path = self.build_path("stage", "moneyline.parquet")
+        new_df = pl.DataFrame([
+            {
+                "book": e.book,
+                "br_event_id": e.br_event_id,
+                "market": e.market,
+                "br_selection_id": e.br_selection_id,
+                "player_name": e.player_name,
+                "side": e.side,
+                "odds": e.odds,
+                "points": e.points,
+                "tournament": e.tournament,
+                "br_tournament_id": e.br_tournament_id,
+                "circuit": e.circuit,
+                "opponent_name": e.opponent_name,
+                "fetched_at": e.fetched_at,
+            }
+            for e in entries
+        ])
+
+        if stage_path.exists():
+            existing = pl.read_parquet(stage_path)
+            new_df = pl.concat([existing, new_df], how="diagonal_relaxed")
+
+        self.save_parquet(new_df, stage_path)
+        return len(entries)
+
+
+# Module-level convenience for CLI
+def fetch_and_save() -> int:
+    """Full flow: fetch odds, save raw + stage parquet."""
+    scraper = BetRiversOddsScraper()
+    return scraper.fetch_and_save()
