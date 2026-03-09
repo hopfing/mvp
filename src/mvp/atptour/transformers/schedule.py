@@ -393,12 +393,12 @@ class ScheduleTransformer(BaseJob):
             .select(df.columns)
         )
 
-        # Drop replaced draw entries: same player+round, different opponent
+        # Drop replaced draw entries: same player+draw_type+round, different opponent
         replaced_uids: set[str] = set()
         non_rr = has_uid.filter(pl.col("round") != "RR")
         for side, opp_side in [("p1_id", "p2_id"), ("p2_id", "p1_id")]:
-            # Group by (player, round) and find duplicates
-            grouped = non_rr.group_by([side, "round"]).agg(
+            # Group by (player, draw_type, round) and find duplicates
+            grouped = non_rr.group_by([side, "draw_type", "round"]).agg(
                 pl.col("match_uid"),
                 pl.col(opp_side),
                 pl.col("snapshot_timestamp"),
