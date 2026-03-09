@@ -27,6 +27,8 @@ PRODUCTION_CONFIG_PATH = Path("production.yaml")
 
 # Tolerance for prediction consistency checks
 PREDICTION_TOLERANCE = 1e-4
+# Threshold for drift alerts (5% probability swing)
+DRIFT_THRESHOLD = 0.05
 
 
 class ProductionPredictor:
@@ -410,8 +412,40 @@ class ProductionPredictor:
             return predictions
 
     def _log_prediction_changes(self, mismatched: pl.DataFrame) -> None:
-        """Append changed predictions to the prediction drift log."""
+        """Append changed predictions to the prediction drift log and emit alerts."""
         log_path = self.predictions_path.parent / "prediction_drift.parquet"
+
+        diff_abs = (mismatched["p1_win_prob"] - mismatched["prev_p1_win_prob"]).abs()
+        # Detect winner flip: previous and current on opposite sides of 0.5
+        flipped = (
+            (mismatched["prev_p1_win_prob"] > 0.5) & (mismatched["p1_win_prob"] < 0.5)
+        ) | (
+            (mismatched["prev_p1_win_prob"] < 0.5) & (mismatched["p1_win_prob"] > 0.5)
+        )
+
+        n_flips = flipped.sum()
+        n_drifts = (diff_abs >= DRIFT_THRESHOLD).sum() - n_flips
+
+        if n_flips > 0:
+            flip_rows = mismatched.filter(flipped)
+            for row in flip_rows.iter_rows(named=True):
+                logger.warning(
+                    "FLIP %s: %.1f%% -> %.1f%%",
+                    row["match_uid"],
+                    row["prev_p1_win_prob"] * 100,
+                    row["p1_win_prob"] * 100,
+                )
+
+        if n_drifts > 0:
+            drift_rows = mismatched.filter((diff_abs >= DRIFT_THRESHOLD) & ~flipped)
+            for row in drift_rows.iter_rows(named=True):
+                logger.info(
+                    "DRIFT %s: %.1f%% -> %.1f%%",
+                    row["match_uid"],
+                    row["prev_p1_win_prob"] * 100,
+                    row["p1_win_prob"] * 100,
+                )
+
         log_entry = mismatched.select(
             "match_uid",
             pl.col("p1_win_prob"),
@@ -425,4 +459,5 @@ class ProductionPredictor:
             existing_log = pl.read_parquet(log_path)
             log_entry = pl.concat([existing_log, log_entry], how="diagonal_relaxed")
         log_entry.write_parquet(log_path)
-        logger.info("Logged %d prediction changes to %s", len(mismatched), log_path.name)
+        logger.info("Logged %d prediction changes (%d flips, %d drifts) to %s",
+                     len(mismatched), n_flips, n_drifts, log_path.name)

@@ -2,6 +2,7 @@
 
 
 import importlib
+import logging
 from datetime import date, datetime
 from pathlib import Path
 from unittest.mock import patch
@@ -562,3 +563,37 @@ class TestSavePredictions:
         latest = drift_log2.tail(len(predictions))
         assert (latest["prev_p1_win_prob"] - 0.999).abs().max() < 1e-4
         assert (latest["p1_win_prob"] - 0.500).abs().max() < 1e-4
+
+    def test_drift_alerts_flip_and_drift(
+        self, production_config, sample_matches, tmp_path, caplog
+    ):
+        from mvp.model.predictor import ProductionPredictor
+
+        predictor = ProductionPredictor(
+            production_config_path=production_config,
+            matches_path=sample_matches,
+            cache_dir=tmp_path / "cache",
+            predictions_path=tmp_path / "predictions.parquet",
+        )
+        predictor.train()
+        predictions = predictor.predict()
+        predictor.save_predictions(predictions)
+
+        # Force a flip: set all to 0.001 (crosses 50% for any prediction > 0.5)
+        flipped = predictions.with_columns(
+            pl.lit(0.001).alias("p1_win_prob")
+        )
+        with caplog.at_level(logging.WARNING):
+            predictor.save_predictions(flipped)
+
+        assert any("FLIP" in r.message for r in caplog.records)
+
+        # Force a drift (>5% but no flip): set all to 0.10
+        caplog.clear()
+        drifted = predictions.with_columns(
+            pl.lit(0.10).alias("p1_win_prob")
+        )
+        with caplog.at_level(logging.INFO):
+            predictor.save_predictions(drifted)
+
+        assert any("DRIFT" in r.message for r in caplog.records)
