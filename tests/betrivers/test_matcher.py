@@ -1,12 +1,10 @@
 """Tests for BetRivers odds matcher."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import polars as pl
-import pytest
 
 from mvp.betrivers.matcher import BetRiversOddsMatcher
-from mvp.draftkings.matcher import normalize_name
 
 
 def _make_players(tmp_path):
@@ -33,7 +31,7 @@ def _make_odds(tmp_path, events):
             "player_name": pname,
             "opponent_name": oname,
             "odds": odds,
-            "fetched_at": datetime(2026, 3, 9, 10, tzinfo=timezone.utc),
+            "fetched_at": datetime(2026, 3, 9, 10, tzinfo=UTC),
             "br_tournament_id": "t1",
             "tournament": "Indian Wells",
             "br_selection_id": f"s{i}",
@@ -121,10 +119,10 @@ class TestBetRiversOddsMatcher:
             "opponent_name": ["Bob Jones", "Alice Smith", "Bob Jones", "Alice Smith"],
             "odds": [2.0, 1.8, 2.1, 1.75],
             "fetched_at": [
-                datetime(2026, 3, 9, 10, tzinfo=timezone.utc),
-                datetime(2026, 3, 9, 10, tzinfo=timezone.utc),
-                datetime(2026, 3, 9, 11, tzinfo=timezone.utc),
-                datetime(2026, 3, 9, 11, tzinfo=timezone.utc),
+                datetime(2026, 3, 9, 10, tzinfo=UTC),
+                datetime(2026, 3, 9, 10, tzinfo=UTC),
+                datetime(2026, 3, 9, 11, tzinfo=UTC),
+                datetime(2026, 3, 9, 11, tzinfo=UTC),
             ],
             "br_tournament_id": ["t1"] * 4,
             "tournament": ["Test"] * 4,

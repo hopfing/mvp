@@ -2,7 +2,7 @@
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import polars as pl
 
@@ -120,7 +120,7 @@ class BetRiversOddsScraper(BaseExtractor):
         url = f"{TENNIS_ENDPOINT}?lang=en_US&market=US-IL"
         resp = self._fetch(url)
         data = resp.json()
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         entries = _parse_response(data, now)
         logger.info("Fetched %d BR odds entries", len(entries))
         return entries, data

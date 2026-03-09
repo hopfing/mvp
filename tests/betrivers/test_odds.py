@@ -1,13 +1,11 @@
 """Tests for BetRivers odds scraper."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 import polars as pl
-import pytest
 
 from mvp.betrivers.odds import (
-    BetRiversOddsEntry,
     BetRiversOddsScraper,
     _is_atp_challenger,
     _parse_response,
@@ -189,12 +187,12 @@ SAMPLE_RESPONSE = {
 
 class TestParseResponse:
     def test_filters_to_atp_challenger(self):
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         entries = _parse_response(SAMPLE_RESPONSE, now)
         assert len(entries) == 4  # 2 per match, 2 matches
 
     def test_entry_fields(self):
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         entries = _parse_response(SAMPLE_RESPONSE, now)
         sinner = next(e for e in entries if "Sinner" in e.player_name)
         assert sinner.book == "br"
@@ -208,13 +206,13 @@ class TestParseResponse:
         assert sinner.points is None
 
     def test_odds_divided_by_1000(self):
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         entries = _parse_response(SAMPLE_RESPONSE, now)
         alcaraz = next(e for e in entries if "Alcaraz" in e.player_name)
         assert alcaraz.odds == 2.812
 
     def test_two_entries_per_match(self):
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         entries = _parse_response(SAMPLE_RESPONSE, now)
         event_ids = {e.br_event_id for e in entries}
         for eid in event_ids:
@@ -222,7 +220,7 @@ class TestParseResponse:
             assert len(match_entries) == 2
 
     def test_opponent_name_symmetric(self):
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         entries = _parse_response(SAMPLE_RESPONSE, now)
         atp_entries = [e for e in entries if e.br_event_id == "1026892922"]
         names = {e.player_name for e in atp_entries}
@@ -230,12 +228,12 @@ class TestParseResponse:
         assert names == opponents
 
     def test_empty_response(self):
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         entries = _parse_response({"events": []}, now)
         assert entries == []
 
     def test_event_without_moneyline_skipped(self):
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         response = {
             "events": [
                 {
@@ -266,7 +264,7 @@ class TestParseResponse:
         assert entries == []
 
     def test_event_without_betoffers_skipped(self):
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         response = {
             "events": [
                 {
