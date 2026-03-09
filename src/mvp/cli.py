@@ -281,11 +281,13 @@ _CIRCUIT_LABELS = {"tour": "ATP", "chal": "Challenger"}
 def print_predictions(
     predictions: Any,
     odds_map: dict[str, dict[str, float]] | None = None,
+    br_odds_map: dict[str, dict[str, float]] | None = None,
 ) -> None:
     """Print human-readable prediction summary."""
     import polars as pl
 
-    width = 90 if odds_map else 78
+    has_odds = odds_map or br_odds_map
+    width = 105 if has_odds else 78
     print("\n" + "=" * width)
     print(f"{'PREDICTIONS':^{width}}")
     print("=" * width)
@@ -324,16 +326,27 @@ def print_predictions(
 
         line = f"  {rnd:5} {p1:25} {p1_prob:5.1%}  vs  {p2_prob:5.1%} {p2}"
 
-        if odds_map:
+        if has_odds:
             match_uid = row.get("match_uid") or ""
             p1_id = row.get("p1_id") or ""
-            match_odds = odds_map.get(match_uid)
-            if match_odds and p1_id:
-                p2_id = row.get("p2_id") or ""
-                o1 = match_odds.get(p1_id)
-                o2 = match_odds.get(p2_id)
-                if o1 is not None and o2 is not None:
-                    line += f"    DK: {o1:.2f} / {o2:.2f}"
+            p2_id = row.get("p2_id") or ""
+            odds_parts = []
+            if odds_map:
+                dk_match = odds_map.get(match_uid)
+                if dk_match and p1_id:
+                    o1 = dk_match.get(p1_id)
+                    o2 = dk_match.get(p2_id)
+                    if o1 is not None and o2 is not None:
+                        odds_parts.append(f"DK:{o1:.2f}/{o2:.2f}")
+            if br_odds_map:
+                br_match = br_odds_map.get(match_uid)
+                if br_match and p1_id:
+                    o1 = br_match.get(p1_id)
+                    o2 = br_match.get(p2_id)
+                    if o1 is not None and o2 is not None:
+                        odds_parts.append(f"BR:{o1:.2f}/{o2:.2f}")
+            if odds_parts:
+                line += "  " + " | ".join(odds_parts)
 
         print(line)
 
@@ -520,6 +533,27 @@ def _fetch_dk_quiet() -> int:
         job_logger.setLevel(prev_levels[2])
 
 
+def _fetch_br_quiet() -> int:
+    """Run BR odds fetch with logging suppressed (runs in background thread)."""
+    import logging as _logging
+
+    from mvp.betrivers.odds import fetch_and_save as br_fetch_and_save
+
+    br_logger = _logging.getLogger("mvp.betrivers")
+    ext_logger = _logging.getLogger("mvp.common.base_extractor")
+    job_logger = _logging.getLogger("mvp.common.base_job")
+    prev_levels = br_logger.level, ext_logger.level, job_logger.level
+    br_logger.setLevel(_logging.WARNING)
+    ext_logger.setLevel(_logging.WARNING)
+    job_logger.setLevel(_logging.WARNING)
+    try:
+        return br_fetch_and_save()
+    finally:
+        br_logger.setLevel(prev_levels[0])
+        ext_logger.setLevel(prev_levels[1])
+        job_logger.setLevel(prev_levels[2])
+
+
 def cmd_live(args: argparse.Namespace) -> int:
     """Run live pipeline: extract, aggregate, predict."""
     from concurrent.futures import ThreadPoolExecutor
@@ -538,10 +572,11 @@ def cmd_live(args: argparse.Namespace) -> int:
 
     # Start DK odds fetch in background (fully independent of pipeline).
     # Suppress its logs — result is reported after collection.
-    dk_pool = ThreadPoolExecutor(max_workers=1)
-    dk_future = dk_pool.submit(_fetch_dk_quiet)
+    odds_pool = ThreadPoolExecutor(max_workers=2)
+    dk_future = odds_pool.submit(_fetch_dk_quiet)
+    br_future = odds_pool.submit(_fetch_br_quiet)
 
-    try:  # ensure dk_pool cleanup on early failure
+    try:  # ensure odds_pool cleanup on early failure
         # Rankings + discovery in parallel
         with ThreadPoolExecutor(max_workers=2) as pool:
             rankings_future = pool.submit(
@@ -599,8 +634,9 @@ def cmd_live(args: argparse.Namespace) -> int:
 
         predictor.save_predictions(predictions)
 
-        # Collect DK odds and match to predictions
+        # Collect odds from both books and match to predictions
         odds_map: dict[str, dict[str, float]] | None = None
+        br_odds_map: dict[str, dict[str, float]] | None = None
         try:
             n = dk_future.result(timeout=30)
             if n:
@@ -610,7 +646,7 @@ def cmd_live(args: argparse.Namespace) -> int:
             match_result = matcher.match(predictions)
             odds_map = match_result.odds or None
             if odds_map:
-                print(f"Matched odds for {len(odds_map)}/{len(predictions)} predictions")
+                print(f"Matched DK odds for {len(odds_map)}/{len(predictions)} predictions")
             if match_result.unmatched_names:
                 print(f"Unmatched DK names ({len(match_result.unmatched_names)}):")
                 for name in sorted(match_result.unmatched_names):
@@ -619,13 +655,32 @@ def cmd_live(args: argparse.Namespace) -> int:
         except Exception as e:
             logger.error("DK odds matching failed: %s", e)
             print(f"Warning: DK odds fetch/match failed ({e})")
-        finally:
-            dk_pool.shutdown(wait=False)
 
-        print_predictions(predictions, odds_map=odds_map)
+        try:
+            n = br_future.result(timeout=30)
+            if n:
+                print(f"Fetched {n} BR moneyline odds entries")
+            from mvp.betrivers.matcher import BetRiversOddsMatcher
+            br_matcher = BetRiversOddsMatcher()
+            br_match_result = br_matcher.match(predictions)
+            br_odds_map = br_match_result.odds or None
+            if br_odds_map:
+                print(f"Matched BR odds for {len(br_odds_map)}/{len(predictions)} predictions")
+            if br_match_result.unmatched_names:
+                print(f"Unmatched BR names ({len(br_match_result.unmatched_names)}):")
+                for name in sorted(br_match_result.unmatched_names):
+                    print(f"  {name}")
+                print(f"Add aliases to: {br_matcher.ALIASES_PATH}")
+        except Exception as e:
+            logger.error("BR odds matching failed: %s", e)
+            print(f"Warning: BR odds fetch/match failed ({e})")
+
+        odds_pool.shutdown(wait=False)
+
+        print_predictions(predictions, odds_map=odds_map, br_odds_map=br_odds_map)
 
     except Exception:
-        dk_pool.shutdown(wait=False)
+        odds_pool.shutdown(wait=False)
         raise
 
     # Sync to Google Sheets (best-effort, must be last)
