@@ -45,3 +45,65 @@ class BetRiversOddsEntry:
 def _is_atp_challenger(term_key: str) -> bool:
     """Check if a Kambi path termKey is ATP or Challenger men's singles."""
     return term_key in _INCLUDE_TERM_KEYS
+
+
+def _parse_response(
+    data: dict,
+    fetched_at: datetime,
+) -> list[BetRiversOddsEntry]:
+    """Parse Kambi API response into BetRiversOddsEntry objects.
+
+    Filters to ATP/Challenger men's singles moneyline only.
+    """
+    entries = []
+
+    for event_wrapper in data.get("events", []):
+        event = event_wrapper.get("event", {})
+        path = event.get("path", [])
+
+        if len(path) < 2:
+            continue
+        circuit_key = path[1].get("termKey", "")
+        if not _is_atp_challenger(circuit_key):
+            continue
+
+        event_id = str(event.get("id", ""))
+        home_name = event.get("homeName", "")
+        away_name = event.get("awayName", "")
+        tournament = event.get("group", "")
+        tournament_id = str(event.get("groupId", ""))
+
+        for offer in event_wrapper.get("betOffers", []):
+            criterion = offer.get("criterion", {})
+            if criterion.get("id") != MONEYLINE_CRITERION_ID:
+                continue
+
+            outcomes = offer.get("outcomes", [])
+            if len(outcomes) < 2:
+                continue
+
+            for outcome in outcomes:
+                label = outcome.get("participant", "") or outcome.get("label", "")
+                raw_odds = outcome.get("odds")
+                if raw_odds is None:
+                    continue
+
+                opponent = away_name if label == home_name else home_name
+
+                entries.append(BetRiversOddsEntry(
+                    book="br",
+                    br_event_id=event_id,
+                    market="moneyline",
+                    br_selection_id=str(outcome.get("id", "")),
+                    player_name=label,
+                    side=outcome.get("type", ""),
+                    odds=raw_odds / 1000,
+                    points=None,
+                    tournament=tournament,
+                    br_tournament_id=tournament_id,
+                    circuit=circuit_key,
+                    opponent_name=opponent,
+                    fetched_at=fetched_at,
+                ))
+
+    return entries

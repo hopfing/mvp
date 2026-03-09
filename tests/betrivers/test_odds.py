@@ -1,8 +1,10 @@
 """Tests for BetRivers odds scraper."""
 
+from datetime import datetime, timezone
+
 import pytest
 
-from mvp.betrivers.odds import _is_atp_challenger
+from mvp.betrivers.odds import BetRiversOddsEntry, _is_atp_challenger, _parse_response
 
 
 class TestCircuitFiltering:
@@ -41,3 +43,242 @@ class TestCircuitFiltering:
 
     def test_unknown_excluded(self):
         assert _is_atp_challenger("some_new_category") is False
+
+
+SAMPLE_RESPONSE = {
+    "events": [
+        {
+            "event": {
+                "id": 1026892922,
+                "name": "Jannik Sinner - Carlos Alcaraz",
+                "homeName": "Jannik Sinner",
+                "awayName": "Carlos Alcaraz",
+                "start": "2026-03-10T18:00:00Z",
+                "group": "Indian Wells",
+                "groupId": 2000070100,
+                "path": [
+                    {"id": 1, "termKey": "tennis"},
+                    {"id": 2, "termKey": "atp"},
+                    {"id": 3, "termKey": "indian_wells"},
+                ],
+                "sport": "TENNIS",
+                "state": "NOT_STARTED",
+            },
+            "betOffers": [
+                {
+                    "id": 2619505297,
+                    "criterion": {"id": 1001159551, "label": "Moneyline"},
+                    "eventId": 1026892922,
+                    "outcomes": [
+                        {
+                            "id": 4096271757,
+                            "label": "Jannik Sinner",
+                            "participant": "Jannik Sinner",
+                            "odds": 1456,
+                            "type": "OT_ONE",
+                            "status": "OPEN",
+                        },
+                        {
+                            "id": 4096271762,
+                            "label": "Carlos Alcaraz",
+                            "participant": "Carlos Alcaraz",
+                            "odds": 2812,
+                            "type": "OT_TWO",
+                            "status": "OPEN",
+                        },
+                    ],
+                },
+            ],
+        },
+        {
+            "event": {
+                "id": 1026892923,
+                "name": "Player A - Player B",
+                "homeName": "Player A",
+                "awayName": "Player B",
+                "start": "2026-03-10T19:00:00Z",
+                "group": "Murcia",
+                "groupId": 2000070200,
+                "path": [
+                    {"id": 1, "termKey": "tennis"},
+                    {"id": 2, "termKey": "challenger"},
+                    {"id": 3, "termKey": "murcia"},
+                ],
+                "sport": "TENNIS",
+                "state": "NOT_STARTED",
+            },
+            "betOffers": [
+                {
+                    "id": 2619505298,
+                    "criterion": {"id": 1001159551, "label": "Moneyline"},
+                    "eventId": 1026892923,
+                    "outcomes": [
+                        {
+                            "id": 4096271770,
+                            "label": "Player A",
+                            "participant": "Player A",
+                            "odds": 1800,
+                            "type": "OT_ONE",
+                            "status": "OPEN",
+                        },
+                        {
+                            "id": 4096271771,
+                            "label": "Player B",
+                            "participant": "Player B",
+                            "odds": 1950,
+                            "type": "OT_TWO",
+                            "status": "OPEN",
+                        },
+                    ],
+                },
+            ],
+        },
+        {
+            "event": {
+                "id": 1026892924,
+                "name": "WTA Player - WTA Player 2",
+                "homeName": "WTA Player",
+                "awayName": "WTA Player 2",
+                "start": "2026-03-10T20:00:00Z",
+                "group": "Miami",
+                "groupId": 2000070300,
+                "path": [
+                    {"id": 1, "termKey": "tennis"},
+                    {"id": 2, "termKey": "wta"},
+                    {"id": 3, "termKey": "miami"},
+                ],
+                "sport": "TENNIS",
+                "state": "NOT_STARTED",
+            },
+            "betOffers": [
+                {
+                    "id": 2619505299,
+                    "criterion": {"id": 1001159551, "label": "Moneyline"},
+                    "eventId": 1026892924,
+                    "outcomes": [
+                        {
+                            "id": 4096271780,
+                            "label": "WTA Player",
+                            "participant": "WTA Player",
+                            "odds": 1500,
+                            "type": "OT_ONE",
+                            "status": "OPEN",
+                        },
+                        {
+                            "id": 4096271781,
+                            "label": "WTA Player 2",
+                            "participant": "WTA Player 2",
+                            "odds": 2500,
+                            "type": "OT_TWO",
+                            "status": "OPEN",
+                        },
+                    ],
+                },
+            ],
+        },
+    ],
+}
+
+
+class TestParseResponse:
+    def test_filters_to_atp_challenger(self):
+        now = datetime.now(timezone.utc)
+        entries = _parse_response(SAMPLE_RESPONSE, now)
+        assert len(entries) == 4  # 2 per match, 2 matches
+
+    def test_entry_fields(self):
+        now = datetime.now(timezone.utc)
+        entries = _parse_response(SAMPLE_RESPONSE, now)
+        sinner = next(e for e in entries if "Sinner" in e.player_name)
+        assert sinner.book == "br"
+        assert sinner.br_event_id == "1026892922"
+        assert sinner.market == "moneyline"
+        assert sinner.odds == 1.456
+        assert sinner.side == "OT_ONE"
+        assert sinner.opponent_name == "Carlos Alcaraz"
+        assert sinner.tournament == "Indian Wells"
+        assert sinner.circuit == "atp"
+        assert sinner.points is None
+
+    def test_odds_divided_by_1000(self):
+        now = datetime.now(timezone.utc)
+        entries = _parse_response(SAMPLE_RESPONSE, now)
+        alcaraz = next(e for e in entries if "Alcaraz" in e.player_name)
+        assert alcaraz.odds == 2.812
+
+    def test_two_entries_per_match(self):
+        now = datetime.now(timezone.utc)
+        entries = _parse_response(SAMPLE_RESPONSE, now)
+        event_ids = {e.br_event_id for e in entries}
+        for eid in event_ids:
+            match_entries = [e for e in entries if e.br_event_id == eid]
+            assert len(match_entries) == 2
+
+    def test_opponent_name_symmetric(self):
+        now = datetime.now(timezone.utc)
+        entries = _parse_response(SAMPLE_RESPONSE, now)
+        atp_entries = [e for e in entries if e.br_event_id == "1026892922"]
+        names = {e.player_name for e in atp_entries}
+        opponents = {e.opponent_name for e in atp_entries}
+        assert names == opponents
+
+    def test_empty_response(self):
+        now = datetime.now(timezone.utc)
+        entries = _parse_response({"events": []}, now)
+        assert entries == []
+
+    def test_event_without_moneyline_skipped(self):
+        now = datetime.now(timezone.utc)
+        response = {
+            "events": [
+                {
+                    "event": {
+                        "id": 999,
+                        "homeName": "A",
+                        "awayName": "B",
+                        "group": "Test",
+                        "groupId": 1,
+                        "path": [
+                            {"termKey": "tennis"},
+                            {"termKey": "atp"},
+                            {"termKey": "test"},
+                        ],
+                        "state": "NOT_STARTED",
+                    },
+                    "betOffers": [
+                        {
+                            "criterion": {"id": 999999, "label": "Total Games"},
+                            "eventId": 999,
+                            "outcomes": [],
+                        },
+                    ],
+                },
+            ],
+        }
+        entries = _parse_response(response, now)
+        assert entries == []
+
+    def test_event_without_betoffers_skipped(self):
+        now = datetime.now(timezone.utc)
+        response = {
+            "events": [
+                {
+                    "event": {
+                        "id": 888,
+                        "homeName": "A",
+                        "awayName": "B",
+                        "group": "Test",
+                        "groupId": 1,
+                        "path": [
+                            {"termKey": "tennis"},
+                            {"termKey": "atp"},
+                            {"termKey": "test"},
+                        ],
+                        "state": "NOT_STARTED",
+                    },
+                    "betOffers": [],
+                },
+            ],
+        }
+        entries = _parse_response(response, now)
+        assert entries == []
