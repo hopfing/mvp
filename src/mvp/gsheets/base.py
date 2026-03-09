@@ -328,11 +328,12 @@ def merge_predictions(
     from mvp.atptour.aggregators.matches import ROUND_ORDER
 
     merged = merged.with_columns(
-        pl.col("round").replace_strict(ROUND_ORDER, default=99).alias("_round_order")
+        pl.col("round").replace_strict(ROUND_ORDER, default=99).alias("_round_order"),
+        pl.col("time").min().over("tournament_day", "tournament").alias("_min_time"),
     )
     merged = merged.sort(
-        ["tournament_day", "circuit", "tournament", "date", "time", "_round_order"]
-    ).drop("_round_order")
+        ["tournament_day", "circuit", "_min_time", "tournament", "date", "time", "_round_order"]
+    ).drop("_round_order", "_min_time")
 
     return merged
 
