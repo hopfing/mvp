@@ -170,7 +170,7 @@ def print_run_summary(results: dict[str, Any], name: str | None = None) -> None:
         if per_model:
             print("\nPer-Model Comparison:")
             print(f"  {'Model':40} {'Acc':>7} {'AUC':>7} {'LL':>7} {'Cal':>7}")
-            print(f"  {'─' * 68}")
+            print(f"  {'-' * 68}")
             for model_name, m in per_model.items():
                 label = model_name
                 if model_name != "ensemble":
@@ -314,7 +314,7 @@ def print_predictions(
             surface = row.get("surface") or ""
             date_str = tournament_dates.get(tournament, "")
             print(f"\n  {label} {tournament} ({surface}) {date_str}")
-            print(f"  {'─' * 60}")
+            print(f"  {'-' * 60}")
 
         p1 = row.get("p1_name") or "TBD"
         p2 = row.get("p2_name") or "TBD"
