@@ -529,9 +529,9 @@ class TestStyleFeatureCount:
             n for n in registry.list_features()
             if self._is_style_feature(n)
         ]
-        # 28 single + 28 diff + 15 matchup + 7 bool + 7 interaction = 85
-        assert len(style_features) == 85, (
-            f"Expected 85 style features, got {len(style_features)}: {sorted(style_features)}"
+        # 29 single + 29 diff + 15 matchup + 7 bool + 7 interaction = 87
+        assert len(style_features) == 87, (
+            f"Expected 87 style features, got {len(style_features)}: {sorted(style_features)}"
         )
 
     def test_no_duplicate_registrations(self):

@@ -3,7 +3,7 @@
 Three layers of features derived from match_beats, stroke_analysis,
 and rally_analysis data (2022+).
 
-Layer 1: 365-day rolling raw style metrics (29 single + 29 diff + ~15 matchup)
+Layer 1: 365-day rolling raw style metrics (29 single + 29 diff + 15 matchup)
 Layer 2: Bool style labels via population percentile thresholds (7)
 Layer 3: Explicit matchup interaction terms (7)
 """
@@ -158,6 +158,18 @@ def style_easy_hold_pct() -> pl.Expr:
 def style_difficult_hold_pct() -> pl.Expr:
     return ratio_feature(
         "mb_player_difficult_holds", "mb_player_service_games", days=_DAYS
+    )
+
+
+@feature(
+    name="style_crucial_pts_win_pct",
+    params=[],
+    description="365d crucial points won / played (big-point performance)",
+    mirror=True,
+)
+def style_crucial_pts_win_pct() -> pl.Expr:
+    return ratio_feature(
+        "mb_player_crucial_points_won", "mb_player_crucial_points_played", days=_DAYS
     )
 
 
@@ -428,6 +440,7 @@ _STYLE_SINGLE_FEATURES = [
     "style_forced_error_rate",
     "style_easy_hold_pct",
     "style_difficult_hold_pct",
+    "style_crucial_pts_win_pct",
     "style_rally_won_avg_length",
     "style_rally_lost_avg_length",
     "style_fh_winner_share",
