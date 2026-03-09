@@ -365,6 +365,7 @@ class ProductionPredictor:
             )
 
             # Consistency validation on overlapping predictions
+            updated_uids: set[str] = set()
             if len(overlap) > 0:
                 merged = overlap.select("match_uid", "p1_win_prob").join(
                     existing.select("match_uid", pl.col("p1_win_prob").alias("existing_prob")),
@@ -372,22 +373,28 @@ class ProductionPredictor:
                     how="inner",
                 )
                 diffs = (merged["p1_win_prob"] - merged["existing_prob"]).abs()
-                mismatches = diffs.filter(diffs > PREDICTION_TOLERANCE)
-                if len(mismatches) > 0:
-                    warnings.warn(
-                        f"prediction mismatch: {len(mismatches)} matches have "
-                        f"different probabilities (max diff: {mismatches.max():.6f}). "
-                        f"This may indicate data leakage or a pipeline bug.",
-                        UserWarning,
-                        stacklevel=2,
+                mismatched = merged.filter(diffs > PREDICTION_TOLERANCE)
+                if len(mismatched) > 0:
+                    updated_uids = set(mismatched["match_uid"].to_list())
+                    logger.info(
+                        "Updating %d predictions with changed probabilities (max diff: %.6f)",
+                        len(updated_uids),
+                        diffs.filter(diffs > PREDICTION_TOLERANCE).max(),
                     )
 
-            if len(new) > 0:
+            # Replace updated predictions in existing, then append new
+            if updated_uids:
+                existing = existing.filter(~pl.col("match_uid").is_in(list(updated_uids)))
+                to_add = pl.concat([new, overlap.filter(pl.col("match_uid").is_in(list(updated_uids)))], how="diagonal_relaxed")
+            else:
+                to_add = new
+
+            if len(to_add) > 0:
                 combined = pl.concat(
-                    [existing, new], how="diagonal_relaxed"
+                    [existing, to_add], how="diagonal_relaxed"
                 )
                 combined.write_parquet(self.predictions_path)
-                logger.info("Appended %d new predictions (%d total)", len(new), len(combined))
+                logger.info("Saved predictions: %d new, %d updated (%d total)", len(new), len(updated_uids), len(combined))
             else:
                 logger.info("No new predictions to save (%d already stored)", len(existing))
 

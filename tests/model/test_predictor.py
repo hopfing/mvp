@@ -513,7 +513,7 @@ class TestSavePredictions:
         stored = pl.read_parquet(tmp_path / "predictions.parquet")
         assert len(stored) == n_first
 
-    def test_consistency_validation_warns_on_mismatch(
+    def test_save_updates_changed_predictions(
         self, production_config, sample_matches, tmp_path
     ):
         from mvp.model.predictor import ProductionPredictor
@@ -532,5 +532,9 @@ class TestSavePredictions:
         tampered = predictions.with_columns(
             pl.lit(0.999).alias("p1_win_prob")
         )
-        with pytest.warns(UserWarning, match="prediction mismatch"):
-            predictor.save_predictions(tampered)
+        predictor.save_predictions(tampered)
+
+        stored = pl.read_parquet(tmp_path / "predictions.parquet")
+        assert len(stored) == len(predictions)
+        # All stored predictions should now have the updated probability
+        assert (stored["p1_win_prob"] - 0.999).abs().max() < 1e-4
