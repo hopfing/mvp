@@ -538,3 +538,27 @@ class TestSavePredictions:
         assert len(stored) == len(predictions)
         # All stored predictions should now have the updated probability
         assert (stored["p1_win_prob"] - 0.999).abs().max() < 1e-4
+
+        # Drift log should exist with one entry per changed prediction
+        drift_log = pl.read_parquet(tmp_path / "prediction_drift.parquet")
+        assert len(drift_log) == len(predictions)
+        assert set(drift_log.columns) == {
+            "match_uid", "p1_win_prob", "p2_win_prob",
+            "prev_p1_win_prob", "prev_p2_win_prob",
+            "prev_predicted_at", "updated_at",
+        }
+        # New prob should be 0.999, prev should be the original
+        assert (drift_log["p1_win_prob"] - 0.999).abs().max() < 1e-4
+        assert (drift_log["prev_p1_win_prob"] - predictions["p1_win_prob"]).abs().max() < 1e-4
+
+        # Second drift: change again, log should accumulate
+        tampered2 = predictions.with_columns(
+            pl.lit(0.500).alias("p1_win_prob")
+        )
+        predictor.save_predictions(tampered2)
+        drift_log2 = pl.read_parquet(tmp_path / "prediction_drift.parquet")
+        assert len(drift_log2) == 2 * len(predictions)
+        # Latest entries should show prev=0.999, new=0.500
+        latest = drift_log2.tail(len(predictions))
+        assert (latest["prev_p1_win_prob"] - 0.999).abs().max() < 1e-4
+        assert (latest["p1_win_prob"] - 0.500).abs().max() < 1e-4

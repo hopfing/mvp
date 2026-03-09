@@ -367,12 +367,16 @@ class ProductionPredictor:
             # Consistency validation on overlapping predictions
             updated_uids: set[str] = set()
             if len(overlap) > 0:
-                merged = overlap.select("match_uid", "p1_win_prob").join(
-                    existing.select("match_uid", pl.col("p1_win_prob").alias("existing_prob")),
+                merged = overlap.select("match_uid", "p1_win_prob", "predicted_at").join(
+                    existing.select(
+                        "match_uid",
+                        pl.col("p1_win_prob").alias("prev_p1_win_prob"),
+                        pl.col("predicted_at").alias("prev_predicted_at"),
+                    ),
                     on="match_uid",
                     how="inner",
                 )
-                diffs = (merged["p1_win_prob"] - merged["existing_prob"]).abs()
+                diffs = (merged["p1_win_prob"] - merged["prev_p1_win_prob"]).abs()
                 mismatched = merged.filter(diffs > PREDICTION_TOLERANCE)
                 if len(mismatched) > 0:
                     updated_uids = set(mismatched["match_uid"].to_list())
@@ -381,6 +385,7 @@ class ProductionPredictor:
                         len(updated_uids),
                         diffs.filter(diffs > PREDICTION_TOLERANCE).max(),
                     )
+                    self._log_prediction_changes(mismatched)
 
             # Replace updated predictions in existing, then append new
             if updated_uids:
@@ -403,3 +408,21 @@ class ProductionPredictor:
             predictions.write_parquet(self.predictions_path)
             logger.info("Saved %d predictions", len(predictions))
             return predictions
+
+    def _log_prediction_changes(self, mismatched: pl.DataFrame) -> None:
+        """Append changed predictions to the prediction drift log."""
+        log_path = self.predictions_path.parent / "prediction_drift.parquet"
+        log_entry = mismatched.select(
+            "match_uid",
+            pl.col("p1_win_prob"),
+            (1 - pl.col("p1_win_prob")).alias("p2_win_prob"),
+            pl.col("prev_p1_win_prob"),
+            (1 - pl.col("prev_p1_win_prob")).alias("prev_p2_win_prob"),
+            "prev_predicted_at",
+            pl.col("predicted_at").alias("updated_at"),
+        )
+        if log_path.exists():
+            existing_log = pl.read_parquet(log_path)
+            log_entry = pl.concat([existing_log, log_entry], how="diagonal_relaxed")
+        log_entry.write_parquet(log_path)
+        logger.info("Logged %d prediction changes to %s", len(mismatched), log_path.name)
