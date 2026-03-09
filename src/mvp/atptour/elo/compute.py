@@ -335,8 +335,11 @@ def compute_elo_ratings(df: pl.DataFrame) -> pl.DataFrame:
             opp_serve_pct, surface, k_serve,
         )
 
-        # Update style dimensions (per-player K, only updates one player by design)
-        k_style = k_player * STYLE_K_MULT
+        # Update style dimensions for BOTH players
+        k_style_player = k_player * STYLE_K_MULT
+        k_style_opp = k_opp * STYLE_K_MULT
+
+        # --- Player style updates ---
 
         # First serve power: aces / first_serve_pts_won
         svc_aces = row.get("svc_aces")
@@ -345,7 +348,7 @@ def compute_elo_ratings(df: pl.DataFrame) -> pl.DataFrame:
         if svc_aces is not None and svc_first_serve_pts_won and svc_first_serve_pts_won > 0:
             ace_rate = svc_aces / svc_first_serve_pts_won
         player_rating.first_serve_power = update_first_serve_power(
-            player_rating.first_serve_power, ace_rate, surface, k_style
+            player_rating.first_serve_power, ace_rate, surface, k_style_player
         )
 
         # Second serve reliability: 1 - (DFs / second_serve_pts_played)
@@ -355,7 +358,7 @@ def compute_elo_ratings(df: pl.DataFrame) -> pl.DataFrame:
         if svc_double_faults is not None and svc_second_serve_pts_played and svc_second_serve_pts_played > 0:
             reliability = 1 - (svc_double_faults / svc_second_serve_pts_played)
         player_rating.second_serve_reliability = update_second_serve_reliability(
-            player_rating.second_serve_reliability, reliability, surface, k_style
+            player_rating.second_serve_reliability, reliability, surface, k_style_player
         )
 
         # Ace resistance: 1 - (opp_svc_aces / ret_first_serve_pts_lost)
@@ -370,7 +373,7 @@ def compute_elo_ratings(df: pl.DataFrame) -> pl.DataFrame:
             if ret_lost > 0:
                 ace_resistance_val = 1 - (opp_svc_aces / ret_lost)
         player_rating.ace_resistance = update_ace_resistance(
-            player_rating.ace_resistance, ace_resistance_val, surface, k_style
+            player_rating.ace_resistance, ace_resistance_val, surface, k_style_player
         )
 
         # Serve clutch: bp_saved / bp_faced
@@ -380,7 +383,7 @@ def compute_elo_ratings(df: pl.DataFrame) -> pl.DataFrame:
         if svc_bp_saved is not None and svc_bp_faced and svc_bp_faced > 0:
             save_rate = svc_bp_saved / svc_bp_faced
         player_rating.serve_clutch = update_serve_clutch(
-            player_rating.serve_clutch, save_rate, surface, k_style
+            player_rating.serve_clutch, save_rate, surface, k_style_player
         )
 
         # Return clutch: bp_converted / bp_opportunities
@@ -390,13 +393,13 @@ def compute_elo_ratings(df: pl.DataFrame) -> pl.DataFrame:
         if ret_bp_converted is not None and ret_bp_opportunities and ret_bp_opportunities > 0:
             conversion_rate = ret_bp_converted / ret_bp_opportunities
         player_rating.return_clutch = update_return_clutch(
-            player_rating.return_clutch, conversion_rate, surface, k_style
+            player_rating.return_clutch, conversion_rate, surface, k_style_player
         )
 
         # TB clutch: count won/played from set scores
         tb_won, tb_played = _count_tiebreaks(row)
         player_rating.tb_clutch = update_tb_clutch(
-            player_rating.tb_clutch, tb_won, tb_played, k_style
+            player_rating.tb_clutch, tb_won, tb_played, k_style_player
         )
 
         # Overall clutch = average of serve, return, tb clutch
@@ -410,7 +413,73 @@ def compute_elo_ratings(df: pl.DataFrame) -> pl.DataFrame:
         indoor = row.get("indoor", False)
         if indoor:
             player_rating.indoor_adj = update_indoor_adj(
-                player_rating.indoor_adj, won, k_style
+                player_rating.indoor_adj, won, k_style_player
+            )
+
+        # --- Opponent style updates (mirror columns) ---
+
+        opp_svc_first_serve_pts_won = row.get("opp_svc_first_serve_pts_won")
+        opp_ace_rate = None
+        if opp_svc_aces is not None and opp_svc_first_serve_pts_won and opp_svc_first_serve_pts_won > 0:
+            opp_ace_rate = opp_svc_aces / opp_svc_first_serve_pts_won
+        opp_rating.first_serve_power = update_first_serve_power(
+            opp_rating.first_serve_power, opp_ace_rate, surface, k_style_opp
+        )
+
+        opp_svc_double_faults = row.get("opp_svc_double_faults")
+        opp_svc_second_serve_pts_played = row.get("opp_svc_second_serve_pts_played")
+        opp_reliability = None
+        if opp_svc_double_faults is not None and opp_svc_second_serve_pts_played and opp_svc_second_serve_pts_played > 0:
+            opp_reliability = 1 - (opp_svc_double_faults / opp_svc_second_serve_pts_played)
+        opp_rating.second_serve_reliability = update_second_serve_reliability(
+            opp_rating.second_serve_reliability, opp_reliability, surface, k_style_opp
+        )
+
+        opp_ret_first_serve_pts_played = row.get("opp_ret_first_serve_pts_played")
+        opp_ret_first_serve_pts_won = row.get("opp_ret_first_serve_pts_won")
+        opp_ace_resistance_val = None
+        if (svc_aces is not None and
+            opp_ret_first_serve_pts_played is not None and
+            opp_ret_first_serve_pts_won is not None):
+            opp_ret_lost = opp_ret_first_serve_pts_played - opp_ret_first_serve_pts_won
+            if opp_ret_lost > 0:
+                opp_ace_resistance_val = 1 - (svc_aces / opp_ret_lost)
+        opp_rating.ace_resistance = update_ace_resistance(
+            opp_rating.ace_resistance, opp_ace_resistance_val, surface, k_style_opp
+        )
+
+        opp_svc_bp_saved = row.get("opp_svc_bp_saved")
+        opp_svc_bp_faced = row.get("opp_svc_bp_faced")
+        opp_save_rate = None
+        if opp_svc_bp_saved is not None and opp_svc_bp_faced and opp_svc_bp_faced > 0:
+            opp_save_rate = opp_svc_bp_saved / opp_svc_bp_faced
+        opp_rating.serve_clutch = update_serve_clutch(
+            opp_rating.serve_clutch, opp_save_rate, surface, k_style_opp
+        )
+
+        opp_ret_bp_converted = row.get("opp_ret_bp_converted")
+        opp_ret_bp_opportunities = row.get("opp_ret_bp_opportunities")
+        opp_conversion_rate = None
+        if opp_ret_bp_converted is not None and opp_ret_bp_opportunities and opp_ret_bp_opportunities > 0:
+            opp_conversion_rate = opp_ret_bp_converted / opp_ret_bp_opportunities
+        opp_rating.return_clutch = update_return_clutch(
+            opp_rating.return_clutch, opp_conversion_rate, surface, k_style_opp
+        )
+
+        opp_tb_won = tb_played - tb_won
+        opp_rating.tb_clutch = update_tb_clutch(
+            opp_rating.tb_clutch, opp_tb_won, tb_played, k_style_opp
+        )
+
+        opp_rating.overall_clutch = (
+            opp_rating.serve_clutch +
+            opp_rating.return_clutch +
+            opp_rating.tb_clutch
+        ) / 3
+
+        if indoor:
+            opp_rating.indoor_adj = update_indoor_adj(
+                opp_rating.indoor_adj, not won, k_style_opp
             )
 
         # Mean reversion — counteract inflation from player turnover
