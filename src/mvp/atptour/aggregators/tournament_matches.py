@@ -500,8 +500,15 @@ class TournamentMatchesAggregator(BaseJob):
         if not (has_round or has_round_sched):
             return df
 
+        # Build effective draw_type/round/opp from both sources
+        dt_col = "draw_type"
+        dt_sched = "draw_type_schedule"
+
         # Add working columns
         work = df.with_columns(
+            pl.coalesce(
+                [pl.col(c) for c in [dt_col, dt_sched] if c in df.columns]
+            ).alias("_eff_draw_type"),
             pl.coalesce(
                 [pl.col(c) for c in [round_col, round_sched] if c in df.columns]
             ).alias("_eff_round"),
@@ -522,18 +529,19 @@ class TournamentMatchesAggregator(BaseJob):
         if schedule_only.is_empty() or has_results.is_empty():
             return df
 
-        # For each results-backed row, record (player_id, round, opp)
+        # For each results-backed row, record (player_id, draw_type, round, opp)
         results_keys = has_results.select(
             pl.col("player_id"),
+            pl.col("_eff_draw_type").alias("_r_draw_type"),
             pl.col("_eff_round").alias("_r_round"),
             pl.col("_eff_opp").alias("_r_opp"),
         ).unique()
 
-        # Join schedule-only rows against results keys on (player_id, round)
+        # Join schedule-only rows against results keys on (player_id, draw_type, round)
         tagged = schedule_only.join(
             results_keys,
-            left_on=["player_id", "_eff_round"],
-            right_on=["player_id", "_r_round"],
+            left_on=["player_id", "_eff_draw_type", "_eff_round"],
+            right_on=["player_id", "_r_draw_type", "_r_round"],
             how="inner",
         )
 
