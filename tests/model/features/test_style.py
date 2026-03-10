@@ -58,7 +58,7 @@ class TestStyleServeFeatures:
     def test_avg_1st_serve_speed_registered(self):
         registry = get_registry()
         feat = registry.get("style_avg_1st_serve_speed")
-        assert feat.params == []
+        assert feat.params == ["days"]
         assert feat.mirror is True
 
     def test_avg_1st_serve_speed_computes(self):
@@ -116,7 +116,7 @@ class TestStyleAggressionFeatures:
     def test_winner_rate_registered(self):
         registry = get_registry()
         feat = registry.get("style_winner_rate")
-        assert feat.params == []
+        assert feat.params == ["days"]
         assert feat.mirror is True
 
     def test_winner_rate_computes(self):

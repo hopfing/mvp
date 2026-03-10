@@ -14,15 +14,16 @@ import polars as pl
 from mvp.model.primitives import ratio_feature, rolling_max, rolling_mean
 from mvp.model.registry import feature
 
-_DAYS = 365
+_DEFAULT_DAYS = 365
 _GRP = "player_id"
 _DATE = "effective_match_date"
 
 
-def _rolling_365(expr: pl.Expr) -> pl.Expr:
-    """365-day rolling mean of a per-match expression, partitioned by player."""
+def _rolling(expr: pl.Expr, days: int | None = None) -> pl.Expr:
+    """Rolling mean of a per-match expression, partitioned by player."""
+    d = days or _DEFAULT_DAYS
     return (
-        expr.rolling_mean_by(by=_DATE, window_size=f"{_DAYS}d", closed="left")
+        expr.rolling_mean_by(by=_DATE, window_size=f"{d}d", closed="left")
         .over(_GRP)
     )
 
@@ -34,52 +35,52 @@ def _rolling_365(expr: pl.Expr) -> pl.Expr:
 
 @feature(
     name="style_avg_1st_serve_speed",
-    params=[],
-    description="365d rolling mean of per-match avg 1st serve speed (km/h)",
+    params=["days"],
+    description="Rolling mean of per-match avg 1st serve speed (km/h)",
     mirror=True,
 )
-def style_avg_1st_serve_speed() -> pl.Expr:
-    return rolling_mean("mb_player_avg_1st_serve_speed", days=_DAYS, group_by=_GRP)
+def style_avg_1st_serve_speed(days: int | None = None) -> pl.Expr:
+    return rolling_mean("mb_player_avg_1st_serve_speed", days=days or _DEFAULT_DAYS, group_by=_GRP)
 
 
 @feature(
     name="style_max_1st_serve_speed",
-    params=[],
-    description="365d rolling max of per-match max 1st serve speed (peak power)",
+    params=["days"],
+    description="Rolling max of per-match max 1st serve speed (peak power)",
     mirror=True,
 )
-def style_max_1st_serve_speed() -> pl.Expr:
-    return rolling_max("mb_player_max_1st_serve_speed", days=_DAYS, group_by=_GRP)
+def style_max_1st_serve_speed(days: int | None = None) -> pl.Expr:
+    return rolling_max("mb_player_max_1st_serve_speed", days=days or _DEFAULT_DAYS, group_by=_GRP)
 
 
 @feature(
     name="style_avg_2nd_serve_speed",
-    params=[],
-    description="365d rolling mean of per-match avg 2nd serve speed (km/h)",
+    params=["days"],
+    description="Rolling mean of per-match avg 2nd serve speed (km/h)",
     mirror=True,
 )
-def style_avg_2nd_serve_speed() -> pl.Expr:
-    return rolling_mean("mb_player_avg_2nd_serve_speed", days=_DAYS, group_by=_GRP)
+def style_avg_2nd_serve_speed(days: int | None = None) -> pl.Expr:
+    return rolling_mean("mb_player_avg_2nd_serve_speed", days=days or _DEFAULT_DAYS, group_by=_GRP)
 
 
 @feature(
     name="style_max_2nd_serve_speed",
-    params=[],
-    description="365d rolling max of per-match max 2nd serve speed",
+    params=["days"],
+    description="Rolling max of per-match max 2nd serve speed",
     mirror=True,
 )
-def style_max_2nd_serve_speed() -> pl.Expr:
-    return rolling_max("mb_player_max_2nd_serve_speed", days=_DAYS, group_by=_GRP)
+def style_max_2nd_serve_speed(days: int | None = None) -> pl.Expr:
+    return rolling_max("mb_player_max_2nd_serve_speed", days=days or _DEFAULT_DAYS, group_by=_GRP)
 
 
 @feature(
     name="style_1st_serve_speed_variance",
-    params=[],
-    description="365d rolling mean of within-match 1st serve speed std dev (tactical variety)",
+    params=["days"],
+    description="Rolling mean of within-match 1st serve speed std dev (tactical variety)",
     mirror=True,
 )
-def style_1st_serve_speed_variance() -> pl.Expr:
-    return rolling_mean("mb_player_std_1st_serve_speed", days=_DAYS, group_by=_GRP)
+def style_1st_serve_speed_variance(days: int | None = None) -> pl.Expr:
+    return rolling_mean("mb_player_std_1st_serve_speed", days=days or _DEFAULT_DAYS, group_by=_GRP)
 
 
 # =============================================================================
@@ -89,47 +90,47 @@ def style_1st_serve_speed_variance() -> pl.Expr:
 
 @feature(
     name="style_winner_rate",
-    params=[],
-    description="365d rolling winners per point (offensive output)",
+    params=["days"],
+    description="Rolling winners per point (offensive output)",
     mirror=True,
 )
-def style_winner_rate() -> pl.Expr:
-    return _rolling_365(pl.col("mb_player_winners") / pl.col("total_points"))
+def style_winner_rate(days: int | None = None) -> pl.Expr:
+    return _rolling(pl.col("mb_player_winners") / pl.col("total_points"), days)
 
 
 @feature(
     name="style_ue_rate",
-    params=[],
-    description="365d rolling unforced errors per point",
+    params=["days"],
+    description="Rolling unforced errors per point",
     mirror=True,
 )
-def style_ue_rate() -> pl.Expr:
-    return _rolling_365(pl.col("mb_player_ues") / pl.col("total_points"))
+def style_ue_rate(days: int | None = None) -> pl.Expr:
+    return _rolling(pl.col("mb_player_ues") / pl.col("total_points"), days)
 
 
 @feature(
     name="style_winner_ue_ratio",
-    params=[],
-    description="365d rolling winners/UEs ratio (aggression efficiency)",
+    params=["days"],
+    description="Rolling winners/UEs ratio (aggression efficiency)",
     mirror=True,
 )
-def style_winner_ue_ratio() -> pl.Expr:
+def style_winner_ue_ratio(days: int | None = None) -> pl.Expr:
     per_match = (
         pl.when(pl.col("mb_player_ues") > 0)
         .then(pl.col("mb_player_winners") / pl.col("mb_player_ues"))
         .otherwise(None)
     )
-    return _rolling_365(per_match)
+    return _rolling(per_match, days)
 
 
 @feature(
     name="style_forced_error_rate",
-    params=[],
-    description="365d rolling opponent FEs per point (offensive pressure)",
+    params=["days"],
+    description="Rolling opponent FEs per point (offensive pressure)",
     mirror=True,
 )
-def style_forced_error_rate() -> pl.Expr:
-    return _rolling_365(pl.col("mb_opp_fes") / pl.col("total_points"))
+def style_forced_error_rate(days: int | None = None) -> pl.Expr:
+    return _rolling(pl.col("mb_opp_fes") / pl.col("total_points"), days)
 
 
 # =============================================================================
@@ -139,37 +140,37 @@ def style_forced_error_rate() -> pl.Expr:
 
 @feature(
     name="style_easy_hold_pct",
-    params=[],
-    description="365d easy holds / service games (serve dominance)",
+    params=["days"],
+    description="Rolling easy holds / service games (serve dominance)",
     mirror=True,
 )
-def style_easy_hold_pct() -> pl.Expr:
+def style_easy_hold_pct(days: int | None = None) -> pl.Expr:
     return ratio_feature(
-        "mb_player_easy_holds", "mb_player_service_games", days=_DAYS
+        "mb_player_easy_holds", "mb_player_service_games", days=days or _DEFAULT_DAYS
     )
 
 
 @feature(
     name="style_difficult_hold_pct",
-    params=[],
-    description="365d difficult holds / service games (under-pressure serving)",
+    params=["days"],
+    description="Rolling difficult holds / service games (under-pressure serving)",
     mirror=True,
 )
-def style_difficult_hold_pct() -> pl.Expr:
+def style_difficult_hold_pct(days: int | None = None) -> pl.Expr:
     return ratio_feature(
-        "mb_player_difficult_holds", "mb_player_service_games", days=_DAYS
+        "mb_player_difficult_holds", "mb_player_service_games", days=days or _DEFAULT_DAYS
     )
 
 
 @feature(
     name="style_crucial_pts_win_pct",
-    params=[],
-    description="365d crucial points won / played (big-point performance)",
+    params=["days"],
+    description="Rolling crucial points won / played (big-point performance)",
     mirror=True,
 )
-def style_crucial_pts_win_pct() -> pl.Expr:
+def style_crucial_pts_win_pct(days: int | None = None) -> pl.Expr:
     return ratio_feature(
-        "mb_player_crucial_points_won", "mb_player_crucial_points_played", days=_DAYS
+        "mb_player_crucial_points_won", "mb_player_crucial_points_played", days=days or _DEFAULT_DAYS
     )
 
 
@@ -180,25 +181,25 @@ def style_crucial_pts_win_pct() -> pl.Expr:
 
 @feature(
     name="style_rally_won_avg_length",
-    params=[],
-    description="365d avg rally length when winning (total shots in won rallies / count)",
+    params=["days"],
+    description="Rolling avg rally length when winning (total shots in won rallies / count)",
     mirror=True,
 )
-def style_rally_won_avg_length() -> pl.Expr:
+def style_rally_won_avg_length(days: int | None = None) -> pl.Expr:
     return ratio_feature(
-        "mb_player_rally_won_shots", "mb_player_rally_won_count", days=_DAYS
+        "mb_player_rally_won_shots", "mb_player_rally_won_count", days=days or _DEFAULT_DAYS
     )
 
 
 @feature(
     name="style_rally_lost_avg_length",
-    params=[],
-    description="365d avg rally length when losing",
+    params=["days"],
+    description="Rolling avg rally length when losing",
     mirror=True,
 )
-def style_rally_lost_avg_length() -> pl.Expr:
+def style_rally_lost_avg_length(days: int | None = None) -> pl.Expr:
     return ratio_feature(
-        "mb_player_rally_lost_shots", "mb_player_rally_lost_count", days=_DAYS
+        "mb_player_rally_lost_shots", "mb_player_rally_lost_count", days=days or _DEFAULT_DAYS
     )
 
 
@@ -209,58 +210,58 @@ def style_rally_lost_avg_length() -> pl.Expr:
 
 @feature(
     name="style_fh_winner_share",
-    params=[],
-    description="365d FH winners as share of FH+BH winners (offensive wing preference)",
+    params=["days"],
+    description="Rolling FH winners as share of FH+BH winners (offensive wing preference)",
     mirror=True,
 )
-def style_fh_winner_share() -> pl.Expr:
+def style_fh_winner_share(days: int | None = None) -> pl.Expr:
     total = pl.col("player_fh_winners") + pl.col("player_bh_winners")
     per_match = pl.when(total > 0).then(pl.col("player_fh_winners") / total).otherwise(None)
-    return _rolling_365(per_match)
+    return _rolling(per_match, days)
 
 
 @feature(
     name="style_fh_ue_share",
-    params=[],
-    description="365d FH UEs as share of FH+BH UEs (error wing tendency)",
+    params=["days"],
+    description="Rolling FH UEs as share of FH+BH UEs (error wing tendency)",
     mirror=True,
 )
-def style_fh_ue_share() -> pl.Expr:
+def style_fh_ue_share(days: int | None = None) -> pl.Expr:
     total = pl.col("player_fh_unforced_errors") + pl.col("player_bh_unforced_errors")
     per_match = pl.when(total > 0).then(pl.col("player_fh_unforced_errors") / total).otherwise(None)
-    return _rolling_365(per_match)
+    return _rolling(per_match, days)
 
 
 @feature(
     name="style_fh_winner_rate",
-    params=[],
-    description="365d FH productivity (FH winners / total FH outcomes)",
+    params=["days"],
+    description="Rolling FH productivity (FH winners / total FH outcomes)",
     mirror=True,
 )
-def style_fh_winner_rate() -> pl.Expr:
+def style_fh_winner_rate(days: int | None = None) -> pl.Expr:
     total = (
         pl.col("player_fh_winners")
         + pl.col("player_fh_forced_errors")
         + pl.col("player_fh_unforced_errors")
     )
     per_match = pl.when(total > 0).then(pl.col("player_fh_winners") / total).otherwise(None)
-    return _rolling_365(per_match)
+    return _rolling(per_match, days)
 
 
 @feature(
     name="style_bh_winner_rate",
-    params=[],
-    description="365d BH productivity (BH winners / total BH outcomes)",
+    params=["days"],
+    description="Rolling BH productivity (BH winners / total BH outcomes)",
     mirror=True,
 )
-def style_bh_winner_rate() -> pl.Expr:
+def style_bh_winner_rate(days: int | None = None) -> pl.Expr:
     total = (
         pl.col("player_bh_winners")
         + pl.col("player_bh_forced_errors")
         + pl.col("player_bh_unforced_errors")
     )
     per_match = pl.when(total > 0).then(pl.col("player_bh_winners") / total).otherwise(None)
-    return _rolling_365(per_match)
+    return _rolling(per_match, days)
 
 
 # =============================================================================
@@ -280,26 +281,26 @@ def _shot_type_total(prefix: str) -> pl.Expr:
 
 @feature(
     name="style_ground_stroke_winner_rate",
-    params=[],
-    description="365d ground stroke winners / total ground strokes (rally offense)",
+    params=["days"],
+    description="Rolling ground stroke winners / total ground strokes (rally offense)",
     mirror=True,
 )
-def style_ground_stroke_winner_rate() -> pl.Expr:
+def style_ground_stroke_winner_rate(days: int | None = None) -> pl.Expr:
     total = _shot_type_total("ground_stroke")
     per_match = pl.when(total > 0).then(pl.col("player_ground_stroke_winners") / total).otherwise(None)
-    return _rolling_365(per_match)
+    return _rolling(per_match, days)
 
 
 @feature(
     name="style_ground_stroke_ue_rate",
-    params=[],
-    description="365d ground stroke UEs / total ground strokes (rally error tendency)",
+    params=["days"],
+    description="Rolling ground stroke UEs / total ground strokes (rally error tendency)",
     mirror=True,
 )
-def style_ground_stroke_ue_rate() -> pl.Expr:
+def style_ground_stroke_ue_rate(days: int | None = None) -> pl.Expr:
     total = _shot_type_total("ground_stroke")
     per_match = pl.when(total > 0).then(pl.col("player_ground_stroke_unforced_errors") / total).otherwise(None)
-    return _rolling_365(per_match)
+    return _rolling(per_match, days)
 
 
 # =============================================================================
@@ -309,66 +310,66 @@ def style_ground_stroke_ue_rate() -> pl.Expr:
 
 @feature(
     name="style_net_approach_frequency",
-    params=[],
-    description="365d net play shots (volley+approach+overhead) per point",
+    params=["days"],
+    description="Rolling net play shots (volley+approach+overhead) per point",
     mirror=True,
 )
-def style_net_approach_frequency() -> pl.Expr:
+def style_net_approach_frequency(days: int | None = None) -> pl.Expr:
     net_total = _shot_type_total("volley") + _shot_type_total("approach") + _shot_type_total("overhead")
     pts = pl.col("pts_total_pts_played")
     per_match = pl.when(pts > 0).then(net_total / pts).otherwise(None)
-    return _rolling_365(per_match)
+    return _rolling(per_match, days)
 
 
 @feature(
     name="style_drop_shot_frequency",
-    params=[],
-    description="365d drop shots per point (craft/variety)",
+    params=["days"],
+    description="Rolling drop shots per point (craft/variety)",
     mirror=True,
 )
-def style_drop_shot_frequency() -> pl.Expr:
+def style_drop_shot_frequency(days: int | None = None) -> pl.Expr:
     total = _shot_type_total("drop_shot")
     pts = pl.col("pts_total_pts_played")
     per_match = pl.when(pts > 0).then(total / pts).otherwise(None)
-    return _rolling_365(per_match)
+    return _rolling(per_match, days)
 
 
 @feature(
     name="style_drop_shot_effectiveness",
-    params=[],
-    description="365d drop shot winners / total drop shots",
+    params=["days"],
+    description="Rolling drop shot winners / total drop shots",
     mirror=True,
 )
-def style_drop_shot_effectiveness() -> pl.Expr:
+def style_drop_shot_effectiveness(days: int | None = None) -> pl.Expr:
     total = _shot_type_total("drop_shot")
     per_match = pl.when(total > 0).then(pl.col("player_drop_shot_winners") / total).otherwise(None)
-    return _rolling_365(per_match)
+    return _rolling(per_match, days)
 
 
 @feature(
     name="style_passing_frequency",
-    params=[],
-    description="365d passing shots per point",
+    params=["days"],
+    description="Rolling passing shots per point",
     mirror=True,
 )
-def style_passing_frequency() -> pl.Expr:
+def style_passing_frequency(days: int | None = None) -> pl.Expr:
     total = _shot_type_total("passing")
     pts = pl.col("pts_total_pts_played")
     per_match = pl.when(pts > 0).then(total / pts).otherwise(None)
-    return _rolling_365(per_match)
+    return _rolling(per_match, days)
 
 
 @feature(
     name="style_lob_frequency",
-    params=[],
-    description="365d lob shots per point (defensive variety)",
+    params=["days"],
+    description="Rolling lob shots per point (defensive variety)",
     mirror=True,
 )
-def style_lob_frequency() -> pl.Expr:
+def style_lob_frequency(days: int | None = None) -> pl.Expr:
     total = _shot_type_total("lob")
     pts = pl.col("pts_total_pts_played")
     per_match = pl.when(pts > 0).then(total / pts).otherwise(None)
-    return _rolling_365(per_match)
+    return _rolling(per_match, days)
 
 
 # =============================================================================
@@ -378,50 +379,50 @@ def style_lob_frequency() -> pl.Expr:
 
 @feature(
     name="style_short_rally_pct",
-    params=[],
-    description="365d short rallies as share of total rallies (serve-dominated play)",
+    params=["days"],
+    description="Rolling short rallies as share of total rallies (serve-dominated play)",
     mirror=True,
 )
-def style_short_rally_pct() -> pl.Expr:
+def style_short_rally_pct(days: int | None = None) -> pl.Expr:
     rpwd = pl.col("rally_points_with_data")
     per_match = pl.when(rpwd > 0).then(pl.col("rally_short_count") / rpwd).otherwise(None)
-    return _rolling_365(per_match)
+    return _rolling(per_match, days)
 
 
 @feature(
     name="style_long_rally_pct",
-    params=[],
-    description="365d long rallies as share of total rallies (grinder tendency)",
+    params=["days"],
+    description="Rolling long rallies as share of total rallies (grinder tendency)",
     mirror=True,
 )
-def style_long_rally_pct() -> pl.Expr:
+def style_long_rally_pct(days: int | None = None) -> pl.Expr:
     rpwd = pl.col("rally_points_with_data")
     per_match = pl.when(rpwd > 0).then(pl.col("rally_long_count") / rpwd).otherwise(None)
-    return _rolling_365(per_match)
+    return _rolling(per_match, days)
 
 
 @feature(
     name="style_short_rally_win_pct",
-    params=[],
-    description="365d short rally points won / total short rallies (quick-point efficiency)",
+    params=["days"],
+    description="Rolling short rally points won / total short rallies (quick-point efficiency)",
     mirror=True,
 )
-def style_short_rally_win_pct() -> pl.Expr:
+def style_short_rally_win_pct(days: int | None = None) -> pl.Expr:
     total = pl.col("player_short_won") + pl.col("player_short_err")
     per_match = pl.when(total > 0).then(pl.col("player_short_won") / total).otherwise(None)
-    return _rolling_365(per_match)
+    return _rolling(per_match, days)
 
 
 @feature(
     name="style_long_rally_win_pct",
-    params=[],
-    description="365d long rally points won / total long rallies (endurance/consistency)",
+    params=["days"],
+    description="Rolling long rally points won / total long rallies (endurance/consistency)",
     mirror=True,
 )
-def style_long_rally_win_pct() -> pl.Expr:
+def style_long_rally_win_pct(days: int | None = None) -> pl.Expr:
     total = pl.col("player_long_won") + pl.col("player_long_err")
     per_match = pl.when(total > 0).then(pl.col("player_long_won") / total).otherwise(None)
-    return _rolling_365(per_match)
+    return _rolling(per_match, days)
 
 
 # =============================================================================
