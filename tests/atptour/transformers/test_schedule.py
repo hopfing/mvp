@@ -818,6 +818,69 @@ class TestUniquenessAssertion:
         ScheduleTransformer._assert_unique(df, ["match_uid"])
 
 
+class TestUndeterminedOpponent:
+    """Skip matches where opponent is not yet decided (possible-players-container)."""
+
+    def _undetermined_opponent_div(self):
+        """Build HTML where p2 is 'M. Landaluce Or J. Pinnington Jones'."""
+        return (
+            '<div class="schedule"'
+            ' data-matchdate="2026-03-10"'
+            ' data-datetime="2026-03-10 14:00:00"'
+            ' data-suffix="Not Before"'
+            ' data-displaytime="Not Before 3:00 PM">'
+            '<div class="schedule-header">'
+            '<div class="schedule-location-timestamp">'
+            '<span class="matchtime">Not Before 3:00 PM</span>'
+            '</div>'
+            '<div class="schedule-type">Q2</div>'
+            '</div>'
+            '<div class="schedule-content">'
+            '<div class="schedule-type">Q2</div>'
+            '<div class="schedule-players">'
+            '<div class="player">'
+            f'<div class="country">{_flag("chn")}</div>'
+            '<div class="name">'
+            f'{_player_link("coleman-wong", "w0bh", "C.", "Wong")}'
+            '<div class="rank"><span></span></div>'
+            '</div></div>'
+            '<div class="status">Vs</div>'
+            '<div class="possible-players-container">'
+            '<div class="opponent possible">'
+            f'<div class="country">{_flag("esp")}</div>'
+            '<div class="name">'
+            f'{_player_link("martin-landaluce", "l0il", "M.", "Landaluce")}'
+            '<div class="rank"><span></span></div>'
+            '</div></div>'
+            '<div class="or-divider">Or</div>'
+            '<div class="opponent possible">'
+            f'<div class="country">{_flag("gbr")}</div>'
+            '<div class="name">'
+            f'{_player_link("jack-pinnington-jones", "pi0j", "J.", "Pinnington Jones")}'
+            '<div class="rank"><span></span></div>'
+            '</div></div>'
+            '</div>'
+            '</div>'
+            '<div class="schedule-cta">'
+            '<span class="schedule-cta-score">&ndash;&ndash;&ndash;</span>'
+            '</div></div></div>'
+        )
+
+    def test_undetermined_opponent_skipped(self):
+        html = _wrap(self._undetermined_opponent_div())
+        records = _parse_fixture(html)
+        assert len(records) == 0
+
+    def test_undetermined_opponent_does_not_affect_other_matches(self):
+        html = _wrap(
+            _singles_div(),
+            self._undetermined_opponent_div(),
+        )
+        records = _parse_fixture(html)
+        assert len(records) == 1
+        assert records[0].p1_id == "ME82"
+
+
 class TestDoublesDetection:
     def test_doubles_draw_type_in_parquet(self, tmp_path):
         _write_schedule_html(

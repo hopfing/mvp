@@ -188,6 +188,11 @@ def _parse_schedule_html(
             if content is None:
                 continue
 
+            # Skip matches where opponent is not yet determined
+            # (e.g., "M. Landaluce Or J. Pinnington Jones" from an unfinished prior round)
+            if content.select_one("div.possible-players-container"):
+                continue
+
             player_div = content.select_one("div.player")
             opponent_div = content.select_one("div.opponent")
             if player_div is None or opponent_div is None:
