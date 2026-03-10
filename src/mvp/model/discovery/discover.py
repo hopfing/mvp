@@ -365,28 +365,30 @@ class FeatureDiscovery:
         Returns:
             SelectionResult with selected features.
         """
+        feat_cfg = self.config.discovery.features
+
         if all_features is None:
             all_features = get_all_feature_specs(
-                window_sizes=self.config.discovery.window_sizes
+                window_sizes=feat_cfg.window_sizes
             )
 
-        if self.config.discovery.include_features:
-            included = set(self.config.discovery.include_features)
+        if feat_cfg.include:
+            included = set(feat_cfg.include)
             all_features = [f for f in all_features if f in included]
-            self._log(f"Restricted to {len(all_features)} features via include_features")
+            self._log(f"Restricted to {len(all_features)} features via include")
 
-        if self.config.discovery.features.compute_only:
-            compute_only = set(self.config.discovery.features.compute_only)
+        if feat_cfg.compute_only:
+            compute_only = set(feat_cfg.compute_only)
             all_features = [f for f in all_features if f not in compute_only]
 
-        if self.config.discovery.exclude_features:
-            excluded = set(self.config.discovery.exclude_features)
+        if feat_cfg.exclude:
+            excluded = set(feat_cfg.exclude)
             all_features = [f for f in all_features if f not in excluded]
             self._log(f"Excluding {len(excluded)} features: {list(excluded)}")
 
         self._log(f"PHASE 1: Feature Selection")
 
-        base = self.config.discovery.base_features
+        base = feat_cfg.base
         method = self.config.discovery.selection_method
 
         if method == "recursive" and base:
@@ -407,8 +409,8 @@ class FeatureDiscovery:
             method=method,
             direction=self.config.discovery.direction,
             importance_fn=importance_fn,
-            min_features=self.config.discovery.min_features,
-            max_features=self.config.discovery.max_features,
+            min_features=feat_cfg.min,
+            max_features=feat_cfg.max,
             importance_threshold=self.config.discovery.importance_threshold,
             base_features=base,
         )

@@ -154,7 +154,18 @@ class TestDiscoveryOptions:
         assert options.segment_analysis is True
         assert options.metric == "calibration_error"
         assert options.direction == "minimize"
+
+    def test_features_defaults(self):
+        """Feature config should have sensible defaults."""
+        options = DiscoveryOptions()
+
+        assert options.features.include == []
+        assert options.features.exclude == []
         assert options.features.compute_only == []
+        assert options.features.base == []
+        assert options.features.min == 5
+        assert options.features.max is None
+        assert options.features.window_sizes is None
 
 
 class TestGetAllFeatureSpecs:

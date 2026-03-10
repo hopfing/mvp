@@ -42,7 +42,13 @@ class MetaDiscoveryConfig(BaseModel):
 class DiscoveryFeaturesConfig(BaseModel):
     """Feature configuration for discovery."""
 
+    include: list[str] = []
+    exclude: list[str] = []
     compute_only: list[str] = []
+    base: list[str] = []
+    min: int = 5
+    max: int | None = None
+    window_sizes: list[int] | None = None  # None = all defaults, 0 = alltime variant
 
 
 class DiscoveryOptions(BaseModel):
@@ -54,13 +60,7 @@ class DiscoveryOptions(BaseModel):
     segment_analysis: bool = True
     metric: str = "calibration_error"
     direction: Literal["minimize", "maximize"] = "minimize"
-    min_features: int = 5
-    max_features: int | None = None
     importance_threshold: float = 0.05
-    include_features: list[str] = []
-    exclude_features: list[str] = []
-    base_features: list[str] = []
-    window_sizes: list[int] | None = None  # None = all defaults, 0 = alltime variant
     meta_discovery: MetaDiscoveryConfig | None = None
     features: DiscoveryFeaturesConfig = DiscoveryFeaturesConfig()
 
