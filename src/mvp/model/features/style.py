@@ -468,13 +468,15 @@ def _register_diff(base_name: str) -> None:
 
     @feature(
         name=diff_name,
-        params=[],
+        params=["days"],
         description=f"{base_name} difference (player - opponent)",
         depends_on=[base_name],
         mirror=False,
     )
-    def _diff() -> pl.Expr:
-        return pl.col(f"player_{base_name}") - pl.col(f"opp_{base_name}")
+    def _diff(days: int | None = None, _bn: str = base_name) -> pl.Expr:
+        if days is None:
+            return pl.col(f"player_{_bn}") - pl.col(f"opp_{_bn}")
+        return pl.col(f"player_{_bn}_{days}d") - pl.col(f"opp_{_bn}_{days}d")
 
     globals()[diff_name] = _diff
 
@@ -564,13 +566,17 @@ def _register_matchup(
 
     @feature(
         name=name,
-        params=[],
+        params=["days"],
         description=description,
         depends_on=[dep1, dep2],
         mirror=False,
     )
-    def _matchup() -> pl.Expr:
-        return pl.col(player_col) - pl.col(opp_col)
+    def _matchup(
+        days: int | None = None, _pc: str = player_col, _oc: str = opp_col
+    ) -> pl.Expr:
+        if days is None:
+            return pl.col(_pc) - pl.col(_oc)
+        return pl.col(f"{_pc}_{days}d") - pl.col(f"{_oc}_{days}d")
 
     globals()[name] = _matchup
 
