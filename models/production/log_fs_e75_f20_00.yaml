@@ -1,0 +1,43 @@
+data:
+  date_range:
+    end: 2025-12-31
+    start: 2020-01-01
+  filters:
+    circuit:
+    - tour
+    - chal
+    draw_type: singles
+description: null
+features:
+  include:
+  - player_elo_surface_diff
+  - player_tour_match_pct_diff(days=365)
+  - player_pts_service_won_pct_diff(days=14)
+  - player_age_diff
+  - player_ret_rating_diff
+  - player_venue_win_pct_diff
+  - player_deciding_set_win_pct_diff(days=14)
+  - player_match_count_diff(days=60)
+  - player_tour_match_pct_diff
+  - player_elo_clutch_diff
+  - player_win_pct_diff(days=180)
+  - player_pts_total_won_pct_diff(days=180)
+  - player_svc_ace_pct_diff(days=14)
+  - player_ret_elo_diff
+  - player_svc_second_serve_reliability_diff
+  - opp_deciding_set_pct
+  - player_deciding_set_pct
+  - player_deciding_set_win_pct_diff(days=60)
+  - player_pts_total_won_pct_diff(days=60)
+  - player_ret_second_serve_win_pct_diff(days=180)
+  - elo_avg
+  - elo_diff_x_elo_avg
+  - elo_diff_x_rd_sum
+metrics:
+  primary: log_loss
+model:
+  type: logistic
+validation:
+  type: expanding_window
+  initial_train_size: 30000
+  step_size: 15000
