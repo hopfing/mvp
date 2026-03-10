@@ -34,14 +34,6 @@ MODIFIERS: list[Modifier] = [
         )["v"],
     ),
     Modifier(
-        name="min_elo_rd",
-        description="Minimum Elo RD (both players well-established?)",
-        required_columns=["player_elo_rd", "opp_elo_rd"],
-        compute_value=lambda df: df.select(
-            pl.min_horizontal("player_elo_rd", "opp_elo_rd").alias("v")
-        )["v"],
-    ),
-    Modifier(
         name="rank_gap",
         description="Absolute ranking difference",
         required_columns=["player_rank", "opp_rank"],
@@ -52,22 +44,6 @@ MODIFIERS: list[Modifier] = [
         description="Disagreement between ranking gap and Elo gap direction",
         required_columns=["player_rank", "opp_rank", "player_elo", "opp_elo"],
         compute_value=lambda df: _rank_elo_divergence(df),
-    ),
-    Modifier(
-        name="age_gap",
-        description="Absolute age difference in years",
-        required_columns=["player_birth_date", "opp_birth_date", "effective_match_date"],
-        compute_value=lambda df: (
-            (df["effective_match_date"] - df["player_birth_date"]).dt.total_days()
-            - (df["effective_match_date"] - df["opp_birth_date"]).dt.total_days()
-        ).abs().cast(pl.Float64) / 365.25,
-    ),
-    Modifier(
-        name="season_month",
-        description="Month of the year",
-        required_columns=["effective_match_date"],
-        compute_value=lambda df: df["effective_match_date"].dt.month().cast(pl.Float64),
-        n_buckets=0,  # natural categories (1-12), not quintiles
     ),
     Modifier(
         name="recent_match_count",
