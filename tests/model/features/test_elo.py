@@ -85,6 +85,8 @@ class TestAbsoluteLevelFeatures:
         return pl.DataFrame({
             "player_elo": [1500.0, 1800.0],
             "opp_elo": [1400.0, 1600.0],
+            "player_elo_rd": [80.0, 60.0],
+            "opp_elo_rd": [100.0, 70.0],
             "player_hard_adj": [30.0, 20.0],
             "player_clay_adj": [20.0, 10.0],
             "player_grass_adj": [10.0, 5.0],
@@ -117,9 +119,27 @@ class TestAbsoluteLevelFeatures:
         # Row 1: surface_diff = (1800+10) - (1600+15) = 195, avg = 1700 → 195 * 1700 = 331500
         assert result["val"].to_list() == [pytest.approx(166750.0), pytest.approx(331500.0)]
 
+    def test_elo_avg_sq(self):
+        from mvp.model.features.elo import elo_avg_sq
+
+        df = self._base_df()
+        result = df.select(elo_avg_sq().alias("val"))
+        # Row 0: avg = 1450 → 1450² = 2102500
+        # Row 1: avg = 1700 → 1700² = 2890000
+        assert result["val"].to_list() == [pytest.approx(2102500.0), pytest.approx(2890000.0)]
+
+    def test_elo_diff_x_rd_sum(self):
+        from mvp.model.features.elo import elo_diff_x_rd_sum
+
+        df = self._base_df()
+        result = df.select(elo_diff_x_rd_sum().alias("val"))
+        # Row 0: surface_diff = (1500+30) - (1400+15) = 115, rd_sum = 80+100 = 180 → 115 * 180 = 20700
+        # Row 1: surface_diff = (1800+10) - (1600+15) = 195, rd_sum = 60+70 = 130 → 195 * 130 = 25350
+        assert result["val"].to_list() == [pytest.approx(20700.0), pytest.approx(25350.0)]
+
     def test_all_registered(self):
         registry = get_registry()
-        for name in ["elo_avg", "elo_min", "elo_diff_x_elo_avg"]:
+        for name in ["elo_avg", "elo_avg_sq", "elo_min", "elo_diff_x_elo_avg", "elo_diff_x_rd_sum"]:
             feat = registry.get(name)
             assert feat is not None, f"Feature {name} not registered"
             assert feat.mirror is False

@@ -41,6 +41,22 @@ def elo_avg() -> pl.Expr:
 
 
 @feature(
+    name="elo_avg_sq",
+    params=[],
+    description="Squared average Elo (nonlinear absolute level effect)",
+    mirror=False,
+)
+def elo_avg_sq() -> pl.Expr:
+    """Squared average Elo of both players.
+
+    Lets logistic regression capture nonlinear calibration effects
+    at Elo extremes that a linear elo_avg term can't model.
+    """
+    avg = (pl.col("player_elo") + pl.col("opp_elo")) / 2
+    return avg ** 2
+
+
+@feature(
     name="elo_min",
     params=[],
     description="Minimum Elo of both players (floor quality)",
@@ -70,6 +86,23 @@ def elo_diff_x_elo_avg() -> pl.Expr:
     diff = surface_elo_expr("player") - surface_elo_expr("opp")
     avg = (pl.col("player_elo") + pl.col("opp_elo")) / 2
     return diff * avg
+
+
+@feature(
+    name="elo_diff_x_rd_sum",
+    params=[],
+    description="Interaction: surface Elo diff × combined rating deviation",
+    mirror=False,
+)
+def elo_diff_x_rd_sum() -> pl.Expr:
+    """Interaction between Elo difference and rating uncertainty.
+
+    Lets logistic regression learn that Elo diffs mean less
+    when rating uncertainty is high.
+    """
+    diff = surface_elo_expr("player") - surface_elo_expr("opp")
+    rd_sum = pl.col("player_elo_rd") + pl.col("opp_elo_rd")
+    return diff * rd_sum
 
 
 @feature(
