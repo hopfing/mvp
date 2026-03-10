@@ -443,6 +443,18 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         help="Run activity extraction/staging (skipped by default)",
     )
 
+    # confidence subcommand
+    conf_parser = subparsers.add_parser(
+        "confidence", help="Run confidence validation on a model's OOF predictions"
+    )
+    conf_parser.add_argument(
+        "config", type=str, help="Model config name (e.g., 'tu_log_fs_75_20f')"
+    )
+    conf_parser.add_argument(
+        "--refresh", action="store_true",
+        help="Force re-run model even if cached OOF exists"
+    )
+
     return parser.parse_args(args)
 
 
@@ -475,6 +487,82 @@ def cmd_model(args: argparse.Namespace) -> int:
     print_run_summary(results, name=runner.run_name)
 
     return 0
+
+
+def cmd_confidence(args: argparse.Namespace) -> int:
+    """Run confidence validation on a model."""
+    from pathlib import Path
+
+    from mvp.model.confidence.report import format_report
+    from mvp.model.confidence.validator import ConfidenceValidator
+    from mvp.model.runner import ExperimentRunner
+
+    config_path = resolve_config_path(args.config, MODEL_DIR)
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config not found: {args.config} (tried {config_path})")
+
+    config_name = config_path.stem
+    oof_dir = Path("data/confidence") / config_name
+    oof_path = oof_dir / "oof.parquet"
+
+    if oof_path.exists() and not args.refresh:
+        import polars as pl
+        logger.info("Loading cached OOF from %s", oof_path)
+        oof_df = pl.read_parquet(oof_path)
+        validator = ConfidenceValidator.from_oof(oof_df)
+    else:
+        logger.info("Running model to generate OOF predictions...")
+        runner = ExperimentRunner(config_path=config_path)
+        results = runner.run()
+        all_predictions = results["all_predictions"]
+
+        validator = ConfidenceValidator(all_predictions)
+
+        oof_dir.mkdir(parents=True, exist_ok=True)
+        validator._oof.write_parquet(oof_path)
+        logger.info("Cached OOF to %s", oof_path)
+
+    logger.info("Running confidence validation...")
+    result = validator.validate()
+
+    report = format_report(result, model_name=config_name)
+    print(report)
+
+    results_path = oof_dir / "validation_results.json"
+    _save_validation_json(result, results_path)
+    logger.info("Saved detailed results to %s", results_path)
+
+    return 0
+
+
+def _save_validation_json(result, path):
+    """Save ValidationResult as JSON for detailed analysis."""
+    import json
+    from pathlib import Path
+
+    data = {
+        "n_total": result.n_total,
+        "profiles": {},
+    }
+    for slice_label, bucket_profiles in result.profiles.items():
+        data["profiles"][slice_label] = {}
+        for bucket_label, profile in bucket_profiles.items():
+            p = {
+                "n_matches": profile.n_matches,
+                "accuracy": profile.accuracy,
+                "err80": profile.err80,
+                "signed_cal": profile.signed_cal,
+            }
+            for wlabel, dist in [("cal_3mo", profile.cal_3mo), ("cal_6mo", profile.cal_6mo), ("cal_12mo", profile.cal_12mo)]:
+                if dist:
+                    p[wlabel] = {
+                        "median": dist.median, "p25": dist.p25, "p75": dist.p75,
+                        "min": dist.min, "max": dist.max,
+                        "n_windows": dist.n_windows, "median_n_per_window": dist.median_n_per_window,
+                    }
+            data["profiles"][slice_label][bucket_label] = p
+
+    Path(path).write_text(json.dumps(data, indent=2))
 
 
 def cmd_experiment(args: argparse.Namespace) -> int:
@@ -726,6 +814,8 @@ def main(args: list[str] | None = None) -> int:
         return cmd_experiment(parsed)
     elif parsed.command == "live":
         return cmd_live(parsed)
+    elif parsed.command == "confidence":
+        return cmd_confidence(parsed)
 
     return 1
 
