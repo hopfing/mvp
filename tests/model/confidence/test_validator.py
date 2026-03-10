@@ -5,6 +5,7 @@ import polars as pl
 import pytest
 
 from mvp.model.confidence.validator import prepare_oof
+from mvp.model.confidence.validator import ConfidenceValidator, ValidationResult
 
 
 class TestPrepareOof:
@@ -68,3 +69,55 @@ class TestPrepareOof:
         buckets = result["prob_bucket"].unique().sort().to_list()
         for b in buckets:
             assert b.endswith("%")
+
+
+class TestConfidenceValidator:
+    def test_validate_returns_result(self, make_oof_df):
+        df = make_oof_df(n=2000)
+        all_predictions = [{
+            "df": df.drop("y_true", "y_prob"),
+            "y_true": df["y_true"].to_numpy(),
+            "y_prob": df["y_prob"].to_numpy(),
+        }]
+        validator = ConfidenceValidator(all_predictions)
+        result = validator.validate()
+        assert isinstance(result, ValidationResult)
+
+    def test_result_has_structural_profiles(self, make_oof_df):
+        df = make_oof_df(n=2000)
+        all_predictions = [{
+            "df": df.drop("y_true", "y_prob"),
+            "y_true": df["y_true"].to_numpy(),
+            "y_prob": df["y_prob"].to_numpy(),
+        }]
+        validator = ConfidenceValidator(all_predictions)
+        result = validator.validate()
+        structural_keys = [k for k in result.profiles.keys() if k.startswith("circuit:")]
+        assert len(structural_keys) >= 2
+
+    def test_result_has_modifier_profiles(self, make_oof_df):
+        df = make_oof_df(n=2000)
+        all_predictions = [{
+            "df": df.drop("y_true", "y_prob"),
+            "y_true": df["y_true"].to_numpy(),
+            "y_prob": df["y_prob"].to_numpy(),
+        }]
+        validator = ConfidenceValidator(all_predictions)
+        result = validator.validate()
+        modifier_keys = [k for k in result.profiles.keys() if k.startswith("elo_level:")]
+        assert len(modifier_keys) == 5
+
+    def test_profiles_have_bucket_breakdown(self, make_oof_df):
+        df = make_oof_df(n=2000)
+        all_predictions = [{
+            "df": df.drop("y_true", "y_prob"),
+            "y_true": df["y_true"].to_numpy(),
+            "y_prob": df["y_prob"].to_numpy(),
+        }]
+        validator = ConfidenceValidator(all_predictions)
+        result = validator.validate()
+        chal_profiles = result.profiles.get("circuit:chal")
+        assert chal_profiles is not None
+        assert "overall" in chal_profiles
+        bucket_keys = [k for k in chal_profiles if k != "overall"]
+        assert len(bucket_keys) > 0
