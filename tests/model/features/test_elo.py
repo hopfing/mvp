@@ -78,6 +78,53 @@ class TestSurfaceEloExpr:
         assert diff_result["diff"].to_list() == manual_result["diff"].to_list()
 
 
+class TestAbsoluteLevelFeatures:
+    """Test absolute Elo level features."""
+
+    def _base_df(self) -> pl.DataFrame:
+        return pl.DataFrame({
+            "player_elo": [1500.0, 1800.0],
+            "opp_elo": [1400.0, 1600.0],
+            "player_hard_adj": [30.0, 20.0],
+            "player_clay_adj": [20.0, 10.0],
+            "player_grass_adj": [10.0, 5.0],
+            "opp_hard_adj": [15.0, 10.0],
+            "opp_clay_adj": [25.0, 15.0],
+            "opp_grass_adj": [5.0, 0.0],
+            "surface": ["Hard", "Clay"],
+        })
+
+    def test_elo_avg(self):
+        from mvp.model.features.elo import elo_avg
+
+        df = self._base_df()
+        result = df.select(elo_avg().alias("val"))
+        assert result["val"].to_list() == [1450.0, 1700.0]
+
+    def test_elo_min(self):
+        from mvp.model.features.elo import elo_min
+
+        df = self._base_df()
+        result = df.select(elo_min().alias("val"))
+        assert result["val"].to_list() == [1400.0, 1600.0]
+
+    def test_elo_diff_x_elo_avg(self):
+        from mvp.model.features.elo import elo_diff_x_elo_avg
+
+        df = self._base_df()
+        result = df.select(elo_diff_x_elo_avg().alias("val"))
+        # Row 0: surface_diff = (1500+30) - (1400+15) = 115, avg = 1450 → 115 * 1450 = 166750
+        # Row 1: surface_diff = (1800+10) - (1600+15) = 195, avg = 1700 → 195 * 1700 = 331500
+        assert result["val"].to_list() == [pytest.approx(166750.0), pytest.approx(331500.0)]
+
+    def test_all_registered(self):
+        registry = get_registry()
+        for name in ["elo_avg", "elo_min", "elo_diff_x_elo_avg"]:
+            feat = registry.get(name)
+            assert feat is not None, f"Feature {name} not registered"
+            assert feat.mirror is False
+
+
 class TestStyleDimensionFeatures:
     """Test style dimension derived features."""
 

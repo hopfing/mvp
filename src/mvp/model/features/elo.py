@@ -26,6 +26,53 @@ def surface_elo_expr(prefix: str) -> pl.Expr:
 
 
 @feature(
+    name="elo_avg",
+    params=[],
+    description="Average Elo of both players (absolute level context)",
+    mirror=False,
+)
+def elo_avg() -> pl.Expr:
+    """Average Elo of both players.
+
+    Gives the model context about the absolute level of the match,
+    not just the difference between players.
+    """
+    return (pl.col("player_elo") + pl.col("opp_elo")) / 2
+
+
+@feature(
+    name="elo_min",
+    params=[],
+    description="Minimum Elo of both players (floor quality)",
+    mirror=False,
+)
+def elo_min() -> pl.Expr:
+    """Minimum Elo of the two players.
+
+    Captures the floor quality — a match involving a 1300 player
+    has different dynamics than one where both are 1700+.
+    """
+    return pl.min_horizontal("player_elo", "opp_elo")
+
+
+@feature(
+    name="elo_diff_x_elo_avg",
+    params=[],
+    description="Interaction: surface Elo diff × average Elo level",
+    mirror=False,
+)
+def elo_diff_x_elo_avg() -> pl.Expr:
+    """Interaction between Elo difference and absolute level.
+
+    Lets logistic regression learn that a 200-point diff means
+    less at high absolute Elo than at low Elo.
+    """
+    diff = surface_elo_expr("player") - surface_elo_expr("opp")
+    avg = (pl.col("player_elo") + pl.col("opp_elo")) / 2
+    return diff * avg
+
+
+@feature(
     name="elo_diff",
     params=[],
     description="Overall Elo difference (player - opponent)",
