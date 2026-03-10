@@ -39,6 +39,12 @@ class MetaDiscoveryConfig(BaseModel):
     weighting: Literal["binary", "magnitude"] = "magnitude"
 
 
+class DiscoveryFeaturesConfig(BaseModel):
+    """Feature configuration for discovery."""
+
+    compute_only: list[str] = []
+
+
 class DiscoveryOptions(BaseModel):
     """Discovery-specific options."""
 
@@ -56,6 +62,7 @@ class DiscoveryOptions(BaseModel):
     base_features: list[str] = []
     window_sizes: list[int] | None = None  # None = all defaults, 0 = alltime variant
     meta_discovery: MetaDiscoveryConfig | None = None
+    features: DiscoveryFeaturesConfig = DiscoveryFeaturesConfig()
 
 
 class ModelConfig(BaseModel):
@@ -108,10 +115,13 @@ class DiscoveryConfig(BaseModel):
         Returns:
             Dict suitable for ExperimentConfig.model_validate().
         """
+        features_dict: dict[str, Any] = {"include": features}
+        if self.discovery.features.compute_only:
+            features_dict["compute_only"] = self.discovery.features.compute_only
         return {
             "description": self.description,
             "data": self.data.model_dump(),
-            "features": {"include": features},
+            "features": features_dict,
             "model": self.model.model_dump(),
             "validation": self.validation.model_dump(),
             "metrics": {"primary": self.discovery.metric},

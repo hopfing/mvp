@@ -375,6 +375,10 @@ class FeatureDiscovery:
             all_features = [f for f in all_features if f in included]
             self._log(f"Restricted to {len(all_features)} features via include_features")
 
+        if self.config.discovery.features.compute_only:
+            compute_only = set(self.config.discovery.features.compute_only)
+            all_features = [f for f in all_features if f not in compute_only]
+
         if self.config.discovery.exclude_features:
             excluded = set(self.config.discovery.exclude_features)
             all_features = [f for f in all_features if f not in excluded]

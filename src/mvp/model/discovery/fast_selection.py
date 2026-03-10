@@ -70,7 +70,11 @@ class FastForwardSelector:
             matches_path=self.matches_path,
             cache_dir=self.cache_dir,
         )
-        df = engine.compute(self.all_feature_specs)
+        compute_only = self.config.discovery.features.compute_only
+        all_specs = self.all_feature_specs + [
+            s for s in compute_only if s not in self.all_feature_specs
+        ]
+        df = engine.compute(all_specs)
 
         if self.config.data.filters:
             df = apply_filters(df, self.config.data.filters)

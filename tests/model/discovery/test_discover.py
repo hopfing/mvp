@@ -92,6 +92,54 @@ class TestDiscoveryConfig:
         assert "model" in experiment_dict
         assert "validation" in experiment_dict
 
+    def test_to_experiment_config_dict_with_compute_only(self, tmp_path):
+        """compute_only features pass through to experiment config."""
+        config_dict = {
+            "data": {
+                "date_range": {
+                    "start": "2020-01-01",
+                    "end": "2025-12-31",
+                }
+            },
+            "discovery": {
+                "features": {
+                    "compute_only": ["player_elo_surface_diff"],
+                },
+            },
+        }
+        config_path = tmp_path / "config.yaml"
+        with open(config_path, "w") as f:
+            yaml.dump(config_dict, f)
+
+        config = DiscoveryConfig.from_file(config_path)
+        experiment_dict = config.to_experiment_config_dict(
+            features=["player_svc_elo_diff"]
+        )
+
+        assert experiment_dict["features"]["include"] == ["player_svc_elo_diff"]
+        assert experiment_dict["features"]["compute_only"] == ["player_elo_surface_diff"]
+
+    def test_to_experiment_config_dict_no_compute_only(self, tmp_path):
+        """No compute_only key when list is empty."""
+        config_dict = {
+            "data": {
+                "date_range": {
+                    "start": "2020-01-01",
+                    "end": "2025-12-31",
+                }
+            },
+        }
+        config_path = tmp_path / "config.yaml"
+        with open(config_path, "w") as f:
+            yaml.dump(config_dict, f)
+
+        config = DiscoveryConfig.from_file(config_path)
+        experiment_dict = config.to_experiment_config_dict(
+            features=["player_svc_elo_diff"]
+        )
+
+        assert "compute_only" not in experiment_dict["features"]
+
 
 class TestDiscoveryOptions:
     """Tests for DiscoveryOptions defaults."""
@@ -106,6 +154,7 @@ class TestDiscoveryOptions:
         assert options.segment_analysis is True
         assert options.metric == "calibration_error"
         assert options.direction == "minimize"
+        assert options.features.compute_only == []
 
 
 class TestGetAllFeatureSpecs:
