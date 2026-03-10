@@ -71,6 +71,44 @@ class TestPrepareOof:
             assert b.endswith("%")
 
 
+class TestEndToEnd:
+    def test_full_pipeline_produces_report(self, make_oof_df):
+        """Full pipeline: prepare -> validate -> format report."""
+        from mvp.model.confidence.report import format_report
+
+        df = make_oof_df(n=5000, cal_bias=0.02)
+        all_predictions = [{
+            "df": df.drop("y_true", "y_prob"),
+            "y_true": df["y_true"].to_numpy(),
+            "y_prob": df["y_prob"].to_numpy(),
+        }]
+
+        validator = ConfidenceValidator(all_predictions)
+        result = validator.validate()
+        report = format_report(result, model_name="test_underconfident")
+
+        assert "underconfident" in report.lower()
+        assert "STRUCTURAL" in report
+        assert "MODIFIER" in report
+        overall = result.profiles["overall"]["overall"]
+        assert overall.signed_cal > 0
+
+    def test_overconfident_model_detected(self, make_oof_df):
+        """Overconfident model shows negative signed calibration."""
+        df = make_oof_df(n=5000, cal_bias=-0.03)
+        all_predictions = [{
+            "df": df.drop("y_true", "y_prob"),
+            "y_true": df["y_true"].to_numpy(),
+            "y_prob": df["y_prob"].to_numpy(),
+        }]
+
+        validator = ConfidenceValidator(all_predictions)
+        result = validator.validate()
+
+        overall = result.profiles["overall"]["overall"]
+        assert overall.signed_cal < 0
+
+
 class TestConfidenceValidator:
     def test_validate_returns_result(self, make_oof_df):
         df = make_oof_df(n=2000)
