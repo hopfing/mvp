@@ -42,11 +42,13 @@ COLUMN_SCHEMA = [
     # Bet action
     {"name": "bet_side", "owner": "user"},
     {"name": "bet_odds", "owner": "formula"},
+    {"name": "bet_edge", "owner": "formula"},
     {"name": "stake", "owner": "user"},
     {"name": "to_win", "owner": "formula"},
     {"name": "book", "owner": "user"},
     # Results
     {"name": "result", "owner": "pipeline"},  # auto-filled
+    {"name": "pred_result", "owner": "formula"},
     {"name": "bet_result", "owner": "user"},
     {"name": "net", "owner": "formula"},
     {"name": "notes", "owner": "user"},
@@ -96,6 +98,10 @@ def generate_formulas(row: int) -> dict[str, str]:
     bet_result_col = COL_LETTERS["bet_result"]
 
     bet_odds_col = COL_LETTERS["bet_odds"]
+    p1_edge_col = COL_LETTERS["p1_edge"]
+    p2_edge_col = COL_LETTERS["p2_edge"]
+    prediction_col = COL_LETTERS["prediction"]
+    result_col = COL_LETTERS["result"]
 
     return {
         "p1_edge": f'=IF({p1_odds}{r}="", "", {p1_prob}{r}-(1/{p1_odds}{r}))',
@@ -103,8 +109,10 @@ def generate_formulas(row: int) -> dict[str, str]:
         "p2_edge": f'=IF({p2_odds}{r}="", "", {p2_prob}{r}-(1/{p2_odds}{r}))',
         "p2_pe": f'=IF({pin_p2}{r}="", "", {p2_prob}{r}-(1/{pin_p2}{r}))',
         "bet_odds": f'=IF({bet_side}{r}="P1", {p1_odds}{r}, IF({bet_side}{r}="P2", {p2_odds}{r}, ""))',
+        "bet_edge": f'=IF({bet_side}{r}="P1", {p1_edge_col}{r}, IF({bet_side}{r}="P2", {p2_edge_col}{r}, ""))',
         "to_win": f'=IF({stake_col}{r}="", "", ROUND({stake_col}{r}*{bet_odds_col}{r}, 2))',
         "net": f'=IF({bet_result_col}{r}="W", {to_win_col}{r}-{stake_col}{r}, IF({bet_result_col}{r}="L", -{stake_col}{r}, IF({bet_result_col}{r}="V", 0, "")))',
+        "pred_result": f'=IF({result_col}{r}="", "", IF({prediction_col}{r}={result_col}{r}, "W", "L"))',
     }
 
 
@@ -237,7 +245,7 @@ def merge_predictions(
         matches: Full matches.parquet DataFrame for result lookup.
 
     Returns:
-        Merged DataFrame with all 36 columns, sorted by tournament_day/tournament/
+        Merged DataFrame with all columns, sorted by tournament_day/tournament/
         match_time/round.
     """
     # 1. Identify new match_uids
@@ -248,7 +256,7 @@ def merge_predictions(
     new_uids = set(new_predictions["match_uid"].to_list())
     truly_new = new_uids - existing_uids
 
-    # 2. Build new rows with all 36 columns
+    # 2. Build new rows with all columns
     if truly_new:
         new_rows = new_predictions.filter(pl.col("match_uid").is_in(list(truly_new)))
         for col_def in COLUMN_SCHEMA:
