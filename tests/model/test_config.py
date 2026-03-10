@@ -106,3 +106,38 @@ model:
         config = ExperimentConfig.from_yaml(yaml_str)
         assert config.metrics.primary == "log_loss"
         assert "accuracy" in config.metrics.secondary
+
+    def test_compute_only_features(self):
+        """compute_only features are parsed but separate from include."""
+        yaml_str = """
+data:
+  date_range:
+    start: "2020-01-01"
+    end: "2024-12-31"
+features:
+  include:
+    - win_rate(days=30)
+  compute_only:
+    - player_elo_surface_diff
+model:
+  type: logistic
+"""
+        config = ExperimentConfig.from_yaml(yaml_str)
+        assert config.features.include == ["win_rate(days=30)"]
+        assert config.features.compute_only == ["player_elo_surface_diff"]
+
+    def test_compute_only_defaults_empty(self):
+        """compute_only defaults to empty list when omitted."""
+        yaml_str = """
+data:
+  date_range:
+    start: "2020-01-01"
+    end: "2024-12-31"
+features:
+  include:
+    - win_rate(days=30)
+model:
+  type: logistic
+"""
+        config = ExperimentConfig.from_yaml(yaml_str)
+        assert config.features.compute_only == []

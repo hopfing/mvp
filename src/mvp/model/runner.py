@@ -159,8 +159,14 @@ class ExperimentRunner:
             assert self.config.features is not None
             feature_specs = self.config.features.include
 
-        # Compute features
-        df = self.engine.compute(feature_specs)
+        # Compute features (include compute_only specs for filtering, not training)
+        compute_only = (
+            self.config.features.compute_only
+            if self.config.features and self.config.features.compute_only
+            else []
+        )
+        all_specs = feature_specs + [s for s in compute_only if s not in feature_specs]
+        df = self.engine.compute(all_specs)
 
         # Apply additional filters (e.g., draw_type: "singles")
         # These are applied AFTER feature computation so workload features

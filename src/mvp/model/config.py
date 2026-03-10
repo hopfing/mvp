@@ -57,6 +57,7 @@ class FeaturesConfig(BaseModel):
     """Feature selection configuration."""
 
     include: list[str]
+    compute_only: list[str] = []
 
 
 class EnsembleBaseModelRef(BaseModel):

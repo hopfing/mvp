@@ -103,8 +103,14 @@ class ProductionPredictor:
             feature_specs = config.features.include
             base_model_specs = None
 
-        # Compute features
-        df = engine.compute(feature_specs)
+        # Compute features (include compute_only specs for filtering, not training)
+        compute_only = (
+            config.features.compute_only
+            if config.features and config.features.compute_only
+            else []
+        )
+        all_specs = feature_specs + [s for s in compute_only if s not in feature_specs]
+        df = engine.compute(all_specs)
 
         # Apply training filters
         train_range = self.config["active"]["train_date_range"]
@@ -223,7 +229,13 @@ class ProductionPredictor:
         else:
             assert config.features is not None
             feature_specs = config.features.include
-        df = engine.compute(feature_specs)
+        compute_only = (
+            config.features.compute_only
+            if config.features and config.features.compute_only
+            else []
+        )
+        all_specs = feature_specs + [s for s in compute_only if s not in feature_specs]
+        df = engine.compute(all_specs)
 
         # Apply non-date filters (same as training, minus date range)
         if self.config["active"].get("filters"):
