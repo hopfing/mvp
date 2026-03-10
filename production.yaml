@@ -1,6 +1,6 @@
 active:
   artifact: data/models/production.joblib
-  config: models/tu_log_fs_75_20f.yaml
+  config: models/production/log_fs_e75_f20_00.yaml
   filters:
     circuit:
     - tour
@@ -9,5 +9,5 @@ active:
   train_date_range:
     end: '2024-12-31'
     start: '2020-01-01'
-  trained_at: '2026-03-08T20:47:58.333905+00:00'
+  trained_at: '2026-03-10T22:44:40.508132+00:00'
 history: []
