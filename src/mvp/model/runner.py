@@ -1,5 +1,7 @@
 """Experiment runner for training and evaluating models."""
 
+import logging
+import time
 import warnings
 from pathlib import Path
 
@@ -9,6 +11,8 @@ from typing import Any
 
 import numpy as np
 import polars as pl
+
+run_logger = logging.getLogger(__name__)
 
 from mvp.model.calibration import PlattCalibrator
 from mvp.model.config import EnsembleParams, ExperimentConfig, apply_filters
@@ -166,6 +170,7 @@ class ExperimentRunner:
             else []
         )
         all_specs = feature_specs + [s for s in compute_only if s not in feature_specs]
+        t_run = time.perf_counter()
         df = self.engine.compute(all_specs)
 
         # Apply additional filters (e.g., draw_type: "singles")
@@ -211,6 +216,10 @@ class ExperimentRunner:
 
         # Get splitter
         splitter = self._get_splitter()
+        run_logger.info(
+            "Training %s model with %d features on %d rows",
+            self.config.model.type, len(feature_cols), len(df),
+        )
 
         # Train and evaluate
         all_metrics: list[dict[str, float]] = []
@@ -259,8 +268,13 @@ class ExperimentRunner:
 
         try:
             for fold_idx, (train_idx, test_idx) in enumerate(splitter.split(df)):
+                t_fold = time.perf_counter()
                 train_df = df[train_idx]
                 test_df = df[test_idx]
+                run_logger.info(
+                    "Fold %d: train=%d, test=%d",
+                    fold_idx + 1, len(train_df), len(test_df),
+                )
 
                 X_train = train_df.select(
                     pl.col(c).cast(pl.Float64) for c in feature_cols
@@ -350,6 +364,13 @@ class ExperimentRunner:
                     all_per_model_predictions.append(
                         model.predict_proba_per_model(X_test)
                     )
+
+                run_logger.info(
+                    "Fold %d: acc=%.3f, auc=%.3f, ll=%.4f (%.1fs)",
+                    fold_idx + 1, metrics.get("accuracy", 0),
+                    metrics.get("auc", 0), metrics.get("log_loss", 0),
+                    time.perf_counter() - t_fold,
+                )
 
                 # Log fold metrics
                 if logger:
@@ -449,6 +470,7 @@ class ExperimentRunner:
                 avg_metrics[f"raw_{k}"] = v
 
             # Compute diagnostics
+            run_logger.info("Computing diagnostics...")
             diagnostics = Diagnostics()
             diagnostic_results = diagnostics.compute_all(all_predictions)
 
@@ -532,6 +554,8 @@ class ExperimentRunner:
         finally:
             if run_context:
                 run_context.__exit__(None, None, None)
+
+        run_logger.info("Run complete in %.1fs", time.perf_counter() - t_run)
 
         return {
             "metrics": avg_metrics,
