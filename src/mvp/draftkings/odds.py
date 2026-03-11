@@ -63,6 +63,7 @@ class OddsEntry:
     tournament: str
     dk_tournament_id: str
     opponent_name: str
+    event_status: str
     fetched_at: datetime
 
 
@@ -107,6 +108,7 @@ def _parse_odds_response(
         ev = event_map.get(event_id, {})
         league_id = str(ev.get("leagueId", "") or mkt.get("leagueId", ""))
         tournament = league_map.get(league_id, {}).get("name", "")
+        event_status = (ev.get("status") or "").upper().strip()
 
         sels = selections_by_market.get(mkt.get("id", ""), [])
         if not sels:
@@ -145,6 +147,7 @@ def _parse_odds_response(
                 tournament=tournament,
                 dk_tournament_id=league_id,
                 opponent_name=opponent,
+                event_status=event_status,
                 fetched_at=fetched_at,
             ))
 
@@ -256,6 +259,7 @@ class DraftKingsOddsScraper(BaseExtractor):
                 "tournament": e.tournament,
                 "dk_tournament_id": e.dk_tournament_id,
                 "opponent_name": e.opponent_name,
+                "event_status": e.event_status,
                 "fetched_at": e.fetched_at,
             }
             for e in entries

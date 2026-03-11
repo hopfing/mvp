@@ -39,6 +39,7 @@ class BetRiversOddsEntry:
     br_tournament_id: str
     circuit: str
     opponent_name: str
+    event_status: str
     fetched_at: datetime
 
 
@@ -72,6 +73,7 @@ def _parse_response(
         away_name = event.get("awayName", "")
         tournament = event.get("group", "")
         tournament_id = str(event.get("groupId", ""))
+        event_status = (event.get("state") or "").upper().strip()
 
         for offer in event_wrapper.get("betOffers", []):
             criterion = offer.get("criterion", {})
@@ -103,6 +105,7 @@ def _parse_response(
                     br_tournament_id=tournament_id,
                     circuit=circuit_key,
                     opponent_name=opponent,
+                    event_status=event_status,
                     fetched_at=fetched_at,
                 ))
 
@@ -151,6 +154,7 @@ class BetRiversOddsScraper(BaseExtractor):
                 "br_tournament_id": e.br_tournament_id,
                 "circuit": e.circuit,
                 "opponent_name": e.opponent_name,
+                "event_status": e.event_status,
                 "fetched_at": e.fetched_at,
             }
             for e in entries
