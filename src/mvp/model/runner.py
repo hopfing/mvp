@@ -16,9 +16,9 @@ run_logger = logging.getLogger(__name__)
 
 from mvp.model.calibration import PlattCalibrator
 from mvp.model.config import EnsembleParams, ExperimentConfig, apply_filters
-from mvp.model.diagnostics import Diagnostics, EnsembleDiagnostics, _compute_calibration_error
+from mvp.model.diagnostics import Diagnostics, EnsembleDiagnostics
 from mvp.model.engine import FeatureEngine, get_feature_columns
-from mvp.model.metrics import compute_metrics
+from mvp.model.metrics import compute_calibration_error, compute_metrics
 from mvp.model.mlflow_logger import ExperimentLogger
 from mvp.model.models import EnsembleModel, get_model
 from mvp.model.splitters import BaseSplitter, make_splitter
@@ -448,9 +448,6 @@ class ExperimentRunner:
                 [p["y_prob"] for p in all_predictions]
             )
             raw_metrics = compute_metrics(combined_y_true_oof, combined_y_prob_oof)
-            raw_metrics["calibration_error"] = _compute_calibration_error(
-                combined_y_true_oof, combined_y_prob_oof
-            )
 
             calibrator = PlattCalibrator()
             calibrator.fit(combined_y_prob_oof, combined_y_true_oof)
