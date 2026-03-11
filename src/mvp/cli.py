@@ -642,6 +642,27 @@ def _fetch_br_quiet() -> int:
         job_logger.setLevel(prev_levels[2])
 
 
+def _fetch_mgm_quiet() -> int:
+    """Run MGM odds fetch with logging suppressed (runs in background thread)."""
+    import logging as _logging
+
+    from mvp.betmgm.odds import fetch_and_save as mgm_fetch_and_save
+
+    mgm_logger = _logging.getLogger("mvp.betmgm")
+    ext_logger = _logging.getLogger("mvp.common.base_extractor")
+    job_logger = _logging.getLogger("mvp.common.base_job")
+    prev_levels = mgm_logger.level, ext_logger.level, job_logger.level
+    mgm_logger.setLevel(_logging.WARNING)
+    ext_logger.setLevel(_logging.WARNING)
+    job_logger.setLevel(_logging.WARNING)
+    try:
+        return mgm_fetch_and_save()
+    finally:
+        mgm_logger.setLevel(prev_levels[0])
+        ext_logger.setLevel(prev_levels[1])
+        job_logger.setLevel(prev_levels[2])
+
+
 def cmd_live(args: argparse.Namespace) -> int:
     """Run live pipeline: extract, aggregate, predict."""
     from concurrent.futures import ThreadPoolExecutor
@@ -660,9 +681,10 @@ def cmd_live(args: argparse.Namespace) -> int:
 
     # Start DK odds fetch in background (fully independent of pipeline).
     # Suppress its logs — result is reported after collection.
-    odds_pool = ThreadPoolExecutor(max_workers=2)
+    odds_pool = ThreadPoolExecutor(max_workers=3)
     dk_future = odds_pool.submit(_fetch_dk_quiet)
     br_future = odds_pool.submit(_fetch_br_quiet)
+    mgm_future = odds_pool.submit(_fetch_mgm_quiet)
 
     try:  # ensure odds_pool cleanup on early failure
         # Rankings + discovery in parallel
@@ -725,8 +747,10 @@ def cmd_live(args: argparse.Namespace) -> int:
         # Collect odds from both books and match to predictions
         odds_map: dict[str, dict[str, float]] | None = None
         br_odds_map: dict[str, dict[str, float]] | None = None
+        mgm_odds_map: dict[str, dict[str, float]] | None = None
         match_result = None
         br_match_result = None
+        mgm_match_result = None
         try:
             n = dk_future.result(timeout=30)
             if n:
@@ -765,6 +789,25 @@ def cmd_live(args: argparse.Namespace) -> int:
             logger.error("BR odds matching failed: %s", e)
             print(f"Warning: BR odds fetch/match failed ({e})")
 
+        try:
+            n = mgm_future.result(timeout=30)
+            if n:
+                print(f"Fetched {n} MGM moneyline odds entries")
+            from mvp.betmgm.matcher import BetMGMOddsMatcher
+            mgm_matcher = BetMGMOddsMatcher()
+            mgm_match_result = mgm_matcher.match(predictions)
+            mgm_odds_map = mgm_match_result.odds or None
+            if mgm_odds_map:
+                print(f"Matched MGM odds for {len(mgm_odds_map)}/{len(predictions)} predictions")
+            if mgm_match_result.unmatched_names:
+                print(f"Unmatched MGM names ({len(mgm_match_result.unmatched_names)}):")
+                for name in sorted(mgm_match_result.unmatched_names):
+                    print(f"  {name}")
+                print(f"Add aliases to: {mgm_matcher.ALIASES_PATH}")
+        except Exception as e:
+            logger.error("MGM odds matching failed: %s", e)
+            print(f"Warning: MGM odds fetch/match failed ({e})")
+
         odds_pool.shutdown(wait=False)
 
         print_predictions(predictions, odds_map=odds_map, br_odds_map=br_odds_map)
@@ -792,6 +835,8 @@ def cmd_live(args: argparse.Namespace) -> int:
             book_odds["DraftKings"] = odds_map
         if br_odds_map:
             book_odds["BetRivers"] = br_odds_map
+        if mgm_odds_map:
+            book_odds["BetMGM"] = mgm_odds_map
         merged = merge_predictions(existing, prepared, matches_df, odds_maps=book_odds or None)
         sheets.write(merged)
 
@@ -819,6 +864,8 @@ def cmd_live(args: argparse.Namespace) -> int:
             save_event_mappings(match_result.event_matches, book="dk")
         if br_match_result and br_match_result.event_matches:
             save_event_mappings(br_match_result.event_matches, book="br")
+        if mgm_match_result and mgm_match_result.event_matches:
+            save_event_mappings(mgm_match_result.event_matches, book="mgm")
 
         # Load event map and compute per-book odds
         event_map = load_event_map_with_overrides()
@@ -837,6 +884,13 @@ def cmd_live(args: argparse.Namespace) -> int:
             br_book_odds = compute_odds_by_book(br_staged, event_map, "br", "br_event_id")
             if len(br_book_odds) > 0:
                 all_odds.append(br_book_odds)
+
+        mgm_odds_path = Path("data/stage/betmgm/moneyline.parquet")
+        if mgm_odds_path.exists():
+            mgm_staged = pl.read_parquet(mgm_odds_path)
+            mgm_book_odds = compute_odds_by_book(mgm_staged, event_map, "mgm", "mgm_event_id")
+            if len(mgm_book_odds) > 0:
+                all_odds.append(mgm_book_odds)
 
         odds_by_book = pl.concat(all_odds, how="diagonal_relaxed") if all_odds else None
 
