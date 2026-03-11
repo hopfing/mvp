@@ -9,6 +9,12 @@ data:
     draw_type: singles
 description: null
 features:
+  compute_only:
+  - player_match_count(days=30)
+  - opp_match_count(days=30)
+  - player_surface_matches
+  - opp_surface_matches
+  - player_h2h_surface_win_pct(days=365)
   include:
   - player_elo_surface_diff
   - player_tour_match_pct_diff(days=365)

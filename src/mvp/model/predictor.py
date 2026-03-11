@@ -13,6 +13,7 @@ import polars as pl
 import yaml
 
 from mvp.model.calibration import PlattCalibrator
+from mvp.model.confidence.dimensions import MODIFIERS
 from mvp.model.config import EnsembleParams, ExperimentConfig, apply_filters
 from mvp.model.engine import FeatureEngine, get_feature_columns
 from mvp.model.features.elo import surface_elo_expr
@@ -323,6 +324,16 @@ class ProductionPredictor:
                     [canonical, missing], how="diagonal_relaxed"
                 )
 
+        # Compute confidence modifier values for Layer 2 enrichment
+        for mod in MODIFIERS:
+            if all(c in canonical.columns for c in mod.required_columns):
+                try:
+                    canonical = canonical.with_columns(
+                        mod.compute_value(canonical).alias(f"conf_{mod.name}")
+                    )
+                except Exception:
+                    logger.debug("Modifier %s failed, skipping", mod.name)
+
         # Build output
         model_version = Path(self.config["active"]["config"]).stem
         now = datetime.now(timezone.utc)
@@ -350,6 +361,9 @@ class ProductionPredictor:
             select_exprs.append(pl.col("scheduled_datetime"))
         if "match_date" in canonical.columns:
             select_exprs.append(pl.col("match_date"))
+        for col in canonical.columns:
+            if col.startswith("conf_"):
+                select_exprs.append(pl.col(col))
         result = canonical.select(select_exprs)
 
         logger.info("Generated %d predictions", len(result))
