@@ -40,10 +40,16 @@ _API_HEADERS = {
     "x-device-type": "desktop",
 }
 
-_COMPETITION_CIRCUIT = {
-    6: "atp",
-    10: "challenger",
-}
+def _classify_circuit(comp_name: str) -> str | None:
+    """Classify competition name into circuit, or None to skip."""
+    name = comp_name.lower()
+    if "doubles" in name:
+        return None
+    if "atp challenger" in name:
+        return "challenger"
+    if name.startswith("atp"):
+        return "atp"
+    return None
 
 _STAGE_MAP = {
     "PreMatch": "NOT_STARTED",
@@ -87,8 +93,8 @@ def _parse_fixtures(
 
     for fixture in fixtures:
         competition = fixture.get("competition", {})
-        comp_id = competition.get("id")
-        circuit = _COMPETITION_CIRCUIT.get(comp_id)
+        comp_name = competition.get("name", {}).get("value", "")
+        circuit = _classify_circuit(comp_name)
         if circuit is None:
             continue
 

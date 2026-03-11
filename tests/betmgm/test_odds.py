@@ -93,8 +93,8 @@ class TestParseFixtures:
         from mvp.betmgm.odds import _parse_fixtures
 
         now = datetime(2026, 3, 11, 12, 0, tzinfo=timezone.utc)
-        atp = _parse_fixtures([_make_fixture(competition_id=6, competition_name="ATP")], now)
-        chal = _parse_fixtures([_make_fixture(competition_id=10, competition_name="Challenger")], now)
+        atp = _parse_fixtures([_make_fixture(competition_name="ATP Masters Indian Wells (USA) - Hard")], now)
+        chal = _parse_fixtures([_make_fixture(competition_name="ATP Challenger Phoenix (USA) - Hard")], now)
 
         assert atp[0].circuit == "atp"
         assert chal[0].circuit == "challenger"
@@ -104,7 +104,17 @@ class TestParseFixtures:
 
         now = datetime(2026, 3, 11, 12, 0, tzinfo=timezone.utc)
         entries = _parse_fixtures([
-            _make_fixture(competition_id=7, competition_name="WTA"),
+            _make_fixture(competition_name="WTA 1000 Indian Wells (USA) - Hard"),
+        ], now)
+
+        assert len(entries) == 0
+
+    def test_filters_doubles_by_competition_name(self):
+        from mvp.betmgm.odds import _parse_fixtures
+
+        now = datetime(2026, 3, 11, 12, 0, tzinfo=timezone.utc)
+        entries = _parse_fixtures([
+            _make_fixture(competition_name="ATP Challenger Cherbourg (FRA), Doubles - Hard"),
         ], now)
 
         assert len(entries) == 0
