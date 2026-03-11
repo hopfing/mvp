@@ -725,6 +725,8 @@ def cmd_live(args: argparse.Namespace) -> int:
         # Collect odds from both books and match to predictions
         odds_map: dict[str, dict[str, float]] | None = None
         br_odds_map: dict[str, dict[str, float]] | None = None
+        match_result = None
+        br_match_result = None
         try:
             n = dk_future.result(timeout=30)
             if n:
@@ -797,6 +799,90 @@ def cmd_live(args: argparse.Namespace) -> int:
     except Exception as e:
         logger.error("Sheets sync failed: %s", e)
         print(f"Warning: Sheets sync failed ({e}). Predictions saved locally.")
+
+    # Build analysis dataset (best-effort)
+    try:
+        import polars as pl
+
+        from mvp.analysis.dataset import build_analysis_dataset
+        from mvp.analysis.event_map import load_event_map_with_overrides, save_event_mappings
+        from mvp.analysis.odds import compute_odds_by_book
+        from mvp.analysis.report import format_summary
+
+        # Save event mappings from matchers
+        if match_result and match_result.event_matches:
+            save_event_mappings(match_result.event_matches, book="dk")
+        if br_match_result and br_match_result.event_matches:
+            save_event_mappings(br_match_result.event_matches, book="br")
+
+        # Load event map and compute per-book odds
+        event_map = load_event_map_with_overrides()
+        all_odds = []
+
+        dk_odds_path = Path("data/stage/draftkings/moneyline.parquet")
+        if dk_odds_path.exists():
+            dk_staged = pl.read_parquet(dk_odds_path)
+            dk_book_odds = compute_odds_by_book(dk_staged, event_map, "dk", "dk_event_id")
+            if len(dk_book_odds) > 0:
+                all_odds.append(dk_book_odds)
+
+        br_odds_path = Path("data/stage/betrivers/moneyline.parquet")
+        if br_odds_path.exists():
+            br_staged = pl.read_parquet(br_odds_path)
+            br_book_odds = compute_odds_by_book(br_staged, event_map, "br", "br_event_id")
+            if len(br_book_odds) > 0:
+                all_odds.append(br_book_odds)
+
+        odds_by_book = pl.concat(all_odds, how="diagonal_relaxed") if all_odds else None
+
+        # Load sheet data
+        sheets_path = Path("data/sheets/bets.parquet")
+        sheet_data = pl.read_parquet(sheets_path) if sheets_path.exists() else None
+
+        # Build results from matches
+        matches_path = Path("data/aggregate/atptour/matches.parquet")
+        results_df = None
+        if matches_path.exists():
+            matches_for_results = pl.read_parquet(matches_path)
+            if "won" in matches_for_results.columns:
+                won = matches_for_results.filter(pl.col("won") == True).select(
+                    "match_uid", pl.col("player_id").alias("winner_id")
+                )
+                if len(won) > 0:
+                    pred_uids = set(predictions["match_uid"].to_list())
+                    won_relevant = won.filter(pl.col("match_uid").is_in(list(pred_uids)))
+                    if len(won_relevant) > 0:
+                        pred_p1 = predictions.select("match_uid", "p1_id")
+                        results_df = won_relevant.join(pred_p1, on="match_uid").with_columns(
+                            pl.when(pl.col("winner_id") == pl.col("p1_id"))
+                            .then(pl.lit("P1"))
+                            .otherwise(pl.lit("P2"))
+                            .alias("result")
+                        ).select("match_uid", "result")
+
+        # Load ALL predictions (not just current batch) for full analysis
+        all_preds_path = Path("data/predictions/predictions.parquet")
+        all_predictions = pl.read_parquet(all_preds_path) if all_preds_path.exists() else predictions
+
+        ds = build_analysis_dataset(
+            predictions=all_predictions,
+            results=results_df,
+            sheet_data=sheet_data,
+            odds_by_book=odds_by_book,
+        )
+
+        # Save analysis dataset
+        analysis_path = Path("data/analysis/analysis.parquet")
+        analysis_path.parent.mkdir(parents=True, exist_ok=True)
+        ds.write_parquet(analysis_path)
+
+        # Print summary
+        summary = format_summary(ds)
+        print(f"\n{summary}")
+
+    except Exception as e:
+        logger.error("Analysis pipeline failed: %s", e)
+        print(f"Warning: Analysis pipeline failed ({e})")
 
     return 0
 
