@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 
 from mvp.gsheets.base import (
     COLUMN_NAMES,
+    FORMULA_COLUMNS,
     _col_letter,
     generate_formulas,
 )
@@ -71,9 +72,10 @@ class SheetsSync:
             row_list = list(row)
             sheet_row = i + 2  # 1-indexed, row 1 is header
             formulas = generate_formulas(sheet_row)
+            always_formula = {"p1_edge", "p1_pe", "p2_edge", "p2_pe", "pred_edge", "pred_result", "bet_odds"}
             for col_name, formula in formulas.items():
                 col_idx = COLUMN_NAMES.index(col_name)
-                if not row_list[col_idx]:
+                if col_name in always_formula or not row_list[col_idx]:
                     row_list[col_idx] = formula
             cell_rows.append(row_list)
 
