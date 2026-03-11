@@ -7,7 +7,7 @@ from pathlib import Path
 import polars as pl
 import yaml
 
-from mvp.draftkings.matcher import EventMatch
+from mvp.common.odds_matching import EventMatch
 
 logger = logging.getLogger(__name__)
 

@@ -6,7 +6,7 @@ import yaml
 from datetime import datetime, timezone
 from pathlib import Path
 
-from mvp.draftkings.matcher import EventMatch
+from mvp.common.odds_matching import EventMatch
 
 
 class TestEventMap:

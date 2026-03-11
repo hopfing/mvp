@@ -7,7 +7,7 @@ import polars as pl
 import yaml
 
 from mvp.common.base_job import BaseJob
-from mvp.draftkings.matcher import EventMatch, OddsMatchResult, normalize_name
+from mvp.common.odds_matching import EventMatch, OddsMatchResult, normalize_name
 
 logger = logging.getLogger(__name__)
 

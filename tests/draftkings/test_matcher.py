@@ -6,11 +6,9 @@ from unittest.mock import patch
 import polars as pl
 import pytest
 
+from mvp.common.odds_matching import EventMatch, OddsMatchResult, normalize_name
 from mvp.draftkings.matcher import (
     DraftKingsOddsMatcher,
-    EventMatch,
-    OddsMatchResult,
-    normalize_name,
     normalize_tournament,
 )
 
