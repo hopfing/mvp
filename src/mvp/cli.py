@@ -753,8 +753,7 @@ def cmd_live(args: argparse.Namespace) -> int:
         mgm_match_result = None
         try:
             n = dk_future.result(timeout=30)
-            if n:
-                print(f"Fetched {n} DK moneyline odds entries")
+            print(f"Fetched {n} DK moneyline odds entries")
             from mvp.draftkings.matcher import DraftKingsOddsMatcher
             matcher = DraftKingsOddsMatcher()
             match_result = matcher.match(predictions)
@@ -772,8 +771,7 @@ def cmd_live(args: argparse.Namespace) -> int:
 
         try:
             n = br_future.result(timeout=30)
-            if n:
-                print(f"Fetched {n} BR moneyline odds entries")
+            print(f"Fetched {n} BR moneyline odds entries")
             from mvp.betrivers.matcher import BetRiversOddsMatcher
             br_matcher = BetRiversOddsMatcher()
             br_match_result = br_matcher.match(predictions)
@@ -791,8 +789,7 @@ def cmd_live(args: argparse.Namespace) -> int:
 
         try:
             n = mgm_future.result(timeout=30)
-            if n:
-                print(f"Fetched {n} MGM moneyline odds entries")
+            print(f"Fetched {n} MGM moneyline odds entries")
             from mvp.betmgm.matcher import BetMGMOddsMatcher
             mgm_matcher = BetMGMOddsMatcher()
             mgm_match_result = mgm_matcher.match(predictions)
