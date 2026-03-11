@@ -194,8 +194,15 @@ class BetMGMOddsScraper(BaseExtractor):
             raw_responses.append(data)
 
             fixtures = data.get("fixtures", [])
-            all_fixtures.extend(fixtures)
             total = data.get("totalCount", 0)
+            logger.info("MGM page skip=%d: %d fixtures (totalCount=%d, status=%d)", skip, len(fixtures), total, resp.status_code)
+
+            if not fixtures and total > 0:
+                logger.warning("MGM returned 0 fixtures but totalCount=%d — possible Cloudflare block", total)
+            if not fixtures and total == 0:
+                logger.warning("MGM returned 0 fixtures and totalCount=0 — API may be blocking or no tennis events")
+
+            all_fixtures.extend(fixtures)
 
             skip += PAGE_SIZE
             if skip >= total:
@@ -203,7 +210,10 @@ class BetMGMOddsScraper(BaseExtractor):
 
         now = datetime.now(UTC)
         entries = _parse_fixtures(all_fixtures, now)
-        logger.info("Fetched %d MGM odds entries from %d fixtures", len(entries), len(all_fixtures))
+        logger.info(
+            "MGM fetch complete: %d fixtures -> %d entries (filtered to ATP/Challenger singles moneyline)",
+            len(all_fixtures), len(entries),
+        )
         return entries, raw_responses
 
     def fetch_and_save(self) -> int:
