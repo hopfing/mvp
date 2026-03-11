@@ -7,7 +7,7 @@ import polars as pl
 import yaml
 
 from mvp.common.base_job import BaseJob
-from mvp.draftkings.matcher import OddsMatchResult, normalize_name
+from mvp.draftkings.matcher import EventMatch, OddsMatchResult, normalize_name
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +109,7 @@ class BetRiversOddsMatcher(BaseJob):
 
         result: dict[str, dict[str, float]] = {}
         unmatched_names: set[str] = set()
+        event_matches: list[EventMatch] = []
         matched = 0
 
         for eid, br_rows in br_events.items():
@@ -137,6 +138,15 @@ class BetRiversOddsMatcher(BaseJob):
             }
             matched += 1
 
+            p1_id = pred["p1_id"]
+            book_names = {pid: br_rows[i]["player_name"] for i, (pid, _) in enumerate(ids_and_odds)}
+            event_matches.append(EventMatch(
+                match_uid=pred["match_uid"],
+                event_id=eid,
+                p1_book_name=book_names.get(p1_id, ""),
+                p2_book_name=book_names.get(pred["p2_id"], ""),
+            ))
+
         total_events = len(br_events)
         total_preds = len(predictions)
         logger.info(
@@ -150,4 +160,4 @@ class BetRiversOddsMatcher(BaseJob):
                 ", ".join(sorted(unmatched_names)),
             )
 
-        return OddsMatchResult(odds=result, unmatched_names=unmatched_names)
+        return OddsMatchResult(odds=result, unmatched_names=unmatched_names, event_matches=event_matches)

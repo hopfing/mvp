@@ -8,6 +8,7 @@ import pytest
 
 from mvp.draftkings.matcher import (
     DraftKingsOddsMatcher,
+    EventMatch,
     OddsMatchResult,
     normalize_name,
     normalize_tournament,
@@ -232,3 +233,19 @@ class TestDraftKingsOddsMatcher:
         matcher.ALIASES_PATH = tmp_path / "nonexistent.yaml"
         result = matcher.match(_make_predictions())
         assert "m1" in result.odds
+
+    def test_event_matches_populated(self, tmp_path):
+        """Successful matches should populate event_matches."""
+        _make_players(tmp_path)
+        _make_odds(tmp_path, [
+            ("e1", "Alice Smith", "Bob Jones", 1.5),
+            ("e1", "Bob Jones", "Alice Smith", 2.5),
+        ])
+        matcher = DraftKingsOddsMatcher(data_root=tmp_path)
+        result = matcher.match(_make_predictions())
+        assert len(result.event_matches) == 1
+        em = result.event_matches[0]
+        assert em.match_uid == "m1"
+        assert em.event_id == "e1"
+        assert em.p1_book_name == "Alice Smith"
+        assert em.p2_book_name == "Bob Jones"

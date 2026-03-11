@@ -44,11 +44,22 @@ def normalize_tournament(tournament: str) -> str:
 
 
 @dataclass
+class EventMatch:
+    """Record of a successful match between a book event and a prediction."""
+
+    match_uid: str
+    event_id: str
+    p1_book_name: str
+    p2_book_name: str
+
+
+@dataclass
 class OddsMatchResult:
     """Result of matching DK odds to predictions."""
 
     odds: dict[str, dict[str, float]] = field(default_factory=dict)
     unmatched_names: set[str] = field(default_factory=set)
+    event_matches: list[EventMatch] = field(default_factory=list)
 
 
 class DraftKingsOddsMatcher(BaseJob):
@@ -150,6 +161,7 @@ class DraftKingsOddsMatcher(BaseJob):
 
         result: dict[str, dict[str, float]] = {}
         unmatched_names: set[str] = set()
+        event_matches: list[EventMatch] = []
         matched = 0
 
         for eid, dk_rows in dk_events.items():
@@ -178,6 +190,15 @@ class DraftKingsOddsMatcher(BaseJob):
             }
             matched += 1
 
+            p1_id = pred["p1_id"]
+            book_names = {pid: dk_rows[i]["player_name"] for i, (pid, _) in enumerate(ids_and_odds)}
+            event_matches.append(EventMatch(
+                match_uid=pred["match_uid"],
+                event_id=eid,
+                p1_book_name=book_names.get(p1_id, ""),
+                p2_book_name=book_names.get(pred["p2_id"], ""),
+            ))
+
         total_events = len(dk_events)
         total_preds = len(predictions)
         logger.info(
@@ -191,4 +212,4 @@ class DraftKingsOddsMatcher(BaseJob):
                 ", ".join(sorted(unmatched_names)),
             )
 
-        return OddsMatchResult(odds=result, unmatched_names=unmatched_names)
+        return OddsMatchResult(odds=result, unmatched_names=unmatched_names, event_matches=event_matches)
