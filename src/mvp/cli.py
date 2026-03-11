@@ -788,6 +788,10 @@ def cmd_live(args: argparse.Namespace) -> int:
         merged = merge_predictions(existing, prepared, matches_df)
         sheets.write(merged)
 
+        sheets_parquet = Path("data/sheets/bets.parquet")
+        sheets_parquet.parent.mkdir(parents=True, exist_ok=True)
+        merged.write_parquet(sheets_parquet)
+
         n_new = len(merged) - len(existing)
         print(f"Synced to Google Sheets ({n_new} new matches)")
     except Exception as e:
