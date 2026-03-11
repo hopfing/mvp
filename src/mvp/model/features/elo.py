@@ -30,6 +30,7 @@ def surface_elo_expr(prefix: str) -> pl.Expr:
     params=[],
     description="Average Elo of both players (absolute level context)",
     mirror=False,
+    match_level=True,
 )
 def elo_avg() -> pl.Expr:
     """Average Elo of both players.
@@ -45,6 +46,7 @@ def elo_avg() -> pl.Expr:
     params=[],
     description="Squared average Elo (nonlinear absolute level effect)",
     mirror=False,
+    match_level=True,
 )
 def elo_avg_sq() -> pl.Expr:
     """Squared average Elo of both players.
@@ -61,6 +63,7 @@ def elo_avg_sq() -> pl.Expr:
     params=[],
     description="Minimum Elo of both players (floor quality)",
     mirror=False,
+    match_level=True,
 )
 def elo_min() -> pl.Expr:
     """Minimum Elo of the two players.
@@ -76,6 +79,7 @@ def elo_min() -> pl.Expr:
     params=[],
     description="Interaction: surface Elo diff × average Elo level",
     mirror=False,
+    match_level=True,
 )
 def elo_diff_x_elo_avg() -> pl.Expr:
     """Interaction between Elo difference and absolute level.
@@ -93,6 +97,7 @@ def elo_diff_x_elo_avg() -> pl.Expr:
     params=[],
     description="Interaction: surface Elo diff × combined rating deviation",
     mirror=False,
+    match_level=True,
 )
 def elo_diff_x_rd_sum() -> pl.Expr:
     """Interaction between Elo difference and rating uncertainty.
