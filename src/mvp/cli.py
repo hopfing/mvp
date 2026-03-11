@@ -787,7 +787,12 @@ def cmd_live(args: argparse.Namespace) -> int:
         matches_df = pl.read_parquet(matches_path) if matches_path.exists() else pl.DataFrame()
 
         prepared = prepare_predictions(predictions)
-        merged = merge_predictions(existing, prepared, matches_df)
+        book_odds = {}
+        if odds_map:
+            book_odds["DraftKings"] = odds_map
+        if br_odds_map:
+            book_odds["BetRivers"] = br_odds_map
+        merged = merge_predictions(existing, prepared, matches_df, odds_maps=book_odds or None)
         sheets.write(merged)
 
         sheets_parquet = Path("data/sheets/bets.parquet")

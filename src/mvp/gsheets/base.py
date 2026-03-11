@@ -236,6 +236,7 @@ def merge_predictions(
     existing: pl.DataFrame,
     new_predictions: pl.DataFrame,
     matches: pl.DataFrame,
+    odds_maps: dict[str, dict[str, dict[str, float]]] | None = None,
 ) -> pl.DataFrame:
     """Merge new predictions with existing sheet data, auto-filling results.
 
@@ -324,6 +325,56 @@ def merge_predictions(
             else:
                 new_bet_results.append(current_bet_result)
         merged = merged.with_columns(pl.Series("bet_result", new_bet_results))
+
+    # 3c. Auto-fill p1_odds, p2_odds, book from best available odds
+    if len(merged) > 0 and odds_maps:
+        new_p1_odds = []
+        new_p2_odds = []
+        new_books = []
+        for row in merged.iter_rows(named=True):
+            current_stake = (row.get("stake") or "").strip()
+            current_p1_odds = (row.get("p1_odds") or "").strip()
+            current_p2_odds = (row.get("p2_odds") or "").strip()
+            current_book = (row.get("book") or "").strip()
+
+            if current_stake:
+                new_p1_odds.append(current_p1_odds)
+                new_p2_odds.append(current_p2_odds)
+                new_books.append(current_book)
+                continue
+
+            uid = row.get("match_uid") or ""
+            p1_id = (row.get("p1_id") or "").strip()
+            p2_id = (row.get("p2_id") or "").strip()
+            prediction = (row.get("prediction") or "").strip()
+
+            best_p1 = None
+            best_p2 = None
+            best_pred_book = None
+            best_pred_odds = None
+
+            for book_name, book_odds in odds_maps.items():
+                match_odds = book_odds.get(uid, {})
+                p1_o = match_odds.get(p1_id)
+                p2_o = match_odds.get(p2_id)
+                if p1_o is not None and (best_p1 is None or p1_o > best_p1):
+                    best_p1 = p1_o
+                if p2_o is not None and (best_p2 is None or p2_o > best_p2):
+                    best_p2 = p2_o
+                pred_odds = p1_o if prediction == "P1" else p2_o if prediction == "P2" else None
+                if pred_odds is not None and (best_pred_odds is None or pred_odds > best_pred_odds):
+                    best_pred_odds = pred_odds
+                    best_pred_book = book_name
+
+            new_p1_odds.append(f"{best_p1:.2f}" if best_p1 is not None else current_p1_odds)
+            new_p2_odds.append(f"{best_p2:.2f}" if best_p2 is not None else current_p2_odds)
+            new_books.append(best_pred_book if best_pred_book else current_book)
+
+        merged = merged.with_columns(
+            pl.Series("p1_odds", new_p1_odds),
+            pl.Series("p2_odds", new_p2_odds),
+            pl.Series("book", new_books),
+        )
 
     # 4. Re-pad time column (Google Sheets strips leading zeros)
     merged = merged.with_columns(

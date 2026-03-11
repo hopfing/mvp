@@ -428,6 +428,70 @@ class TestMergePredictions:
         assert m1["bet_result"][0] == ""
 
 
+    def test_odds_auto_filled_when_no_stake(self):
+        row = _make_sheet_row(match_uid="M1", p1_odds="", p2_odds="", stake="", book="")
+        existing = _sheet_df([row])
+        new = prepare_predictions(_make_predictions(match_uid="OTHER"))
+        matches = _matches_df({"match_uid": [], "won": [], "player_id": [], "opp_id": []})
+        odds_maps = {
+            "DraftKings": {"M1": {"A": 2.10, "B": 1.75}},
+            "BetRivers": {"M1": {"A": 2.05, "B": 1.80}},
+        }
+        result = merge_predictions(existing, new, matches, odds_maps=odds_maps)
+        m1 = result.filter(pl.col("match_uid") == "M1")
+        assert m1["p1_odds"][0] == "2.10"  # best for p1 is DK
+        assert m1["p2_odds"][0] == "1.80"  # best for p2 is BR
+
+    def test_odds_not_overwritten_when_stake_filled(self):
+        row = _make_sheet_row(
+            match_uid="M1", p1_odds="2.00", p2_odds="1.70",
+            stake="10", book="Bet365",
+        )
+        existing = _sheet_df([row])
+        new = prepare_predictions(_make_predictions(match_uid="OTHER"))
+        matches = _matches_df({"match_uid": [], "won": [], "player_id": [], "opp_id": []})
+        odds_maps = {"DraftKings": {"M1": {"A": 2.50, "B": 1.50}}}
+        result = merge_predictions(existing, new, matches, odds_maps=odds_maps)
+        m1 = result.filter(pl.col("match_uid") == "M1")
+        assert m1["p1_odds"][0] == "2.00"
+        assert m1["p2_odds"][0] == "1.70"
+        assert m1["book"][0] == "Bet365"
+
+    def test_book_filled_with_best_for_predicted_side(self):
+        row = _make_sheet_row(match_uid="M1", prediction="P1", stake="", book="")
+        existing = _sheet_df([row])
+        new = prepare_predictions(_make_predictions(match_uid="OTHER"))
+        matches = _matches_df({"match_uid": [], "won": [], "player_id": [], "opp_id": []})
+        odds_maps = {
+            "DraftKings": {"M1": {"A": 2.00, "B": 1.80}},
+            "BetRivers": {"M1": {"A": 2.15, "B": 1.72}},
+        }
+        result = merge_predictions(existing, new, matches, odds_maps=odds_maps)
+        m1 = result.filter(pl.col("match_uid") == "M1")
+        assert m1["book"][0] == "BetRivers"  # BR has better p1 odds
+
+    def test_odds_updated_on_subsequent_runs(self):
+        """Odds should update each run until a stake is placed."""
+        row = _make_sheet_row(match_uid="M1", p1_odds="1.90", p2_odds="1.85", stake="", book="DraftKings")
+        existing = _sheet_df([row])
+        new = prepare_predictions(_make_predictions(match_uid="OTHER"))
+        matches = _matches_df({"match_uid": [], "won": [], "player_id": [], "opp_id": []})
+        odds_maps = {"DraftKings": {"M1": {"A": 2.10, "B": 1.75}}}
+        result = merge_predictions(existing, new, matches, odds_maps=odds_maps)
+        m1 = result.filter(pl.col("match_uid") == "M1")
+        assert m1["p1_odds"][0] == "2.10"
+        assert m1["p2_odds"][0] == "1.75"
+
+    def test_no_odds_maps_leaves_odds_unchanged(self):
+        row = _make_sheet_row(match_uid="M1", p1_odds="2.00", stake="")
+        existing = _sheet_df([row])
+        new = prepare_predictions(_make_predictions(match_uid="OTHER"))
+        matches = _matches_df({"match_uid": [], "won": [], "player_id": [], "opp_id": []})
+        result = merge_predictions(existing, new, matches)
+        m1 = result.filter(pl.col("match_uid") == "M1")
+        assert m1["p1_odds"][0] == "2.00"
+
+
 class TestColLetters:
     def test_first_column_is_A(self):
         assert COL_LETTERS[COLUMN_NAMES[0]] == "A"
