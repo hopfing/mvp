@@ -118,6 +118,11 @@ def generate_formulas(row: int) -> dict[str, str]:
 
 CIRCUIT_LABELS = {"tour": "ATP", "chal": "CH"}
 
+BOOK_DISPLAY_NAMES = {
+    "BetRivers": "Rivers",
+    "BetMGM": "MGM",
+}
+
 
 def _format_date(val) -> str | None:
     """Format a date/datetime value as YYYY-MM-DD string, or None."""
@@ -368,7 +373,8 @@ def merge_predictions(
 
             new_p1_odds.append(f"{best_p1:.2f}" if best_p1 is not None else current_p1_odds)
             new_p2_odds.append(f"{best_p2:.2f}" if best_p2 is not None else current_p2_odds)
-            new_books.append(best_pred_book if best_pred_book else current_book)
+            display = BOOK_DISPLAY_NAMES.get(best_pred_book, best_pred_book) if best_pred_book else current_book
+            new_books.append(display)
 
         merged = merged.with_columns(
             pl.Series("p1_odds", new_p1_odds),
