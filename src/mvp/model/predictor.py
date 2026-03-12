@@ -256,20 +256,14 @@ class ProductionPredictor:
             matches_path=self.matches_path, cache_dir=self.cache_dir
         )
 
-        # Compute features
+        # Compute features (no entry-level filters — match_uids constrains scope)
         compute_only = (
             config.features.compute_only
             if config.features and config.features.compute_only
             else []
         )
-        filter_feature_specs = get_filter_feature_specs(entry.get("filters"))
-        extra = compute_only + filter_feature_specs
-        all_specs = feature_specs + [s for s in extra if s not in feature_specs]
+        all_specs = feature_specs + [s for s in compute_only if s not in feature_specs]
         df = engine.compute(all_specs)
-
-        # Apply non-date filters
-        if entry.get("filters"):
-            df = apply_filters(df, entry["filters"])
 
         # Scope to tournaments
         if tournament_keys is not None:
@@ -334,12 +328,23 @@ class ProductionPredictor:
         return result
 
     def train_voters(self) -> int:
-        """Train all voter models. Returns count of voters trained."""
+        """Train all voter models using each config's native filters."""
         voters = self.config.get("voters", [])
         for voter in voters:
             name = voter.get("name", "unnamed")
             logger.info("Training voter: %s", name)
-            self._train_single(voter)
+            # Build training entry: config's own data.filters + voter's date range/artifact
+            voter_config = ExperimentConfig.from_file(voter["config"])
+            train_entry = {
+                "config": voter["config"],
+                "artifact": voter["artifact"],
+                "train_date_range": {
+                    "start": voter_config.data.date_range.start.isoformat(),
+                    "end": voter_config.data.date_range.end.isoformat(),
+                },
+                "filters": voter_config.data.filters,
+            }
+            self._train_single(train_entry)
         return len(voters)
 
     def predict_voters(
