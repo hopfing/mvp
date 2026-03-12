@@ -16,6 +16,7 @@ def apply_filters(df: pl.DataFrame, filters: dict[str, Any]) -> pl.DataFrame:
       - scalar: equality (col == value)
       - list: membership (col in values)
       - dict with min/max: range (col >= min, col <= max)
+      - dict with abs_min/abs_max: absolute value range (abs(col) >= abs_min, abs(col) <= abs_max)
     """
     for col, value in filters.items():
         if isinstance(value, list):
@@ -25,6 +26,10 @@ def apply_filters(df: pl.DataFrame, filters: dict[str, Any]) -> pl.DataFrame:
                 df = df.filter(pl.col(col) >= value["min"])
             if "max" in value:
                 df = df.filter(pl.col(col) <= value["max"])
+            if "abs_min" in value:
+                df = df.filter(pl.col(col).abs() >= value["abs_min"])
+            if "abs_max" in value:
+                df = df.filter(pl.col(col).abs() <= value["abs_max"])
         else:
             df = df.filter(pl.col(col) == value)
     return df
