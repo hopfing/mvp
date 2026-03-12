@@ -159,3 +159,68 @@ class TestConfidenceValidator:
         assert "overall" in chal_profiles
         bucket_keys = [k for k in chal_profiles if k != "overall"]
         assert len(bucket_keys) > 0
+
+
+class TestEnsembleConsensusValidation:
+    def test_consensus_profiles_present(self, make_oof_df, make_per_model_preds):
+        df = make_oof_df(n=2000)
+        all_predictions = [{
+            "df": df.drop("y_true", "y_prob"),
+            "y_true": df["y_true"].to_numpy(),
+            "y_prob": df["y_prob"].to_numpy(),
+        }]
+        per_model_oof = [make_per_model_preds(df, n_models=3)]
+        validator = ConfidenceValidator(all_predictions, per_model_oof=per_model_oof)
+        result = validator.validate()
+        consensus_keys = [k for k in result.profiles if k.startswith("consensus:")]
+        assert len(consensus_keys) >= 1
+
+    def test_no_consensus_without_per_model(self, make_oof_df):
+        df = make_oof_df(n=2000)
+        all_predictions = [{
+            "df": df.drop("y_true", "y_prob"),
+            "y_true": df["y_true"].to_numpy(),
+            "y_prob": df["y_prob"].to_numpy(),
+        }]
+        validator = ConfidenceValidator(all_predictions)
+        result = validator.validate()
+        consensus_keys = [k for k in result.profiles if k.startswith("consensus:")]
+        assert len(consensus_keys) == 0
+
+    def test_consensus_with_base_names(self, make_oof_df, make_per_model_preds):
+        df = make_oof_df(n=2000)
+        all_predictions = [{
+            "df": df.drop("y_true", "y_prob"),
+            "y_true": df["y_true"].to_numpy(),
+            "y_prob": df["y_prob"].to_numpy(),
+        }]
+        per_model_oof = [make_per_model_preds(df, n_models=3, noise_scale=0.3)]
+        validator = ConfidenceValidator(
+            all_predictions,
+            per_model_oof=per_model_oof,
+            base_names=["specialist_chal", "specialist_tour", "generalist"],
+        )
+        result = validator.validate()
+        identity_keys = [k for k in result.profiles if k.startswith("consensus_id:")]
+        # With high noise, should have identity slices
+        assert len(identity_keys) >= 1
+        # Names should appear in identity keys
+        assert any("specialist" in k for k in identity_keys)
+
+    def test_from_oof_with_per_model_columns(self, make_oof_df, make_per_model_preds):
+        """Cached OOF with per-model columns should produce consensus slices."""
+        df = make_oof_df(n=2000)
+        per_model = make_per_model_preds(df, n_models=3)
+        all_predictions = [{
+            "df": df.drop("y_true", "y_prob"),
+            "y_true": df["y_true"].to_numpy(),
+            "y_prob": df["y_prob"].to_numpy(),
+        }]
+        # Simulate cached OOF with per-model columns baked in
+        oof = prepare_oof(all_predictions)
+        for i, preds in enumerate(per_model):
+            oof = oof.with_columns(pl.Series(f"_pm_{i}", preds))
+        validator = ConfidenceValidator.from_oof(oof)
+        result = validator.validate()
+        consensus_keys = [k for k in result.profiles if k.startswith("consensus:")]
+        assert len(consensus_keys) >= 1

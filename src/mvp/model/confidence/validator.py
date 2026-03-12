@@ -4,31 +4,43 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
+import numpy as np
 import polars as pl
 
-from mvp.model.confidence.dimensions import get_modifier_slices, get_structural_slices
+from mvp.model.confidence.dimensions import (
+    get_consensus_slices,
+    get_modifier_slices,
+    get_structural_slices,
+)
 from mvp.model.confidence.metrics import ReliabilityProfile, compute_reliability_profile
 
 logger = logging.getLogger(__name__)
 
 
-def prepare_oof(all_predictions: list[dict[str, Any]]) -> pl.DataFrame:
+def prepare_oof(
+    all_predictions: list[dict[str, Any]],
+    per_model_oof: list[list[np.ndarray]] | None = None,
+) -> pl.DataFrame:
     """Concatenate fold predictions and orient to favored side.
 
-    Takes the all_predictions list from ExperimentRunner.run() and produces
-    a single DataFrame with favored-side orientation and probability bucketing.
+    Args:
+        all_predictions: Per-fold prediction dicts with df, y_true, y_prob.
+        per_model_oof: Optional per-fold per-model predictions from ensemble.
+            Structure: per_model_oof[fold_idx][model_idx] = np.ndarray.
     """
     frames = []
-    for pred in all_predictions:
+    for fold_idx, pred in enumerate(all_predictions):
         df = pred["df"]
         y_true = pred["y_true"]
         y_prob = pred["y_prob"]
-        frames.append(
-            df.with_columns(
-                pl.Series("y_true", y_true),
-                pl.Series("y_prob", y_prob),
-            )
-        )
+        extra_cols = [
+            pl.Series("y_true", y_true),
+            pl.Series("y_prob", y_prob),
+        ]
+        if per_model_oof and fold_idx < len(per_model_oof):
+            for model_idx, model_preds in enumerate(per_model_oof[fold_idx]):
+                extra_cols.append(pl.Series(f"_pm_{model_idx}", model_preds))
+        frames.append(df.with_columns(extra_cols))
 
     combined = pl.concat(frames, how="diagonal_relaxed")
 
@@ -67,13 +79,24 @@ class ValidationResult:
 
 
 class ConfidenceValidator:
-    def __init__(self, all_predictions: list[dict[str, Any]]) -> None:
-        self._oof = prepare_oof(all_predictions)
+    def __init__(
+        self,
+        all_predictions: list[dict[str, Any]],
+        per_model_oof: list[list[np.ndarray]] | None = None,
+        base_names: list[str] | None = None,
+    ) -> None:
+        self._oof = prepare_oof(all_predictions, per_model_oof=per_model_oof)
+        self._base_names = base_names
 
     @classmethod
-    def from_oof(cls, oof_df: pl.DataFrame) -> "ConfidenceValidator":
+    def from_oof(
+        cls,
+        oof_df: pl.DataFrame,
+        base_names: list[str] | None = None,
+    ) -> "ConfidenceValidator":
         instance = cls.__new__(cls)
         instance._oof = oof_df
+        instance._base_names = base_names
         return instance
 
     def validate(self) -> ValidationResult:
@@ -90,6 +113,17 @@ class ConfidenceValidator:
         for label, slice_df in modifiers.items():
             logger.debug("Computing profiles for %s (n=%d)", label, len(slice_df))
             result.profiles[label] = self._compute_slice_profiles(slice_df)
+
+        # Consensus slices (ensemble only — detected by _pm_* columns)
+        pm_cols = sorted(c for c in self._oof.columns if c.startswith("_pm_"))
+        if len(pm_cols) >= 2:
+            per_model = [self._oof[c].to_numpy() for c in pm_cols]
+            consensus = get_consensus_slices(
+                self._oof, per_model, base_names=self._base_names
+            )
+            for label, slice_df in consensus.items():
+                logger.debug("Computing profiles for %s (n=%d)", label, len(slice_df))
+                result.profiles[label] = self._compute_slice_profiles(slice_df)
 
         return result
 
