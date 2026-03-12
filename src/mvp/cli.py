@@ -78,10 +78,11 @@ def print_run_summary(results: dict[str, Any], name: str | None = None) -> None:
                     acc = m.get('accuracy', 0)
                     auc = m.get('roc_auc', 0)
                     ll = m.get('log_loss', 0)
+                    brier = m.get('brier_score', 0)
                     cal = m.get('calibration_error', 0)
                     err = m.get('error_rate_80plus', 0)
                     n = m.get('n_matches', 0)
-                    print(f"      {surface:8} {acc:5.1%} | {auc:.3f} | {ll:.3f} | {cal:.1%} | {err:.1%} | n={n:,}")
+                    print(f"      {surface:8} {acc:5.1%} | {auc:.3f} | {ll:.3f} | {brier:.4f} | {cal:.1%} | {err:.1%} | n={n:,}")
 
             # Per-round metrics
             if circuit_data.get("round"):
@@ -94,10 +95,11 @@ def print_run_summary(results: dict[str, Any], name: str | None = None) -> None:
                     acc = m.get('accuracy', 0)
                     auc = m.get('roc_auc', 0)
                     ll = m.get('log_loss', 0)
+                    brier = m.get('brier_score', 0)
                     cal = m.get('calibration_error', 0)
                     err = m.get('error_rate_80plus', 0)
                     n = m.get('n_matches', 0)
-                    print(f"      {rnd:10} {acc:5.1%} | {auc:.3f} | {ll:.3f} | {cal:.1%} | {err:.1%} | n={n:,}")
+                    print(f"      {rnd:10} {acc:5.1%} | {auc:.3f} | {ll:.3f} | {brier:.4f} | {cal:.1%} | {err:.1%} | n={n:,}")
 
             # Betting group subsegments (circuit-aware performance groups)
             if circuit_data.get("betting_group"):
@@ -106,10 +108,11 @@ def print_run_summary(results: dict[str, Any], name: str | None = None) -> None:
                     acc = m.get('accuracy', 0)
                     auc = m.get('roc_auc', 0)
                     ll = m.get('log_loss', 0)
+                    brier = m.get('brier_score', 0)
                     cal = m.get('calibration_error', 0)
                     err = m.get('error_rate_80plus', 0)
                     n = m.get('n_matches', 0)
-                    print(f"      {group:10} {acc:5.1%} | {auc:.3f} | {ll:.3f} | {cal:.1%} | {err:.1%} | n={n:,}")
+                    print(f"      {group:10} {acc:5.1%} | {auc:.3f} | {ll:.3f} | {brier:.4f} | {cal:.1%} | {err:.1%} | n={n:,}")
 
     # Calibration buckets table
     cal_data = diagnostics.calibration
