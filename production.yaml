@@ -12,9 +12,9 @@ active:
   trained_at: '2026-03-10T22:44:40.508132+00:00'
 voters:
 - name: close_matches
-  config: models/fs_log_wsA_f15_close_matches.yaml
+  config: models/voters/fs_log_wsA_f15_close_matches.yaml
   artifact: data/models/voter_close_matches.joblib
 - name: tour_only
-  config: models/tour_only.yaml
+  config: models/voters/tour_only.yaml
   artifact: data/models/voter_tour_only.joblib
 history: []
