@@ -224,3 +224,39 @@ class TestEnsembleConsensusValidation:
         result = validator.validate()
         consensus_keys = [k for k in result.profiles if k.startswith("consensus:")]
         assert len(consensus_keys) >= 1
+
+
+class TestCachedOofConsensus:
+    def test_old_cache_without_pm_columns(self, make_oof_df):
+        """Old cached OOF without _pm_ columns should work with no consensus."""
+        from mvp.model.confidence.validator import prepare_oof
+        df = make_oof_df(n=500)
+        oof = prepare_oof([{
+            "df": df.drop("y_true", "y_prob"),
+            "y_true": df["y_true"].to_numpy(),
+            "y_prob": df["y_prob"].to_numpy(),
+        }])
+        # No _pm_ columns — simulates old cache
+        validator = ConfidenceValidator.from_oof(oof)
+        result = validator.validate()
+        consensus_keys = [k for k in result.profiles if k.startswith("consensus")]
+        assert len(consensus_keys) == 0
+
+    def test_cached_with_base_names(self, make_oof_df, make_per_model_preds):
+        """Cached OOF + base_names produces named identity slices."""
+        from mvp.model.confidence.validator import prepare_oof
+        df = make_oof_df(n=2000)
+        per_model = make_per_model_preds(df, n_models=3, noise_scale=0.3)
+        oof = prepare_oof([{
+            "df": df.drop("y_true", "y_prob"),
+            "y_true": df["y_true"].to_numpy(),
+            "y_prob": df["y_prob"].to_numpy(),
+        }])
+        for i, preds in enumerate(per_model):
+            oof = oof.with_columns(pl.Series(f"_pm_{i}", preds))
+        validator = ConfidenceValidator.from_oof(
+            oof, base_names=["chal_spec", "tour_spec", "general"]
+        )
+        result = validator.validate()
+        identity_keys = [k for k in result.profiles if k.startswith("consensus_id:")]
+        assert any("spec" in k for k in identity_keys)
