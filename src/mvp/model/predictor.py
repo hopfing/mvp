@@ -14,7 +14,7 @@ import yaml
 
 from mvp.model.calibration import PlattCalibrator
 from mvp.model.confidence.dimensions import MODIFIERS
-from mvp.model.config import EnsembleParams, ExperimentConfig, apply_filters
+from mvp.model.config import EnsembleParams, ExperimentConfig, apply_filters, get_filter_feature_specs
 from mvp.model.engine import FeatureEngine, get_feature_columns
 from mvp.model.features.elo import surface_elo_expr
 from mvp.model.models import EnsembleModel, get_model
@@ -104,13 +104,15 @@ class ProductionPredictor:
             feature_specs = config.features.include
             base_model_specs = None
 
-        # Compute features (include compute_only specs for filtering, not training)
+        # Compute features (include compute_only and filter-referenced features)
         compute_only = (
             config.features.compute_only
             if config.features and config.features.compute_only
             else []
         )
-        all_specs = feature_specs + [s for s in compute_only if s not in feature_specs]
+        filter_specs = get_filter_feature_specs(self.config["active"].get("filters"))
+        extra = compute_only + filter_specs
+        all_specs = feature_specs + [s for s in extra if s not in feature_specs]
         df = engine.compute(all_specs)
 
         # Apply training filters
@@ -235,7 +237,9 @@ class ProductionPredictor:
             if config.features and config.features.compute_only
             else []
         )
-        all_specs = feature_specs + [s for s in compute_only if s not in feature_specs]
+        filter_specs = get_filter_feature_specs(self.config["active"].get("filters"))
+        extra = compute_only + filter_specs
+        all_specs = feature_specs + [s for s in extra if s not in feature_specs]
         df = engine.compute(all_specs)
 
         # Apply non-date filters (same as training, minus date range)

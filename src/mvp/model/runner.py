@@ -15,7 +15,7 @@ import polars as pl
 run_logger = logging.getLogger(__name__)
 
 from mvp.model.calibration import PlattCalibrator
-from mvp.model.config import EnsembleParams, ExperimentConfig, apply_filters
+from mvp.model.config import EnsembleParams, ExperimentConfig, apply_filters, get_filter_feature_specs
 from mvp.model.diagnostics import Diagnostics, EnsembleDiagnostics
 from mvp.model.engine import FeatureEngine, get_feature_columns
 from mvp.model.metrics import compute_calibration_error, compute_metrics
@@ -163,13 +163,15 @@ class ExperimentRunner:
             assert self.config.features is not None
             feature_specs = self.config.features.include
 
-        # Compute features (include compute_only specs for filtering, not training)
+        # Compute features (include compute_only and filter-referenced features)
         compute_only = (
             self.config.features.compute_only
             if self.config.features and self.config.features.compute_only
             else []
         )
-        all_specs = feature_specs + [s for s in compute_only if s not in feature_specs]
+        filter_specs = get_filter_feature_specs(self.config.data.filters)
+        extra = compute_only + filter_specs
+        all_specs = feature_specs + [s for s in extra if s not in feature_specs]
         t_run = time.perf_counter()
         df = self.engine.compute(all_specs)
 

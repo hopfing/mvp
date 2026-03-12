@@ -9,6 +9,34 @@ import yaml
 from pydantic import BaseModel, field_validator, model_validator
 
 
+def get_filter_feature_specs(filters: dict[str, Any] | None) -> list[str]:
+    """Return filter column names that are computed features (not raw columns).
+
+    These must be included in the feature computation so filter columns
+    are available even when they aren't selected model features.
+    """
+    if not filters:
+        return []
+
+    import mvp.model.features  # noqa: F401 - triggers registration
+    from mvp.model.registry import get_registry
+
+    registry = get_registry()
+    known = set(registry.list_features())
+    specs = []
+    for col in filters:
+        # Check if the column (with player_ prefix stripped) is a registered feature
+        if col.startswith("player_"):
+            base = col[7:]
+        elif col.startswith("opp_"):
+            base = col[4:]
+        else:
+            base = col
+        if base in known:
+            specs.append(col)
+    return specs
+
+
 def apply_filters(df: pl.DataFrame, filters: dict[str, Any]) -> pl.DataFrame:
     """Apply equality, list, and range filters to a DataFrame.
 
