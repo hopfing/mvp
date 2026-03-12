@@ -273,8 +273,8 @@ class TestFastForwardSelector:
         for (fast_train, fast_test), (run_train, run_test) in zip(
             fast.folds, runner_folds
         ):
-            assert fast_train == run_train
-            assert fast_test == run_test
+            assert list(fast_train) == run_train
+            assert list(fast_test) == run_test
 
 
 class TestMakeSplitter:

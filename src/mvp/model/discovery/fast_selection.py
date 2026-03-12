@@ -6,6 +6,7 @@ from pathlib import Path
 
 import numpy as np
 import polars as pl
+from sklearn.linear_model import LogisticRegression
 
 from mvp.model.config import apply_filters
 from mvp.model.discovery.config import DiscoveryConfig
@@ -15,6 +16,34 @@ from mvp.model.models import get_model
 from mvp.model.splitters import make_splitter
 
 warnings.filterwarnings("ignore", message="All-NaN slice encountered")
+
+
+def _make_metric_fn(metric: str) -> Callable[[np.ndarray, np.ndarray], float]:
+    """Return a function that computes a single metric.
+
+    Avoids the overhead of compute_metrics() which calculates all 6 metrics
+    when only one is needed per iteration.
+    """
+    from sklearn.metrics import accuracy_score, brier_score_loss, log_loss, roc_auc_score
+
+    from mvp.model.metrics import compute_calibration_error, compute_error_rate_80plus
+
+    metric_fns: dict[str, Callable[[np.ndarray, np.ndarray], float]] = {
+        "log_loss": lambda yt, yp: float(
+            log_loss(yt, np.clip(yp, 1e-15, 1 - 1e-15))
+        ),
+        "accuracy": lambda yt, yp: float(
+            accuracy_score(yt, (yp >= 0.5).astype(int))
+        ),
+        "brier_score": lambda yt, yp: float(brier_score_loss(yt, yp)),
+        "roc_auc": lambda yt, yp: float(roc_auc_score(yt, yp)),
+        "calibration_error": lambda yt, yp: compute_calibration_error(yt, yp),
+        "error_rate_80plus": lambda yt, yp: compute_error_rate_80plus(yt, yp),
+    }
+    if metric not in metric_fns:
+        # Fall back to full compute_metrics for unknown metrics
+        return lambda yt, yp: compute_metrics(yt, yp)[metric]
+    return metric_fns[metric]
 
 
 class FastForwardSelector:
@@ -43,7 +72,7 @@ class FastForwardSelector:
         self.y: np.ndarray | None = None
         self.sample_weights: np.ndarray | None = None
         self.col_to_idx: dict[str, int] = {}
-        self.folds: list[tuple[list[int], list[int]]] = []
+        self.folds: list[tuple[np.ndarray, np.ndarray]] = []
         self.fold_medians: list[np.ndarray] = []
 
     def precompute(
@@ -124,7 +153,10 @@ class FastForwardSelector:
             step_size=val.step_size,
             train_size=val.train_size,
         )
-        self.folds = list(splitter.split(df))
+        self.folds = [
+            (np.array(train_idx), np.array(test_idx))
+            for train_idx, test_idx in splitter.split(df)
+        ]
 
         self.fold_medians = []
         for train_idx, _test_idx in self.folds:
@@ -151,6 +183,17 @@ class FastForwardSelector:
         model_type = self.config.model.type
         model_params = self.config.model.params or {}
         scale = model_type in ("logistic",)
+
+        # For logistic regression, bypass the LogisticModel wrapper to avoid
+        # redundant scaling (the scorer already scales) and per-call import
+        # overhead. Use sklearn LogisticRegression directly.
+        use_fast_logistic = model_type == "logistic"
+        if use_fast_logistic:
+            lr_params = {"random_state": 42, "max_iter": 1000, **model_params}
+
+        # Build a single-metric function to avoid computing all 6 metrics
+        # when we only need one.
+        metric_fn = _make_metric_fn(metric)
 
         def scorer(features: list[str]) -> float:
             if not features:
@@ -181,15 +224,22 @@ class FastForwardSelector:
                         X_train = (X_train - mean) / std
                         X_test = (X_test - mean) / std
 
-                model = get_model(model_type, model_params)
-                fit_kwargs: dict = {}
-                if sample_weights is not None:
-                    fit_kwargs["sample_weight"] = sample_weights[train_idx]
-                if model_type == "xgboost":
-                    fit_kwargs["eval_set"] = [(X_test, y_test)]
-                model.fit(X_train, y_train, **fit_kwargs)
-                y_prob = model.predict_proba(X_test)
-                fold_metrics.append(compute_metrics(y_test, y_prob)[metric])
+                if use_fast_logistic:
+                    model = LogisticRegression(**lr_params)
+                    sw = sample_weights[train_idx] if sample_weights is not None else None
+                    model.fit(X_train, y_train, sample_weight=sw)
+                    y_prob = model.predict_proba(X_test)[:, 1]
+                else:
+                    model = get_model(model_type, model_params)
+                    fit_kwargs: dict = {}
+                    if sample_weights is not None:
+                        fit_kwargs["sample_weight"] = sample_weights[train_idx]
+                    if model_type == "xgboost":
+                        fit_kwargs["eval_set"] = [(X_test, y_test)]
+                    model.fit(X_train, y_train, **fit_kwargs)
+                    y_prob = model.predict_proba(X_test)
+
+                fold_metrics.append(metric_fn(y_test, y_prob))
 
             return float(np.mean(fold_metrics))
 
