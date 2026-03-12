@@ -30,13 +30,15 @@ def format_summary(ds: pl.DataFrame, days: int = 7) -> str:
         acc = correct / len(resolved) if len(resolved) > 0 else 0
         lines.append(f"Model accuracy: {acc:.1%}")
 
-    if "net" in ds.columns and "bet_side" in ds.columns:
-        bets = ds.filter(pl.col("bet_side").is_not_null() & (pl.col("bet_side") != ""))
+    if "net" in ds.columns and "stake" in ds.columns:
+        bets = ds.filter(
+            pl.col("stake").is_not_null() & (pl.col("stake") != "")
+        )
         if len(bets) > 0:
             net_values = bets["net"].cast(pl.Float64, strict=False).drop_nulls()
             if len(net_values) > 0:
                 total_pnl = net_values.sum()
                 sign = "+" if total_pnl >= 0 else ""
-                lines.append(f"P&L: {sign}${total_pnl:.2f} ({len(bets)} bets)")
+                lines.append(f"P&L: {sign}${total_pnl:.2f} ({len(net_values)} settled, {len(bets)} total bets)")
 
     return "\n".join(lines)

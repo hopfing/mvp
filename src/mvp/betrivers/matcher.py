@@ -77,6 +77,9 @@ class BetRiversOddsMatcher(BaseJob):
         if len(df) == 0:
             return df
 
+        if "event_status" in df.columns:
+            df = df.filter(pl.col("event_status") != "STARTED")
+
         return (
             df.sort("fetched_at")
             .group_by(["br_event_id", "player_name"])
