@@ -67,3 +67,25 @@ def make_oof_df():
         )
 
     return _make
+
+
+@pytest.fixture
+def make_per_model_preds():
+    """Factory for synthetic per-model prediction arrays."""
+
+    def _make(
+        oof_df: pl.DataFrame,
+        n_models: int = 3,
+        noise_scale: float = 0.15,
+        seed: int = 42,
+    ) -> list[np.ndarray]:
+        rng = np.random.default_rng(seed)
+        y_prob = oof_df["y_prob"].to_numpy()
+        preds = []
+        for i in range(n_models):
+            noise = rng.normal(0, noise_scale, size=len(y_prob))
+            perturbed = np.clip(y_prob + noise, 0.01, 0.99)
+            preds.append(perturbed)
+        return preds
+
+    return _make

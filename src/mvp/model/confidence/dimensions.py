@@ -169,3 +169,72 @@ def get_modifier_slices(df: pl.DataFrame) -> dict[str, pl.DataFrame]:
                     slices[label] = filtered
 
     return slices
+
+
+def get_consensus_slices(
+    df: pl.DataFrame,
+    per_model_preds: list[np.ndarray],
+    base_names: list[str] | None = None,
+) -> dict[str, pl.DataFrame]:
+    """Slice OOF data by ensemble consensus strength and identity.
+
+    Produces two types of slices:
+    - consensus:N-M — N models agree with ensemble, M disagree
+    - consensus_id:X+Y — which specific models agree (only for non-unanimous)
+
+    Args:
+        df: OOF DataFrame (must have y_prob column).
+        per_model_preds: Per-base-model prediction arrays, aligned with df rows.
+        base_names: Optional model names for identity slices. Defaults to m0, m1, ...
+    """
+    n_models = len(per_model_preds)
+    if n_models < 2:
+        return {}
+
+    if base_names is None:
+        base_names = [f"m{i}" for i in range(n_models)]
+
+    # Binary predictions from each model and from ensemble
+    model_binary = np.array([(p >= 0.5).astype(int) for p in per_model_preds])
+    ensemble_binary = (df["y_prob"].to_numpy() >= 0.5).astype(int)
+
+    # Count how many models agree with ensemble per match
+    agree_with_ensemble = np.sum(model_binary == ensemble_binary, axis=0)
+
+    slices: dict[str, pl.DataFrame] = {}
+
+    # Consensus count slices
+    for n_agree in range(n_models, -1, -1):
+        n_disagree = n_models - n_agree
+        mask = agree_with_ensemble == n_agree
+        if mask.any():
+            slices[f"consensus:{n_agree}-{n_disagree}"] = df.filter(
+                pl.Series(mask)
+            )
+
+    # Identity slices — only for non-unanimous predictions
+    if n_models <= 7:  # avoid combinatorial explosion
+        agrees_per_match = model_binary == ensemble_binary  # (n_models, n_matches)
+        unanimous_mask = agree_with_ensemble == n_models
+
+        if not unanimous_mask.all():
+            labels = np.empty(len(df), dtype=object)
+            labels[unanimous_mask] = None
+            non_unanimous_idx = np.where(~unanimous_mask)[0]
+            for idx in non_unanimous_idx:
+                agreeing = sorted(
+                    name for j, name in enumerate(base_names)
+                    if agrees_per_match[j, idx]
+                )
+                labels[idx] = "+".join(agreeing)
+
+            label_series = pl.Series("_cid", labels.tolist())
+            df_with_label = df.with_columns(label_series)
+            for label_val in label_series.drop_nulls().unique().to_list():
+                filtered = df_with_label.filter(
+                    pl.col("_cid") == label_val
+                ).drop("_cid")
+                if len(filtered) > 0:
+                    slices[f"consensus_id:{label_val}"] = filtered
+
+    return slices
