@@ -29,7 +29,10 @@ def format_report(result: ValidationResult, model_name: str = "") -> str:
 
     mod_prefixes = _modifier_prefixes()
     structural = {k: v for k, v in result.profiles.items()
-                  if ":" in k and k.split(":")[0] not in mod_prefixes and k != "overall"}
+                  if ":" in k
+                  and k.split(":")[0] not in mod_prefixes
+                  and not k.startswith("consensus")
+                  and k != "overall"}
 
     dim_groups: dict[str, list[tuple[str, dict[str, ReliabilityProfile]]]] = {}
     for label, profiles in sorted(structural.items()):
@@ -68,6 +71,38 @@ def format_report(result: ValidationResult, model_name: str = "") -> str:
                 _format_profile_summary(lines, overall, indent=4)
                 _format_bucket_breakdown(lines, profiles, indent=4)
 
+    # Consensus section (ensemble only)
+    consensus_profiles = {k: v for k, v in result.profiles.items()
+                          if k.startswith("consensus:")}
+    identity_profiles = {k: v for k, v in result.profiles.items()
+                         if k.startswith("consensus_id:")}
+
+    if consensus_profiles:
+        lines.append("")
+        lines.append("--- CONSENSUS ---")
+        for label in sorted(consensus_profiles, key=_consensus_sort_key):
+            profiles = consensus_profiles[label]
+            short_label = label.split(":")[1]
+            overall = profiles.get("overall")
+            if overall:
+                lines.append("")
+                lines.append(f"  {short_label} (n={overall.n_matches:,})")
+                _format_profile_summary(lines, overall, indent=4)
+                _format_bucket_breakdown(lines, profiles, indent=4)
+
+    if identity_profiles:
+        lines.append("")
+        lines.append("--- CONSENSUS IDENTITY ---")
+        for label in sorted(identity_profiles):
+            profiles = identity_profiles[label]
+            short_label = label.split(":")[1]
+            overall = profiles.get("overall")
+            if overall:
+                lines.append("")
+                lines.append(f"  {short_label} (n={overall.n_matches:,})")
+                _format_profile_summary(lines, overall, indent=4)
+                _format_bucket_breakdown(lines, profiles, indent=4)
+
     lines.append("")
     lines.append(sep)
     return "\n".join(lines)
@@ -76,6 +111,12 @@ def format_report(result: ValidationResult, model_name: str = "") -> str:
 def _modifier_prefixes() -> set[str]:
     from mvp.model.confidence.dimensions import MODIFIERS
     return {m.name for m in MODIFIERS}
+
+
+def _consensus_sort_key(label: str) -> int:
+    """Sort consensus labels by agreement count descending (3-0 before 2-1)."""
+    parts = label.split(":")[1].split("-")
+    return -int(parts[0])
 
 
 def _sort_entries(entries, dim):
