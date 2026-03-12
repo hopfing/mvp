@@ -30,6 +30,7 @@ def format_report(result: ValidationResult, model_name: str = "") -> str:
     mod_prefixes = _modifier_prefixes()
     structural = {k: v for k, v in result.profiles.items()
                   if ":" in k
+                  and "/" not in k
                   and k.split(":")[0] not in mod_prefixes
                   and not k.startswith("consensus")
                   and k != "overall"}
@@ -73,22 +74,43 @@ def format_report(result: ValidationResult, model_name: str = "") -> str:
 
     # Consensus section (ensemble only)
     consensus_profiles = {k: v for k, v in result.profiles.items()
-                          if k.startswith("consensus:")}
+                          if k.startswith("consensus:") and "/" not in k}
+    cross_profiles = {k: v for k, v in result.profiles.items()
+                      if k.startswith("consensus:") and "/" in k}
     identity_profiles = {k: v for k, v in result.profiles.items()
-                         if k.startswith("consensus_id:")}
+                         if k.startswith("consensus_id:") and "/" not in k}
 
     if consensus_profiles:
-        lines.append("")
-        lines.append("--- CONSENSUS ---")
-        for label in sorted(consensus_profiles, key=_consensus_sort_key):
-            profiles = consensus_profiles[label]
-            short_label = label.split(":")[1]
-            overall = profiles.get("overall")
-            if overall:
-                lines.append("")
-                lines.append(f"  {short_label} (n={overall.n_matches:,})")
-                _format_profile_summary(lines, overall, indent=4)
-                _format_bucket_breakdown(lines, profiles, indent=4)
+        for cons_label in sorted(consensus_profiles, key=_consensus_sort_key):
+            cons_short = cons_label.split(":")[1]
+            cons_overall = consensus_profiles[cons_label].get("overall")
+            if not cons_overall:
+                continue
+
+            lines.append("")
+            lines.append(f"--- CONSENSUS: {cons_short} (n={cons_overall.n_matches:,}) ---")
+            _format_profile_summary(lines, cons_overall, indent=2)
+            _format_bucket_breakdown(lines, consensus_profiles[cons_label], indent=2)
+
+            # Cross-cut structural slices for this consensus level
+            prefix = f"{cons_label}/"
+            sub = {k: v for k, v in cross_profiles.items() if k.startswith(prefix)}
+            if sub:
+                sub_groups: dict[str, list[tuple[str, dict[str, ReliabilityProfile]]]] = {}
+                for label, profiles in sorted(sub.items()):
+                    sub_label = label[len(prefix):]
+                    dim = sub_label.split(":")[0]
+                    sub_groups.setdefault(dim, []).append((sub_label, profiles))
+
+                for dim, entries in sub_groups.items():
+                    for sub_label, profiles in _sort_entries(entries, dim):
+                        short = sub_label.split(":")[-1]
+                        overall = profiles.get("overall")
+                        if overall:
+                            lines.append("")
+                            lines.append(f"  {short} (n={overall.n_matches:,})")
+                            _format_profile_summary(lines, overall, indent=4)
+                            _format_bucket_breakdown(lines, profiles, indent=4)
 
     if identity_profiles:
         lines.append("")

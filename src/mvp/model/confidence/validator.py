@@ -125,6 +125,13 @@ class ConfidenceValidator:
                 logger.debug("Computing profiles for %s (n=%d)", label, len(slice_df))
                 result.profiles[label] = self._compute_slice_profiles(slice_df)
 
+                # Cross-cut consensus × structural
+                sub_structural = get_structural_slices(slice_df)
+                for sub_label, sub_df in sub_structural.items():
+                    cross_label = f"{label}/{sub_label}"
+                    logger.debug("Computing profiles for %s (n=%d)", cross_label, len(sub_df))
+                    result.profiles[cross_label] = self._compute_slice_profiles(sub_df)
+
         return result
 
     def _compute_slice_profiles(self, df: pl.DataFrame) -> dict[str, ReliabilityProfile]:
