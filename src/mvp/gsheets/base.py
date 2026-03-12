@@ -29,6 +29,7 @@ COLUMN_SCHEMA = [
     {"name": "p1_prob", "owner": "pipeline"},
     {"name": "p2_prob", "owner": "pipeline"},
     {"name": "prediction", "owner": "pipeline"},
+    {"name": "consensus", "owner": "pipeline"},
     # Odds (user-filled)
     {"name": "p1_odds", "owner": "user"},
     {"name": "p2_odds", "owner": "user"},
@@ -199,6 +200,7 @@ def prepare_predictions(predictions: pl.DataFrame) -> pl.DataFrame:
             "p1_prob": p1_prob,
             "p2_prob": p2_prob,
             "prediction": prediction,
+            "consensus": row.get("consensus") if row.get("consensus") is not None else "",
             "result": "",
             "match_uid": row["match_uid"],
             "p1_id": row["p1_id"],

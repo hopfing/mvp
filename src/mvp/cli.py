@@ -330,7 +330,9 @@ def print_predictions(
         p2_prob = row.get("p2_win_prob") or 0.5
         rnd = row.get("round") or ""
 
-        line = f"  {rnd:5} {p1:25} {p1_prob:5.1%}  vs  {p2_prob:5.1%} {p2}"
+        consensus = row.get("consensus")
+        consensus_tag = f"  [{consensus:.0%}]" if consensus is not None else ""
+        line = f"  {rnd:5} {p1:25} {p1_prob:5.1%}  vs  {p2_prob:5.1%} {p2}{consensus_tag}"
 
         if has_odds:
             match_uid = row.get("match_uid") or ""
@@ -471,6 +473,9 @@ def cmd_train(args: argparse.Namespace) -> int:
     predictor = ProductionPredictor()
     predictor.train()
     print("Production model trained and saved.")
+    n_voters = predictor.train_voters()
+    if n_voters > 0:
+        print(f"Trained {n_voters} voter model(s).")
     return 0
 
 
@@ -773,6 +778,12 @@ def cmd_live(args: argparse.Namespace) -> int:
         # Predict with production model
         predictor = ProductionPredictor()
         predictions = predictor.predict(tournament_keys=pairs)
+
+        if len(predictions) == 0:
+            print("\nNo pending matches to predict.")
+            return 0
+
+        predictions = predictor.predict_voters(pairs, predictions)
 
         if len(predictions) == 0:
             print("\nNo pending matches to predict.")

@@ -56,53 +56,68 @@ class ProductionPredictor:
 
     def _resolve_ensemble_features(self) -> tuple[list[str], list[dict]]:
         """Resolve ensemble config to union features and base model specs."""
-        config = self._experiment_config
-        ensemble_params = EnsembleParams.model_validate(config.model.params)
+        _, feature_specs, base_model_specs = self._resolve_entry_features(
+            self.config["active"]
+        )
+        assert base_model_specs is not None
+        return feature_specs, base_model_specs
 
-        all_feature_specs: list[str] = []
-        base_model_specs: list[dict] = []
+    def _resolve_entry_features(
+        self, entry: dict
+    ) -> tuple[ExperimentConfig, list[str], list[dict] | None]:
+        """Load experiment config for an entry and resolve its features.
 
-        for ref in ensemble_params.base_models:
-            base_config = ExperimentConfig.from_file(ref.config)
-            if base_config.features is None:
-                raise ValueError(f"Base model {ref.config} has no features section")
-            for spec in base_config.features.include:
+        Returns:
+            Tuple of (experiment_config, feature_specs, base_model_specs_or_None).
+        """
+        config = ExperimentConfig.from_file(entry["config"])
+        is_ensemble = config.model.type == "ensemble"
+
+        if is_ensemble:
+            ensemble_params = EnsembleParams.model_validate(config.model.params)
+            all_feature_specs: list[str] = []
+            base_model_specs: list[dict] = []
+
+            for ref in ensemble_params.base_models:
+                base_config = ExperimentConfig.from_file(ref.config)
+                if base_config.features is None:
+                    raise ValueError(f"Base model {ref.config} has no features section")
+                for spec in base_config.features.include:
+                    if spec not in all_feature_specs:
+                        all_feature_specs.append(spec)
+                base_model_specs.append({
+                    "type": base_config.model.type,
+                    "params": base_config.model.params or {},
+                    "weight": ref.weight,
+                    "feature_specs": base_config.features.include,
+                })
+
+            for spec in ensemble_params.meta_features:
                 if spec not in all_feature_specs:
                     all_feature_specs.append(spec)
-            base_model_specs.append({
-                "type": base_config.model.type,
-                "params": base_config.model.params or {},
-                "weight": ref.weight,
-                "feature_specs": base_config.features.include,
-            })
 
-        for spec in ensemble_params.meta_features:
-            if spec not in all_feature_specs:
-                all_feature_specs.append(spec)
+            union_cols = get_feature_columns(all_feature_specs)
+            for spec in base_model_specs:
+                base_cols = get_feature_columns(spec["feature_specs"])
+                spec["feature_indices"] = [union_cols.index(c) for c in base_cols]
+                del spec["feature_specs"]
 
-        union_cols = get_feature_columns(all_feature_specs)
-        for spec in base_model_specs:
-            base_cols = get_feature_columns(spec["feature_specs"])
-            spec["feature_indices"] = [union_cols.index(c) for c in base_cols]
-            del spec["feature_specs"]
+            return config, all_feature_specs, base_model_specs
+        else:
+            assert config.features is not None
+            return config, config.features.include, None
 
-        return all_feature_specs, base_model_specs
+    def _train_single(self, entry: dict) -> None:
+        """Train a single model from an entry dict and save its artifact.
 
-    def train(self) -> None:
-        """Train production model on all matching data and save artifact."""
-        config = self._experiment_config
+        Args:
+            entry: Dict with keys config, artifact, train_date_range, filters.
+        """
+        config, feature_specs, base_model_specs = self._resolve_entry_features(entry)
         is_ensemble = config.model.type == "ensemble"
         engine = FeatureEngine(
             matches_path=self.matches_path, cache_dir=self.cache_dir
         )
-
-        # Resolve features
-        if is_ensemble:
-            feature_specs, base_model_specs = self._resolve_ensemble_features()
-        else:
-            assert config.features is not None
-            feature_specs = config.features.include
-            base_model_specs = None
 
         # Compute features (include compute_only and filter-referenced features)
         compute_only = (
@@ -110,13 +125,13 @@ class ProductionPredictor:
             if config.features and config.features.compute_only
             else []
         )
-        filter_specs = get_filter_feature_specs(self.config["active"].get("filters"))
+        filter_specs = get_filter_feature_specs(entry.get("filters"))
         extra = compute_only + filter_specs
         all_specs = feature_specs + [s for s in extra if s not in feature_specs]
         df = engine.compute(all_specs)
 
         # Apply training filters
-        train_range = self.config["active"]["train_date_range"]
+        train_range = entry["train_date_range"]
         start = datetime.fromisoformat(train_range["start"])
         end = datetime.fromisoformat(train_range["end"])
         df = df.filter(
@@ -124,8 +139,8 @@ class ProductionPredictor:
             & (pl.col("effective_match_date") <= end)
         )
 
-        if self.config["active"].get("filters"):
-            df = apply_filters(df, self.config["active"]["filters"])
+        if entry.get("filters"):
+            df = apply_filters(df, entry["filters"])
 
         # Drop rows without outcomes
         df = df.filter(pl.col("won").is_not_null())
@@ -169,7 +184,7 @@ class ProductionPredictor:
         )
 
         # Save artifact
-        artifact_path = Path(self.config["active"]["artifact"])
+        artifact_path = Path(entry["artifact"])
         artifact_path.parent.mkdir(parents=True, exist_ok=True)
         joblib.dump(
             {
@@ -182,11 +197,15 @@ class ProductionPredictor:
         )
 
         # Update trained_at in config
-        self.config["active"]["trained_at"] = datetime.now(timezone.utc).isoformat()
+        entry["trained_at"] = datetime.now(timezone.utc).isoformat()
         with open(self.production_config_path, "w") as f:
             yaml.dump(self.config, f, default_flow_style=False)
 
         logger.info("Model saved to %s", artifact_path)
+
+    def train(self) -> None:
+        """Train production model on all matching data and save artifact."""
+        self._train_single(self.config["active"])
 
     def load(self) -> tuple[Any, np.ndarray, list[str], PlattCalibrator | None]:
         """Load the trained production model.
@@ -208,6 +227,172 @@ class ProductionPredictor:
         if calibrator is None:
             logger.warning("No calibrator in artifact — predictions will be uncalibrated")
         return artifact["model"], artifact["medians"], artifact["feature_cols"], calibrator
+
+    def _load_single(
+        self, entry: dict
+    ) -> tuple[Any, np.ndarray, list[str], PlattCalibrator | None]:
+        """Load a trained model artifact from an entry dict."""
+        artifact_path = Path(entry["artifact"])
+        if not artifact_path.exists():
+            raise FileNotFoundError(f"No trained model at {artifact_path}")
+        artifact = joblib.load(artifact_path)
+        calibrator = artifact.get("calibrator")
+        return artifact["model"], artifact["medians"], artifact["feature_cols"], calibrator
+
+    def _predict_raw(
+        self,
+        entry: dict,
+        tournament_keys: list[tuple[str, int]] | None,
+        match_uids: set[str],
+    ) -> dict[str, float]:
+        """Generate raw uid->prob predictions for a single model entry.
+
+        Only predicts matches whose uid is in match_uids (intersection with
+        production predictions). Returns {match_uid: p1_win_prob}.
+        """
+        model, medians, feature_cols, calibrator = self._load_single(entry)
+        config, feature_specs, _ = self._resolve_entry_features(entry)
+        engine = FeatureEngine(
+            matches_path=self.matches_path, cache_dir=self.cache_dir
+        )
+
+        # Compute features
+        compute_only = (
+            config.features.compute_only
+            if config.features and config.features.compute_only
+            else []
+        )
+        filter_feature_specs = get_filter_feature_specs(entry.get("filters"))
+        extra = compute_only + filter_feature_specs
+        all_specs = feature_specs + [s for s in extra if s not in feature_specs]
+        df = engine.compute(all_specs)
+
+        # Apply non-date filters
+        if entry.get("filters"):
+            df = apply_filters(df, entry["filters"])
+
+        # Scope to tournaments
+        if tournament_keys is not None:
+            keys_df = pl.DataFrame(
+                {"tournament_id": [t for t, _ in tournament_keys],
+                 "_year": [y for _, y in tournament_keys]},
+            ).with_columns(pl.col("_year").cast(pl.Int32))
+            df = df.with_columns(
+                pl.col("effective_match_date").dt.year().alias("_year")
+            ).join(keys_df, on=["tournament_id", "_year"], how="semi").drop("_year")
+
+        # Keep only pending matches in the production set
+        pending = df.filter(
+            pl.col("won").is_null() & pl.col("match_uid").is_in(list(match_uids))
+        )
+
+        if len(pending) == 0:
+            return {}
+
+        # Deduplicate to canonical row per match
+        if "draw_p1_id" in pending.columns:
+            pending = pending.with_columns(
+                pl.when(pl.col("draw_p1_id").is_not_null())
+                .then(pl.col("player_id") == pl.col("draw_p1_id"))
+                .otherwise(pl.col("player_id") < pl.col("opp_id"))
+                .alias("_is_canonical")
+            )
+        else:
+            pending = pending.with_columns(
+                (pl.col("player_id") < pl.col("opp_id")).alias("_is_canonical")
+            )
+        canonical = pending.filter(pl.col("_is_canonical"))
+        non_canonical = pending.filter(~pl.col("_is_canonical"))
+
+        if len(non_canonical) > 0:
+            seen_uids = set(canonical["match_uid"].to_list())
+            missing = non_canonical.filter(
+                ~pl.col("match_uid").is_in(list(seen_uids))
+            )
+            if len(missing) > 0:
+                canonical = pl.concat([canonical, missing], how="diagonal_relaxed")
+
+        # Predict
+        X = canonical.select(
+            pl.col(c).cast(pl.Float64) for c in feature_cols
+        ).to_numpy()
+        X = np.where(np.isnan(X), medians, X)
+        probs = model.predict_proba(X)
+        if calibrator is not None:
+            probs = calibrator.transform(probs)
+
+        # For non-canonical rows that were included, flip the prob
+        result: dict[str, float] = {}
+        for i, row in enumerate(canonical.iter_rows(named=True)):
+            uid = row["match_uid"]
+            p = float(probs[i])
+            is_canonical = row["_is_canonical"]
+            if not is_canonical:
+                p = 1.0 - p
+            result[uid] = p
+
+        return result
+
+    def train_voters(self) -> int:
+        """Train all voter models. Returns count of voters trained."""
+        voters = self.config.get("voters", [])
+        for voter in voters:
+            name = voter.get("name", "unnamed")
+            logger.info("Training voter: %s", name)
+            self._train_single(voter)
+        return len(voters)
+
+    def predict_voters(
+        self,
+        tournament_keys: list[tuple[str, int]] | None,
+        predictions: pl.DataFrame,
+    ) -> pl.DataFrame:
+        """Add consensus column from voter models.
+
+        Args:
+            tournament_keys: Tournament scope (same as predict()).
+            predictions: DataFrame from predict() with p1_win_prob.
+
+        Returns:
+            predictions with added 'consensus' column.
+        """
+        voters = self.config.get("voters", [])
+        if not voters:
+            return predictions.with_columns(
+                pl.lit(None).cast(pl.Float64).alias("consensus")
+            )
+
+        match_uids = set(predictions["match_uid"].to_list())
+
+        # Production binary pick per match
+        prod_picks: dict[str, bool] = {}
+        for row in predictions.iter_rows(named=True):
+            prod_picks[row["match_uid"]] = row["p1_win_prob"] >= 0.5
+
+        # Collect voter picks
+        voter_picks: list[dict[str, bool]] = []
+        for voter in voters:
+            raw = self._predict_raw(voter, tournament_keys, match_uids)
+            picks = {uid: prob >= 0.5 for uid, prob in raw.items()}
+            voter_picks.append(picks)
+
+        # Build consensus as decimal (agree / total)
+        consensus_values: list[float] = []
+        for row in predictions.iter_rows(named=True):
+            uid = row["match_uid"]
+            prod_pick = prod_picks[uid]
+            total = 1  # production always counts
+            agree = 1  # production always agrees with itself
+            for picks in voter_picks:
+                if uid in picks:
+                    total += 1
+                    if picks[uid] == prod_pick:
+                        agree += 1
+            consensus_values.append(round(agree / total, 2))
+
+        return predictions.with_columns(
+            pl.Series("consensus", consensus_values)
+        )
 
     def predict(
         self, tournament_keys: list[tuple[str, int]] | None = None

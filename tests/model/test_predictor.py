@@ -597,3 +597,184 @@ class TestSavePredictions:
             predictor.save_predictions(drifted)
 
         assert any("DRIFT" in r.message for r in caplog.records)
+
+
+@pytest.fixture
+def production_config_with_voters(tmp_path: Path, sample_matches: Path) -> Path:
+    """Create production.yaml with voter models configured."""
+    # Production model config (4 features)
+    model_config = {
+        "data": {
+            "date_range": {"start": "2024-01-01", "end": "2024-12-31"},
+            "filters": {"draw_type": "singles", "circuit": ["tour", "chal"]},
+        },
+        "features": {
+            "include": [
+                "player_elo_surface_diff",
+                "player_svc_elo_diff",
+                "player_ret_elo_diff",
+                "player_age_diff",
+            ]
+        },
+        "model": {"type": "logistic"},
+    }
+    model_config_path = tmp_path / "model.yaml"
+    model_config_path.write_text(yaml.dump(model_config))
+
+    # Voter config (2 features — different from production)
+    voter_config = {
+        "data": {
+            "date_range": {"start": "2024-01-01", "end": "2024-12-31"},
+            "filters": {"draw_type": "singles", "circuit": ["tour", "chal"]},
+        },
+        "features": {
+            "include": ["player_elo_surface_diff", "player_age_diff"]
+        },
+        "model": {"type": "logistic"},
+    }
+    voter_config_path = tmp_path / "voter_model.yaml"
+    voter_config_path.write_text(yaml.dump(voter_config))
+
+    prod_config = {
+        "active": {
+            "config": str(model_config_path),
+            "artifact": str(tmp_path / "production.joblib"),
+            "trained_at": None,
+            "train_date_range": {"start": "2024-01-01", "end": "2024-12-31"},
+            "filters": {"draw_type": "singles", "circuit": ["tour", "chal"]},
+        },
+        "voters": [
+            {
+                "name": "voter_a",
+                "config": str(voter_config_path),
+                "artifact": str(tmp_path / "voter_a.joblib"),
+                "train_date_range": {"start": "2024-01-01", "end": "2024-12-31"},
+                "filters": {"draw_type": "singles", "circuit": ["tour", "chal"]},
+            },
+            {
+                "name": "voter_b",
+                "config": str(voter_config_path),
+                "artifact": str(tmp_path / "voter_b.joblib"),
+                "train_date_range": {"start": "2024-01-01", "end": "2024-12-31"},
+                "filters": {"draw_type": "singles", "circuit": ["tour", "chal"]},
+            },
+        ],
+        "history": [],
+    }
+    prod_path = tmp_path / "production.yaml"
+    prod_path.write_text(yaml.dump(prod_config))
+    return prod_path
+
+
+class TestTrainVoters:
+    def test_train_voters_saves_artifacts(
+        self, production_config_with_voters, sample_matches, tmp_path
+    ):
+        from mvp.model.predictor import ProductionPredictor
+
+        predictor = ProductionPredictor(
+            production_config_path=production_config_with_voters,
+            matches_path=sample_matches,
+            cache_dir=tmp_path / "cache",
+        )
+        predictor.train()
+        n = predictor.train_voters()
+
+        assert n == 2
+        assert Path(tmp_path / "voter_a.joblib").exists()
+        assert Path(tmp_path / "voter_b.joblib").exists()
+
+    def test_train_voters_empty_list(
+        self, production_config, sample_matches, tmp_path
+    ):
+        from mvp.model.predictor import ProductionPredictor
+
+        predictor = ProductionPredictor(
+            production_config_path=production_config,
+            matches_path=sample_matches,
+            cache_dir=tmp_path / "cache",
+        )
+        n = predictor.train_voters()
+        assert n == 0
+
+    def test_train_voters_raises_on_failure(
+        self, production_config_with_voters, sample_matches, tmp_path
+    ):
+        from mvp.model.predictor import ProductionPredictor
+
+        predictor = ProductionPredictor(
+            production_config_path=production_config_with_voters,
+            matches_path=sample_matches,
+            cache_dir=tmp_path / "cache",
+        )
+        predictor.train()
+
+        # Break one voter's config path
+        predictor.config["voters"][0]["config"] = "/nonexistent.yaml"
+
+        with pytest.raises(Exception):
+            predictor.train_voters()
+
+
+class TestPredictVoters:
+    def test_predict_voters_returns_consensus(
+        self, production_config_with_voters, sample_matches, tmp_path
+    ):
+        from mvp.model.predictor import ProductionPredictor
+
+        predictor = ProductionPredictor(
+            production_config_path=production_config_with_voters,
+            matches_path=sample_matches,
+            cache_dir=tmp_path / "cache",
+        )
+        predictor.train()
+        predictor.train_voters()
+        predictions = predictor.predict()
+
+        result = predictor.predict_voters(None, predictions)
+
+        assert "consensus" in result.columns
+        assert len(result) == len(predictions)
+        # With 2 voters, consensus is a decimal: 0.33, 0.67, or 1.0
+        for val in result["consensus"].to_list():
+            assert val is not None
+            assert 0.0 <= val <= 1.0
+
+    def test_predict_voters_no_voters_empty_string(
+        self, production_config, sample_matches, tmp_path
+    ):
+        from mvp.model.predictor import ProductionPredictor
+
+        predictor = ProductionPredictor(
+            production_config_path=production_config,
+            matches_path=sample_matches,
+            cache_dir=tmp_path / "cache",
+        )
+        predictor.train()
+        predictions = predictor.predict()
+
+        result = predictor.predict_voters(None, predictions)
+
+        assert "consensus" in result.columns
+        for val in result["consensus"].to_list():
+            assert val is None
+
+    def test_predict_voters_raises_on_failed_voter(
+        self, production_config_with_voters, sample_matches, tmp_path
+    ):
+        from mvp.model.predictor import ProductionPredictor
+
+        predictor = ProductionPredictor(
+            production_config_path=production_config_with_voters,
+            matches_path=sample_matches,
+            cache_dir=tmp_path / "cache",
+        )
+        predictor.train()
+        predictor.train_voters()
+        predictions = predictor.predict()
+
+        # Break one voter's artifact
+        predictor.config["voters"][0]["artifact"] = "/nonexistent.joblib"
+
+        with pytest.raises(FileNotFoundError):
+            predictor.predict_voters(None, predictions)
