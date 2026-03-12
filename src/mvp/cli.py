@@ -32,16 +32,18 @@ def print_run_summary(results: dict[str, Any], name: str | None = None) -> None:
     test_acc = metrics.get("accuracy", 0)
     test_auc = metrics.get("roc_auc", 0)
     test_ll = metrics.get("log_loss", 0)
+    test_brier = metrics.get("brier_score", 0)
 
     if train_metrics:
         train_acc = train_metrics.get("accuracy", 0)
         train_auc = train_metrics.get("roc_auc", 0)
         train_ll = train_metrics.get("log_loss", 0)
-        print(f"\n{'':8} {'Accuracy':>10} {'AUC':>10} {'Log Loss':>10}")
-        print(f"{'Train':8} {train_acc:>10.1%} {train_auc:>10.3f} {train_ll:>10.3f}")
-        print(f"{'Test':8} {test_acc:>10.1%} {test_auc:>10.3f} {test_ll:>10.3f}")
+        train_brier = train_metrics.get("brier_score", 0)
+        print(f"\n{'':8} {'Accuracy':>10} {'AUC':>10} {'Log Loss':>10} {'Brier':>10}")
+        print(f"{'Train':8} {train_acc:>10.1%} {train_auc:>10.3f} {train_ll:>10.3f} {train_brier:>10.4f}")
+        print(f"{'Test':8} {test_acc:>10.1%} {test_auc:>10.3f} {test_ll:>10.3f} {test_brier:>10.4f}")
     else:
-        print(f"\nTest: {test_acc:.1%} acc | {test_auc:.3f} AUC | {test_ll:.3f} log_loss")
+        print(f"\nTest: {test_acc:.1%} acc | {test_auc:.3f} AUC | {test_ll:.3f} LL | {test_brier:.4f} Brier")
 
 
     if not diagnostics:
@@ -63,10 +65,11 @@ def print_run_summary(results: dict[str, Any], name: str | None = None) -> None:
             acc = overall.get('accuracy', 0)
             auc = overall.get('roc_auc', 0)
             ll = overall.get('log_loss', 0)
+            brier = overall.get('brier_score', 0)
             cal = overall.get('calibration_error', 0)
             err = overall.get('error_rate_80plus', 0)
             n = overall.get('n_matches', 0)
-            print(f"\n  {circuit.upper()}  {acc:5.1%} acc | {auc:.3f} AUC | {ll:.3f} ll | {cal:.1%} cal | {err:.1%} err80 | n={n:,}")
+            print(f"\n  {circuit.upper()}  {acc:5.1%} acc | {auc:.3f} AUC | {ll:.3f} ll | {brier:.4f} brier | {cal:.1%} cal | {err:.1%} err80 | n={n:,}")
 
             # Surface subsegments
             if circuit_data.get("surface"):
