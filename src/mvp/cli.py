@@ -511,18 +511,29 @@ def cmd_confidence(args: argparse.Namespace) -> int:
     oof_dir = Path("data/confidence") / config_name
     oof_path = oof_dir / "oof.parquet"
 
+    # Resolve base model names for ensemble identity slices
+    base_names = _get_ensemble_base_names(config_path)
+
     if oof_path.exists() and not args.refresh:
         import polars as pl
         logger.info("Loading cached OOF from %s", oof_path)
         oof_df = pl.read_parquet(oof_path)
-        validator = ConfidenceValidator.from_oof(oof_df)
+        validator = ConfidenceValidator.from_oof(oof_df, base_names=base_names)
     else:
         logger.info("Running model to generate OOF predictions...")
         runner = ExperimentRunner(config_path=config_path)
         results = runner.run()
         all_predictions = results["all_predictions"]
+        per_model_oof = results.get("per_model_oof") or None
+        # per_model_oof is [] for non-ensemble, convert to None
+        if not per_model_oof:
+            per_model_oof = None
 
-        validator = ConfidenceValidator(all_predictions)
+        validator = ConfidenceValidator(
+            all_predictions,
+            per_model_oof=per_model_oof,
+            base_names=base_names,
+        )
 
         oof_dir.mkdir(parents=True, exist_ok=True)
         validator._oof.write_parquet(oof_path)
@@ -539,6 +550,22 @@ def cmd_confidence(args: argparse.Namespace) -> int:
     logger.info("Saved detailed results to %s", results_path)
 
     return 0
+
+
+def _get_ensemble_base_names(config_path) -> list[str] | None:
+    """Extract short base model names from ensemble config, or None if not ensemble."""
+    from pathlib import Path
+
+    from mvp.model.config import ExperimentConfig
+
+    config = ExperimentConfig.from_file(config_path)
+    if config.model.type != "ensemble" or not config.model.params:
+        return None
+
+    from mvp.model.config import EnsembleParams
+
+    ens = EnsembleParams.model_validate(config.model.params)
+    return [Path(ref.config).stem for ref in ens.base_models]
 
 
 def _save_validation_json(result, path):
