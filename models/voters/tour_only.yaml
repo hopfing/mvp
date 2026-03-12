@@ -1,0 +1,38 @@
+data:
+  date_range:
+    end: 2025-12-31
+    start: 2020-01-01
+  filters:
+    circuit: tour
+    draw_type: singles
+description: null
+features:
+  include:
+  - player_elo_surface_diff
+  - player_tour_match_pct_diff(days=365)
+  - player_pts_total_won_pct_diff(days=365)
+  - player_age_diff
+  - player_deciding_set_win_pct_diff(days=365)
+  - player_tour_match_pct_diff
+  - player_venue_win_pct_diff
+  - player_ranking_rank_diff
+  - player_match_count_diff(days=15)
+  - player_svc_ace_pct_diff(days=15)
+  - player_elo_diff
+  - player_ret_rating_diff
+  - player_svc_rating_diff(days=60)
+  - player_ret_elo_diff
+  - player_style_avg_1st_serve_speed_diff(days=180)
+metrics:
+  primary: log_loss
+model:
+  params: null
+  type: logistic
+validation:
+  initial_train_size: 10000
+  min_train_size: 50000
+  n_splits: 5
+  step_size: 5000
+  test_size: 10000
+  train_size: null
+  type: expanding_window
