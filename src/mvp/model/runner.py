@@ -170,6 +170,10 @@ class ExperimentRunner:
             else []
         )
         filter_specs = get_filter_feature_specs(self.config.data.filters)
+        if is_ensemble and model_filters:
+            for filt in model_filters:
+                if filt is not None:
+                    filter_specs.extend(get_filter_feature_specs(filt))
         extra = compute_only + filter_specs
         all_specs = feature_specs + [s for s in extra if s not in feature_specs]
         t_run = time.perf_counter()
