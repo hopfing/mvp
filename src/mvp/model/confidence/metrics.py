@@ -48,6 +48,9 @@ class ReliabilityProfile:
     accuracy: float
     err80: float
     signed_cal: float
+    log_loss: float
+    brier_score: float
+    roc_auc: float | None
     cal_3mo: WindowDistribution | None
     cal_6mo: WindowDistribution | None
     cal_12mo: WindowDistribution | None
@@ -102,6 +105,7 @@ def compute_reliability_profile(df: pl.DataFrame) -> ReliabilityProfile:
     if n == 0:
         return ReliabilityProfile(
             n_matches=0, accuracy=0.0, err80=0.0, signed_cal=0.0,
+            log_loss=0.0, brier_score=0.0, roc_auc=None,
             cal_3mo=None, cal_6mo=None, cal_12mo=None,
         )
 
@@ -115,6 +119,14 @@ def compute_reliability_profile(df: pl.DataFrame) -> ReliabilityProfile:
 
     signed_cal = float(df["favored_won"].mean() - df["favored_prob"].mean())
 
+    # Scoring metrics (use raw y_prob/y_true for proper computation)
+    y_true = df["y_true"].to_numpy().astype(float)
+    y_prob = np.clip(df["y_prob"].to_numpy(), 1e-15, 1 - 1e-15)
+    log_loss = -float(np.mean(y_true * np.log(y_prob) + (1 - y_true) * np.log(1 - y_prob)))
+    brier_score = float(np.mean((y_prob - y_true) ** 2))
+
+    roc_auc = _roc_auc(y_true, y_prob)
+
     cal_3mo = compute_rolling_signed_calibration(df, window_months=3)
     cal_6mo = compute_rolling_signed_calibration(df, window_months=6)
     cal_12mo = compute_rolling_signed_calibration(df, window_months=12)
@@ -124,10 +136,38 @@ def compute_reliability_profile(df: pl.DataFrame) -> ReliabilityProfile:
         accuracy=accuracy,
         err80=err80,
         signed_cal=signed_cal,
+        log_loss=log_loss,
+        brier_score=brier_score,
+        roc_auc=roc_auc,
         cal_3mo=cal_3mo,
         cal_6mo=cal_6mo,
         cal_12mo=cal_12mo,
     )
+
+
+def _roc_auc(y_true: np.ndarray, y_prob: np.ndarray) -> float | None:
+    """Compute ROC AUC using rank-based method. Returns None if single-class."""
+    n_pos = int(y_true.sum())
+    n_neg = len(y_true) - n_pos
+    if n_pos == 0 or n_neg == 0:
+        return None
+    order = np.argsort(y_prob)
+    ranks = np.empty(len(y_prob), dtype=float)
+    ranks[order] = np.arange(1, len(y_prob) + 1, dtype=float)
+    # Handle ties: replace ranks with average rank for tied values
+    sorted_probs = y_prob[order]
+    i = 0
+    while i < len(sorted_probs):
+        j = i + 1
+        while j < len(sorted_probs) and sorted_probs[j] == sorted_probs[i]:
+            j += 1
+        if j > i + 1:
+            avg_rank = (i + 1 + j) / 2.0
+            for k in range(i, j):
+                ranks[order[k]] = avg_rank
+        i = j
+    auc = (ranks[y_true == 1].sum() - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg)
+    return float(auc)
 
 
 def _add_months(d: date, months: int) -> date:

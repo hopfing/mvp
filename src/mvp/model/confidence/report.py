@@ -137,9 +137,11 @@ def _format_profile_summary(lines, p, indent=2):
     pad = " " * indent
     direction = "underconfident" if p.signed_cal >= 0 else "overconfident"
     sign = "+" if p.signed_cal >= 0 else ""
+    auc_str = f" | AUC: {p.roc_auc:.3f}" if p.roc_auc is not None else ""
     lines.append(
         f"{pad}cal: {sign}{p.signed_cal * 100:.1f}% ({direction}) | "
-        f"acc: {p.accuracy * 100:.1f}% | err80: {p.err80 * 100:.1f}%"
+        f"acc: {p.accuracy * 100:.1f}% | err80: {p.err80 * 100:.1f}% | "
+        f"LL: {p.log_loss:.4f} | BS: {p.brier_score:.4f}{auc_str}"
     )
     for label, dist in [("3mo", p.cal_3mo), ("6mo", p.cal_6mo), ("12mo", p.cal_12mo)]:
         if dist:

@@ -14,6 +14,7 @@ class TestFormatReport:
         profile = ReliabilityProfile(
             n_matches=1000, accuracy=0.665, err80=0.13,
             signed_cal=0.005,
+            log_loss=0.603, brier_score=0.220, roc_auc=0.732,
             cal_3mo=dist, cal_6mo=dist, cal_12mo=dist,
         )
         return ValidationResult(

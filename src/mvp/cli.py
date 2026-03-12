@@ -585,6 +585,9 @@ def _save_validation_json(result, path):
                 "accuracy": profile.accuracy,
                 "err80": profile.err80,
                 "signed_cal": profile.signed_cal,
+                "log_loss": profile.log_loss,
+                "brier_score": profile.brier_score,
+                "roc_auc": profile.roc_auc,
             }
             for wlabel, dist in [("cal_3mo", profile.cal_3mo), ("cal_6mo", profile.cal_6mo), ("cal_12mo", profile.cal_12mo)]:
                 if dist:
