@@ -47,12 +47,12 @@ COLUMN_SCHEMA = [
     {"name": "pred_result", "owner": "formula"},
     {"name": "bet_result", "owner": "user"},
     {"name": "net", "owner": "formula"},
+    {"name": "notes", "owner": "user"},
     # Pinnacle reference
     {"name": "p1_pin", "owner": "user"},
     {"name": "p2_pin", "owner": "user"},
     {"name": "p1_pe", "owner": "formula"},
     {"name": "p2_pe", "owner": "formula"},
-    {"name": "notes", "owner": "user"},
     # Metadata
     {"name": "match_uid", "owner": "pipeline"},
     {"name": "p1_id", "owner": "pipeline"},
