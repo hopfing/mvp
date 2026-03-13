@@ -318,20 +318,53 @@ def merge_predictions(
         merged = merged.with_columns(pl.Series("result", new_results))
 
     # 3b. Auto-fill bet_result from result + bet_side (don't overwrite user entries)
+    #     Walkovers are always voided (bet_result="V") when a bet was placed.
+    #     Retirements are left blank — varies by book, user decides.
+    result_type_map: dict[str, str] = {}
+    if len(matches) > 0 and "result_type" in matches.columns:
+        for row in matches.filter(
+            pl.col("result_type").is_in(["walkover", "retirement"])
+        ).select("match_uid", "result_type").unique("match_uid").iter_rows(named=True):
+            result_type_map[row["match_uid"]] = row["result_type"]
+
     if len(merged) > 0:
         new_bet_results = []
+        new_notes = []
         for row in merged.iter_rows(named=True):
             current_bet_result = (row.get("bet_result") or "").strip()
+            current_notes = (row.get("notes") or "").strip()
+            uid = row.get("match_uid") or ""
+            rt = result_type_map.get(uid)
+
+            # Auto-fill notes for walkovers/retirements (don't overwrite)
+            if rt and not current_notes:
+                new_notes.append(rt)
+            else:
+                new_notes.append(current_notes)
+
             if current_bet_result:
                 new_bet_results.append(current_bet_result)
                 continue
-            bet_side = (row.get("bet_side") or "").strip()
-            result_val = (row.get("result") or "").strip()
-            if bet_side in ("P1", "P2") and result_val in ("P1", "P2"):
-                new_bet_results.append("W" if bet_side == result_val else "L")
+
+            has_bet = bool((row.get("stake") or "").strip())
+
+            if rt == "walkover" and has_bet:
+                new_bet_results.append("V")
+            elif rt == "retirement":
+                # Leave blank — varies by book, user decides
+                new_bet_results.append("")
             else:
-                new_bet_results.append(current_bet_result)
-        merged = merged.with_columns(pl.Series("bet_result", new_bet_results))
+                bet_side = (row.get("bet_side") or "").strip()
+                result_val = (row.get("result") or "").strip()
+                if bet_side in ("P1", "P2") and result_val in ("P1", "P2"):
+                    new_bet_results.append("W" if bet_side == result_val else "L")
+                else:
+                    new_bet_results.append(current_bet_result)
+
+        merged = merged.with_columns(
+            pl.Series("bet_result", new_bet_results),
+            pl.Series("notes", new_notes),
+        )
 
     # 3c. Auto-fill p1_odds, p2_odds, book from best available odds
     if len(merged) > 0 and odds_maps:
