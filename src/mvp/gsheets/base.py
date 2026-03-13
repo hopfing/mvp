@@ -48,11 +48,9 @@ COLUMN_SCHEMA = [
     {"name": "bet_result", "owner": "user"},
     {"name": "net", "owner": "formula"},
     {"name": "notes", "owner": "user"},
-    # Pinnacle reference
+    # Pinnacle odds (manual data capture)
     {"name": "p1_pin", "owner": "user"},
     {"name": "p2_pin", "owner": "user"},
-    {"name": "p1_pe", "owner": "formula"},
-    {"name": "p2_pe", "owner": "formula"},
     # Metadata
     {"name": "match_uid", "owner": "pipeline"},
     {"name": "p1_id", "owner": "pipeline"},
@@ -91,8 +89,6 @@ def generate_formulas(row: int) -> dict[str, str]:
     p2_prob = COL_LETTERS["p2_prob"]
     p1_odds = COL_LETTERS["p1_odds"]
     p2_odds = COL_LETTERS["p2_odds"]
-    pin_p1 = COL_LETTERS["p1_pin"]
-    pin_p2 = COL_LETTERS["p2_pin"]
     bet_side = COL_LETTERS["bet_side"]
     stake_col = COL_LETTERS["stake"]
     to_win_col = COL_LETTERS["to_win"]
@@ -121,8 +117,6 @@ def generate_formulas(row: int) -> dict[str, str]:
         "bet_odds": f'=IF({bet_side}{r}="P1", {p1_odds}{r}, IF({bet_side}{r}="P2", {p2_odds}{r}, ""))',
         "to_win": f'=IF({stake_col}{r}="", "", ROUND({stake_col}{r}*{bet_odds_col}{r}, 2))',
         "pred_result": f'=IF({result_col}{r}="", "", IF({prediction_col}{r}={result_col}{r}, "W", "L"))',
-        "p1_pe": f'=IF({pin_p1}{r}="", "", {p1_prob}{r}-(1/{pin_p1}{r}))',
-        "p2_pe": f'=IF({pin_p2}{r}="", "", {p2_prob}{r}-(1/{pin_p2}{r}))',
         "net": f'=IF({bet_result_col}{r}="W", {to_win_col}{r}-{stake_col}{r}, IF({bet_result_col}{r}="L", -{stake_col}{r}, IF({bet_result_col}{r}="V", 0, "")))',
     }
 
