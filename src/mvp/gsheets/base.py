@@ -30,18 +30,13 @@ COLUMN_SCHEMA = [
     {"name": "p2_prob", "owner": "pipeline"},
     {"name": "prediction", "owner": "pipeline"},
     {"name": "consensus", "owner": "pipeline"},
-    # Odds (user-filled)
+    # Odds (user-filled or auto-filled from books)
     {"name": "p1_odds", "owner": "user"},
     {"name": "p2_odds", "owner": "user"},
-    {"name": "p1_pin", "owner": "user"},
-    {"name": "p2_pin", "owner": "user"},
     # Edge analysis (formulas)
-    {"name": "p1_edge", "owner": "formula"},
-    {"name": "p1_pe", "owner": "formula"},
-    {"name": "p2_edge", "owner": "formula"},
-    {"name": "p2_pe", "owner": "formula"},
+    {"name": "fav_edge", "owner": "formula"},
+    {"name": "dog_edge", "owner": "formula"},
     # Bet action
-    {"name": "pred_edge", "owner": "formula"},
     {"name": "bet_side", "owner": "user"},
     {"name": "bet_odds", "owner": "formula"},
     {"name": "stake", "owner": "user"},
@@ -52,6 +47,11 @@ COLUMN_SCHEMA = [
     {"name": "pred_result", "owner": "formula"},
     {"name": "bet_result", "owner": "user"},
     {"name": "net", "owner": "formula"},
+    # Pinnacle reference
+    {"name": "p1_pin", "owner": "user"},
+    {"name": "p2_pin", "owner": "user"},
+    {"name": "p1_pe", "owner": "formula"},
+    {"name": "p2_pe", "owner": "formula"},
     {"name": "notes", "owner": "user"},
     # Metadata
     {"name": "match_uid", "owner": "pipeline"},
@@ -99,21 +99,31 @@ def generate_formulas(row: int) -> dict[str, str]:
     bet_result_col = COL_LETTERS["bet_result"]
 
     bet_odds_col = COL_LETTERS["bet_odds"]
-    p1_edge_col = COL_LETTERS["p1_edge"]
-    p2_edge_col = COL_LETTERS["p2_edge"]
     prediction_col = COL_LETTERS["prediction"]
     result_col = COL_LETTERS["result"]
 
+    # fav_edge: edge on the model's predicted winner
+    # dog_edge: edge on the other side
+    fav_edge_formula = (
+        f'=IF(OR({p1_odds}{r}="",{p2_odds}{r}=""), "", '
+        f'IF({prediction_col}{r}="P1", {p1_prob}{r}-(1/{p1_odds}{r}), '
+        f'{p2_prob}{r}-(1/{p2_odds}{r})))'
+    )
+    dog_edge_formula = (
+        f'=IF(OR({p1_odds}{r}="",{p2_odds}{r}=""), "", '
+        f'IF({prediction_col}{r}="P1", {p2_prob}{r}-(1/{p2_odds}{r}), '
+        f'{p1_prob}{r}-(1/{p1_odds}{r})))'
+    )
+
     return {
-        "p1_edge": f'=IF({p1_odds}{r}="", "", {p1_prob}{r}-(1/{p1_odds}{r}))',
-        "p1_pe": f'=IF({pin_p1}{r}="", "", {p1_prob}{r}-(1/{pin_p1}{r}))',
-        "p2_edge": f'=IF({p2_odds}{r}="", "", {p2_prob}{r}-(1/{p2_odds}{r}))',
-        "p2_pe": f'=IF({pin_p2}{r}="", "", {p2_prob}{r}-(1/{pin_p2}{r}))',
+        "fav_edge": fav_edge_formula,
+        "dog_edge": dog_edge_formula,
         "bet_odds": f'=IF({bet_side}{r}="P1", {p1_odds}{r}, IF({bet_side}{r}="P2", {p2_odds}{r}, ""))',
-        "pred_edge": f'=IF({prediction_col}{r}="P1", {p1_edge_col}{r}, IF({prediction_col}{r}="P2", {p2_edge_col}{r}, ""))',
         "to_win": f'=IF({stake_col}{r}="", "", ROUND({stake_col}{r}*{bet_odds_col}{r}, 2))',
-        "net": f'=IF({bet_result_col}{r}="W", {to_win_col}{r}-{stake_col}{r}, IF({bet_result_col}{r}="L", -{stake_col}{r}, IF({bet_result_col}{r}="V", 0, "")))',
         "pred_result": f'=IF({result_col}{r}="", "", IF({prediction_col}{r}={result_col}{r}, "W", "L"))',
+        "p1_pe": f'=IF({pin_p1}{r}="", "", {p1_prob}{r}-(1/{pin_p1}{r}))',
+        "p2_pe": f'=IF({pin_p2}{r}="", "", {p2_prob}{r}-(1/{pin_p2}{r}))',
+        "net": f'=IF({bet_result_col}{r}="W", {to_win_col}{r}-{stake_col}{r}, IF({bet_result_col}{r}="L", -{stake_col}{r}, IF({bet_result_col}{r}="V", 0, "")))',
     }
 
 

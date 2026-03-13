@@ -72,7 +72,7 @@ class SheetsSync:
             row_list = list(row)
             sheet_row = i + 2  # 1-indexed, row 1 is header
             formulas = generate_formulas(sheet_row)
-            always_formula = {"p1_edge", "p1_pe", "p2_edge", "p2_pe", "pred_edge", "pred_result", "bet_odds"}
+            always_formula = {"fav_edge", "dog_edge", "p1_pe", "p2_pe", "pred_result", "bet_odds"}
             for col_name, formula in formulas.items():
                 col_idx = COLUMN_NAMES.index(col_name)
                 if col_name in always_formula or not row_list[col_idx]:

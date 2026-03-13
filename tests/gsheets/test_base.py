@@ -20,8 +20,8 @@ from mvp.gsheets.base import (
 
 
 class TestColumnSchema:
-    def test_column_schema_has_39_columns(self):
-        assert len(COLUMN_SCHEMA) == 39
+    def test_column_schema_has_38_columns(self):
+        assert len(COLUMN_SCHEMA) == 38
 
     def test_match_uid_is_in_schema(self):
         assert "match_uid" in COLUMN_NAMES
@@ -332,7 +332,7 @@ class TestMergePredictions:
         })
         result = merge_predictions(existing, new, matches)
         assert list(result.columns) == COLUMN_NAMES
-        assert len(result.columns) == 39
+        assert len(result.columns) == 38
 
     def test_empty_existing_empty_new(self):
         existing = _sheet_df([])
@@ -365,7 +365,7 @@ class TestMergePredictions:
         })
         result = merge_predictions(existing, new, matches)
         assert len(result) == 0
-        assert len(result.columns) == 39
+        assert len(result.columns) == 38
         assert list(result.columns) == COLUMN_NAMES
 
     def test_duplicate_match_uid_not_added(self):
@@ -508,10 +508,15 @@ class TestGenerateFormulas:
         formulas = generate_formulas(row=2)
         assert set(formulas.keys()) == FORMULA_COLUMNS
 
-    def test_p1_edge_formula(self):
+    def test_fav_edge_formula(self):
         formulas = generate_formulas(row=2)
-        assert formulas["p1_edge"].startswith("=IF(")
-        assert "1/" in formulas["p1_edge"]
+        assert formulas["fav_edge"].startswith("=IF(")
+        assert "1/" in formulas["fav_edge"]
+
+    def test_dog_edge_formula(self):
+        formulas = generate_formulas(row=2)
+        assert formulas["dog_edge"].startswith("=IF(")
+        assert "1/" in formulas["dog_edge"]
 
     def test_to_win_is_stake_times_odds(self):
         formulas = generate_formulas(row=2)
@@ -527,8 +532,8 @@ class TestGenerateFormulas:
     def test_formulas_use_correct_row_number(self):
         f2 = generate_formulas(row=2)
         f5 = generate_formulas(row=5)
-        assert "2" in f2["p1_edge"] and "5" not in f2["p1_edge"]
-        assert "5" in f5["p1_edge"] and "2" not in f5["p1_edge"]
+        assert "2" in f2["fav_edge"] and "5" not in f2["fav_edge"]
+        assert "5" in f5["fav_edge"] and "2" not in f5["fav_edge"]
 
     def test_all_formulas_start_with_equals(self):
         formulas = generate_formulas(row=2)
