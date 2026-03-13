@@ -291,11 +291,15 @@ class ExperimentRunner:
                 ).to_numpy()
                 y_test = test_df["won"].to_numpy().astype(int)
 
-                # Handle missing values with median imputation (0 for all-NaN cols)
-                medians = np.nanmedian(X_train, axis=0)
-                medians = np.where(np.isnan(medians), 0.0, medians)
-                X_train = np.where(np.isnan(X_train), medians, X_train)
-                X_test = np.where(np.isnan(X_test), medians, X_test)
+                # Median-impute NaN for models that can't handle them natively.
+                # LogisticModel has its own NaN handling (nanmean/nanstd + nan_to_num)
+                # and XGBoost handles NaN natively. Pre-imputing for these models
+                # creates fake signal when a feature is mostly NaN in early folds.
+                if self.config.model.type not in ("logistic", "xgboost"):
+                    medians = np.nanmedian(X_train, axis=0)
+                    medians = np.where(np.isnan(medians), 0.0, medians)
+                    X_train = np.where(np.isnan(X_train), medians, X_train)
+                    X_test = np.where(np.isnan(X_test), medians, X_test)
 
                 # Build per-model training data for ensemble date/filter differences
                 per_model_data = None
@@ -319,9 +323,8 @@ class ExperimentRunner:
                                 pl.col(c).cast(pl.Float64) for c in feature_cols
                             ).to_numpy()
                             y_m = model_train_df["won"].to_numpy().astype(int)
-                            medians_m = np.nanmedian(X_m, axis=0)
-                            medians_m = np.where(np.isnan(medians_m), 0.0, medians_m)
-                            X_m = np.where(np.isnan(X_m), medians_m, X_m)
+                            # No median imputation — base models (logistic, xgboost)
+                            # handle NaN natively. See main imputation comment above.
                             per_model_data.append((X_m, y_m))
                         else:
                             per_model_data.append(None)
@@ -374,7 +377,7 @@ class ExperimentRunner:
                 run_logger.info(
                     "Fold %d: acc=%.3f, auc=%.3f, ll=%.4f (%.1fs)",
                     fold_idx + 1, metrics.get("accuracy", 0),
-                    metrics.get("auc", 0), metrics.get("log_loss", 0),
+                    metrics.get("roc_auc", 0), metrics.get("log_loss", 0),
                     time.perf_counter() - t_fold,
                 )
 
