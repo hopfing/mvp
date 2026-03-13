@@ -26,6 +26,7 @@ COLUMN_SCHEMA = [
     {"name": "p2", "owner": "pipeline"},
     {"name": "p1_elo", "owner": "pipeline"},
     {"name": "p2_elo", "owner": "pipeline"},
+    {"name": "elo_diff", "owner": "formula"},
     {"name": "p1_prob", "owner": "pipeline"},
     {"name": "p2_prob", "owner": "pipeline"},
     {"name": "prediction", "owner": "pipeline"},
@@ -85,6 +86,8 @@ def generate_formulas(row: int) -> dict[str, str]:
         Dict mapping each formula column name to its formula string.
     """
     r = row
+    p1_elo = COL_LETTERS["p1_elo"]
+    p2_elo = COL_LETTERS["p2_elo"]
     p1_prob = COL_LETTERS["p1_prob"]
     p2_prob = COL_LETTERS["p2_prob"]
     p1_odds = COL_LETTERS["p1_odds"]
@@ -112,6 +115,7 @@ def generate_formulas(row: int) -> dict[str, str]:
     )
 
     return {
+        "elo_diff": f'=ABS({p1_elo}{r}-{p2_elo}{r})',
         "fav_edge": fav_edge_formula,
         "dog_edge": dog_edge_formula,
         "bet_odds": f'=IF({bet_side}{r}="P1", {p1_odds}{r}, IF({bet_side}{r}="P2", {p2_odds}{r}, ""))',
