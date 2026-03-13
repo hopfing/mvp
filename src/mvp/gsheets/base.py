@@ -105,14 +105,14 @@ def generate_formulas(row: int) -> dict[str, str]:
     # fav_edge: edge on the model's predicted winner
     # dog_edge: edge on the other side
     fav_edge_formula = (
-        f'=IF(OR({p1_odds}{r}="",{p2_odds}{r}=""), "", '
-        f'IF({prediction_col}{r}="P1", {p1_prob}{r}-(1/{p1_odds}{r}), '
-        f'{p2_prob}{r}-(1/{p2_odds}{r})))'
+        f'=IF({prediction_col}{r}="P1", '
+        f'IF({p1_odds}{r}="", "", {p1_prob}{r}-(1/{p1_odds}{r})), '
+        f'IF({p2_odds}{r}="", "", {p2_prob}{r}-(1/{p2_odds}{r})))'
     )
     dog_edge_formula = (
-        f'=IF(OR({p1_odds}{r}="",{p2_odds}{r}=""), "", '
-        f'IF({prediction_col}{r}="P1", {p2_prob}{r}-(1/{p2_odds}{r}), '
-        f'{p1_prob}{r}-(1/{p1_odds}{r})))'
+        f'=IF({prediction_col}{r}="P1", '
+        f'IF({p2_odds}{r}="", "", {p2_prob}{r}-(1/{p2_odds}{r})), '
+        f'IF({p1_odds}{r}="", "", {p1_prob}{r}-(1/{p1_odds}{r})))'
     )
 
     return {
