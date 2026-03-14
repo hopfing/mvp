@@ -121,10 +121,15 @@ class FastForwardSelector:
         target = getattr(self.config, "target", "won")
         if target == "deciding_set":
             target_col = "_target_deciding_set"
-            reason_filter = ~pl.col("reason").is_in(["RET", "DEF", "UNP"]) if "reason" in df.columns else pl.lit(True)
-            df = df.filter(
-                pl.col("sets_played").is_not_null() & reason_filter
-            )
+            df = df.filter(pl.col("sets_played").is_not_null())
+            if "reason" in df.columns:
+                df = df.filter(
+                    ~pl.col("reason").is_in(["DEF", "UNP"])
+                    & ~(
+                        pl.col("reason").is_in(["RET"])
+                        & (pl.col("sets_played") < pl.col("number_of_sets"))
+                    )
+                )
             df = df.with_columns(
                 (pl.col("sets_played") == pl.col("number_of_sets"))
                 .cast(pl.Int64)

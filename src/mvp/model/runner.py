@@ -81,12 +81,19 @@ class ExperimentRunner:
             return df, "won"
         if target == "deciding_set":
             target_col = "_target_deciding_set"
-            # Filter out remaining incomplete matches — retirements in a deciding
-            # set show sets_played == number_of_sets but the match wasn't completed
-            reason_filter = ~pl.col("reason").is_in(["RET", "DEF", "UNP"]) if "reason" in df.columns else pl.lit(True)
-            df = df.filter(
-                pl.col("sets_played").is_not_null() & reason_filter
-            )
+            df = df.filter(pl.col("sets_played").is_not_null())
+            # Retirements where sets_played == number_of_sets are settled:
+            # the deciding set started, so over 2.5 is graded a winner.
+            # Retirements before that point are voided — outcome uncertain.
+            # DEF/UNP are always excluded (no meaningful play).
+            if "reason" in df.columns:
+                df = df.filter(
+                    ~pl.col("reason").is_in(["DEF", "UNP"])
+                    & ~(
+                        pl.col("reason").is_in(["RET"])
+                        & (pl.col("sets_played") < pl.col("number_of_sets"))
+                    )
+                )
             df = df.with_columns(
                 (pl.col("sets_played") == pl.col("number_of_sets"))
                 .cast(pl.Int64)
