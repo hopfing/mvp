@@ -114,7 +114,19 @@ class FastForwardSelector:
             & (pl.col("effective_match_date") <= dr.end)
         )
 
-        df = df.filter(pl.col("won").is_not_null())
+        # Resolve target column
+        target = getattr(self.config, "target", "won")
+        if target == "deciding_set":
+            target_col = "_target_deciding_set"
+            df = df.with_columns(
+                (pl.col("sets_played") == pl.col("number_of_sets"))
+                .cast(pl.Int64)
+                .alias(target_col)
+            )
+            df = df.filter(pl.col("sets_played").is_not_null())
+        else:
+            target_col = "won"
+        df = df.filter(pl.col(target_col).is_not_null())
 
         if row_keys is not None:
             keyed = row_keys.with_row_index("_order")
@@ -131,7 +143,7 @@ class FastForwardSelector:
             df.select(pl.col(c).cast(pl.Float64) for c in all_col_names)
             .to_numpy()
         )
-        self.y = df["won"].to_numpy().astype(int)
+        self.y = df[target_col].to_numpy().astype(int)
 
         if override_y is not None:
             self.y = override_y

@@ -156,6 +156,7 @@ class ExperimentConfig(BaseModel):
     """Complete experiment configuration."""
 
     description: str | None = None
+    target: Literal["won", "deciding_set"] = "won"
     data: DataConfig
     features: FeaturesConfig | None = None
     model: ModelConfig

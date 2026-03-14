@@ -64,6 +64,28 @@ class ExperimentRunner:
             cache_dir=self.cache_dir,
         )
 
+    def _resolve_target(self, df: pl.DataFrame) -> tuple[pl.DataFrame, str]:
+        """Add the target column to df and return (df, target_col_name).
+
+        For 'won': uses existing column as-is.
+        For 'deciding_set': derives target from sets_played == number_of_sets,
+            filters out retirements/walkovers (null sets_played).
+        """
+        target = self.config.target
+        if target == "won":
+            return df, "won"
+        if target == "deciding_set":
+            target_col = "_target_deciding_set"
+            df = df.with_columns(
+                (pl.col("sets_played") == pl.col("number_of_sets"))
+                .cast(pl.Int64)
+                .alias(target_col)
+            )
+            # Filter out incomplete matches (retirements/walkovers)
+            df = df.filter(pl.col("sets_played").is_not_null())
+            return df, target_col
+        raise ValueError(f"Unknown target: {target}")
+
     def _get_splitter(self) -> BaseSplitter:
         """Get the appropriate splitter for validation strategy."""
         val = self.config.validation
@@ -194,6 +216,9 @@ class ExperimentRunner:
                 if filt is not None:
                     needs_per_model = True
 
+        # Resolve target column (adds derived column if needed, filters incomplete matches)
+        df, target_col = self._resolve_target(df)
+
         # Build wide date range df for per-model training (ensemble only)
         df_wide = None
         if is_ensemble and model_date_ranges:
@@ -202,7 +227,7 @@ class ExperimentRunner:
                 df_wide = df.filter(
                     (pl.col("effective_match_date") >= earliest)
                     & (pl.col("effective_match_date") <= self.config.data.date_range.end)
-                    & (pl.col("won").is_not_null())
+                    & (pl.col(target_col).is_not_null())
                 )
 
         # Filter by ensemble's date range (evaluation window)
@@ -212,7 +237,7 @@ class ExperimentRunner:
         )
 
         # Drop rows with no outcome (e.g., future/unfinished matches)
-        df = df.filter(pl.col("won").is_not_null())
+        df = df.filter(pl.col(target_col).is_not_null())
 
         # Get feature columns from config
         feature_cols = get_feature_columns(feature_specs)
@@ -238,6 +263,7 @@ class ExperimentRunner:
             run_context.__enter__()
             logger.log_params({
                 "model_type": self.config.model.type,
+                "target": self.config.target,
                 "validation_type": self.config.validation.type,
                 "n_features": len(feature_cols),
                 "n_splits": self.config.validation.n_splits,
@@ -285,11 +311,11 @@ class ExperimentRunner:
                 X_train = train_df.select(
                     pl.col(c).cast(pl.Float64) for c in feature_cols
                 ).to_numpy()
-                y_train = train_df["won"].to_numpy().astype(int)
+                y_train = train_df[target_col].to_numpy().astype(int)
                 X_test = test_df.select(
                     pl.col(c).cast(pl.Float64) for c in feature_cols
                 ).to_numpy()
-                y_test = test_df["won"].to_numpy().astype(int)
+                y_test = test_df[target_col].to_numpy().astype(int)
 
                 # Median-impute NaN for models that can't handle them natively.
                 # LogisticModel has its own NaN handling (nanmean/nanstd + nan_to_num)
@@ -322,7 +348,7 @@ class ExperimentRunner:
                             X_m = model_train_df.select(
                                 pl.col(c).cast(pl.Float64) for c in feature_cols
                             ).to_numpy()
-                            y_m = model_train_df["won"].to_numpy().astype(int)
+                            y_m = model_train_df[target_col].to_numpy().astype(int)
                             # No median imputation — base models (logistic, xgboost)
                             # handle NaN natively. See main imputation comment above.
                             per_model_data.append((X_m, y_m))

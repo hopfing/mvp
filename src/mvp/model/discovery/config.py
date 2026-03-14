@@ -88,6 +88,7 @@ class DiscoveryConfig(BaseModel):
     """Complete discovery configuration."""
 
     description: str | None = None
+    target: Literal["won", "deciding_set"] = "won"
     data: DataConfig
     discovery: DiscoveryOptions = DiscoveryOptions()
     model: ModelConfig = ModelConfig()
@@ -118,7 +119,7 @@ class DiscoveryConfig(BaseModel):
         features_dict: dict[str, Any] = {"include": features}
         if self.discovery.features.compute_only:
             features_dict["compute_only"] = self.discovery.features.compute_only
-        return {
+        result: dict[str, Any] = {
             "description": self.description,
             "data": self.data.model_dump(),
             "features": features_dict,
@@ -126,3 +127,6 @@ class DiscoveryConfig(BaseModel):
             "validation": self.validation.model_dump(),
             "metrics": {"primary": self.discovery.metric},
         }
+        if self.target != "won":
+            result["target"] = self.target
+        return result
