@@ -76,13 +76,17 @@ class ExperimentRunner:
             return df, "won"
         if target == "deciding_set":
             target_col = "_target_deciding_set"
+            # Filter out incomplete matches — retirements in a deciding set
+            # show sets_played == number_of_sets but the match wasn't completed
+            df = df.filter(
+                pl.col("sets_played").is_not_null()
+                & ~pl.col("reason").is_in(["RET", "W/O", "DEF", "UNP"])
+            )
             df = df.with_columns(
                 (pl.col("sets_played") == pl.col("number_of_sets"))
                 .cast(pl.Int64)
                 .alias(target_col)
             )
-            # Filter out incomplete matches (retirements/walkovers)
-            df = df.filter(pl.col("sets_played").is_not_null())
             return df, target_col
         raise ValueError(f"Unknown target: {target}")
 
