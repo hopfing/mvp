@@ -76,7 +76,7 @@ class ExperimentRunner:
         target = self.config.target
         # Walkovers are voided bets — never valid training data for any target
         if "reason" in df.columns:
-            df = df.filter(pl.col("reason") != "W/O")
+            df = df.filter(pl.col("reason").fill_null("").ne("W/O"))
         if target == "won":
             return df, "won"
         if target == "deciding_set":
@@ -87,10 +87,11 @@ class ExperimentRunner:
             # Retirements before that point are voided — outcome uncertain.
             # DEF/UNP are always excluded (no meaningful play).
             if "reason" in df.columns:
+                reason = pl.col("reason").fill_null("")
                 df = df.filter(
-                    ~pl.col("reason").is_in(["DEF", "UNP"])
+                    ~reason.is_in(["DEF", "UNP"])
                     & ~(
-                        pl.col("reason").is_in(["RET"])
+                        reason.is_in(["RET"])
                         & (pl.col("sets_played") < pl.col("number_of_sets"))
                     )
                 )
