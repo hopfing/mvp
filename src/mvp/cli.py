@@ -653,26 +653,20 @@ def _run_voter_confidence(args: argparse.Namespace, config_path: Path) -> int:
             oof_df = oof_df.join(voter_probs_df, on=["match_uid", "player_id"], how="left")
 
             # Scoped voters: null out predictions for out-of-scope matches
+            # Use the voter's full DataFrame (which has all columns including
+            # computed features) to determine scope, then map back by key.
             if voter_entry.get("scoped") and voter_cfg.data.filters:
-                scope_mask = pl.lit(True)
-                for col_name, value in voter_cfg.data.filters.items():
-                    if isinstance(value, list):
-                        scope_mask = scope_mask & pl.col(col_name).is_in(value)
-                    elif isinstance(value, dict):
-                        if "min" in value:
-                            scope_mask = scope_mask & (pl.col(col_name) >= value["min"])
-                        if "max" in value:
-                            scope_mask = scope_mask & (pl.col(col_name) <= value["max"])
-                        if "abs_min" in value:
-                            scope_mask = scope_mask & (pl.col(col_name).abs() >= value["abs_min"])
-                        if "abs_max" in value:
-                            scope_mask = scope_mask & (pl.col(col_name).abs() <= value["abs_max"])
-                    else:
-                        scope_mask = scope_mask & (pl.col(col_name) == value)
+                in_scope_keys = apply_filters(voter_df, voter_cfg.data.filters).select(
+                    "match_uid", "player_id"
+                ).with_columns(pl.lit(True).alias("_in_scope"))
                 voter_col = f"_voter_{name}"
+                oof_df = oof_df.join(in_scope_keys, on=["match_uid", "player_id"], how="left")
                 oof_df = oof_df.with_columns(
-                    pl.when(scope_mask).then(pl.col(voter_col)).otherwise(None).alias(voter_col)
-                )
+                    pl.when(pl.col("_in_scope").is_not_null())
+                    .then(pl.col(voter_col))
+                    .otherwise(None)
+                    .alias(voter_col)
+                ).drop("_in_scope")
                 in_scope = oof_df[voter_col].is_not_null().sum()
                 logger.info("Voter %s scoped: %d/%d matches in scope", name, in_scope, len(oof_df))
 
