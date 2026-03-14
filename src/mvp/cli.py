@@ -468,7 +468,11 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
 
 def cmd_train(args: argparse.Namespace) -> int:
     """Train the production model from production.yaml."""
+    from mvp.atptour.aggregators.matches import MatchesAggregator
     from mvp.model.predictor import ProductionPredictor
+
+    logger.info("Rebuilding matches.parquet")
+    MatchesAggregator().run()
 
     predictor = ProductionPredictor()
     predictor.train()
