@@ -114,13 +114,16 @@ class FastForwardSelector:
             & (pl.col("effective_match_date") <= dr.end)
         )
 
+        # Walkovers are voided bets — never valid training data for any target
+        if "reason" in df.columns:
+            df = df.filter(pl.col("reason") != "W/O")
         # Resolve target column
         target = getattr(self.config, "target", "won")
         if target == "deciding_set":
             target_col = "_target_deciding_set"
+            reason_filter = ~pl.col("reason").is_in(["RET", "DEF", "UNP"]) if "reason" in df.columns else pl.lit(True)
             df = df.filter(
-                pl.col("sets_played").is_not_null()
-                & ~pl.col("reason").is_in(["RET", "W/O", "DEF", "UNP"])
+                pl.col("sets_played").is_not_null() & reason_filter
             )
             df = df.with_columns(
                 (pl.col("sets_played") == pl.col("number_of_sets"))

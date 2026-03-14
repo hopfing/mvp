@@ -67,20 +67,25 @@ class ExperimentRunner:
     def _resolve_target(self, df: pl.DataFrame) -> tuple[pl.DataFrame, str]:
         """Add the target column to df and return (df, target_col_name).
 
-        For 'won': uses existing column as-is.
+        Walkovers are always excluded — they're voided bets with no on-court signal.
+
+        For 'won': uses existing column as-is, excludes walkovers.
         For 'deciding_set': derives target from sets_played == number_of_sets,
-            filters out retirements/walkovers (null sets_played).
+            excludes all incomplete matches (RET/W-O/DEF/UNP).
         """
         target = self.config.target
+        # Walkovers are voided bets — never valid training data for any target
+        if "reason" in df.columns:
+            df = df.filter(pl.col("reason") != "W/O")
         if target == "won":
             return df, "won"
         if target == "deciding_set":
             target_col = "_target_deciding_set"
-            # Filter out incomplete matches — retirements in a deciding set
-            # show sets_played == number_of_sets but the match wasn't completed
+            # Filter out remaining incomplete matches — retirements in a deciding
+            # set show sets_played == number_of_sets but the match wasn't completed
+            reason_filter = ~pl.col("reason").is_in(["RET", "DEF", "UNP"]) if "reason" in df.columns else pl.lit(True)
             df = df.filter(
-                pl.col("sets_played").is_not_null()
-                & ~pl.col("reason").is_in(["RET", "W/O", "DEF", "UNP"])
+                pl.col("sets_played").is_not_null() & reason_filter
             )
             df = df.with_columns(
                 (pl.col("sets_played") == pl.col("number_of_sets"))
