@@ -1154,6 +1154,10 @@ def cmd_live(args: argparse.Namespace) -> int:
         sheets_path = Path("data/sheets/bets.parquet")
         sheet_data = pl.read_parquet(sheets_path) if sheets_path.exists() else None
 
+        # Load ALL predictions (not just current batch) for full analysis
+        all_preds_path = Path("data/predictions/predictions.parquet")
+        all_predictions = pl.read_parquet(all_preds_path) if all_preds_path.exists() else predictions
+
         # Build results from matches
         matches_path = Path("data/aggregate/atptour/matches.parquet")
         results_df = None
@@ -1164,20 +1168,16 @@ def cmd_live(args: argparse.Namespace) -> int:
                     "match_uid", pl.col("player_id").alias("winner_id")
                 )
                 if len(won) > 0:
-                    pred_uids = set(predictions["match_uid"].to_list())
-                    won_relevant = won.filter(pl.col("match_uid").is_in(list(pred_uids)))
+                    all_pred_uids = set(all_predictions["match_uid"].to_list())
+                    won_relevant = won.filter(pl.col("match_uid").is_in(list(all_pred_uids)))
                     if len(won_relevant) > 0:
-                        pred_p1 = predictions.select("match_uid", "p1_id")
-                        results_df = won_relevant.join(pred_p1, on="match_uid").with_columns(
+                        all_pred_p1 = all_predictions.select("match_uid", "p1_id").unique(subset=["match_uid"])
+                        results_df = won_relevant.join(all_pred_p1, on="match_uid").with_columns(
                             pl.when(pl.col("winner_id") == pl.col("p1_id"))
                             .then(pl.lit("P1"))
                             .otherwise(pl.lit("P2"))
                             .alias("result")
                         ).select("match_uid", "result")
-
-        # Load ALL predictions (not just current batch) for full analysis
-        all_preds_path = Path("data/predictions/predictions.parquet")
-        all_predictions = pl.read_parquet(all_preds_path) if all_preds_path.exists() else predictions
 
         ds = build_analysis_dataset(
             predictions=all_predictions,
