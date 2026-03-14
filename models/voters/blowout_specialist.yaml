@@ -1,0 +1,35 @@
+data:
+  date_range:
+    end: 2025-12-31
+    start: 2020-01-01
+  filters:
+    circuit:
+    - tour
+    - chal
+    draw_type: singles
+    player_elo_surface_diff:
+      abs_min: 75
+description: blowout specialist
+features:
+  include:
+  - player_elo_surface_diff
+  - player_deciding_set_win_pct_diff(days=90)
+  - player_venue_win_pct_diff
+  - player_win_pct_diff(days=365)
+  - player_match_count_diff(days=30)
+  - player_pts_service_won_pct_diff(days=365)
+  - player_age_diff
+  - player_tour_match_pct_diff
+  - elo_diff_x_elo_avg
+  - player_ret_elo_diff
+  - player_ranking_points_diff
+  - player_ranking_rank_diff
+metrics:
+  primary: log_loss
+model:
+  params: null
+  type: logistic
+validation:
+  initial_train_size: 20000
+  step_size: 10000
+  type: expanding_window

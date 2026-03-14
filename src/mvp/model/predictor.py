@@ -244,11 +244,16 @@ class ProductionPredictor:
         entry: dict,
         tournament_keys: list[tuple[str, int]] | None,
         match_uids: set[str],
+        scoped: bool = False,
     ) -> dict[str, float]:
         """Generate raw uid->prob predictions for a single model entry.
 
         Only predicts matches whose uid is in match_uids (intersection with
-        production predictions). Returns {match_uid: p1_win_prob}.
+        production predictions). When scoped=True, additionally excludes
+        matches that don't pass the entry's config filters (the voter only
+        votes on matches within its training domain).
+
+        Returns {match_uid: p1_win_prob}.
         """
         model, medians, feature_cols, calibrator = self._load_single(entry)
         config, feature_specs, _ = self._resolve_entry_features(entry)
@@ -256,14 +261,23 @@ class ProductionPredictor:
             matches_path=self.matches_path, cache_dir=self.cache_dir
         )
 
-        # Compute features (no entry-level filters — match_uids constrains scope)
+        # Compute features — include filter-referenced features so scoping
+        # can evaluate filter columns (e.g., player_elo_surface_diff)
         compute_only = (
             config.features.compute_only
             if config.features and config.features.compute_only
             else []
         )
-        all_specs = feature_specs + [s for s in compute_only if s not in feature_specs]
+        filter_specs = get_filter_feature_specs(config.data.filters) if scoped else []
+        extra = compute_only + filter_specs
+        all_specs = feature_specs + [s for s in extra if s not in feature_specs]
         df = engine.compute(all_specs)
+
+        # Determine in-scope match UIDs for scoped voters
+        in_scope_uids: set[str] | None = None
+        if scoped and config.data.filters:
+            scoped_df = apply_filters(df, config.data.filters)
+            in_scope_uids = set(scoped_df["match_uid"].unique().to_list())
 
         # Scope to tournaments
         if tournament_keys is not None:
@@ -319,6 +333,9 @@ class ProductionPredictor:
         result: dict[str, float] = {}
         for i, row in enumerate(canonical.iter_rows(named=True)):
             uid = row["match_uid"]
+            # Scoped voters skip matches outside their training domain
+            if in_scope_uids is not None and uid not in in_scope_uids:
+                continue
             p = float(probs[i])
             is_canonical = row["_is_canonical"]
             if not is_canonical:
@@ -352,19 +369,23 @@ class ProductionPredictor:
         tournament_keys: list[tuple[str, int]] | None,
         predictions: pl.DataFrame,
     ) -> pl.DataFrame:
-        """Add consensus column from voter models.
+        """Add consensus and voter_count columns from voter models.
+
+        Scoped voters (scoped: true in config) only vote on matches that
+        pass their training filters. Unscoped voters vote on everything.
 
         Args:
             tournament_keys: Tournament scope (same as predict()).
             predictions: DataFrame from predict() with p1_win_prob.
 
         Returns:
-            predictions with added 'consensus' column.
+            predictions with added 'consensus' and 'voter_count' columns.
         """
         voters = self.config.get("voters", [])
         if not voters:
             return predictions.with_columns(
-                pl.lit(None).cast(pl.Float64).alias("consensus")
+                pl.lit(None).cast(pl.Float64).alias("consensus"),
+                pl.lit(None).cast(pl.Int64).alias("voter_count"),
             )
 
         match_uids = set(predictions["match_uid"].to_list())
@@ -374,15 +395,19 @@ class ProductionPredictor:
         for row in predictions.iter_rows(named=True):
             prod_picks[row["match_uid"]] = row["p1_win_prob"] >= 0.5
 
-        # Collect voter picks
+        # Collect voter picks (scoped voters will have fewer UIDs)
         voter_picks: list[dict[str, bool]] = []
         for voter in voters:
-            raw = self._predict_raw(voter, tournament_keys, match_uids)
+            is_scoped = voter.get("scoped", False)
+            raw = self._predict_raw(
+                voter, tournament_keys, match_uids, scoped=is_scoped
+            )
             picks = {uid: prob >= 0.5 for uid, prob in raw.items()}
             voter_picks.append(picks)
 
-        # Build consensus as decimal (agree / total)
+        # Build consensus (decimal) and voter_count
         consensus_values: list[float] = []
+        voter_count_values: list[int] = []
         for row in predictions.iter_rows(named=True):
             uid = row["match_uid"]
             prod_pick = prod_picks[uid]
@@ -394,9 +419,11 @@ class ProductionPredictor:
                     if picks[uid] == prod_pick:
                         agree += 1
             consensus_values.append(round(agree / total, 2))
+            voter_count_values.append(total)
 
         return predictions.with_columns(
-            pl.Series("consensus", consensus_values)
+            pl.Series("consensus", consensus_values),
+            pl.Series("voter_count", voter_count_values),
         )
 
     def predict(
