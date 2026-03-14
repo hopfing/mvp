@@ -500,6 +500,191 @@ def cmd_model(args: argparse.Namespace) -> int:
     return 0
 
 
+def _is_voter_config(config_path: Path) -> bool:
+    """Check if a config file is a voter-system config (has active + voters)."""
+    import yaml
+
+    with open(config_path) as f:
+        data = yaml.safe_load(f)
+    return isinstance(data, dict) and "active" in data and "voters" in data
+
+
+def _run_voter_confidence(args: argparse.Namespace, config_path: Path) -> int:
+    """Run confidence validation with voter consensus overlay.
+
+    Mirrors production behavior: each voter is trained on its own filtered
+    data up to the fold's training cutoff, then predicts on the full
+    (unfiltered) primary test set. Only the binary pick is used for consensus.
+    """
+    from pathlib import Path
+
+    import numpy as np
+    import polars as pl
+    import yaml
+
+    from mvp.model.confidence.report import format_report
+    from mvp.model.confidence.validator import ConfidenceValidator, prepare_oof
+    from mvp.model.config import ExperimentConfig, apply_filters, get_filter_feature_specs
+    from mvp.model.engine import FeatureEngine, get_feature_columns
+    from mvp.model.models import get_model
+    from mvp.model.runner import ExperimentRunner
+    from mvp.model.splitters import make_splitter
+
+    with open(config_path) as f:
+        voter_config = yaml.safe_load(f)
+
+    config_name = config_path.stem
+    oof_dir = Path("data/confidence") / config_name
+    oof_path = oof_dir / "oof.parquet"
+    voter_names = [v["name"] for v in voter_config["voters"]]
+
+    if oof_path.exists() and not args.refresh:
+        logger.info("Loading cached OOF from %s", oof_path)
+        oof_df = pl.read_parquet(oof_path)
+        validator = ConfidenceValidator.from_oof(oof_df, voter_names=voter_names)
+    else:
+        # Run primary model
+        primary_config_path = resolve_config_path(voter_config["active"]["config"], MODEL_DIR)
+        logger.info("Running primary model: %s", primary_config_path)
+        primary_runner = ExperimentRunner(config_path=primary_config_path, log_to_mlflow=False)
+        primary_results = primary_runner.run()
+        primary_predictions = primary_results["all_predictions"]
+
+        # Build primary OOF
+        oof_df = prepare_oof(primary_predictions)
+
+        # Get primary config for splitter and date range
+        primary_config = ExperimentConfig.from_file(str(primary_config_path))
+        primary_val = primary_config.validation
+        primary_splitter = make_splitter(
+            val_type=primary_val.type,
+            n_splits=primary_val.n_splits,
+            min_train_size=primary_val.min_train_size,
+            test_size=primary_val.test_size,
+            initial_train_size=primary_val.initial_train_size,
+            step_size=primary_val.step_size,
+            train_size=primary_val.train_size,
+        )
+
+        # Get primary's full filtered DataFrame for fold replay
+        primary_engine = FeatureEngine(
+            matches_path=Path("data/aggregate/atptour/matches.parquet"),
+            cache_dir=Path("data/features/cache"),
+        )
+
+        # For each voter: replay primary folds, train on voter-filtered
+        # training data, predict on full primary test set
+        for voter_entry in voter_config["voters"]:
+            name = voter_entry["name"]
+            voter_path = resolve_config_path(voter_entry["config"], MODEL_DIR)
+            logger.info("Running voter: %s (%s)", name, voter_path)
+            voter_cfg = ExperimentConfig.from_file(str(voter_path))
+
+            # Compute voter features on the full (unfiltered) match set
+            assert voter_cfg.features is not None
+            voter_feature_specs = voter_cfg.features.include
+            compute_only = voter_cfg.features.compute_only if voter_cfg.features.compute_only else []
+            filter_specs = get_filter_feature_specs(voter_cfg.data.filters)
+            extra = compute_only + filter_specs
+            all_specs = voter_feature_specs + [s for s in extra if s not in voter_feature_specs]
+
+            voter_engine = FeatureEngine(
+                matches_path=Path("data/aggregate/atptour/matches.parquet"),
+                cache_dir=Path("data/features/cache"),
+            )
+            voter_df = voter_engine.compute(all_specs)
+
+            # Apply primary's non-filter constraints (date range, target)
+            # so voter_df aligns with the primary's row set
+            if primary_config.data.filters:
+                voter_df = apply_filters(voter_df, primary_config.data.filters)
+            voter_df = voter_df.filter(
+                (pl.col("effective_match_date") >= primary_config.data.date_range.start)
+                & (pl.col("effective_match_date") <= primary_config.data.date_range.end)
+            )
+            voter_df = voter_df.filter(pl.col("won").is_not_null())
+            # Filter walkovers to match primary
+            if "reason" in voter_df.columns:
+                voter_df = voter_df.filter(pl.col("reason").fill_null("").ne("W/O"))
+
+            voter_feature_cols = get_feature_columns(voter_feature_specs)
+
+            # Replay primary folds on voter data
+            voter_fold_probs: list[np.ndarray] = []
+            voter_fold_keys: list[pl.DataFrame] = []
+            for fold_idx, (train_idx, test_idx) in enumerate(primary_splitter.split(voter_df)):
+                train_fold = voter_df[train_idx]
+                test_fold = voter_df[test_idx]
+
+                # Apply voter's own filters to training data only
+                if voter_cfg.data.filters:
+                    train_filtered = apply_filters(train_fold, voter_cfg.data.filters)
+                else:
+                    train_filtered = train_fold
+
+                X_train = train_filtered.select(
+                    pl.col(c).cast(pl.Float64) for c in voter_feature_cols
+                ).to_numpy()
+                y_train = train_filtered["won"].to_numpy().astype(int)
+
+                # Predict on full (unfiltered) test set
+                X_test = test_fold.select(
+                    pl.col(c).cast(pl.Float64) for c in voter_feature_cols
+                ).to_numpy()
+
+                model = get_model(voter_cfg.model.type, voter_cfg.model.params or {})
+                model.fit(X_train, y_train)
+                y_prob = model.predict_proba(X_test)
+
+                voter_fold_probs.append(y_prob)
+                voter_fold_keys.append(test_fold.select("match_uid", "player_id"))
+
+                logger.info(
+                    "Voter %s fold %d: trained on %d (filtered from %d), predicted %d",
+                    name, fold_idx + 1, len(train_filtered), len(train_fold), len(test_fold),
+                )
+
+            # Concatenate voter predictions and join to primary OOF
+            all_voter_keys = pl.concat(voter_fold_keys)
+            all_voter_probs = np.concatenate(voter_fold_probs)
+            voter_probs_df = all_voter_keys.with_columns(
+                pl.Series(f"_voter_{name}", all_voter_probs)
+            )
+            oof_df = oof_df.join(voter_probs_df, on=["match_uid", "player_id"], how="left")
+
+        # Compute voter consensus: count agreements with primary pick
+        n_voters = 1 + len(voter_names)
+        primary_pick = pl.col("y_prob") >= 0.5
+        agree_expr = pl.lit(1)  # primary always agrees with itself
+        for name in voter_names:
+            col = f"_voter_{name}"
+            voter_agrees = primary_pick == (pl.col(col) >= 0.5)
+            agree_expr = agree_expr + voter_agrees.cast(pl.Int64)
+
+        oof_df = oof_df.with_columns(
+            (agree_expr.cast(pl.Utf8) + pl.lit("-") + (pl.lit(n_voters) - agree_expr).cast(pl.Utf8))
+            .alias("voter_consensus")
+        )
+
+        oof_dir.mkdir(parents=True, exist_ok=True)
+        oof_df.write_parquet(oof_path)
+        logger.info("Cached OOF to %s", oof_path)
+
+        validator = ConfidenceValidator.from_oof(oof_df, voter_names=voter_names)
+
+    logger.info("Running confidence validation...")
+    result = validator.validate()
+
+    report = format_report(result, model_name=config_name)
+    print(report)
+
+    results_path = oof_dir / "validation_results.json"
+    _save_validation_json(result, results_path)
+    logger.info("Saved detailed results to %s", results_path)
+
+    return 0
+
+
 def cmd_confidence(args: argparse.Namespace) -> int:
     """Run confidence validation on a model."""
     from pathlib import Path
@@ -511,6 +696,10 @@ def cmd_confidence(args: argparse.Namespace) -> int:
     config_path = resolve_config_path(args.config, MODEL_DIR)
     if not config_path.exists():
         raise FileNotFoundError(f"Config not found: {args.config} (tried {config_path})")
+
+    # Voter-system config: has active + voters
+    if _is_voter_config(config_path):
+        return _run_voter_confidence(args, config_path)
 
     config_name = config_path.stem
     oof_dir = Path("data/confidence") / config_name

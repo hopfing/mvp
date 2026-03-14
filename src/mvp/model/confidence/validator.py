@@ -84,19 +84,23 @@ class ConfidenceValidator:
         all_predictions: list[dict[str, Any]],
         per_model_oof: list[list[np.ndarray]] | None = None,
         base_names: list[str] | None = None,
+        voter_names: list[str] | None = None,
     ) -> None:
         self._oof = prepare_oof(all_predictions, per_model_oof=per_model_oof)
         self._base_names = base_names
+        self._voter_names = voter_names
 
     @classmethod
     def from_oof(
         cls,
         oof_df: pl.DataFrame,
         base_names: list[str] | None = None,
+        voter_names: list[str] | None = None,
     ) -> "ConfidenceValidator":
         instance = cls.__new__(cls)
         instance._oof = oof_df
         instance._base_names = base_names
+        instance._voter_names = voter_names
         return instance
 
     def validate(self) -> ValidationResult:
@@ -122,6 +126,23 @@ class ConfidenceValidator:
                 self._oof, per_model, base_names=self._base_names
             )
             for label, slice_df in consensus.items():
+                logger.debug("Computing profiles for %s (n=%d)", label, len(slice_df))
+                result.profiles[label] = self._compute_slice_profiles(slice_df)
+
+                # Cross-cut consensus × structural
+                sub_structural = get_structural_slices(slice_df)
+                for sub_label, sub_df in sub_structural.items():
+                    cross_label = f"{label}/{sub_label}"
+                    logger.debug("Computing profiles for %s (n=%d)", cross_label, len(sub_df))
+                    result.profiles[cross_label] = self._compute_slice_profiles(sub_df)
+
+        # Voter consensus slices (voter-system configs — detected by voter_consensus column)
+        if "voter_consensus" in self._oof.columns:
+            for level in self._oof["voter_consensus"].unique().sort().to_list():
+                if level is None:
+                    continue
+                slice_df = self._oof.filter(pl.col("voter_consensus") == level)
+                label = f"consensus:{level}"
                 logger.debug("Computing profiles for %s (n=%d)", label, len(slice_df))
                 result.profiles[label] = self._compute_slice_profiles(slice_df)
 
