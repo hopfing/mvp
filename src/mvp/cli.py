@@ -652,18 +652,45 @@ def _run_voter_confidence(args: argparse.Namespace, config_path: Path) -> int:
             )
             oof_df = oof_df.join(voter_probs_df, on=["match_uid", "player_id"], how="left")
 
+            # Scoped voters: null out predictions for out-of-scope matches
+            if voter_entry.get("scoped") and voter_cfg.data.filters:
+                scope_mask = pl.lit(True)
+                for col_name, value in voter_cfg.data.filters.items():
+                    if isinstance(value, list):
+                        scope_mask = scope_mask & pl.col(col_name).is_in(value)
+                    elif isinstance(value, dict):
+                        if "min" in value:
+                            scope_mask = scope_mask & (pl.col(col_name) >= value["min"])
+                        if "max" in value:
+                            scope_mask = scope_mask & (pl.col(col_name) <= value["max"])
+                        if "abs_min" in value:
+                            scope_mask = scope_mask & (pl.col(col_name).abs() >= value["abs_min"])
+                        if "abs_max" in value:
+                            scope_mask = scope_mask & (pl.col(col_name).abs() <= value["abs_max"])
+                    else:
+                        scope_mask = scope_mask & (pl.col(col_name) == value)
+                voter_col = f"_voter_{name}"
+                oof_df = oof_df.with_columns(
+                    pl.when(scope_mask).then(pl.col(voter_col)).otherwise(None).alias(voter_col)
+                )
+                in_scope = oof_df[voter_col].is_not_null().sum()
+                logger.info("Voter %s scoped: %d/%d matches in scope", name, in_scope, len(oof_df))
+
         # Compute voter consensus: count agreements with primary pick
-        n_voters = 1 + len(voter_names)
         primary_pick = pl.col("y_prob") >= 0.5
         agree_expr = pl.lit(1)  # primary always agrees with itself
+        total_expr = pl.lit(1)  # primary always counts
         for name in voter_names:
             col = f"_voter_{name}"
+            has_vote = pl.col(col).is_not_null()
             voter_agrees = primary_pick == (pl.col(col) >= 0.5)
-            agree_expr = agree_expr + voter_agrees.cast(pl.Int64)
+            agree_expr = agree_expr + (has_vote & voter_agrees).cast(pl.Int64)
+            total_expr = total_expr + has_vote.cast(pl.Int64)
 
         oof_df = oof_df.with_columns(
-            (agree_expr.cast(pl.Utf8) + pl.lit("-") + (pl.lit(n_voters) - agree_expr).cast(pl.Utf8))
-            .alias("voter_consensus")
+            (agree_expr.cast(pl.Utf8) + pl.lit("-") + (total_expr - agree_expr).cast(pl.Utf8))
+            .alias("voter_consensus"),
+            total_expr.alias("voter_count"),
         )
 
         oof_dir.mkdir(parents=True, exist_ok=True)

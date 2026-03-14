@@ -153,6 +153,16 @@ class ConfidenceValidator:
                     logger.debug("Computing profiles for %s (n=%d)", cross_label, len(sub_df))
                     result.profiles[cross_label] = self._compute_slice_profiles(sub_df)
 
+            # Slice by voter count (how many voters participated)
+            if "voter_count" in self._oof.columns:
+                for count in self._oof["voter_count"].unique().sort().to_list():
+                    if count is None:
+                        continue
+                    slice_df = self._oof.filter(pl.col("voter_count") == count)
+                    label = f"voter_count:{count}"
+                    logger.debug("Computing profiles for %s (n=%d)", label, len(slice_df))
+                    result.profiles[label] = self._compute_slice_profiles(slice_df)
+
         return result
 
     def _compute_slice_profiles(self, df: pl.DataFrame) -> dict[str, ReliabilityProfile]:
