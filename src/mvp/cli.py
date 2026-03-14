@@ -969,20 +969,18 @@ def cmd_live(args: argparse.Namespace) -> int:
         MatchesAggregator().run()
 
         # Report extraction/aggregation failures
-        if failed or player_result.has_failures:
-            error_parts = []
-            if failed:
-                error_parts.append(f"{len(failed)} failed tournament(s)")
-                for tid, year, error in failed:
-                    logger.error(
-                        "  FAILED: tournament %s (%d): %s", tid, year, error
-                    )
-            if player_result.has_failures:
-                error_parts.append(
-                    f"{len(player_result.all_failures)} failed player operation(s)"
+        if player_result.has_failures:
+            logger.warning(
+                "%d failed player operation(s) — continuing",
+                len(player_result.all_failures),
+            )
+        if failed:
+            for tid, year, error in failed:
+                logger.error(
+                    "  FAILED: tournament %s (%d): %s", tid, year, error
                 )
             raise RuntimeError(
-                f"Pipeline finished with {', '.join(error_parts)}"
+                f"Pipeline finished with {len(failed)} failed tournament(s)"
             )
 
         # Predict with production model
