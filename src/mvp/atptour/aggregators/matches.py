@@ -396,6 +396,31 @@ def add_tournament_level(df: pl.DataFrame) -> pl.DataFrame:
     )
 
 
+def add_best_of(df: pl.DataFrame) -> pl.DataFrame:
+    """Derive best_of (3 or 5) from tournament metadata.
+
+    Rules:
+      - Grand Slam main draw (non-qualifying) → 5
+      - Wimbledon Q3 (final qualifying round) → 5
+      - Jeddah / Six Kings (tournament_id 7696) → 5
+      - Everything else → 3
+    """
+    is_gs_main = (pl.col("tournament_level") == "GS") & pl.col("round").is_in(
+        ["R128", "R64", "R32", "R16", "QF", "SF", "F", "RR"]
+    )
+    is_wimbledon_q3 = (
+        (pl.col("tournament_name") == "Wimbledon") & (pl.col("round") == "Q3")
+    )
+    is_jeddah = pl.col("tournament_id") == "7696"
+
+    return df.with_columns(
+        pl.when(is_gs_main | is_wimbledon_q3 | is_jeddah)
+        .then(pl.lit(5))
+        .otherwise(pl.lit(3))
+        .alias("best_of")
+    )
+
+
 def add_partner_workload_rows(df: pl.DataFrame) -> pl.DataFrame:
     """Add rows for doubles partners so workload features count their appearances.
 
@@ -582,6 +607,7 @@ class MatchesAggregator(BaseJob):
         combined = add_round_order(combined)
         combined = add_effective_match_date(combined)
         combined = add_tournament_level(combined)
+        combined = add_best_of(combined)
 
         # Compute Elo ratings for singles matches only
         singles = combined.filter(pl.col("draw_type") == "singles")

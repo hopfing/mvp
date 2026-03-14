@@ -128,11 +128,11 @@ class FastForwardSelector:
                     ~reason.is_in(["DEF", "UNP"])
                     & ~(
                         reason.is_in(["RET"])
-                        & (pl.col("sets_played") < pl.col("number_of_sets"))
+                        & (pl.col("sets_played") < pl.col("best_of"))
                     )
                 )
             df = df.with_columns(
-                (pl.col("sets_played") == pl.col("number_of_sets"))
+                (pl.col("sets_played") == pl.col("best_of"))
                 .cast(pl.Int64)
                 .alias(target_col)
             )

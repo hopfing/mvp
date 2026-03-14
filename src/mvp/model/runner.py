@@ -70,8 +70,8 @@ class ExperimentRunner:
         Walkovers are always excluded — they're voided bets with no on-court signal.
 
         For 'won': uses existing column as-is, excludes walkovers.
-        For 'deciding_set': derives target from sets_played == number_of_sets,
-            excludes all incomplete matches (RET/W-O/DEF/UNP).
+        For 'deciding_set': derives target from sets_played == best_of,
+            excludes incomplete matches where outcome is uncertain.
         """
         target = self.config.target
         # Walkovers are voided bets — never valid training data for any target
@@ -82,8 +82,8 @@ class ExperimentRunner:
         if target == "deciding_set":
             target_col = "_target_deciding_set"
             df = df.filter(pl.col("sets_played").is_not_null())
-            # Retirements where sets_played == number_of_sets are settled:
-            # the deciding set started, so over 2.5 is graded a winner.
+            # Retirements where sets_played == best_of are settled:
+            # the deciding set started, so over is graded a winner.
             # Retirements before that point are voided — outcome uncertain.
             # DEF/UNP are always excluded (no meaningful play).
             if "reason" in df.columns:
@@ -92,11 +92,11 @@ class ExperimentRunner:
                     ~reason.is_in(["DEF", "UNP"])
                     & ~(
                         reason.is_in(["RET"])
-                        & (pl.col("sets_played") < pl.col("number_of_sets"))
+                        & (pl.col("sets_played") < pl.col("best_of"))
                     )
                 )
             df = df.with_columns(
-                (pl.col("sets_played") == pl.col("number_of_sets"))
+                (pl.col("sets_played") == pl.col("best_of"))
                 .cast(pl.Int64)
                 .alias(target_col)
             )

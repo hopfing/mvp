@@ -31,7 +31,7 @@ def _tiebreaks_won() -> pl.Expr:
 
 def _deciding_set_flag() -> pl.Expr:
     """1 if this match went to a deciding set, 0 otherwise."""
-    return (pl.col("sets_played") == pl.col("number_of_sets")).cast(pl.Int64)
+    return (pl.col("sets_played") == pl.col("best_of")).cast(pl.Int64)
 
 
 def _rolling_ratio(numerator: pl.Expr, denominator: pl.Expr, days: int) -> pl.Expr:
