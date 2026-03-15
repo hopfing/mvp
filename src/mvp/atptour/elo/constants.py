@@ -6,7 +6,6 @@ MAX_RD = 350.0
 
 # K-factor settings
 BASE_K = 32.0
-MAX_K = 80.0  # Cap to prevent extreme single-match swings
 NEW_PLAYER_K_MULT = 1.5
 HIGH_RD_K_MULT = 1.2
 HIGH_RD_THRESHOLD = 200.0

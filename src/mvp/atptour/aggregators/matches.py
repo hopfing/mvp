@@ -6,7 +6,7 @@ from pathlib import Path
 
 import polars as pl
 
-from mvp.atptour.ratings import compute_all_ratings
+from mvp.atptour.elo import compute_elo_ratings
 from mvp.common.base_job import BaseJob
 
 logger = logging.getLogger(__name__)
@@ -612,7 +612,7 @@ class MatchesAggregator(BaseJob):
         # Compute Elo ratings for singles matches only
         singles = combined.filter(pl.col("draw_type") == "singles")
         if not singles.is_empty():
-            singles = compute_all_ratings(singles)
+            singles = compute_elo_ratings(singles)
             # Rejoin with non-singles rows
             non_singles = combined.filter(pl.col("draw_type") != "singles")
             combined = pl.concat([singles, non_singles], how="diagonal_relaxed")

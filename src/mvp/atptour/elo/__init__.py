@@ -7,6 +7,7 @@ from mvp.atptour.elo.ratings import (
     initialize_player,
     update_elo,
     update_rd,
+    update_return_elo,
     update_serve_elo,
     update_surface_adj,
 )
@@ -21,6 +22,7 @@ __all__ = [
     "initialize_player",
     "update_elo",
     "update_rd",
+    "update_return_elo",
     "update_serve_elo",
     "update_surface_adj",
 ]

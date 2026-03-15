@@ -8,9 +8,9 @@ import polars as pl
 
 from mvp.atptour.elo.constants import (
     DEFAULT_ELO,
-    DEFAULT_RD,
     REVERSION_RATE,
     SERVE_RETURN_K_MULT,
+    STYLE_K_MULT,
     SURFACE_K_MULT,
 )
 from mvp.atptour.elo.ratings import (
@@ -75,20 +75,17 @@ ELO_COLUMNS = [
 
 
 def _capture_rating_values(rating: PlayerRating) -> dict[str, float]:
-    """Capture current rating values as a dict for caching/output.
-
-    Keys match column suffixes so they can be prefixed with player_/opp_.
-    """
+    """Capture current rating values as a dict for caching."""
     return {
         "elo": rating.elo,
-        "elo_rd": rating.rd,
+        "rd": rating.rd,
         "hard_adj": rating.hard_adj,
         "clay_adj": rating.clay_adj,
         "grass_adj": rating.grass_adj,
         "serve_elo": rating.serve_elo,
-        "serve_elo_rd": rating.serve_rd,
+        "serve_rd": rating.serve_rd,
         "return_elo": rating.return_elo,
-        "return_elo_rd": rating.return_rd,
+        "return_rd": rating.return_rd,
         "first_serve_power": rating.first_serve_power,
         "second_serve_reliability": rating.second_serve_reliability,
         "ace_resistance": rating.ace_resistance,
@@ -98,17 +95,6 @@ def _capture_rating_values(rating: PlayerRating) -> dict[str, float]:
         "overall_clutch": rating.overall_clutch,
         "indoor_adj": rating.indoor_adj,
     }
-
-
-def _append_ratings_to_output(
-    output: dict[str, list],
-    player_vals: dict[str, float],
-    opp_vals: dict[str, float],
-) -> None:
-    """Append pre-match rating values to the output dict."""
-    for key in player_vals:
-        output[f"player_{key}"].append(player_vals[key])
-        output[f"opp_{key}"].append(opp_vals[key])
 
 
 def _count_tiebreaks(row: dict) -> tuple[int, int]:
@@ -123,7 +109,6 @@ def _count_tiebreaks(row: dict) -> tuple[int, int]:
             if player_tb > opp_tb:
                 tb_won += 1
     return tb_won, tb_played
-
 
 
 def compute_elo_ratings(df: pl.DataFrame) -> pl.DataFrame:
@@ -146,17 +131,8 @@ def compute_elo_ratings(df: pl.DataFrame) -> pl.DataFrame:
     # Cache pre-match ratings for each match_uid to handle both rows consistently
     match_ratings_cache: dict[str, dict[str, dict[str, float]]] = {}
 
-    rows = df.to_dicts()
-    for row in rows:
+    for row in df.iter_rows(named=True):
         match_uid = row["match_uid"]
-
-        # Guard against None match_uid — would cause cache collisions
-        if match_uid is None:
-            logger.warning("Skipping row with None match_uid: %s", row.get("player_id"))
-            for col in ELO_COLUMNS:
-                output[col].append(None)
-            continue
-
         player_id = row["player_id"]
         opp_id = row["opp_id"]
         surface = row.get("surface") or "Hard"
@@ -178,8 +154,49 @@ def compute_elo_ratings(df: pl.DataFrame) -> pl.DataFrame:
 
         # Check if this match was already processed (second row of same match)
         if match_uid in match_ratings_cache:
-            cached = match_ratings_cache.pop(match_uid)
-            _append_ratings_to_output(output, cached[player_id], cached[opp_id])
+            # Use cached pre-match values for consistency
+            cached = match_ratings_cache[match_uid]
+            player_cached = cached[player_id]
+            opp_cached = cached[opp_id]
+
+            output["player_elo"].append(player_cached["elo"])
+            output["player_elo_rd"].append(player_cached["rd"])
+            output["player_hard_adj"].append(player_cached["hard_adj"])
+            output["player_clay_adj"].append(player_cached["clay_adj"])
+            output["player_grass_adj"].append(player_cached["grass_adj"])
+            output["player_serve_elo"].append(player_cached["serve_elo"])
+            output["player_serve_elo_rd"].append(player_cached["serve_rd"])
+            output["player_return_elo"].append(player_cached["return_elo"])
+            output["player_return_elo_rd"].append(player_cached["return_rd"])
+
+            output["opp_elo"].append(opp_cached["elo"])
+            output["opp_elo_rd"].append(opp_cached["rd"])
+            output["opp_hard_adj"].append(opp_cached["hard_adj"])
+            output["opp_clay_adj"].append(opp_cached["clay_adj"])
+            output["opp_grass_adj"].append(opp_cached["grass_adj"])
+            output["opp_serve_elo"].append(opp_cached["serve_elo"])
+            output["opp_serve_elo_rd"].append(opp_cached["serve_rd"])
+            output["opp_return_elo"].append(opp_cached["return_elo"])
+            output["opp_return_elo_rd"].append(opp_cached["return_rd"])
+
+            # Style dimensions (cached)
+            output["player_first_serve_power"].append(player_cached["first_serve_power"])
+            output["player_second_serve_reliability"].append(player_cached["second_serve_reliability"])
+            output["player_ace_resistance"].append(player_cached["ace_resistance"])
+            output["player_serve_clutch"].append(player_cached["serve_clutch"])
+            output["player_return_clutch"].append(player_cached["return_clutch"])
+            output["player_tb_clutch"].append(player_cached["tb_clutch"])
+            output["player_overall_clutch"].append(player_cached["overall_clutch"])
+            output["player_indoor_adj"].append(player_cached["indoor_adj"])
+
+            output["opp_first_serve_power"].append(opp_cached["first_serve_power"])
+            output["opp_second_serve_reliability"].append(opp_cached["second_serve_reliability"])
+            output["opp_ace_resistance"].append(opp_cached["ace_resistance"])
+            output["opp_serve_clutch"].append(opp_cached["serve_clutch"])
+            output["opp_return_clutch"].append(opp_cached["return_clutch"])
+            output["opp_tb_clutch"].append(opp_cached["tb_clutch"])
+            output["opp_overall_clutch"].append(opp_cached["overall_clutch"])
+            output["opp_indoor_adj"].append(opp_cached["indoor_adj"])
             continue
 
         # First row for this match - apply inactivity and cache pre-match values
@@ -204,12 +221,50 @@ def compute_elo_ratings(df: pl.DataFrame) -> pl.DataFrame:
             )
 
         # Cache pre-match values for both players
-        player_vals = _capture_rating_values(player_rating)
-        opp_vals = _capture_rating_values(opp_rating)
-        match_ratings_cache[match_uid] = {player_id: player_vals, opp_id: opp_vals}
+        match_ratings_cache[match_uid] = {
+            player_id: _capture_rating_values(player_rating),
+            opp_id: _capture_rating_values(opp_rating),
+        }
 
         # Record PRE-MATCH values
-        _append_ratings_to_output(output, player_vals, opp_vals)
+        output["player_elo"].append(player_rating.elo)
+        output["player_elo_rd"].append(player_rating.rd)
+        output["player_hard_adj"].append(player_rating.hard_adj)
+        output["player_clay_adj"].append(player_rating.clay_adj)
+        output["player_grass_adj"].append(player_rating.grass_adj)
+        output["player_serve_elo"].append(player_rating.serve_elo)
+        output["player_serve_elo_rd"].append(player_rating.serve_rd)
+        output["player_return_elo"].append(player_rating.return_elo)
+        output["player_return_elo_rd"].append(player_rating.return_rd)
+
+        output["opp_elo"].append(opp_rating.elo)
+        output["opp_elo_rd"].append(opp_rating.rd)
+        output["opp_hard_adj"].append(opp_rating.hard_adj)
+        output["opp_clay_adj"].append(opp_rating.clay_adj)
+        output["opp_grass_adj"].append(opp_rating.grass_adj)
+        output["opp_serve_elo"].append(opp_rating.serve_elo)
+        output["opp_serve_elo_rd"].append(opp_rating.serve_rd)
+        output["opp_return_elo"].append(opp_rating.return_elo)
+        output["opp_return_elo_rd"].append(opp_rating.return_rd)
+
+        # Style dimensions (pre-match)
+        output["player_first_serve_power"].append(player_rating.first_serve_power)
+        output["player_second_serve_reliability"].append(player_rating.second_serve_reliability)
+        output["player_ace_resistance"].append(player_rating.ace_resistance)
+        output["player_serve_clutch"].append(player_rating.serve_clutch)
+        output["player_return_clutch"].append(player_rating.return_clutch)
+        output["player_tb_clutch"].append(player_rating.tb_clutch)
+        output["player_overall_clutch"].append(player_rating.overall_clutch)
+        output["player_indoor_adj"].append(player_rating.indoor_adj)
+
+        output["opp_first_serve_power"].append(opp_rating.first_serve_power)
+        output["opp_second_serve_reliability"].append(opp_rating.second_serve_reliability)
+        output["opp_ace_resistance"].append(opp_rating.ace_resistance)
+        output["opp_serve_clutch"].append(opp_rating.serve_clutch)
+        output["opp_return_clutch"].append(opp_rating.return_clutch)
+        output["opp_tb_clutch"].append(opp_rating.tb_clutch)
+        output["opp_overall_clutch"].append(opp_rating.overall_clutch)
+        output["opp_indoor_adj"].append(opp_rating.indoor_adj)
 
         # Mark as processed and update ratings
         processed_matches.add(match_uid)
@@ -230,18 +285,17 @@ def compute_elo_ratings(df: pl.DataFrame) -> pl.DataFrame:
             opp_rating.elo, opp_effective, player_effective, not won, k_opp
         )
 
-        # Update surface adjustments using base Elos (not effective) to avoid
-        # double-counting the surface signal already embedded in effective Elos
+        # Update surface adjustments (using same pre-match snapshot)
         if surface in ("Hard", "Clay", "Grass"):
             k_surface_player = k_player * SURFACE_K_MULT
             k_surface_opp = k_opp * SURFACE_K_MULT
             new_adj = update_surface_adj(
                 player_rating.get_surface_adj(surface),
-                player_rating.elo, opp_rating.elo, won, k_surface_player,
+                player_effective, opp_effective, won, k_surface_player,
             )
             opp_new_adj = update_surface_adj(
                 opp_rating.get_surface_adj(surface),
-                opp_rating.elo, player_rating.elo, not won, k_surface_opp,
+                opp_effective, player_effective, not won, k_surface_opp,
             )
             if surface == "Hard":
                 player_rating.hard_adj = new_adj
@@ -282,6 +336,8 @@ def compute_elo_ratings(df: pl.DataFrame) -> pl.DataFrame:
         )
 
         # Update style dimensions for BOTH players
+        k_style_player = k_player * STYLE_K_MULT
+        k_style_opp = k_opp * STYLE_K_MULT
 
         # --- Player style updates ---
 
@@ -289,26 +345,20 @@ def compute_elo_ratings(df: pl.DataFrame) -> pl.DataFrame:
         svc_aces = row.get("svc_aces")
         svc_first_serve_pts_won = row.get("svc_first_serve_pts_won")
         ace_rate = None
-        if (svc_aces is not None
-                and svc_first_serve_pts_won
-                and svc_first_serve_pts_won > 0):
+        if svc_aces is not None and svc_first_serve_pts_won and svc_first_serve_pts_won > 0:
             ace_rate = svc_aces / svc_first_serve_pts_won
         player_rating.first_serve_power = update_first_serve_power(
-            player_rating.first_serve_power, ace_rate, surface
+            player_rating.first_serve_power, ace_rate, surface, k_style_player
         )
 
         # Second serve reliability: 1 - (DFs / second_serve_pts_played)
         svc_double_faults = row.get("svc_double_faults")
         svc_second_serve_pts_played = row.get("svc_second_serve_pts_played")
         reliability = None
-        if (svc_double_faults is not None
-                and svc_second_serve_pts_played
-                and svc_second_serve_pts_played > 0):
-            reliability = (
-                1 - svc_double_faults / svc_second_serve_pts_played
-            )
+        if svc_double_faults is not None and svc_second_serve_pts_played and svc_second_serve_pts_played > 0:
+            reliability = 1 - (svc_double_faults / svc_second_serve_pts_played)
         player_rating.second_serve_reliability = update_second_serve_reliability(
-            player_rating.second_serve_reliability, reliability, surface
+            player_rating.second_serve_reliability, reliability, surface, k_style_player
         )
 
         # Ace resistance: 1 - (opp_svc_aces / ret_first_serve_pts_lost)
@@ -323,7 +373,7 @@ def compute_elo_ratings(df: pl.DataFrame) -> pl.DataFrame:
             if ret_lost > 0:
                 ace_resistance_val = 1 - (opp_svc_aces / ret_lost)
         player_rating.ace_resistance = update_ace_resistance(
-            player_rating.ace_resistance, ace_resistance_val, surface
+            player_rating.ace_resistance, ace_resistance_val, surface, k_style_player
         )
 
         # Serve clutch: bp_saved / bp_faced
@@ -333,57 +383,56 @@ def compute_elo_ratings(df: pl.DataFrame) -> pl.DataFrame:
         if svc_bp_saved is not None and svc_bp_faced and svc_bp_faced > 0:
             save_rate = svc_bp_saved / svc_bp_faced
         player_rating.serve_clutch = update_serve_clutch(
-            player_rating.serve_clutch, save_rate, surface
+            player_rating.serve_clutch, save_rate, surface, k_style_player
         )
 
         # Return clutch: bp_converted / bp_opportunities
         ret_bp_converted = row.get("ret_bp_converted")
         ret_bp_opportunities = row.get("ret_bp_opportunities")
         conversion_rate = None
-        if (ret_bp_converted is not None
-                and ret_bp_opportunities
-                and ret_bp_opportunities > 0):
+        if ret_bp_converted is not None and ret_bp_opportunities and ret_bp_opportunities > 0:
             conversion_rate = ret_bp_converted / ret_bp_opportunities
         player_rating.return_clutch = update_return_clutch(
-            player_rating.return_clutch, conversion_rate, surface
+            player_rating.return_clutch, conversion_rate, surface, k_style_player
         )
 
         # TB clutch: count won/played from set scores
         tb_won, tb_played = _count_tiebreaks(row)
         player_rating.tb_clutch = update_tb_clutch(
-            player_rating.tb_clutch, tb_won, tb_played
+            player_rating.tb_clutch, tb_won, tb_played, k_style_player
         )
+
+        # Overall clutch = average of serve, return, tb clutch
+        player_rating.overall_clutch = (
+            player_rating.serve_clutch +
+            player_rating.return_clutch +
+            player_rating.tb_clutch
+        ) / 3
 
         # Indoor adjustment
         indoor = row.get("indoor", False)
         if indoor:
             player_rating.indoor_adj = update_indoor_adj(
-                player_rating.indoor_adj, won
+                player_rating.indoor_adj, won, k_style_player
             )
 
         # --- Opponent style updates (mirror columns) ---
 
         opp_svc_first_serve_pts_won = row.get("opp_svc_first_serve_pts_won")
         opp_ace_rate = None
-        if (opp_svc_aces is not None
-                and opp_svc_first_serve_pts_won
-                and opp_svc_first_serve_pts_won > 0):
+        if opp_svc_aces is not None and opp_svc_first_serve_pts_won and opp_svc_first_serve_pts_won > 0:
             opp_ace_rate = opp_svc_aces / opp_svc_first_serve_pts_won
         opp_rating.first_serve_power = update_first_serve_power(
-            opp_rating.first_serve_power, opp_ace_rate, surface
+            opp_rating.first_serve_power, opp_ace_rate, surface, k_style_opp
         )
 
         opp_svc_double_faults = row.get("opp_svc_double_faults")
         opp_svc_second_serve_pts_played = row.get("opp_svc_second_serve_pts_played")
         opp_reliability = None
-        if (opp_svc_double_faults is not None
-                and opp_svc_second_serve_pts_played
-                and opp_svc_second_serve_pts_played > 0):
-            opp_reliability = (
-                1 - opp_svc_double_faults / opp_svc_second_serve_pts_played
-            )
+        if opp_svc_double_faults is not None and opp_svc_second_serve_pts_played and opp_svc_second_serve_pts_played > 0:
+            opp_reliability = 1 - (opp_svc_double_faults / opp_svc_second_serve_pts_played)
         opp_rating.second_serve_reliability = update_second_serve_reliability(
-            opp_rating.second_serve_reliability, opp_reliability, surface
+            opp_rating.second_serve_reliability, opp_reliability, surface, k_style_opp
         )
 
         opp_ret_first_serve_pts_played = row.get("opp_ret_first_serve_pts_played")
@@ -396,7 +445,7 @@ def compute_elo_ratings(df: pl.DataFrame) -> pl.DataFrame:
             if opp_ret_lost > 0:
                 opp_ace_resistance_val = 1 - (svc_aces / opp_ret_lost)
         opp_rating.ace_resistance = update_ace_resistance(
-            opp_rating.ace_resistance, opp_ace_resistance_val, surface
+            opp_rating.ace_resistance, opp_ace_resistance_val, surface, k_style_opp
         )
 
         opp_svc_bp_saved = row.get("opp_svc_bp_saved")
@@ -405,38 +454,41 @@ def compute_elo_ratings(df: pl.DataFrame) -> pl.DataFrame:
         if opp_svc_bp_saved is not None and opp_svc_bp_faced and opp_svc_bp_faced > 0:
             opp_save_rate = opp_svc_bp_saved / opp_svc_bp_faced
         opp_rating.serve_clutch = update_serve_clutch(
-            opp_rating.serve_clutch, opp_save_rate, surface
+            opp_rating.serve_clutch, opp_save_rate, surface, k_style_opp
         )
 
         opp_ret_bp_converted = row.get("opp_ret_bp_converted")
         opp_ret_bp_opportunities = row.get("opp_ret_bp_opportunities")
         opp_conversion_rate = None
-        if (opp_ret_bp_converted is not None
-                and opp_ret_bp_opportunities
-                and opp_ret_bp_opportunities > 0):
+        if opp_ret_bp_converted is not None and opp_ret_bp_opportunities and opp_ret_bp_opportunities > 0:
             opp_conversion_rate = opp_ret_bp_converted / opp_ret_bp_opportunities
         opp_rating.return_clutch = update_return_clutch(
-            opp_rating.return_clutch, opp_conversion_rate, surface
+            opp_rating.return_clutch, opp_conversion_rate, surface, k_style_opp
         )
 
         opp_tb_won = tb_played - tb_won
         opp_rating.tb_clutch = update_tb_clutch(
-            opp_rating.tb_clutch, opp_tb_won, tb_played
+            opp_rating.tb_clutch, opp_tb_won, tb_played, k_style_opp
         )
+
+        opp_rating.overall_clutch = (
+            opp_rating.serve_clutch +
+            opp_rating.return_clutch +
+            opp_rating.tb_clutch
+        ) / 3
 
         if indoor:
             opp_rating.indoor_adj = update_indoor_adj(
-                opp_rating.indoor_adj, not won
+                opp_rating.indoor_adj, not won, k_style_opp
             )
 
         # Mean reversion — counteract inflation from player turnover
-        # Scaled by RD: uncertain players revert more, established players barely
-        for r in (player_rating, opp_rating):
-            reversion = REVERSION_RATE * (r.rd / DEFAULT_RD)
-            r.elo += reversion * (DEFAULT_ELO - r.elo)
-            r.hard_adj *= 1 - reversion
-            r.clay_adj *= 1 - reversion
-            r.grass_adj *= 1 - reversion
+        player_rating.elo += REVERSION_RATE * (DEFAULT_ELO - player_rating.elo)
+        opp_rating.elo += REVERSION_RATE * (DEFAULT_ELO - opp_rating.elo)
+
+        for attr in ("hard_adj", "clay_adj", "grass_adj"):
+            setattr(player_rating, attr, getattr(player_rating, attr) * (1 - REVERSION_RATE))
+            setattr(opp_rating, attr, getattr(opp_rating, attr) * (1 - REVERSION_RATE))
 
         # Update RD (decreases after match)
         player_rating.rd = update_rd(player_rating.rd)
@@ -458,9 +510,8 @@ def compute_elo_ratings(df: pl.DataFrame) -> pl.DataFrame:
         df = df.with_columns(pl.Series(name=col_name, values=values))
 
     logger.info(
-        "Computed Elo for %d players across %d unique matches (%d rows)",
+        "Computed Elo for %d players across %d matches",
         len(ratings),
         len(processed_matches),
-        len(df),
     )
     return df
