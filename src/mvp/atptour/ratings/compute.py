@@ -31,10 +31,28 @@ from mvp.atptour.elo.ratings import (
     update_surface_adj,
     update_tb_clutch,
 )
+from mvp.atptour.glicko.constants import TAU
+from mvp.atptour.glicko.ratings import (
+    GlickoRating,
+    apply_glicko_inactivity,
+    glicko2_update,
+    glicko2_update_surface,
+)
 
 logger = logging.getLogger(__name__)
 
-ALL_RATING_COLUMNS = ELO_COLUMNS
+GLICKO_COLUMNS = [
+    "player_glicko_mu", "player_glicko_rd", "player_glicko_sigma",
+    "player_glicko_hard_adj", "player_glicko_hard_rd", "player_glicko_hard_sigma",
+    "player_glicko_clay_adj", "player_glicko_clay_rd", "player_glicko_clay_sigma",
+    "player_glicko_grass_adj", "player_glicko_grass_rd", "player_glicko_grass_sigma",
+    "opp_glicko_mu", "opp_glicko_rd", "opp_glicko_sigma",
+    "opp_glicko_hard_adj", "opp_glicko_hard_rd", "opp_glicko_hard_sigma",
+    "opp_glicko_clay_adj", "opp_glicko_clay_rd", "opp_glicko_clay_sigma",
+    "opp_glicko_grass_adj", "opp_glicko_grass_rd", "opp_glicko_grass_sigma",
+]
+
+ALL_RATING_COLUMNS = ELO_COLUMNS + GLICKO_COLUMNS
 
 
 def _capture_elo_values(rating: PlayerRating) -> dict[str, float]:
@@ -63,15 +81,38 @@ def _capture_elo_values(rating: PlayerRating) -> dict[str, float]:
     }
 
 
+def _capture_glicko_values(rating: GlickoRating) -> dict[str, float]:
+    """Capture current Glicko-2 rating values for caching/output."""
+    return {
+        "glicko_mu": rating.mu,
+        "glicko_rd": rating.rd,
+        "glicko_sigma": rating.sigma,
+        "glicko_hard_adj": rating.hard_adj,
+        "glicko_hard_rd": rating.hard_rd,
+        "glicko_hard_sigma": rating.hard_sigma,
+        "glicko_clay_adj": rating.clay_adj,
+        "glicko_clay_rd": rating.clay_rd,
+        "glicko_clay_sigma": rating.clay_sigma,
+        "glicko_grass_adj": rating.grass_adj,
+        "glicko_grass_rd": rating.grass_rd,
+        "glicko_grass_sigma": rating.grass_sigma,
+    }
+
+
 def _append_ratings_to_output(
     output: dict[str, list],
     elo_player: dict[str, float],
     elo_opp: dict[str, float],
+    glicko_player: dict[str, float],
+    glicko_opp: dict[str, float],
 ) -> None:
     """Append pre-match rating values to the output dict."""
     for key in elo_player:
         output[f"player_{key}"].append(elo_player[key])
         output[f"opp_{key}"].append(elo_opp[key])
+    for key in glicko_player:
+        output[f"player_{key}"].append(glicko_player[key])
+        output[f"opp_{key}"].append(glicko_opp[key])
 
 
 def _count_tiebreaks(row: dict) -> tuple[int, int]:
@@ -104,6 +145,7 @@ def compute_all_ratings(df: pl.DataFrame) -> pl.DataFrame:
     df = df.sort("effective_match_date")
 
     elo_ratings: dict[str, PlayerRating] = {}
+    glicko_ratings: dict[str, GlickoRating] = {}
     output: dict[str, list[float | None]] = {col: [] for col in ALL_RATING_COLUMNS}
     processed_matches: set[str] = set()
     # Cache pre-match ratings for each match_uid to handle both rows consistently
@@ -132,9 +174,11 @@ def compute_all_ratings(df: pl.DataFrame) -> pl.DataFrame:
         if player_id not in elo_ratings:
             ranking = row.get("player_rank")
             elo_ratings[player_id] = initialize_player(ranking)
+            glicko_ratings[player_id] = GlickoRating()
         if opp_id not in elo_ratings:
             opp_ranking = row.get("opp_rank")
             elo_ratings[opp_id] = initialize_player(opp_ranking)
+            glicko_ratings[opp_id] = GlickoRating()
 
         player_rating = elo_ratings[player_id]
         opp_rating = elo_ratings[opp_id]
@@ -142,7 +186,13 @@ def compute_all_ratings(df: pl.DataFrame) -> pl.DataFrame:
         # Check if this match was already processed (second row of same match)
         if match_uid in match_ratings_cache:
             cached = match_ratings_cache.pop(match_uid)
-            _append_ratings_to_output(output, cached[player_id], cached[opp_id])
+            p_cached = cached[player_id]
+            o_cached = cached[opp_id]
+            _append_ratings_to_output(
+                output,
+                p_cached["elo"], o_cached["elo"],
+                p_cached["glicko"], o_cached["glicko"],
+            )
             continue
 
         # First row for this match - apply inactivity and cache pre-match values
@@ -166,13 +216,41 @@ def compute_all_ratings(df: pl.DataFrame) -> pl.DataFrame:
                 opp_rating.return_rd, opp_rating.last_match_date, match_date
             )
 
+        # Glicko-2 inactivity
+        glicko_p = glicko_ratings[player_id]
+        glicko_o = glicko_ratings[opp_id]
+
+        if isinstance(match_date, date):
+            glicko_p.rd = apply_glicko_inactivity(
+                glicko_p.rd, glicko_p.sigma, glicko_p.last_match_date, match_date
+            )
+            glicko_o.rd = apply_glicko_inactivity(
+                glicko_o.rd, glicko_o.sigma, glicko_o.last_match_date, match_date
+            )
+            for surf in ("hard", "clay", "grass"):
+                for r in (glicko_p, glicko_o):
+                    setattr(r, f"{surf}_rd", apply_glicko_inactivity(
+                        getattr(r, f"{surf}_rd"),
+                        getattr(r, f"{surf}_sigma"),
+                        getattr(r, f"last_{surf}_date"),
+                        match_date,
+                    ))
+
         # Cache pre-match values for both players
         elo_player = _capture_elo_values(player_rating)
         elo_opp = _capture_elo_values(opp_rating)
-        match_ratings_cache[match_uid] = {player_id: elo_player, opp_id: elo_opp}
+        glicko_p_vals = _capture_glicko_values(glicko_p)
+        glicko_o_vals = _capture_glicko_values(glicko_o)
+
+        match_ratings_cache[match_uid] = {
+            player_id: {"elo": elo_player, "glicko": glicko_p_vals},
+            opp_id: {"elo": elo_opp, "glicko": glicko_o_vals},
+        }
 
         # Record PRE-MATCH values
-        _append_ratings_to_output(output, elo_player, elo_opp)
+        _append_ratings_to_output(
+            output, elo_player, elo_opp, glicko_p_vals, glicko_o_vals,
+        )
 
         # Mark as processed and update ratings
         processed_matches.add(match_uid)
@@ -409,7 +487,65 @@ def compute_all_ratings(df: pl.DataFrame) -> pl.DataFrame:
         opp_rating.serve_rd = update_rd(opp_rating.serve_rd)
         opp_rating.return_rd = update_rd(opp_rating.return_rd)
 
-        # Update metadata
+        # === GLICKO-2 UPDATES ===
+        # Snapshot pre-update values (both use pre-match state)
+        pre_p_mu, pre_p_rd = glicko_p.mu, glicko_p.rd
+        pre_p_sigma = glicko_p.sigma
+        pre_o_mu, pre_o_rd = glicko_o.mu, glicko_o.rd
+        pre_o_sigma = glicko_o.sigma
+
+        # Base rating update
+        glicko_p.mu, glicko_p.rd, glicko_p.sigma = glicko2_update(
+            pre_p_mu, pre_p_rd, pre_p_sigma,
+            pre_o_mu, pre_o_rd, won, TAU,
+        )
+        glicko_o.mu, glicko_o.rd, glicko_o.sigma = glicko2_update(
+            pre_o_mu, pre_o_rd, pre_o_sigma,
+            pre_p_mu, pre_p_rd, not won, TAU,
+        )
+
+        # Surface adjustment update
+        if surface in ("Hard", "Clay", "Grass"):
+            surf_lower = surface.lower()
+            adj_attr = f"{surf_lower}_adj"
+            rd_attr = f"{surf_lower}_rd"
+            sigma_attr = f"{surf_lower}_sigma"
+            date_attr = f"last_{surf_lower}_date"
+
+            new_adj, new_rd, new_sigma = glicko2_update_surface(
+                getattr(glicko_p, adj_attr),
+                getattr(glicko_p, rd_attr),
+                getattr(glicko_p, sigma_attr),
+                pre_p_mu, pre_o_mu, pre_o_rd,
+                won, TAU,
+            )
+            setattr(glicko_p, adj_attr, new_adj)
+            setattr(glicko_p, rd_attr, new_rd)
+            setattr(glicko_p, sigma_attr, new_sigma)
+
+            o_new_adj, o_new_rd, o_new_sigma = glicko2_update_surface(
+                getattr(glicko_o, adj_attr),
+                getattr(glicko_o, rd_attr),
+                getattr(glicko_o, sigma_attr),
+                pre_o_mu, pre_p_mu, pre_p_rd,
+                not won, TAU,
+            )
+            setattr(glicko_o, adj_attr, o_new_adj)
+            setattr(glicko_o, rd_attr, o_new_rd)
+            setattr(glicko_o, sigma_attr, o_new_sigma)
+
+            if isinstance(match_date, date):
+                setattr(glicko_p, date_attr, match_date)
+                setattr(glicko_o, date_attr, match_date)
+
+        # Glicko metadata
+        glicko_p.match_count += 1
+        glicko_o.match_count += 1
+        if isinstance(match_date, date):
+            glicko_p.last_match_date = match_date
+            glicko_o.last_match_date = match_date
+
+        # Update Elo metadata
         player_rating.match_count += 1
         opp_rating.match_count += 1
         if isinstance(match_date, date):
