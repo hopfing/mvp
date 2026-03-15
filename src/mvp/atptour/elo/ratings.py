@@ -277,7 +277,6 @@ def update_first_serve_power(
     current_elo: float,
     ace_rate: float | None,
     surface: str,
-    k: float,
 ) -> float:
     """Update first serve power based on ace rate.
 
@@ -296,7 +295,6 @@ def update_second_serve_reliability(
     current_elo: float,
     reliability: float | None,
     surface: str,
-    k: float,
 ) -> float:
     """Update second serve reliability.
 
@@ -315,7 +313,6 @@ def update_ace_resistance(
     current_elo: float,
     resistance: float | None,
     surface: str,
-    k: float,
 ) -> float:
     """Update ace resistance based on opponent's ace rate against us.
 
@@ -334,7 +331,6 @@ def update_serve_clutch(
     current_elo: float,
     save_rate: float | None,
     surface: str,
-    k: float,
 ) -> float:
     """Update serve clutch based on break points saved.
 
@@ -353,7 +349,6 @@ def update_return_clutch(
     current_elo: float,
     conversion_rate: float | None,
     surface: str,
-    k: float,
 ) -> float:
     """Update return clutch based on break points converted.
 
@@ -372,7 +367,6 @@ def update_tb_clutch(
     current_elo: float,
     tb_won: int,
     tb_played: int,
-    k: float,
 ) -> float:
     """Update tiebreak clutch based on TB win rate.
 
@@ -389,7 +383,6 @@ def update_tb_clutch(
 def update_indoor_adj(
     current_adj: float,
     won: bool,
-    k: float,
 ) -> float:
     """Update indoor adjustment based on match result.
 

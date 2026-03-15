@@ -636,20 +636,20 @@ class TestUpdateFirstServePower:
         from mvp.atptour.elo.ratings import update_first_serve_power
 
         # 0.25 ace rate on Hard (baseline 0.176) should increase
-        new_elo = update_first_serve_power(1500.0, 0.25, "Hard", 16.0)
+        new_elo = update_first_serve_power(1500.0, 0.25, "Hard")
         assert new_elo > 1500.0
 
     def test_below_baseline_decreases(self):
         from mvp.atptour.elo.ratings import update_first_serve_power
 
         # 0.10 ace rate on Hard (baseline 0.176) should decrease
-        new_elo = update_first_serve_power(1500.0, 0.10, "Hard", 16.0)
+        new_elo = update_first_serve_power(1500.0, 0.10, "Hard")
         assert new_elo < 1500.0
 
     def test_missing_stats_unchanged(self):
         from mvp.atptour.elo.ratings import update_first_serve_power
 
-        new_elo = update_first_serve_power(1500.0, None, "Hard", 16.0)
+        new_elo = update_first_serve_power(1500.0, None, "Hard")
         assert new_elo == 1500.0
 
 
@@ -660,14 +660,14 @@ class TestUpdateSecondServeReliability:
         from mvp.atptour.elo.ratings import update_second_serve_reliability
 
         # 0.95 reliability on Hard (baseline 0.893) should increase
-        new_elo = update_second_serve_reliability(1500.0, 0.95, "Hard", 16.0)
+        new_elo = update_second_serve_reliability(1500.0, 0.95, "Hard")
         assert new_elo > 1500.0
 
     def test_below_baseline_decreases(self):
         from mvp.atptour.elo.ratings import update_second_serve_reliability
 
         # 0.85 reliability on Hard (baseline 0.893) should decrease
-        new_elo = update_second_serve_reliability(1500.0, 0.85, "Hard", 16.0)
+        new_elo = update_second_serve_reliability(1500.0, 0.85, "Hard")
         assert new_elo < 1500.0
 
 
@@ -678,20 +678,20 @@ class TestUpdateAceResistance:
         from mvp.atptour.elo.ratings import update_ace_resistance
 
         # 0.90 resistance on Hard (baseline 0.824) should increase
-        new_elo = update_ace_resistance(1500.0, 0.90, "Hard", 16.0)
+        new_elo = update_ace_resistance(1500.0, 0.90, "Hard")
         assert new_elo > 1500.0
 
     def test_below_baseline_decreases(self):
         from mvp.atptour.elo.ratings import update_ace_resistance
 
         # 0.75 resistance on Hard (baseline 0.824) should decrease
-        new_elo = update_ace_resistance(1500.0, 0.75, "Hard", 16.0)
+        new_elo = update_ace_resistance(1500.0, 0.75, "Hard")
         assert new_elo < 1500.0
 
     def test_missing_stats_unchanged(self):
         from mvp.atptour.elo.ratings import update_ace_resistance
 
-        new_elo = update_ace_resistance(1500.0, None, "Hard", 16.0)
+        new_elo = update_ace_resistance(1500.0, None, "Hard")
         assert new_elo == 1500.0
 
 
@@ -702,14 +702,14 @@ class TestUpdateServeClutch:
         from mvp.atptour.elo.ratings import update_serve_clutch
 
         # 0.70 save rate on Hard (baseline 0.597) should increase
-        new_elo = update_serve_clutch(1500.0, 0.70, "Hard", 16.0)
+        new_elo = update_serve_clutch(1500.0, 0.70, "Hard")
         assert new_elo > 1500.0
 
     def test_below_baseline_decreases(self):
         from mvp.atptour.elo.ratings import update_serve_clutch
 
         # 0.50 save rate on Hard (baseline 0.597) should decrease
-        new_elo = update_serve_clutch(1500.0, 0.50, "Hard", 16.0)
+        new_elo = update_serve_clutch(1500.0, 0.50, "Hard")
         assert new_elo < 1500.0
 
 
@@ -720,14 +720,14 @@ class TestUpdateReturnClutch:
         from mvp.atptour.elo.ratings import update_return_clutch
 
         # 0.50 conversion rate on Hard (baseline 0.404) should increase
-        new_elo = update_return_clutch(1500.0, 0.50, "Hard", 16.0)
+        new_elo = update_return_clutch(1500.0, 0.50, "Hard")
         assert new_elo > 1500.0
 
     def test_below_baseline_decreases(self):
         from mvp.atptour.elo.ratings import update_return_clutch
 
         # 0.30 conversion rate on Hard (baseline 0.404) should decrease
-        new_elo = update_return_clutch(1500.0, 0.30, "Hard", 16.0)
+        new_elo = update_return_clutch(1500.0, 0.30, "Hard")
         assert new_elo < 1500.0
 
 
@@ -738,21 +738,21 @@ class TestUpdateTbClutch:
         from mvp.atptour.elo.ratings import update_tb_clutch
 
         # Won 2 of 2 TBs (100%) vs baseline 50% should increase
-        new_elo = update_tb_clutch(1500.0, 2, 2, 16.0)
+        new_elo = update_tb_clutch(1500.0, 2, 2)
         assert new_elo > 1500.0
 
     def test_tb_loss_decreases(self):
         from mvp.atptour.elo.ratings import update_tb_clutch
 
         # Won 0 of 2 TBs (0%) vs baseline 50% should decrease
-        new_elo = update_tb_clutch(1500.0, 0, 2, 16.0)
+        new_elo = update_tb_clutch(1500.0, 0, 2)
         assert new_elo < 1500.0
 
     def test_no_tbs_unchanged(self):
         from mvp.atptour.elo.ratings import update_tb_clutch
 
         # No TBs played - unchanged
-        new_elo = update_tb_clutch(1500.0, 0, 0, 16.0)
+        new_elo = update_tb_clutch(1500.0, 0, 0)
         assert new_elo == 1500.0
 
 
@@ -762,13 +762,13 @@ class TestUpdateIndoorAdj:
     def test_indoor_win_increases(self):
         from mvp.atptour.elo.ratings import update_indoor_adj
 
-        new_adj = update_indoor_adj(0.0, won=True, k=16.0)
+        new_adj = update_indoor_adj(0.0, won=True)
         assert new_adj > 0.0
 
     def test_indoor_loss_decreases(self):
         from mvp.atptour.elo.ratings import update_indoor_adj
 
-        new_adj = update_indoor_adj(0.0, won=False, k=16.0)
+        new_adj = update_indoor_adj(0.0, won=False)
         assert new_adj < 0.0
 
 
@@ -818,7 +818,7 @@ class TestEMAConvergence:
 
         elo = DEFAULT_ELO
         for _ in range(200):
-            elo = update_first_serve_power(elo, 0.25, "Hard", 16.0)
+            elo = update_first_serve_power(elo, 0.25, "Hard")
         # Target = 1500 + (0.25 - 0.176) * 3000 = 1722
         assert abs(elo - 1722.0) < 0.01
 
@@ -827,7 +827,7 @@ class TestEMAConvergence:
 
         elo = DEFAULT_ELO
         for _ in range(200):
-            elo = update_tb_clutch(elo, 2, 3, 16.0)
+            elo = update_tb_clutch(elo, 2, 3)
         # Target = 1500 + (0.6667 - 0.50) * 3000 = 2000
         assert abs(elo - 2000.0) < 1.0
 
@@ -836,7 +836,7 @@ class TestEMAConvergence:
 
         adj = 0.0
         for _ in range(200):
-            adj = update_indoor_adj(adj, won=True, k=16.0)
+            adj = update_indoor_adj(adj, won=True)
         # Target = INDOOR_EMA_SCALE * 1.0 = 500.0
         assert abs(adj - 500.0) < 0.01
 
@@ -845,7 +845,7 @@ class TestEMAConvergence:
 
         adj = 0.0
         for _ in range(200):
-            adj = update_indoor_adj(adj, won=False, k=16.0)
+            adj = update_indoor_adj(adj, won=False)
         # Target = INDOOR_EMA_SCALE * -1.0 = -500.0
         assert abs(adj - (-500.0)) < 0.01
 
