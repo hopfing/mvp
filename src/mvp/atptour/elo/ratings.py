@@ -12,13 +12,13 @@ from mvp.atptour.elo.constants import (
     HIGH_RD_K_MULT,
     HIGH_RD_THRESHOLD,
     INDOOR_EMA_SCALE,
+    MAX_K,
     MAX_RD,
     MIN_RD,
     NEW_PLAYER_K_MULT,
     NEW_PLAYER_THRESHOLD,
     RD_DECAY_FACTOR,
     RD_GROWTH_PER_DAY,
-    RETURN_BASELINE,
     RETURN_CLUTCH_BASELINE,
     ROUND_IMPORTANCE,
     SECOND_SERVE_RELIABILITY_BASELINE,
@@ -29,7 +29,6 @@ from mvp.atptour.elo.constants import (
     SERVE_BASELINE,
     SERVE_CLUTCH_BASELINE,
     SERVE_RETURN_DEVIATION_SCALE,
-    SERVE_RETURN_SCALE,
     STYLE_SCALE,
     TB_CLUTCH_BASELINE,
     TOURNAMENT_IMPORTANCE,
@@ -56,10 +55,14 @@ class PlayerRating:
     serve_clutch: float = DEFAULT_ELO
     return_clutch: float = DEFAULT_ELO
     tb_clutch: float = DEFAULT_ELO
-    overall_clutch: float = DEFAULT_ELO
     indoor_adj: float = 0.0
     match_count: int = 0
     last_match_date: date | None = None
+
+    @property
+    def overall_clutch(self) -> float:
+        """Derived average of serve, return, and tiebreak clutch."""
+        return (self.serve_clutch + self.return_clutch + self.tb_clutch) / 3
 
     def get_surface_adj(self, surface: str) -> float:
         """Return surface adjustment for the given surface.
@@ -78,7 +81,11 @@ class PlayerRating:
         return self.elo + self.get_surface_adj(surface)
 
 
-def get_k_factor(player: PlayerRating, round_name: str, tournament_level: str = "250") -> float:
+def get_k_factor(
+    player: PlayerRating,
+    round_name: str,
+    tournament_level: str = "250",
+) -> float:
     """Calculate dynamic K-factor based on player state and match importance."""
     k = BASE_K
 
@@ -94,7 +101,7 @@ def get_k_factor(player: PlayerRating, round_name: str, tournament_level: str = 
     k *= ROUND_IMPORTANCE.get(round_name, 1.0)
     k *= TOURNAMENT_IMPORTANCE.get(tournament_level, 1.0)
 
-    return k
+    return min(k, MAX_K)
 
 
 def expected_score(player_elo: float, opponent_elo: float) -> float:
@@ -112,6 +119,15 @@ def normalize_serve_score(serve_pct: float, surface: str) -> float:
     return max(0.0, min(1.0, score))
 
 
+def _elo_delta(
+    player_elo: float, opponent_elo: float, won: bool, k: float
+) -> float:
+    """Compute Elo update delta: k * (outcome - expected)."""
+    expected = expected_score(player_elo, opponent_elo)
+    outcome = 1.0 if won else 0.0
+    return k * (outcome - expected)
+
+
 def update_elo(
     player_elo: float,
     player_effective_elo: float,
@@ -122,49 +138,23 @@ def update_elo(
     """Calculate new Elo after a match.
 
     Uses pre-computed effective Elos (base + surface adj) for expected score,
-    but applies the delta to the base Elo. Pure function — no mutable state.
-
-    Args:
-        player_elo: Player's base Elo (before match).
-        player_effective_elo: Player's effective Elo (base + surface adj).
-        opponent_effective_elo: Opponent's effective Elo (base + surface adj).
-        won: Whether the player won.
-        k: K-factor for this update.
-
-    Returns:
-        New base Elo value.
+    but applies the delta to the base Elo.
     """
-    expected = expected_score(player_effective_elo, opponent_effective_elo)
-    outcome = 1.0 if won else 0.0
-
-    return player_elo + k * (outcome - expected)
+    return player_elo + _elo_delta(player_effective_elo, opponent_effective_elo, won, k)
 
 
 def update_surface_adj(
     current_adj: float,
-    player_effective_elo: float,
-    opponent_effective_elo: float,
+    player_base_elo: float,
+    opponent_base_elo: float,
     won: bool,
     k: float,
 ) -> float:
     """Calculate new surface adjustment after a match.
 
-    Pure function — caller provides pre-computed effective Elos and current adj.
-
-    Args:
-        current_adj: Current surface adjustment value.
-        player_effective_elo: Player's effective Elo (base + surface adj).
-        opponent_effective_elo: Opponent's effective Elo (base + surface adj).
-        won: Whether the player won.
-        k: K-factor for this update.
-
-    Returns:
-        New surface adjustment value.
+    Uses base Elos (not effective) to avoid double-counting surface signal.
     """
-    expected = expected_score(player_effective_elo, opponent_effective_elo)
-    outcome = 1.0 if won else 0.0
-
-    return current_adj + k * (outcome - expected)
+    return current_adj + _elo_delta(player_base_elo, opponent_base_elo, won, k)
 
 
 def update_rd(current_rd: float) -> float:
@@ -215,29 +205,6 @@ def update_serve_elo(
     )
 
 
-def update_return_elo(
-    returner_return_elo: float,
-    server_serve_elo: float,
-    opp_serve_pct: float | None,
-    surface: str,
-    k: float,
-) -> tuple[float, float]:
-    """Update return and serve Elo for a return sub-game.
-
-    This is the returner's perspective of a serve sub-game. The opponent's
-    serve% is the input — low opp_serve_pct means the returner did well.
-
-    Returns:
-        Tuple of (new_returner_return_elo, new_server_serve_elo).
-    """
-    if opp_serve_pct is None:
-        return returner_return_elo, server_serve_elo
-
-    new_server, new_returner = update_serve_elo(
-        server_serve_elo, returner_return_elo, opp_serve_pct, surface, k
-    )
-    return new_returner, new_server
-
 
 def initialize_player(ranking: int | None) -> PlayerRating:
     """Initialize a new player's rating, optionally seeded from ranking.
@@ -250,34 +217,13 @@ def initialize_player(ranking: int | None) -> PlayerRating:
     else:
         elo = SEED_UNRANKED
 
-    return PlayerRating(
-        elo=elo,
-        rd=DEFAULT_RD,
-        hard_adj=0.0,
-        clay_adj=0.0,
-        grass_adj=0.0,
-        serve_elo=DEFAULT_ELO,
-        serve_rd=DEFAULT_RD,
-        return_elo=DEFAULT_ELO,
-        return_rd=DEFAULT_RD,
-        first_serve_power=DEFAULT_ELO,
-        second_serve_reliability=DEFAULT_ELO,
-        ace_resistance=DEFAULT_ELO,
-        serve_clutch=DEFAULT_ELO,
-        return_clutch=DEFAULT_ELO,
-        tb_clutch=DEFAULT_ELO,
-        overall_clutch=DEFAULT_ELO,
-        indoor_adj=0.0,
-        match_count=0,
-        last_match_date=None,
-    )
+    return PlayerRating(elo=elo)
 
 
 def update_first_serve_power(
     current_elo: float,
     ace_rate: float | None,
     surface: str,
-    k: float,
 ) -> float:
     """Update first serve power based on ace rate.
 
@@ -296,7 +242,6 @@ def update_second_serve_reliability(
     current_elo: float,
     reliability: float | None,
     surface: str,
-    k: float,
 ) -> float:
     """Update second serve reliability.
 
@@ -315,7 +260,6 @@ def update_ace_resistance(
     current_elo: float,
     resistance: float | None,
     surface: str,
-    k: float,
 ) -> float:
     """Update ace resistance based on opponent's ace rate against us.
 
@@ -334,7 +278,6 @@ def update_serve_clutch(
     current_elo: float,
     save_rate: float | None,
     surface: str,
-    k: float,
 ) -> float:
     """Update serve clutch based on break points saved.
 
@@ -353,7 +296,6 @@ def update_return_clutch(
     current_elo: float,
     conversion_rate: float | None,
     surface: str,
-    k: float,
 ) -> float:
     """Update return clutch based on break points converted.
 
@@ -372,7 +314,6 @@ def update_tb_clutch(
     current_elo: float,
     tb_won: int,
     tb_played: int,
-    k: float,
 ) -> float:
     """Update tiebreak clutch based on TB win rate.
 
@@ -389,7 +330,6 @@ def update_tb_clutch(
 def update_indoor_adj(
     current_adj: float,
     won: bool,
-    k: float,
 ) -> float:
     """Update indoor adjustment based on match result.
 
