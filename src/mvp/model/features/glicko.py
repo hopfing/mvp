@@ -9,24 +9,6 @@ import polars as pl
 from mvp.model.registry import feature
 
 
-def surface_glicko_expr(prefix: str) -> pl.Expr:
-    """Surface-adjusted Glicko mu for a player.
-
-    Args:
-        prefix: "player" or "opp"
-    """
-    return (
-        pl.col(f"{prefix}_glicko_mu")
-        + pl.when(pl.col("surface") == "Hard")
-        .then(pl.col(f"{prefix}_glicko_hard_adj"))
-        .when(pl.col("surface") == "Clay")
-        .then(pl.col(f"{prefix}_glicko_clay_adj"))
-        .when(pl.col("surface") == "Grass")
-        .then(pl.col(f"{prefix}_glicko_grass_adj"))
-        .otherwise(0.0)
-    )
-
-
 @feature(
     name="glicko_diff",
     description="Base Glicko-2 mu difference (player - opponent)",
@@ -34,15 +16,6 @@ def surface_glicko_expr(prefix: str) -> pl.Expr:
 )
 def glicko_diff() -> pl.Expr:
     return pl.col("player_glicko_mu") - pl.col("opp_glicko_mu")
-
-
-@feature(
-    name="glicko_surface_diff",
-    description="Surface-adjusted Glicko-2 mu difference",
-    mirror=False,
-)
-def glicko_surface_diff() -> pl.Expr:
-    return surface_glicko_expr("player") - surface_glicko_expr("opp")
 
 
 @feature(
@@ -75,7 +48,7 @@ def glicko_sigma_diff() -> pl.Expr:
 
 @feature(
     name="glicko_surface_rd_sum",
-    description="Surface-specific Glicko-2 RD sum",
+    description="Surface-specific Glicko-2 RD sum (surface uncertainty)",
     mirror=False,
     match_level=True,
 )
@@ -107,6 +80,6 @@ def glicko_surface_rd_sum() -> pl.Expr:
     mirror=False,
 )
 def glicko_diff_x_rd_sum() -> pl.Expr:
-    diff = surface_glicko_expr("player") - surface_glicko_expr("opp")
+    diff = pl.col("player_glicko_mu") - pl.col("opp_glicko_mu")
     rd_sum = pl.col("player_glicko_rd") + pl.col("opp_glicko_rd")
     return diff * rd_sum

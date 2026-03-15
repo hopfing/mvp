@@ -67,30 +67,10 @@ class TestGlickoColumnsPresent:
         df = _make_match_df()
         result = compute_all_ratings(df)
         expected_cols = [
-            "player_glicko_mu",
-            "player_glicko_rd",
-            "player_glicko_sigma",
-            "player_glicko_hard_adj",
-            "player_glicko_hard_rd",
-            "player_glicko_hard_sigma",
-            "player_glicko_clay_adj",
-            "player_glicko_clay_rd",
-            "player_glicko_clay_sigma",
-            "player_glicko_grass_adj",
-            "player_glicko_grass_rd",
-            "player_glicko_grass_sigma",
-            "opp_glicko_mu",
-            "opp_glicko_rd",
-            "opp_glicko_sigma",
-            "opp_glicko_hard_adj",
-            "opp_glicko_hard_rd",
-            "opp_glicko_hard_sigma",
-            "opp_glicko_clay_adj",
-            "opp_glicko_clay_rd",
-            "opp_glicko_clay_sigma",
-            "opp_glicko_grass_adj",
-            "opp_glicko_grass_rd",
-            "opp_glicko_grass_sigma",
+            "player_glicko_mu", "player_glicko_rd", "player_glicko_sigma",
+            "player_glicko_hard_rd", "player_glicko_clay_rd", "player_glicko_grass_rd",
+            "opp_glicko_mu", "opp_glicko_rd", "opp_glicko_sigma",
+            "opp_glicko_hard_rd", "opp_glicko_clay_rd", "opp_glicko_grass_rd",
         ]
         for col in expected_cols:
             assert col in result.columns, f"Missing column: {col}"

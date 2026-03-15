@@ -35,21 +35,17 @@ from mvp.atptour.glicko.constants import TAU
 from mvp.atptour.glicko.ratings import (
     GlickoRating,
     apply_glicko_inactivity,
+    decay_glicko_rd,
     glicko2_update,
-    glicko2_update_surface,
 )
 
 logger = logging.getLogger(__name__)
 
 GLICKO_COLUMNS = [
     "player_glicko_mu", "player_glicko_rd", "player_glicko_sigma",
-    "player_glicko_hard_adj", "player_glicko_hard_rd", "player_glicko_hard_sigma",
-    "player_glicko_clay_adj", "player_glicko_clay_rd", "player_glicko_clay_sigma",
-    "player_glicko_grass_adj", "player_glicko_grass_rd", "player_glicko_grass_sigma",
+    "player_glicko_hard_rd", "player_glicko_clay_rd", "player_glicko_grass_rd",
     "opp_glicko_mu", "opp_glicko_rd", "opp_glicko_sigma",
-    "opp_glicko_hard_adj", "opp_glicko_hard_rd", "opp_glicko_hard_sigma",
-    "opp_glicko_clay_adj", "opp_glicko_clay_rd", "opp_glicko_clay_sigma",
-    "opp_glicko_grass_adj", "opp_glicko_grass_rd", "opp_glicko_grass_sigma",
+    "opp_glicko_hard_rd", "opp_glicko_clay_rd", "opp_glicko_grass_rd",
 ]
 
 ALL_RATING_COLUMNS = ELO_COLUMNS + GLICKO_COLUMNS
@@ -87,15 +83,9 @@ def _capture_glicko_values(rating: GlickoRating) -> dict[str, float]:
         "glicko_mu": rating.mu,
         "glicko_rd": rating.rd,
         "glicko_sigma": rating.sigma,
-        "glicko_hard_adj": rating.hard_adj,
         "glicko_hard_rd": rating.hard_rd,
-        "glicko_hard_sigma": rating.hard_sigma,
-        "glicko_clay_adj": rating.clay_adj,
         "glicko_clay_rd": rating.clay_rd,
-        "glicko_clay_sigma": rating.clay_sigma,
-        "glicko_grass_adj": rating.grass_adj,
         "glicko_grass_rd": rating.grass_rd,
-        "glicko_grass_sigma": rating.grass_sigma,
     }
 
 
@@ -227,11 +217,12 @@ def compute_all_ratings(df: pl.DataFrame) -> pl.DataFrame:
             glicko_o.rd = apply_glicko_inactivity(
                 glicko_o.rd, glicko_o.sigma, glicko_o.last_match_date, match_date
             )
+            # Surface RD grows with inactivity using base sigma
             for surf in ("hard", "clay", "grass"):
                 for r in (glicko_p, glicko_o):
                     setattr(r, f"{surf}_rd", apply_glicko_inactivity(
                         getattr(r, f"{surf}_rd"),
-                        getattr(r, f"{surf}_sigma"),
+                        r.sigma,
                         getattr(r, f"last_{surf}_date"),
                         match_date,
                     ))
@@ -516,35 +507,14 @@ def compute_all_ratings(df: pl.DataFrame) -> pl.DataFrame:
             pre_p_mu, pre_p_rd, not won, TAU,
         )
 
-        # Surface adjustment update
+        # Surface RD decay — playing on a surface reduces uncertainty
         if surface in ("Hard", "Clay", "Grass"):
             surf_lower = surface.lower()
-            adj_attr = f"{surf_lower}_adj"
             rd_attr = f"{surf_lower}_rd"
-            sigma_attr = f"{surf_lower}_sigma"
             date_attr = f"last_{surf_lower}_date"
 
-            new_adj, new_rd, new_sigma = glicko2_update_surface(
-                getattr(glicko_p, adj_attr),
-                getattr(glicko_p, rd_attr),
-                getattr(glicko_p, sigma_attr),
-                pre_p_mu, pre_o_mu, pre_o_rd,
-                won, TAU,
-            )
-            setattr(glicko_p, adj_attr, new_adj)
-            setattr(glicko_p, rd_attr, new_rd)
-            setattr(glicko_p, sigma_attr, new_sigma)
-
-            o_new_adj, o_new_rd, o_new_sigma = glicko2_update_surface(
-                getattr(glicko_o, adj_attr),
-                getattr(glicko_o, rd_attr),
-                getattr(glicko_o, sigma_attr),
-                pre_o_mu, pre_p_mu, pre_p_rd,
-                not won, TAU,
-            )
-            setattr(glicko_o, adj_attr, o_new_adj)
-            setattr(glicko_o, rd_attr, o_new_rd)
-            setattr(glicko_o, sigma_attr, o_new_sigma)
+            setattr(glicko_p, rd_attr, decay_glicko_rd(getattr(glicko_p, rd_attr)))
+            setattr(glicko_o, rd_attr, decay_glicko_rd(getattr(glicko_o, rd_attr)))
 
             if isinstance(match_date, date):
                 setattr(glicko_p, date_attr, match_date)

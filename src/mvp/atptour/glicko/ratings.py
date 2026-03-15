@@ -23,15 +23,9 @@ class GlickoRating:
     rd: float = INITIAL_RD
     sigma: float = INITIAL_SIGMA
 
-    hard_adj: float = 0.0
     hard_rd: float = INITIAL_RD
-    hard_sigma: float = INITIAL_SIGMA
-    clay_adj: float = 0.0
     clay_rd: float = INITIAL_RD
-    clay_sigma: float = INITIAL_SIGMA
-    grass_adj: float = 0.0
     grass_rd: float = INITIAL_RD
-    grass_sigma: float = INITIAL_SIGMA
 
     match_count: int = 0
     last_match_date: date | None = None
@@ -39,17 +33,13 @@ class GlickoRating:
     last_clay_date: date | None = None
     last_grass_date: date | None = None
 
-    def get_surface_adj(self, surface: str) -> float:
-        """Return surface adjustment for the given surface."""
+    def get_surface_rd(self, surface: str) -> float:
+        """Return surface RD for the given surface."""
         return {
-            "Hard": self.hard_adj,
-            "Clay": self.clay_adj,
-            "Grass": self.grass_adj,
-        }.get(surface, 0.0)
-
-    def effective_surface_mu(self, surface: str) -> float:
-        """Return mu plus surface adjustment."""
-        return self.mu + self.get_surface_adj(surface)
+            "Hard": self.hard_rd,
+            "Clay": self.clay_rd,
+            "Grass": self.grass_rd,
+        }.get(surface, self.rd)
 
 
 def to_glicko2(mu: float, rd: float) -> tuple[float, float]:
@@ -181,56 +171,12 @@ def glicko2_update(
     return final_mu, final_rd, new_sigma
 
 
-def glicko2_update_surface(
-    adj: float,
-    adj_rd: float,
-    adj_sigma: float,
-    player_mu: float,
-    opp_mu: float,
-    opp_rd: float,
-    won: bool,
-    tau: float,
-) -> tuple[float, float, float]:
-    """Glicko-2 update for a surface adjustment dimension.
+def decay_glicko_rd(rd: float, factor: float = 0.95) -> float:
+    """Decay RD after a match (we learned something about this dimension).
 
-    Uses base mus for expected score to avoid double-counting.
-    The adjustment has its own RD and sigma.
-
-    Returns (new_adj, new_adj_rd, new_adj_sigma).
+    Simple multiplicative decay, same concept as Elo's update_rd.
     """
-    # Convert base mus to Glicko-2 scale for expected score
-    mu_p, _ = to_glicko2(player_mu, 0.0)
-    mu_o, phi_o = to_glicko2(opp_mu, opp_rd)
-
-    # Adjustment RD in Glicko-2 scale
-    phi_adj = adj_rd / SCALE
-
-    # Expected score from base mus
-    g_val = g(phi_o)
-    e_val = expected_score(mu_p, mu_o, phi_o)
-
-    # Estimated variance
-    v = 1.0 / (g_val**2 * e_val * (1.0 - e_val))
-
-    outcome = 1.0 if won else 0.0
-    delta = v * g_val * (outcome - e_val)
-
-    # New sigma for the adjustment
-    new_sigma = _compute_new_sigma(adj_sigma, phi_adj, v, delta, tau)
-
-    # phi_star and phi_new for the adjustment
-    phi_star = math.sqrt(phi_adj**2 + new_sigma**2)
-    phi_new = 1.0 / math.sqrt(1.0 / phi_star**2 + 1.0 / v)
-
-    # Update adjustment (centered at 0, not 1500)
-    adj_g2 = adj / SCALE
-    new_adj_g2 = adj_g2 + phi_new**2 * g_val * (outcome - e_val)
-
-    new_adj = new_adj_g2 * SCALE
-    new_adj_rd = phi_new * SCALE
-    new_adj_rd = max(MIN_RD, min(MAX_RD, new_adj_rd))
-
-    return new_adj, new_adj_rd, new_sigma
+    return max(MIN_RD, rd * factor)
 
 
 def apply_glicko_inactivity(

@@ -15,11 +15,11 @@ from mvp.atptour.glicko.constants import (
 from mvp.atptour.glicko.ratings import (
     GlickoRating,
     apply_glicko_inactivity,
+    decay_glicko_rd,
     expected_score,
     from_glicko2,
     g,
     glicko2_update,
-    glicko2_update_surface,
     to_glicko2,
 )
 
@@ -33,24 +33,17 @@ class TestGlickoRatingDefaults:
         assert r.match_count == 0
         assert r.last_match_date is None
 
-    def test_surface_defaults(self):
+    def test_surface_rd_defaults(self):
         r = GlickoRating()
-        assert r.hard_adj == 0.0
         assert r.hard_rd == INITIAL_RD
-        assert r.hard_sigma == INITIAL_SIGMA
-        assert r.clay_adj == 0.0
-        assert r.grass_adj == 0.0
+        assert r.clay_rd == INITIAL_RD
+        assert r.grass_rd == INITIAL_RD
 
-    def test_get_surface_adj(self):
-        r = GlickoRating(hard_adj=50.0, clay_adj=-30.0)
-        assert r.get_surface_adj("Hard") == 50.0
-        assert r.get_surface_adj("Clay") == -30.0
-        assert r.get_surface_adj("Carpet") == 0.0
-
-    def test_effective_surface_mu(self):
-        r = GlickoRating(mu=1600.0, hard_adj=50.0)
-        assert r.effective_surface_mu("Hard") == 1650.0
-        assert r.effective_surface_mu("Carpet") == 1600.0
+    def test_get_surface_rd(self):
+        r = GlickoRating(hard_rd=100.0, clay_rd=200.0)
+        assert r.get_surface_rd("Hard") == 100.0
+        assert r.get_surface_rd("Clay") == 200.0
+        assert r.get_surface_rd("Carpet") == r.rd
 
 
 class TestScaleConversion:
@@ -166,12 +159,7 @@ class TestGlicko2Update:
         assert (high_rd_mu - 1500.0) > (low_rd_mu - 1500.0)
 
     def test_reference_values(self):
-        """Verify exact output against known-correct Glicko-2 computation.
-
-        For a symmetric match (1500/200 vs 1500/200), the Glicko-2 math gives
-        phi=200/173.7178=1.1513, g(phi)=0.8443, E=0.5, v=5.6116, delta=2.3689.
-        After the Illinois step and scale conversion, new_mu≈1578.8 and new_rd≈180.1.
-        """
+        """Verify exact output against known-correct Glicko-2 computation."""
         new_mu, new_rd, new_sigma = glicko2_update(
             1500.0, 200.0, 0.06, 1500.0, 200.0, True, TAU
         )
@@ -180,47 +168,15 @@ class TestGlicko2Update:
         assert new_sigma == pytest.approx(0.06, abs=0.005)
 
 
-class TestGlicko2UpdateSurface:
-    def test_winner_adj_increases(self):
-        """Winning on surface should increase surface adjustment."""
-        new_adj, _, _ = glicko2_update_surface(
-            adj=0.0, adj_rd=200.0, adj_sigma=0.06,
-            player_mu=1500.0, opp_mu=1500.0, opp_rd=200.0,
-            won=True, tau=TAU,
-        )
-        assert new_adj > 0.0
+class TestDecayGlickoRd:
+    def test_rd_decreases(self):
+        assert decay_glicko_rd(200.0) < 200.0
 
-    def test_loser_adj_decreases(self):
-        new_adj, _, _ = glicko2_update_surface(
-            adj=0.0, adj_rd=200.0, adj_sigma=0.06,
-            player_mu=1500.0, opp_mu=1500.0, opp_rd=200.0,
-            won=False, tau=TAU,
-        )
-        assert new_adj < 0.0
+    def test_respects_min_rd(self):
+        assert decay_glicko_rd(MIN_RD) == MIN_RD
 
-    def test_adj_rd_decreases(self):
-        """Surface RD should decrease after a match."""
-        _, new_rd, _ = glicko2_update_surface(
-            adj=0.0, adj_rd=200.0, adj_sigma=0.06,
-            player_mu=1500.0, opp_mu=1500.0, opp_rd=200.0,
-            won=True, tau=TAU,
-        )
-        assert new_rd < 200.0
-
-    def test_uses_base_mu_not_effective(self):
-        """Expected score should be based on base mus, not effective mus."""
-        adj1, _, _ = glicko2_update_surface(
-            adj=0.0, adj_rd=200.0, adj_sigma=0.06,
-            player_mu=1600.0, opp_mu=1400.0, opp_rd=200.0,
-            won=True, tau=TAU,
-        )
-        adj2, _, _ = glicko2_update_surface(
-            adj=100.0, adj_rd=200.0, adj_sigma=0.06,
-            player_mu=1600.0, opp_mu=1400.0, opp_rd=200.0,
-            won=True, tau=TAU,
-        )
-        assert adj1 > 0.0
-        assert (adj2 - 100.0) == pytest.approx(adj1, abs=1e-6)
+    def test_custom_factor(self):
+        assert decay_glicko_rd(200.0, factor=0.9) == pytest.approx(180.0)
 
 
 class TestGlickoInactivity:
