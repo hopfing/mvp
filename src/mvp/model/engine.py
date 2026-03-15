@@ -204,12 +204,17 @@ class FeatureEngine:
         """Compute a hash of all feature function source code.
 
         Detects when feature implementations change so cached values
-        from old code are not served.
+        from old code are not served.  Falls back to bytecode if source
+        files changed on disk after import (inspect.getsource fails).
         """
         sources = []
         for name in sorted(self._registry.list_features()):
             feat = self._registry.get(name)
-            sources.append(f"{name}:{inspect.getsource(feat.func)}")
+            try:
+                sig = inspect.getsource(feat.func)
+            except OSError:
+                sig = feat.func.__code__.co_code.hex()
+            sources.append(f"{name}:{sig}")
         return hashlib.md5("\n".join(sources).encode()).hexdigest()
 
     def _compute_cache_key(self) -> str:
