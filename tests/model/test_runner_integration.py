@@ -53,6 +53,7 @@ class TestRunnerIntegration:
                     "won": won,
                     "player_rankings_points": 1000 - player_rank * 4,
                     "opp_rankings_points": 1000 - opp_rank * 4,
+                    "circuit": "tour",
                 }
             )
 
@@ -66,6 +67,7 @@ class TestRunnerIntegration:
                     "won": not won,
                     "player_rankings_points": 1000 - opp_rank * 4,
                     "opp_rankings_points": 1000 - player_rank * 4,
+                    "circuit": "tour",
                 }
             )
 

@@ -43,6 +43,7 @@ def sample_matches(tmp_path: Path) -> Path:
             "opp_rankings_points": rng.randint(100, 2000, n).tolist(),
             "player_rank": rng.randint(1, 200, n).tolist(),
             "opp_rank": rng.randint(1, 200, n).tolist(),
+            "circuit": ["tour" for _ in range(n)],
         }
     ).with_columns(pl.col("effective_match_date").str.to_datetime())
     path = tmp_path / "matches.parquet"

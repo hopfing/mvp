@@ -18,9 +18,11 @@ from mvp.model.calibration import PlattCalibrator
 from mvp.model.config import EnsembleParams, ExperimentConfig, apply_filters, get_filter_feature_specs
 from mvp.model.diagnostics import Diagnostics, EnsembleDiagnostics
 from mvp.model.engine import FeatureEngine, get_feature_columns
+from mvp.model.imputation import apply_imputation, build_impute_specs, fit_imputation
 from mvp.model.metrics import compute_calibration_error, compute_metrics
 from mvp.model.mlflow_logger import ExperimentLogger
 from mvp.model.models import EnsembleModel, get_model
+from mvp.model.registry import get_registry
 from mvp.model.splitters import BaseSplitter, make_splitter
 
 
@@ -262,6 +264,9 @@ class ExperimentRunner:
         if not feature_cols:
             raise ValueError("No feature columns found after computing features")
 
+        # Build per-feature imputation specs from registry declarations
+        impute_specs = build_impute_specs(feature_specs, get_registry())
+
         # Get splitter
         splitter = self._get_splitter()
         run_logger.info(
@@ -334,15 +339,19 @@ class ExperimentRunner:
                 ).to_numpy()
                 y_test = test_df[target_col].to_numpy().astype(int)
 
-                # Median-impute NaN for models that can't handle them natively.
-                # LogisticModel has its own NaN handling (nanmean/nanstd + nan_to_num)
-                # and XGBoost handles NaN natively. Pre-imputing for these models
-                # creates fake signal when a feature is mostly NaN in early folds.
-                if self.config.model.type not in ("logistic", "xgboost"):
-                    medians = np.nanmedian(X_train, axis=0)
-                    medians = np.where(np.isnan(medians), 0.0, medians)
-                    X_train = np.where(np.isnan(X_train), medians, X_train)
-                    X_test = np.where(np.isnan(X_test), medians, X_test)
+                # Impute NaN using per-feature strategy with circuit-stratified medians
+                circuit_train = train_df["circuit"].to_numpy()
+                circuit_test = test_df["circuit"].to_numpy()
+                impute_state = fit_imputation(X_train, circuit_train, impute_specs)
+                X_train = apply_imputation(X_train, circuit_train, impute_state)
+                X_test = apply_imputation(X_test, circuit_test, impute_state)
+
+                # Z-score scale (logistic needs it; tree models are invariant)
+                train_mean = X_train.mean(axis=0)
+                train_std = X_train.std(axis=0)
+                train_std[train_std == 0] = 1.0
+                X_train = (X_train - train_mean) / train_std
+                X_test = (X_test - train_mean) / train_std
 
                 # Build per-model training data for ensemble date/filter differences
                 per_model_data = None
@@ -366,8 +375,9 @@ class ExperimentRunner:
                                 pl.col(c).cast(pl.Float64) for c in feature_cols
                             ).to_numpy()
                             y_m = model_train_df[target_col].to_numpy().astype(int)
-                            # No median imputation — base models (logistic, xgboost)
-                            # handle NaN natively. See main imputation comment above.
+                            circuit_m = model_train_df["circuit"].to_numpy()
+                            X_m = apply_imputation(X_m, circuit_m, impute_state)
+                            X_m = (X_m - train_mean) / train_std
                             per_model_data.append((X_m, y_m))
                         else:
                             per_model_data.append(None)

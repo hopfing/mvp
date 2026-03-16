@@ -39,6 +39,7 @@ class TestExperimentRunner:
                 "won": [i % 2 == 0 for i in range(200)],
                 "player_rankings_points": [1000 - i for i in range(200)],
                 "opp_rankings_points": [500 + i for i in range(200)],
+                "circuit": ["tour" for _ in range(200)],
             }
         ).with_columns(pl.col("effective_match_date").str.to_datetime())
         path = tmp_path / "matches.parquet"
