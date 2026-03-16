@@ -8,6 +8,7 @@ which registers the features via decorators.
 from mvp.model.features import (
     context,
     elo,
+    fitness,
     form,
     glicko,
     h2h,
@@ -31,6 +32,7 @@ __all__ = [
     "get_registry",
     "context",
     "elo",
+    "fitness",
     "form",
     "glicko",
     "h2h",

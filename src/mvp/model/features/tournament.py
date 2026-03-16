@@ -135,6 +135,30 @@ def tourn_matches_won() -> pl.Expr:
     return _tourn_cumulative(pl.col("won").cast(pl.Int64))
 
 
+# Cross-draw-type workload: counts ALL matches (singles + doubles + qualifying)
+TOURN_WORKLOAD_GROUP = ["player_id", "tournament_id", "year"]
+
+
+@feature(
+    name="tourn_matches_played",
+    params=[],
+    description="Total matches played at this tournament (all draw types incl. doubles)",
+    mirror=True,
+    impute=0,
+)
+def tourn_matches_played() -> pl.Expr:
+    """Workload signal: counts singles, doubles, and qualifying matches."""
+    return (
+        pl.col(DATE_COL)
+        .is_not_null()
+        .cast(pl.Int64)
+        .cum_sum()
+        .shift(1)
+        .over(TOURN_WORKLOAD_GROUP, order_by=DATE_COL)
+        .fill_null(0)
+    )
+
+
 # --- Derived diff features ---
 
 
@@ -220,3 +244,15 @@ def tourn_games_margin_diff() -> pl.Expr:
 )
 def tourn_matches_won_diff() -> pl.Expr:
     return pl.col("player_tourn_matches_won") - pl.col("opp_tourn_matches_won")
+
+
+@feature(
+    name="tourn_matches_played_diff",
+    params=[],
+    description="Player - opponent total matches played at tournament (all draw types)",
+    depends_on=["tourn_matches_played"],
+    mirror=False,
+    impute=0,
+)
+def tourn_matches_played_diff() -> pl.Expr:
+    return pl.col("player_tourn_matches_played") - pl.col("opp_tourn_matches_played")

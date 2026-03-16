@@ -223,4 +223,4 @@ class TestTournamentFeatureCount:
     def test_total_count(self):
         registry = get_registry()
         tourn = [n for n in registry.list_features() if n.startswith("tourn_")]
-        assert len(tourn) == 14, f"Expected 14 tournament features, got {len(tourn)}: {sorted(tourn)}"
+        assert len(tourn) == 16, f"Expected 16 tournament features, got {len(tourn)}: {sorted(tourn)}"
