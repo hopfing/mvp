@@ -37,6 +37,7 @@ def win_pct(days: int | None = None) -> pl.Expr:
     params=["days"],
     description="Number of matches played (windowed or all-time)",
     mirror=True,
+    impute=0,
 )
 def matches_played(days: int | None = None) -> pl.Expr:
     """Number of matches played in past N days, or all-time if days is None.

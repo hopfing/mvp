@@ -43,6 +43,7 @@ def ranking_rank_diff() -> pl.Expr:
     params=[],
     description="Ratio of player rank to opponent rank",
     mirror=False,
+    impute=1.0,
 )
 def ranking_ratio() -> pl.Expr:
     """Ratio of rankings (player_rank / opp_rank).
@@ -57,6 +58,7 @@ def ranking_ratio() -> pl.Expr:
     params=["cap"],
     description="Ranking ratio capped at specified value (reduces outlier influence)",
     mirror=False,
+    impute=1.0,
 )
 def ranking_ratio_capped(cap: float = 3.0) -> pl.Expr:
     """Ranking ratio capped symmetrically at [1/cap, cap]."""

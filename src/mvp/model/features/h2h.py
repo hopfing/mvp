@@ -17,6 +17,7 @@ from mvp.model.registry import feature
     params=["days"],
     description="Wins against specific opponent (windowed or all-time)",
     mirror=True,
+    impute=0,
 )
 def h2h_wins(days: int | None = None) -> pl.Expr:
     """Wins against specific opponent.
@@ -39,6 +40,7 @@ def h2h_wins(days: int | None = None) -> pl.Expr:
     params=["days"],
     description="Win percentage against specific opponent (windowed or all-time)",
     mirror=True,
+    impute=0.5,
 )
 def h2h_win_pct(days: int | None = None) -> pl.Expr:
     """Win percentage against specific opponent."""
@@ -71,6 +73,7 @@ def h2h_wins_diff(days: int | None = None) -> pl.Expr:
     params=["days"],
     description="Wins against opponent on current surface (windowed or all-time)",
     mirror=True,
+    impute=0,
 )
 def h2h_surface_wins(days: int | None = None) -> pl.Expr:
     """Wins against specific opponent on current surface."""
@@ -85,6 +88,7 @@ def h2h_surface_wins(days: int | None = None) -> pl.Expr:
     params=["days"],
     description="Win pct against opponent on current surface (windowed or all-time)",
     mirror=True,
+    impute=0.5,
 )
 def h2h_surface_win_pct(days: int | None = None) -> pl.Expr:
     """Win percentage against opponent on current surface."""

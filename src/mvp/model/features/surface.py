@@ -35,6 +35,7 @@ def surface_win_pct(days: int | None = None) -> pl.Expr:
     params=["days"],
     description="Matches played on current surface (windowed or all-time)",
     mirror=True,
+    impute=0,
 )
 def surface_matches(days: int | None = None) -> pl.Expr:
     """Number of matches played on the current match's surface."""

@@ -127,6 +127,7 @@ def is_seeded() -> pl.Expr:
     params=[],
     description="Player seed minus opponent seed (lower seed is better)",
     mirror=False,
+    impute=0,
 )
 def seed_diff() -> pl.Expr:
     """Seed difference (negative = player has better seed)."""

@@ -53,6 +53,7 @@ def _cumulative_ratio(numerator: pl.Expr, denominator: pl.Expr) -> pl.Expr:
     params=["days"],
     description="Tiebreak win percentage (windowed or all-time)",
     mirror=True,
+    impute=0.5,
 )
 def tiebreak_win_pct(days: int | None = None) -> pl.Expr:
     """Percentage of tiebreaks won."""
@@ -100,6 +101,7 @@ def tiebreak_pct(days: int | None = None) -> pl.Expr:
     params=["days"],
     description="Total tiebreaks played (windowed or all-time)",
     mirror=True,
+    impute=0,
 )
 def tiebreaks_played(days: int | None = None) -> pl.Expr:
     """Volume of tiebreaks played."""
@@ -134,6 +136,7 @@ def deciding_set_pct(days: int | None = None) -> pl.Expr:
     params=["days"],
     description="Win percentage in deciding sets (windowed or all-time)",
     mirror=True,
+    impute=0.5,
 )
 def deciding_set_win_pct(days: int | None = None) -> pl.Expr:
     """Win percentage when match goes to deciding set."""

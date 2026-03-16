@@ -12,6 +12,7 @@ from mvp.model.registry import feature
     params=["days"],
     description="Matches played in rolling window (activity/fatigue indicator)",
     mirror=True,
+    impute=0,
 )
 def match_count(days: int | None = None) -> pl.Expr:
     """Number of matches in a rolling window.
