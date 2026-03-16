@@ -60,6 +60,7 @@ def h2h_win_pct(days: int | None = None) -> pl.Expr:
     description="H2H wins difference (player - opponent)",
     depends_on=["h2h_wins"],
     mirror=False,
+    impute=0,
 )
 def h2h_wins_diff(days: int | None = None) -> pl.Expr:
     """H2H wins difference between player and opponent."""

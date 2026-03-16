@@ -472,6 +472,7 @@ def _register_diff(base_name: str) -> None:
         description=f"{base_name} difference (player - opponent)",
         depends_on=[base_name],
         mirror=False,
+        impute=0,
     )
     def _diff(days: int | None = None, _bn: str = base_name) -> pl.Expr:
         if days is None:
@@ -570,6 +571,7 @@ def _register_matchup(
         description=description,
         depends_on=[dep1, dep2],
         mirror=False,
+        impute=0,
     )
     def _matchup(
         days: int | None = None, _pc: str = player_col, _oc: str = opp_col

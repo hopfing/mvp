@@ -59,6 +59,7 @@ def matches_played(days: int | None = None) -> pl.Expr:
     description="Difference between player and opponent win percentage",
     depends_on=["win_pct"],
     mirror=False,
+    impute=0,
 )
 def win_pct_diff(days: int | None = None) -> pl.Expr:
     """Difference between player and opponent win percentage.

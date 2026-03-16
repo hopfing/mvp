@@ -13,6 +13,7 @@ from mvp.model.registry import feature
     name="glicko_diff",
     description="Base Glicko-2 mu difference (player - opponent)",
     mirror=False,
+    impute=0,
 )
 def glicko_diff() -> pl.Expr:
     return pl.col("player_glicko_mu") - pl.col("opp_glicko_mu")
@@ -32,6 +33,7 @@ def glicko_rd_sum() -> pl.Expr:
     name="glicko_rd_diff",
     description="Glicko-2 RD difference (asymmetric uncertainty)",
     mirror=False,
+    impute=0,
 )
 def glicko_rd_diff() -> pl.Expr:
     return pl.col("player_glicko_rd") - pl.col("opp_glicko_rd")
@@ -41,6 +43,7 @@ def glicko_rd_diff() -> pl.Expr:
     name="glicko_sigma_diff",
     description="Glicko-2 volatility difference (erratic vs consistent)",
     mirror=False,
+    impute=0,
 )
 def glicko_sigma_diff() -> pl.Expr:
     return pl.col("player_glicko_sigma") - pl.col("opp_glicko_sigma")
@@ -78,6 +81,7 @@ def glicko_surface_rd_sum() -> pl.Expr:
     name="glicko_diff_x_rd_sum",
     description="Glicko diff weighted by combined uncertainty",
     mirror=False,
+    impute=0,
 )
 def glicko_diff_x_rd_sum() -> pl.Expr:
     diff = pl.col("player_glicko_mu") - pl.col("opp_glicko_mu")

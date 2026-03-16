@@ -51,6 +51,7 @@ def surface_matches(days: int | None = None) -> pl.Expr:
     description="Difference in surface win percentage (player - opponent)",
     depends_on=["surface_win_pct"],
     mirror=False,
+    impute=0,
 )
 def surface_win_pct_diff(days: int | None = None) -> pl.Expr:
     """Difference between player and opponent surface win percentage."""

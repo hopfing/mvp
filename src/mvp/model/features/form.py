@@ -32,6 +32,7 @@ def match_count(days: int | None = None) -> pl.Expr:
     description="Match count difference (player - opponent)",
     depends_on=["match_count"],
     mirror=False,
+    impute=0,
 )
 def match_count_diff(days: int | None = None) -> pl.Expr:
     """Activity difference between player and opponent."""

@@ -102,6 +102,7 @@ def svc_rating(days: int | None = None) -> pl.Expr:
     description="First serve win pct difference (player - opponent)",
     depends_on=["svc_first_serve_win_pct"],
     mirror=False,
+    impute=0,
 )
 def svc_first_serve_win_pct_diff(days: int | None = None) -> pl.Expr:
     """First serve win percentage difference."""
@@ -119,6 +120,7 @@ def svc_first_serve_win_pct_diff(days: int | None = None) -> pl.Expr:
     description="Second serve win pct difference (player - opponent)",
     depends_on=["svc_second_serve_win_pct"],
     mirror=False,
+    impute=0,
 )
 def svc_second_serve_win_pct_diff(days: int | None = None) -> pl.Expr:
     """Second serve win percentage difference."""
@@ -136,6 +138,7 @@ def svc_second_serve_win_pct_diff(days: int | None = None) -> pl.Expr:
     description="Ace percentage difference (player - opponent)",
     depends_on=["svc_ace_pct"],
     mirror=False,
+    impute=0,
 )
 def svc_ace_pct_diff(days: int | None = None) -> pl.Expr:
     """Ace percentage difference."""
@@ -150,6 +153,7 @@ def svc_ace_pct_diff(days: int | None = None) -> pl.Expr:
     description="Double fault percentage difference (player - opponent)",
     depends_on=["svc_df_pct"],
     mirror=False,
+    impute=0,
 )
 def svc_df_pct_diff(days: int | None = None) -> pl.Expr:
     """Double fault percentage difference."""
@@ -164,6 +168,7 @@ def svc_df_pct_diff(days: int | None = None) -> pl.Expr:
     description="Break point save percentage difference (player - opponent)",
     depends_on=["svc_bp_save_pct"],
     mirror=False,
+    impute=0,
 )
 def svc_bp_save_pct_diff(days: int | None = None) -> pl.Expr:
     """Break point save percentage difference."""
@@ -178,6 +183,7 @@ def svc_bp_save_pct_diff(days: int | None = None) -> pl.Expr:
     description="First serve in percentage difference (player - opponent)",
     depends_on=["svc_first_serve_in_pct"],
     mirror=False,
+    impute=0,
 )
 def svc_first_serve_in_pct_diff(days: int | None = None) -> pl.Expr:
     """First serve in percentage difference."""
@@ -195,6 +201,7 @@ def svc_first_serve_in_pct_diff(days: int | None = None) -> pl.Expr:
     description="ATP serve rating difference (player - opponent)",
     depends_on=["svc_rating"],
     mirror=False,
+    impute=0,
 )
 def svc_rating_diff(days: int | None = None) -> pl.Expr:
     """ATP serve rating difference."""
@@ -214,6 +221,7 @@ def svc_rating_diff(days: int | None = None) -> pl.Expr:
     description="Player first serve win % minus opponent first return win %",
     depends_on=["svc_first_serve_win_pct", "ret_first_serve_win_pct"],
     mirror=False,
+    impute=0,
 )
 def svc_first_serve_win_pct_matchup(days: int | None = None) -> pl.Expr:
     """Player's first serve vs opponent's first serve return."""
@@ -231,6 +239,7 @@ def svc_first_serve_win_pct_matchup(days: int | None = None) -> pl.Expr:
     description="Player second serve win % minus opponent second return win %",
     depends_on=["svc_second_serve_win_pct", "ret_second_serve_win_pct"],
     mirror=False,
+    impute=0,
 )
 def svc_second_serve_win_pct_matchup(days: int | None = None) -> pl.Expr:
     """Player's second serve vs opponent's second serve return."""
@@ -248,6 +257,7 @@ def svc_second_serve_win_pct_matchup(days: int | None = None) -> pl.Expr:
     description="Player BP save % minus opponent BP convert %",
     depends_on=["svc_bp_save_pct", "ret_bp_convert_pct"],
     mirror=False,
+    impute=0,
 )
 def svc_bp_pct_matchup(days: int | None = None) -> pl.Expr:
     """Player's clutch serving vs opponent's clutch returning."""

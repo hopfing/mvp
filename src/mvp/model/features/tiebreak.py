@@ -68,6 +68,7 @@ def tiebreak_win_pct(days: int | None = None) -> pl.Expr:
     description="Player tiebreak win pct minus opponent tiebreak win pct",
     depends_on=["tiebreak_win_pct"],
     mirror=False,
+    impute=0,
 )
 def tiebreak_win_pct_diff(days: int | None = None) -> pl.Expr:
     """Tiebreak win percentage difference."""
@@ -153,6 +154,7 @@ def deciding_set_win_pct(days: int | None = None) -> pl.Expr:
     description="Player deciding set win pct minus opponent deciding set win pct",
     depends_on=["deciding_set_win_pct"],
     mirror=False,
+    impute=0,
 )
 def deciding_set_win_pct_diff(days: int | None = None) -> pl.Expr:
     """Deciding set win percentage difference."""

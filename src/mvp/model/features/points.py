@@ -56,6 +56,7 @@ def pts_return_won_pct(days: int | None = None) -> pl.Expr:
     description="Total points won pct difference (player - opponent)",
     depends_on=["pts_total_won_pct"],
     mirror=False,
+    impute=0,
 )
 def pts_total_won_pct_diff(days: int | None = None) -> pl.Expr:
     """Total points won percentage difference."""
@@ -70,6 +71,7 @@ def pts_total_won_pct_diff(days: int | None = None) -> pl.Expr:
     description="Service points won pct difference (player - opponent)",
     depends_on=["pts_service_won_pct"],
     mirror=False,
+    impute=0,
 )
 def pts_service_won_pct_diff(days: int | None = None) -> pl.Expr:
     """Service points won percentage difference."""
@@ -87,6 +89,7 @@ def pts_service_won_pct_diff(days: int | None = None) -> pl.Expr:
     description="Return points won pct difference (player - opponent)",
     depends_on=["pts_return_won_pct"],
     mirror=False,
+    impute=0,
 )
 def pts_return_won_pct_diff(days: int | None = None) -> pl.Expr:
     """Return points won percentage difference."""
@@ -109,6 +112,7 @@ def pts_return_won_pct_diff(days: int | None = None) -> pl.Expr:
     description="Player service pts % minus opponent return pts % (serve advantage)",
     depends_on=["pts_service_won_pct", "pts_return_won_pct"],
     mirror=False,
+    impute=0,
 )
 def svc_pts_won_pct_matchup(days: int | None = None) -> pl.Expr:
     """Player's serve strength vs opponent's return strength.
@@ -129,6 +133,7 @@ def svc_pts_won_pct_matchup(days: int | None = None) -> pl.Expr:
     description="Player return pts % minus opponent service pts % (return advantage)",
     depends_on=["pts_service_won_pct", "pts_return_won_pct"],
     mirror=False,
+    impute=0,
 )
 def ret_pts_won_pct_matchup(days: int | None = None) -> pl.Expr:
     """Player's return strength vs opponent's serve strength.

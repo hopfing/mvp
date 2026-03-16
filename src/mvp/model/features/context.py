@@ -31,6 +31,7 @@ def venue_win_pct(days: int | None = None) -> pl.Expr:
     description="Player venue win pct minus opponent venue win pct",
     depends_on=["venue_win_pct"],
     mirror=False,
+    impute=0,
 )
 def venue_win_pct_diff(days: int | None = None) -> pl.Expr:
     """Venue win percentage difference (indoor/outdoor)."""
@@ -63,6 +64,7 @@ def circuit_win_pct(days: int | None = None) -> pl.Expr:
     description="Player circuit win pct minus opponent circuit win pct",
     depends_on=["circuit_win_pct"],
     mirror=False,
+    impute=0,
 )
 def circuit_win_pct_diff(days: int | None = None) -> pl.Expr:
     """Circuit win percentage difference."""
@@ -103,6 +105,7 @@ def tour_match_pct(days: int | None = None) -> pl.Expr:
     description="Player tour match pct minus opponent tour match pct",
     depends_on=["tour_match_pct"],
     mirror=False,
+    impute=0,
 )
 def tour_match_pct_diff(days: int | None = None) -> pl.Expr:
     """Tour match percentage difference between player and opponent."""
@@ -139,6 +142,7 @@ def seed_diff() -> pl.Expr:
     params=[],
     description="1 if both players seeded, 0 otherwise",
     mirror=False,
+    impute=0,
 )
 def both_seeded() -> pl.Expr:
     """Whether both players are seeded."""
@@ -152,6 +156,7 @@ def both_seeded() -> pl.Expr:
     params=[],
     description="1 if neither player seeded, 0 otherwise",
     mirror=False,
+    impute=0,
 )
 def neither_seeded() -> pl.Expr:
     """Whether neither player is seeded."""

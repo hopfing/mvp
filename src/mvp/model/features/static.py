@@ -11,6 +11,7 @@ from mvp.model.registry import feature
     params=[],
     description="Player height minus opponent height in cm",
     mirror=False,
+    impute=0,
 )
 def height_diff() -> pl.Expr:
     """Height difference in cm (positive = player taller)."""
@@ -39,6 +40,7 @@ def age() -> pl.Expr:
     description="Player age minus opponent age in years",
     depends_on=["age"],
     mirror=False,
+    impute=0,
 )
 def age_diff() -> pl.Expr:
     """Age difference (positive = player older)."""
@@ -64,6 +66,7 @@ def years_pro() -> pl.Expr:
     description="Player years pro minus opponent years pro",
     depends_on=["years_pro"],
     mirror=False,
+    impute=0,
 )
 def experience_diff() -> pl.Expr:
     """Experience difference (positive = player more experienced)."""
@@ -75,6 +78,7 @@ def experience_diff() -> pl.Expr:
     params=[],
     description="1 if player is right-handed, 0 if left-handed",
     mirror=True,
+    impute=0,
 )
 def is_right_handed() -> pl.Expr:
     """Right-handed indicator."""
@@ -86,6 +90,7 @@ def is_right_handed() -> pl.Expr:
     params=[],
     description="1 if same handedness, 0 if different",
     mirror=False,
+    impute=0,
 )
 def handedness_match() -> pl.Expr:
     """Whether players have same handedness."""
@@ -99,6 +104,7 @@ def handedness_match() -> pl.Expr:
     params=[],
     description="1 if player is lefty facing righty, -1 if righty facing lefty, 0 if same",
     mirror=False,
+    impute=0,
 )
 def lefty_vs_righty() -> pl.Expr:
     """Handedness matchup indicator."""

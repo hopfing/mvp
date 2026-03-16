@@ -80,6 +80,7 @@ def elo_min() -> pl.Expr:
     description="Interaction: surface Elo diff × average Elo level",
     mirror=False,
     match_level=True,
+    impute=0,
 )
 def elo_diff_x_elo_avg() -> pl.Expr:
     """Interaction between Elo difference and absolute level.
@@ -98,6 +99,7 @@ def elo_diff_x_elo_avg() -> pl.Expr:
     description="Interaction: surface Elo diff × combined rating deviation",
     mirror=False,
     match_level=True,
+    impute=0,
 )
 def elo_diff_x_rd_sum() -> pl.Expr:
     """Interaction between Elo difference and rating uncertainty.
@@ -115,6 +117,7 @@ def elo_diff_x_rd_sum() -> pl.Expr:
     params=[],
     description="Overall Elo difference (player - opponent)",
     mirror=False,
+    impute=0,
 )
 def elo_diff() -> pl.Expr:
     """Overall Elo rating difference."""
@@ -126,6 +129,7 @@ def elo_diff() -> pl.Expr:
     params=[],
     description="Surface-adjusted Elo difference",
     mirror=False,
+    impute=0,
 )
 def elo_surface_diff() -> pl.Expr:
     """Surface-adjusted Elo difference."""
@@ -137,6 +141,7 @@ def elo_surface_diff() -> pl.Expr:
     params=[],
     description="Serve Elo difference (player - opponent)",
     mirror=False,
+    impute=0,
 )
 def svc_elo_diff() -> pl.Expr:
     """Serve Elo rating difference."""
@@ -148,6 +153,7 @@ def svc_elo_diff() -> pl.Expr:
     params=[],
     description="Return Elo difference (player - opponent)",
     mirror=False,
+    impute=0,
 )
 def ret_elo_diff() -> pl.Expr:
     """Return Elo rating difference."""
@@ -159,6 +165,7 @@ def ret_elo_diff() -> pl.Expr:
     params=[],
     description="Player serve Elo vs opponent return Elo (direct matchup)",
     mirror=False,
+    impute=0,
 )
 def svc_elo_matchup() -> pl.Expr:
     """Player's serving ability vs opponent's returning ability.
@@ -173,6 +180,7 @@ def svc_elo_matchup() -> pl.Expr:
     params=[],
     description="Player return Elo vs opponent serve Elo (direct matchup)",
     mirror=False,
+    impute=0,
 )
 def ret_elo_matchup() -> pl.Expr:
     """Player's returning ability vs opponent's serving ability.
@@ -202,6 +210,7 @@ def elo_rd_sum() -> pl.Expr:
     params=[],
     description="Uncertainty in serve vs return matchup",
     mirror=False,
+    impute=0,
 )
 def svc_elo_matchup_rd() -> pl.Expr:
     """Uncertainty in the serve vs return matchup.
@@ -216,6 +225,7 @@ def svc_elo_matchup_rd() -> pl.Expr:
     params=[],
     description="Uncertainty in return vs serve matchup",
     mirror=False,
+    impute=0,
 )
 def ret_elo_matchup_rd() -> pl.Expr:
     """Uncertainty in the return vs serve matchup.
@@ -281,6 +291,7 @@ def elo_surface_consistency() -> pl.Expr:
     params=[],
     description="First serve power difference (player - opponent)",
     mirror=False,
+    impute=0,
 )
 def svc_first_serve_power_diff() -> pl.Expr:
     """First serve power difference."""
@@ -292,6 +303,7 @@ def svc_first_serve_power_diff() -> pl.Expr:
     params=[],
     description="Second serve reliability difference (player - opponent)",
     mirror=False,
+    impute=0,
 )
 def svc_second_serve_reliability_diff() -> pl.Expr:
     """Second serve reliability difference."""
@@ -303,6 +315,7 @@ def svc_second_serve_reliability_diff() -> pl.Expr:
     params=[],
     description="Ace resistance difference (player - opponent)",
     mirror=False,
+    impute=0,
 )
 def ret_ace_resistance_diff() -> pl.Expr:
     """Ace resistance difference."""
@@ -314,6 +327,7 @@ def ret_ace_resistance_diff() -> pl.Expr:
     params=[],
     description="Serve clutch difference (player - opponent)",
     mirror=False,
+    impute=0,
 )
 def svc_clutch_diff() -> pl.Expr:
     """Serve clutch (BP save rate) difference."""
@@ -325,6 +339,7 @@ def svc_clutch_diff() -> pl.Expr:
     params=[],
     description="Return clutch difference (player - opponent)",
     mirror=False,
+    impute=0,
 )
 def ret_clutch_diff() -> pl.Expr:
     """Return clutch (BP conversion) difference."""
@@ -336,6 +351,7 @@ def ret_clutch_diff() -> pl.Expr:
     params=[],
     description="Tiebreak clutch difference (player - opponent)",
     mirror=False,
+    impute=0,
 )
 def elo_tb_clutch_diff() -> pl.Expr:
     """Tiebreak clutch difference."""
@@ -347,6 +363,7 @@ def elo_tb_clutch_diff() -> pl.Expr:
     params=[],
     description="Overall clutch difference (player - opponent)",
     mirror=False,
+    impute=0,
 )
 def elo_clutch_diff() -> pl.Expr:
     """Overall clutch difference."""
@@ -358,6 +375,7 @@ def elo_clutch_diff() -> pl.Expr:
     params=[],
     description="Indoor adjustment difference (player - opponent)",
     mirror=False,
+    impute=0,
 )
 def elo_indoor_adj_diff() -> pl.Expr:
     """Indoor venue adjustment difference."""
@@ -374,6 +392,7 @@ def elo_indoor_adj_diff() -> pl.Expr:
     params=[],
     description="Player first serve power vs opponent ace resistance",
     mirror=False,
+    impute=0,
 )
 def svc_first_serve_power_matchup() -> pl.Expr:
     """Player's first serve power vs opponent's ace resistance.
@@ -388,6 +407,7 @@ def svc_first_serve_power_matchup() -> pl.Expr:
     params=[],
     description="Player serve clutch vs opponent return clutch",
     mirror=False,
+    impute=0,
 )
 def svc_clutch_matchup() -> pl.Expr:
     """Player's BP save ability vs opponent's BP conversion ability.
@@ -402,6 +422,7 @@ def svc_clutch_matchup() -> pl.Expr:
     params=[],
     description="Player return clutch vs opponent serve clutch",
     mirror=False,
+    impute=0,
 )
 def ret_clutch_matchup() -> pl.Expr:
     """Player's BP conversion ability vs opponent's BP save ability.
