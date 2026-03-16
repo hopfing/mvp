@@ -17,7 +17,9 @@ from mvp.model.confidence.dimensions import MODIFIERS
 from mvp.model.config import EnsembleParams, ExperimentConfig, apply_filters, get_filter_feature_specs
 from mvp.model.engine import FeatureEngine, get_feature_columns
 from mvp.model.features.elo import surface_elo_expr
+from mvp.model.imputation import apply_imputation, build_impute_specs, fit_imputation
 from mvp.model.models import EnsembleModel, get_model
+from mvp.model.registry import get_registry
 
 logger = logging.getLogger(__name__)
 
@@ -151,10 +153,17 @@ class ProductionPredictor:
 
         logger.info("Training on %d rows with %d features", len(y), len(feature_cols))
 
-        # Median imputation (fallback to 0 for all-NaN columns)
-        medians = np.nanmedian(X, axis=0)
-        medians = np.where(np.isnan(medians), 0.0, medians)
-        X = np.where(np.isnan(X), medians, X)
+        # Impute using per-feature strategy with circuit-stratified medians
+        circuit = df["circuit"].to_numpy()
+        impute_specs = build_impute_specs(feature_specs, get_registry())
+        impute_state = fit_imputation(X, circuit, impute_specs)
+        X = apply_imputation(X, circuit, impute_state)
+
+        # Z-score scale
+        scaler_mean = X.mean(axis=0)
+        scaler_std = X.std(axis=0)
+        scaler_std[scaler_std == 0] = 1.0
+        X = (X - scaler_mean) / scaler_std
 
         # Train
         model = get_model(config.model.type, config.model.params or {})
@@ -189,9 +198,12 @@ class ProductionPredictor:
         joblib.dump(
             {
                 "model": model,
-                "medians": medians,
+                "impute_state": impute_state,
+                "scaler": {"mean": scaler_mean, "std": scaler_std},
                 "feature_cols": feature_cols,
                 "calibrator": calibrator,
+                # Backward compat: keep medians for old code paths
+                "medians": impute_state.global_medians,
             },
             artifact_path,
         )
@@ -207,11 +219,11 @@ class ProductionPredictor:
         """Train production model on all matching data and save artifact."""
         self._train_single(self.config["active"])
 
-    def load(self) -> tuple[Any, np.ndarray, list[str], PlattCalibrator | None]:
+    def load(self) -> dict[str, Any]:
         """Load the trained production model.
 
         Returns:
-            Tuple of (model, medians, feature_cols, calibrator).
+            Dict with model artifact contents.
 
         Raises:
             FileNotFoundError: If no trained artifact exists.
@@ -223,21 +235,16 @@ class ProductionPredictor:
             )
 
         artifact = joblib.load(artifact_path)
-        calibrator = artifact.get("calibrator")
-        if calibrator is None:
+        if artifact.get("calibrator") is None:
             logger.warning("No calibrator in artifact — predictions will be uncalibrated")
-        return artifact["model"], artifact["medians"], artifact["feature_cols"], calibrator
+        return artifact
 
-    def _load_single(
-        self, entry: dict
-    ) -> tuple[Any, np.ndarray, list[str], PlattCalibrator | None]:
+    def _load_single(self, entry: dict) -> dict[str, Any]:
         """Load a trained model artifact from an entry dict."""
         artifact_path = Path(entry["artifact"])
         if not artifact_path.exists():
             raise FileNotFoundError(f"No trained model at {artifact_path}")
-        artifact = joblib.load(artifact_path)
-        calibrator = artifact.get("calibrator")
-        return artifact["model"], artifact["medians"], artifact["feature_cols"], calibrator
+        return joblib.load(artifact_path)
 
     def _predict_raw(
         self,
@@ -255,7 +262,10 @@ class ProductionPredictor:
 
         Returns {match_uid: p1_win_prob}.
         """
-        model, medians, feature_cols, calibrator = self._load_single(entry)
+        artifact = self._load_single(entry)
+        model = artifact["model"]
+        feature_cols = artifact["feature_cols"]
+        calibrator = artifact.get("calibrator")
         config, feature_specs, _ = self._resolve_entry_features(entry)
         engine = FeatureEngine(
             matches_path=self.matches_path, cache_dir=self.cache_dir
@@ -324,7 +334,15 @@ class ProductionPredictor:
         X = canonical.select(
             pl.col(c).cast(pl.Float64) for c in feature_cols
         ).to_numpy()
-        X = np.where(np.isnan(X), medians, X)
+        circuit_arr = canonical["circuit"].to_numpy()
+        if "impute_state" in artifact:
+            X = apply_imputation(X, circuit_arr, artifact["impute_state"])
+            scaler = artifact["scaler"]
+            X = (X - scaler["mean"]) / scaler["std"]
+        else:
+            # Backward compat: old artifact without impute_state
+            medians = artifact["medians"]
+            X = np.where(np.isnan(X), medians, X)
         probs = model.predict_proba(X)
         if calibrator is not None:
             probs = calibrator.transform(probs)
@@ -437,7 +455,10 @@ class ProductionPredictor:
         Returns:
             DataFrame with one row per match, containing prediction columns.
         """
-        model, medians, feature_cols, calibrator = self.load()
+        artifact = self.load()
+        model = artifact["model"]
+        feature_cols = artifact["feature_cols"]
+        calibrator = artifact.get("calibrator")
         config = self._experiment_config
         engine = FeatureEngine(
             matches_path=self.matches_path, cache_dir=self.cache_dir
@@ -484,7 +505,15 @@ class ProductionPredictor:
         X = pending.select(
             pl.col(c).cast(pl.Float64) for c in feature_cols
         ).to_numpy()
-        X = np.where(np.isnan(X), medians, X)
+        circuit_arr = pending["circuit"].to_numpy()
+        if "impute_state" in artifact:
+            X = apply_imputation(X, circuit_arr, artifact["impute_state"])
+            scaler = artifact["scaler"]
+            X = (X - scaler["mean"]) / scaler["std"]
+        else:
+            # Backward compat: old artifact without impute_state
+            medians = artifact["medians"]
+            X = np.where(np.isnan(X), medians, X)
         probs = model.predict_proba(X)
         if calibrator is not None:
             probs = calibrator.transform(probs)
