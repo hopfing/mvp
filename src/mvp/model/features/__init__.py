@@ -22,6 +22,7 @@ from mvp.model.features import (
     surface,
     tiebreak,
     tournament,
+    transition,
     win_rate,
 )
 from mvp.model.registry import get_registry
@@ -44,5 +45,6 @@ __all__ = [
     "surface",
     "tiebreak",
     "tournament",
+    "transition",
     "win_rate",
 ]
