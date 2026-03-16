@@ -192,24 +192,27 @@ def apply_imputation(
     """
     result = X.copy()
 
-    for spec in state.specs:
+    # Separate constant and median specs
+    constant_specs = [s for s in state.specs if s.strategy == "constant"]
+    median_cols = [s.col_index for s in state.specs if s.strategy == "median"]
+
+    # Constant imputation (vectorized, circuit-independent)
+    for spec in constant_specs:
         col = spec.col_index
-
-        if spec.strategy == "constant":
-            nan_mask = np.isnan(result[:, col])
+        nan_mask = np.isnan(result[:, col])
+        if nan_mask.any():
             result[nan_mask, col] = spec.constant
-        else:
-            # Median strategy: use circuit-specific medians
-            nan_mask = np.isnan(result[:, col])
-            if not np.any(nan_mask):
-                continue
 
-            for row_idx in np.where(nan_mask)[0]:
-                circ_label = circuit[row_idx]
-                if circ_label in state.circuit_medians:
-                    result[row_idx, col] = state.circuit_medians[circ_label][col]
-                else:
-                    result[row_idx, col] = state.global_medians[col]
+    # Median imputation (vectorized per circuit)
+    if median_cols:
+        unique_circuits = set(circuit)
+        for circ_label in unique_circuits:
+            circ_row_mask = circuit == circ_label
+            medians = state.circuit_medians.get(circ_label, state.global_medians)
+            for col in median_cols:
+                nan_and_circ = circ_row_mask & np.isnan(result[:, col])
+                if nan_and_circ.any():
+                    result[nan_and_circ, col] = medians[col]
 
     return result
 

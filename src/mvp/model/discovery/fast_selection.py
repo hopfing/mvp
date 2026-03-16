@@ -1,5 +1,7 @@
 """Fast forward selection using precomputed feature matrix."""
 
+import logging
+import time
 import warnings
 from collections.abc import Callable
 from pathlib import Path
@@ -21,6 +23,8 @@ from mvp.model.metrics import compute_metrics
 from mvp.model.models import get_model
 from mvp.model.registry import get_registry
 from mvp.model.splitters import make_splitter
+
+logger = logging.getLogger(__name__)
 
 warnings.filterwarnings("ignore", message="All-NaN slice encountered")
 
@@ -159,12 +163,18 @@ class FastForwardSelector:
         all_col_names = get_feature_columns(self.all_feature_specs)
         self.col_to_idx = {c: i for i, c in enumerate(all_col_names)}
 
+        logger.info(
+            "Extracting %d features x %d rows to numpy",
+            len(all_col_names), len(df),
+        )
+        t0 = time.perf_counter()
         self.X_wide = (
             df.select(pl.col(c).cast(pl.Float64) for c in all_col_names)
             .to_numpy()
         )
         self.y = df[target_col].to_numpy().astype(int)
         self.circuit = df["circuit"].to_numpy()
+        logger.info("Numpy extraction complete in %.1fs", time.perf_counter() - t0)
 
         if override_y is not None:
             self.y = override_y
@@ -192,6 +202,8 @@ class FastForwardSelector:
             for train_idx, test_idx in splitter.split(df)
         ]
 
+        logger.info("Fitting imputation states for %d folds", len(self.folds))
+        t0 = time.perf_counter()
         self.impute_specs = build_impute_specs(self.all_feature_specs, get_registry())
         self.fold_impute_states = []
         for train_idx, _test_idx in self.folds:
@@ -201,6 +213,7 @@ class FastForwardSelector:
                 self.impute_specs,
             )
             self.fold_impute_states.append(state)
+        logger.info("Imputation states fitted in %.1fs", time.perf_counter() - t0)
 
     def create_scorer(self, metric: str) -> Callable[[list[str]], float]:
         """Return a fast scorer function that evaluates feature subsets.
