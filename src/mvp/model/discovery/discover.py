@@ -544,11 +544,12 @@ class FeatureDiscovery:
 
         if not selected:
             self._log("No features selected. Check your data and configuration.")
-            return DiscoveryResult(
+            self._last_result = DiscoveryResult(
                 selected_features=[],
                 selection_result=selection_result,
                 n_experiments=self._experiment_count,
             )
+            return self._last_result
 
         # Phase 2: Sweeps (optional)
         sweep_result = None
@@ -620,7 +621,7 @@ class FeatureDiscovery:
         self._log(f"Final {self.config.discovery.metric}: {final_metric:.4f}")
         self._log(f"Total experiments: {self._experiment_count}")
 
-        return DiscoveryResult(
+        self._last_result = DiscoveryResult(
             selected_features=final_features,
             selection_result=selection_result,
             sweep_result=sweep_result,
@@ -628,6 +629,7 @@ class FeatureDiscovery:
             final_metric=final_metric,
             n_experiments=self._experiment_count,
         )
+        return self._last_result
 
     def save_config(self, output_path: Path | str) -> None:
         """Save discovered config to file.
