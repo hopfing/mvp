@@ -18,7 +18,7 @@ from mvp.model.calibration import PlattCalibrator
 from mvp.model.config import EnsembleParams, ExperimentConfig, apply_filters, get_filter_feature_specs
 from mvp.model.diagnostics import Diagnostics, EnsembleDiagnostics
 from mvp.model.engine import FeatureEngine, get_feature_columns
-from mvp.model.imputation import apply_imputation, build_impute_specs, fit_imputation
+from mvp.model.imputation import apply_imputation, build_imputation, fit_imputation
 from mvp.model.metrics import compute_calibration_error, compute_metrics
 from mvp.model.mlflow_logger import ExperimentLogger
 from mvp.model.models import EnsembleModel, get_model
@@ -265,7 +265,9 @@ class ExperimentRunner:
             raise ValueError("No feature columns found after computing features")
 
         # Build per-feature imputation specs from registry declarations
-        impute_specs = build_impute_specs(feature_specs, get_registry())
+        build_result = build_imputation(feature_specs, get_registry())
+        augmented_cols = feature_cols + build_result.aux_base_col_names
+        n_model = build_result.n_model_features
 
         # Get splitter
         splitter = self._get_splitter()
@@ -331,32 +333,34 @@ class ExperimentRunner:
                 )
 
                 X_train = train_df.select(
-                    pl.col(c).cast(pl.Float64) for c in feature_cols
+                    pl.col(c).cast(pl.Float64) for c in augmented_cols
                 ).to_numpy()
                 y_train = train_df[target_col].to_numpy().astype(int)
                 X_test = test_df.select(
-                    pl.col(c).cast(pl.Float64) for c in feature_cols
+                    pl.col(c).cast(pl.Float64) for c in augmented_cols
                 ).to_numpy()
                 y_test = test_df[target_col].to_numpy().astype(int)
 
                 # Impute NaN using per-feature strategy with circuit-stratified medians
                 circuit_train = train_df["circuit"].to_numpy()
                 circuit_test = test_df["circuit"].to_numpy()
-                impute_state = fit_imputation(X_train, circuit_train, impute_specs)
+                impute_state = fit_imputation(X_train, circuit_train, build_result.specs)
 
-                # Compute scaling stats from real data (before imputation)
+                # Compute scaling stats from real data (before imputation), model cols only
                 import warnings as _w
                 with _w.catch_warnings():
                     _w.simplefilter("ignore", RuntimeWarning)
-                    train_mean = np.nanmean(X_train, axis=0)
-                    train_std = np.nanstd(X_train, axis=0)
+                    train_mean = np.nanmean(X_train[:, :n_model], axis=0)
+                    train_std = np.nanstd(X_train[:, :n_model], axis=0)
                 train_mean = np.where(np.isnan(train_mean), 0.0, train_mean)
                 train_std = np.where(np.isnan(train_std), 1.0, train_std)
                 train_std[train_std == 0] = 1.0
 
-                # Then impute and scale
+                # Impute (augmented), strip aux columns, then scale
                 X_train = apply_imputation(X_train, circuit_train, impute_state)
                 X_test = apply_imputation(X_test, circuit_test, impute_state)
+                X_train = X_train[:, :n_model]
+                X_test = X_test[:, :n_model]
                 X_train = (X_train - train_mean) / train_std
                 X_test = (X_test - train_mean) / train_std
 
@@ -379,11 +383,12 @@ class ExperimentRunner:
                             if has_custom_filters:
                                 model_train_df = apply_filters(model_train_df, filt)
                             X_m = model_train_df.select(
-                                pl.col(c).cast(pl.Float64) for c in feature_cols
+                                pl.col(c).cast(pl.Float64) for c in augmented_cols
                             ).to_numpy()
                             y_m = model_train_df[target_col].to_numpy().astype(int)
                             circuit_m = model_train_df["circuit"].to_numpy()
                             X_m = apply_imputation(X_m, circuit_m, impute_state)
+                            X_m = X_m[:, :n_model]
                             X_m = (X_m - train_mean) / train_std
                             per_model_data.append((X_m, y_m))
                         else:

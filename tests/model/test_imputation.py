@@ -18,6 +18,24 @@ def _make_registry(*features: tuple[str, float | str]) -> FeatureRegistry:
     return reg
 
 
+def _make_registry_ext(
+    *features: tuple[str, float | str, list[str], bool],
+) -> FeatureRegistry:
+    """Build registry with (name, impute, depends_on, mirror) tuples."""
+    reg = FeatureRegistry()
+    for name, impute, depends_on, mirror in features:
+        reg.register(
+            FeatureDef(
+                name=name,
+                func=lambda: None,
+                impute=impute,
+                depends_on=depends_on,
+                mirror=mirror,
+            )
+        )
+    return reg
+
+
 # ===========================================================================
 # TestBuildImputeSpecs
 # ===========================================================================
@@ -270,3 +288,409 @@ class TestSubsetImputeState:
         # Should match the corresponding columns from full imputation
         np.testing.assert_array_equal(sub_result[:, 0], full_result[:, 0])
         np.testing.assert_array_equal(sub_result[:, 1], full_result[:, 2])
+
+
+# ===========================================================================
+# TestBuildImputation (new recompute-aware builder)
+# ===========================================================================
+
+class TestBuildImputation:
+    """Tests for build_imputation with recompute support."""
+
+    def test_single_dep_diff_detected(self):
+        """Single-dep diff feature gets recompute strategy."""
+        from mvp.model.imputation import build_imputation
+
+        reg = _make_registry_ext(
+            ("win_pct", "median", [], True),       # base feature
+            ("win_pct_diff", 0, ["win_pct"], False),  # diff feature
+        )
+        result = build_imputation(["player_win_pct_diff"], reg)
+
+        # Should have 3 specs: 1 recompute (diff) + 2 median (aux bases)
+        assert result.n_model_features == 1
+        assert len(result.aux_base_col_names) == 2
+        assert "player_win_pct" in result.aux_base_col_names
+        assert "opp_win_pct" in result.aux_base_col_names
+
+        recompute_specs = [s for s in result.specs if s.strategy == "recompute"]
+        assert len(recompute_specs) == 1
+        assert recompute_specs[0].col_index == 0
+        assert recompute_specs[0].recompute is not None
+
+    def test_two_dep_matchup_detected(self):
+        """Two-dep matchup feature gets recompute with different bases."""
+        from mvp.model.imputation import build_imputation
+
+        reg = _make_registry_ext(
+            ("svc_won_pct", "median", [], True),
+            ("ret_won_pct", "median", [], True),
+            ("svc_matchup", 0, ["svc_won_pct", "ret_won_pct"], False),
+        )
+        result = build_imputation(["player_svc_matchup"], reg)
+
+        assert result.n_model_features == 1
+        assert "player_svc_won_pct" in result.aux_base_col_names
+        assert "opp_ret_won_pct" in result.aux_base_col_names
+
+    def test_base_already_in_features_no_duplicate(self):
+        """If base column is already a model feature, no aux column added."""
+        from mvp.model.imputation import build_imputation
+
+        reg = _make_registry_ext(
+            ("win_pct", "median", [], True),
+            ("win_pct_diff", 0, ["win_pct"], False),
+        )
+        # Both base and diff are model features
+        result = build_imputation(
+            ["player_win_pct", "opp_win_pct", "player_win_pct_diff"], reg
+        )
+
+        assert result.n_model_features == 3
+        # Base columns are already model features — no aux needed
+        assert len(result.aux_base_col_names) == 0
+
+        recompute_specs = [s for s in result.specs if s.strategy == "recompute"]
+        assert len(recompute_specs) == 1
+        # Should reference the existing model feature indices
+        assert recompute_specs[0].recompute.player_base_idx == 0
+        assert recompute_specs[0].recompute.opp_base_idx == 1
+
+    def test_median_feature_not_recomputed(self):
+        """Feature with impute='median' is not recomputed even with depends_on."""
+        from mvp.model.imputation import build_imputation
+
+        reg = _make_registry_ext(
+            ("style_winner_rate", "median", [], True),
+            ("is_aggressive", "median", ["style_winner_rate"], True),
+        )
+        result = build_imputation(["player_is_aggressive"], reg)
+
+        assert len(result.aux_base_col_names) == 0
+        assert all(s.strategy == "median" for s in result.specs)
+
+    def test_mirror_true_not_recomputed(self):
+        """Feature with mirror=True is not recomputed."""
+        from mvp.model.imputation import build_imputation
+
+        reg = _make_registry_ext(
+            ("base_stat", "median", [], True),
+            ("derived_stat", 0, ["base_stat"], True),  # mirror=True
+        )
+        result = build_imputation(["player_derived_stat"], reg)
+
+        assert len(result.aux_base_col_names) == 0
+        assert all(s.strategy == "constant" for s in result.specs)
+
+    def test_with_params(self):
+        """Recompute works with parameterized features (days=30)."""
+        from mvp.model.imputation import build_imputation
+
+        reg = _make_registry_ext(
+            ("win_pct", "median", [], True),
+            ("win_pct_diff", 0, ["win_pct"], False),
+        )
+        result = build_imputation(["player_win_pct_diff(days=30)"], reg)
+
+        assert "player_win_pct_30d" in result.aux_base_col_names
+        assert "opp_win_pct_30d" in result.aux_base_col_names
+
+
+# ===========================================================================
+# TestRecomputeImputation (end-to-end recompute behavior)
+# ===========================================================================
+
+class TestRecomputeImputation:
+    """Tests for two-phase imputation with recompute."""
+
+    def _build_augmented_state(self):
+        """Build a test scenario: diff + 2 base columns, with circuit medians.
+
+        Augmented matrix layout: [diff, player_base, opp_base]
+        Columns 1 and 2 are aux base columns imputed via median.
+        Column 0 is recomputed as col1 - col2.
+        """
+        from mvp.model.imputation import ImputeSpec, ImputeState, RecomputeInfo
+
+        specs = [
+            ImputeSpec(
+                col_index=0,
+                strategy="recompute",
+                recompute=RecomputeInfo(player_base_idx=1, opp_base_idx=2),
+            ),
+            ImputeSpec(col_index=1, strategy="median"),
+            ImputeSpec(col_index=2, strategy="median"),
+        ]
+        state = ImputeState(
+            specs=specs,
+            circuit_medians={
+                "TOUR": np.array([0.0, 0.60, 0.55]),
+                "CHAL": np.array([0.0, 0.50, 0.45]),
+            },
+            global_medians=np.array([0.0, 0.55, 0.50]),
+            circuit_labels=["TOUR", "CHAL"],
+        )
+        return state
+
+    def test_asymmetric_nan_player_has_data(self):
+        """Player has data, opp is NaN → diff uses imputed opp base."""
+        from mvp.model.imputation import apply_imputation
+
+        state = self._build_augmented_state()
+
+        #             diff    player_base  opp_base
+        X = np.array([[np.nan, 0.70,        np.nan]])  # opp missing
+        circuit = np.array(["TOUR"])
+
+        result = apply_imputation(X, circuit, state)
+
+        # opp_base imputed to TOUR median (0.55)
+        # diff recomputed: 0.70 - 0.55 = 0.15
+        assert result[0, 0] == pytest.approx(0.15)
+        assert result[0, 1] == pytest.approx(0.70)  # player unchanged
+        assert result[0, 2] == pytest.approx(0.55)  # opp imputed
+
+    def test_asymmetric_nan_opp_has_data(self):
+        """Opp has data, player is NaN → diff uses imputed player base."""
+        from mvp.model.imputation import apply_imputation
+
+        state = self._build_augmented_state()
+
+        X = np.array([[np.nan, np.nan, 0.40]])  # player missing
+        circuit = np.array(["CHAL"])
+
+        result = apply_imputation(X, circuit, state)
+
+        # player_base imputed to CHAL median (0.50)
+        # diff recomputed: 0.50 - 0.40 = 0.10
+        assert result[0, 0] == pytest.approx(0.10)
+
+    def test_symmetric_nan_both_imputed(self):
+        """Both bases NaN → diff is median - median ≈ small nonzero."""
+        from mvp.model.imputation import apply_imputation
+
+        state = self._build_augmented_state()
+
+        X = np.array([[np.nan, np.nan, np.nan]])
+        circuit = np.array(["TOUR"])
+
+        result = apply_imputation(X, circuit, state)
+
+        # Both imputed to TOUR medians: 0.60 - 0.55 = 0.05
+        assert result[0, 0] == pytest.approx(0.05)
+
+    def test_no_nan_recomputed_identically(self):
+        """Both bases present → recompute matches original diff."""
+        from mvp.model.imputation import apply_imputation
+
+        state = self._build_augmented_state()
+
+        # Original diff was computed as 0.70 - 0.40 = 0.30
+        X = np.array([[0.30, 0.70, 0.40]])
+        circuit = np.array(["TOUR"])
+
+        result = apply_imputation(X, circuit, state)
+
+        # Recomputed: 0.70 - 0.40 = 0.30 (same)
+        assert result[0, 0] == pytest.approx(0.30)
+
+    def test_two_dep_matchup_recompute(self):
+        """Matchup feature (player_X - opp_Y) with different base deps."""
+        from mvp.model.imputation import ImputeSpec, ImputeState, RecomputeInfo, apply_imputation
+
+        # Layout: [matchup, player_svc, opp_ret]
+        specs = [
+            ImputeSpec(
+                col_index=0,
+                strategy="recompute",
+                recompute=RecomputeInfo(player_base_idx=1, opp_base_idx=2),
+            ),
+            ImputeSpec(col_index=1, strategy="median"),
+            ImputeSpec(col_index=2, strategy="median"),
+        ]
+        state = ImputeState(
+            specs=specs,
+            circuit_medians={
+                "TOUR": np.array([0.0, 0.65, 0.35]),
+            },
+            global_medians=np.array([0.0, 0.65, 0.35]),
+            circuit_labels=["TOUR"],
+        )
+
+        # Player has serve data, opp return is NaN
+        X = np.array([[np.nan, 0.72, np.nan]])
+        circuit = np.array(["TOUR"])
+
+        result = apply_imputation(X, circuit, state)
+
+        # opp_ret imputed to 0.35, matchup = 0.72 - 0.35 = 0.37
+        assert result[0, 0] == pytest.approx(0.37)
+
+
+class TestSubsetImputeStateRecompute:
+    """Tests for subset_impute_state with recompute specs."""
+
+    def test_recompute_spec_remapped(self):
+        """Recompute spec indices are correctly remapped in subset."""
+        from mvp.model.imputation import (
+            ImputeSpec,
+            ImputeState,
+            RecomputeInfo,
+            subset_impute_state,
+        )
+
+        state = ImputeState(
+            specs=[
+                ImputeSpec(col_index=0, strategy="median"),
+                ImputeSpec(
+                    col_index=1,
+                    strategy="recompute",
+                    recompute=RecomputeInfo(player_base_idx=3, opp_base_idx=4),
+                ),
+                ImputeSpec(col_index=2, strategy="median"),
+                ImputeSpec(col_index=3, strategy="median"),
+                ImputeSpec(col_index=4, strategy="median"),
+            ],
+            circuit_medians={"TOUR": np.array([1.0, 2.0, 3.0, 4.0, 5.0])},
+            global_medians=np.array([1.0, 2.0, 3.0, 4.0, 5.0]),
+            circuit_labels=["TOUR"],
+        )
+
+        # Select diff (1) + its bases (3, 4)
+        sub = subset_impute_state(state, np.array([1, 3, 4]))
+
+        recompute_specs = [s for s in sub.specs if s.strategy == "recompute"]
+        assert len(recompute_specs) == 1
+        assert recompute_specs[0].col_index == 0  # was 1, now 0
+        assert recompute_specs[0].recompute.player_base_idx == 1  # was 3, now 1
+        assert recompute_specs[0].recompute.opp_base_idx == 2  # was 4, now 2
+
+    def test_recompute_dropped_when_bases_missing(self):
+        """Recompute spec is dropped if base columns aren't in the subset."""
+        from mvp.model.imputation import (
+            ImputeSpec,
+            ImputeState,
+            RecomputeInfo,
+            subset_impute_state,
+        )
+
+        state = ImputeState(
+            specs=[
+                ImputeSpec(
+                    col_index=0,
+                    strategy="recompute",
+                    recompute=RecomputeInfo(player_base_idx=1, opp_base_idx=2),
+                ),
+                ImputeSpec(col_index=1, strategy="median"),
+                ImputeSpec(col_index=2, strategy="median"),
+            ],
+            circuit_medians={"TOUR": np.array([0.0, 1.0, 2.0])},
+            global_medians=np.array([0.0, 1.0, 2.0]),
+            circuit_labels=["TOUR"],
+        )
+
+        # Select only the diff column without its bases
+        sub = subset_impute_state(state, np.array([0]))
+
+        # Recompute spec should be dropped (bases not available)
+        assert len(sub.specs) == 0
+
+    def test_subset_recompute_end_to_end(self):
+        """Full flow: subset + apply_imputation with recompute."""
+        from mvp.model.imputation import (
+            ImputeSpec,
+            ImputeState,
+            RecomputeInfo,
+            apply_imputation,
+            subset_impute_state,
+        )
+
+        state = ImputeState(
+            specs=[
+                ImputeSpec(col_index=0, strategy="median"),
+                ImputeSpec(
+                    col_index=1,
+                    strategy="recompute",
+                    recompute=RecomputeInfo(player_base_idx=2, opp_base_idx=3),
+                ),
+                ImputeSpec(col_index=2, strategy="median"),
+                ImputeSpec(col_index=3, strategy="median"),
+            ],
+            circuit_medians={
+                "TOUR": np.array([99.0, 0.0, 0.60, 0.55]),
+            },
+            global_medians=np.array([99.0, 0.0, 0.60, 0.55]),
+            circuit_labels=["TOUR"],
+        )
+
+        # Select diff (1) + bases (2, 3)
+        col_indices = np.array([1, 2, 3])
+        sub_state = subset_impute_state(state, col_indices)
+
+        # Asymmetric NaN: player has data, opp missing
+        X = np.array([[np.nan, 0.70, np.nan]])
+        circuit = np.array(["TOUR"])
+
+        result = apply_imputation(X, circuit, sub_state)
+
+        # opp imputed to 0.55, diff = 0.70 - 0.55 = 0.15
+        assert result[0, 0] == pytest.approx(0.15)
+        assert result[0, 1] == pytest.approx(0.70)
+        assert result[0, 2] == pytest.approx(0.55)
+
+
+class TestAugmentedColIndices:
+    """Tests for augmented_col_indices helper."""
+
+    def test_no_recompute_returns_original(self):
+        from mvp.model.imputation import ImputeSpec, augmented_col_indices
+
+        specs = [
+            ImputeSpec(col_index=0, strategy="median"),
+            ImputeSpec(col_index=1, strategy="constant", constant=0.0),
+        ]
+        model_idx = np.array([0, 1])
+        aug, n_model = augmented_col_indices(model_idx, specs)
+
+        np.testing.assert_array_equal(aug, [0, 1])
+        assert n_model == 2
+
+    def test_adds_aux_for_recompute(self):
+        from mvp.model.imputation import ImputeSpec, RecomputeInfo, augmented_col_indices
+
+        specs = [
+            ImputeSpec(
+                col_index=0,
+                strategy="recompute",
+                recompute=RecomputeInfo(player_base_idx=3, opp_base_idx=4),
+            ),
+            ImputeSpec(col_index=1, strategy="median"),
+            ImputeSpec(col_index=3, strategy="median"),
+            ImputeSpec(col_index=4, strategy="median"),
+        ]
+        # Model selects column 0 (diff) — needs aux 3, 4
+        model_idx = np.array([0])
+        aug, n_model = augmented_col_indices(model_idx, specs)
+
+        assert n_model == 1
+        assert set(aug.tolist()) == {0, 3, 4}
+        assert aug[0] == 0  # model feature first
+
+    def test_base_already_in_model_no_duplicate(self):
+        from mvp.model.imputation import ImputeSpec, RecomputeInfo, augmented_col_indices
+
+        specs = [
+            ImputeSpec(
+                col_index=0,
+                strategy="recompute",
+                recompute=RecomputeInfo(player_base_idx=1, opp_base_idx=2),
+            ),
+            ImputeSpec(col_index=1, strategy="median"),
+            ImputeSpec(col_index=2, strategy="median"),
+        ]
+        # All columns already selected as model features
+        model_idx = np.array([0, 1, 2])
+        aug, n_model = augmented_col_indices(model_idx, specs)
+
+        np.testing.assert_array_equal(aug, [0, 1, 2])
+        assert n_model == 3

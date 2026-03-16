@@ -17,7 +17,7 @@ from mvp.model.confidence.dimensions import MODIFIERS
 from mvp.model.config import EnsembleParams, ExperimentConfig, apply_filters, get_filter_feature_specs
 from mvp.model.engine import FeatureEngine, get_feature_columns
 from mvp.model.features.elo import surface_elo_expr
-from mvp.model.imputation import apply_imputation, build_impute_specs, fit_imputation
+from mvp.model.imputation import apply_imputation, build_imputation, fit_imputation
 from mvp.model.models import EnsembleModel, get_model
 from mvp.model.registry import get_registry
 
@@ -148,26 +148,30 @@ class ProductionPredictor:
         df = df.filter(pl.col("won").is_not_null())
 
         feature_cols = get_feature_columns(feature_specs)
-        X = df.select(pl.col(c).cast(pl.Float64) for c in feature_cols).to_numpy()
+        build_result = build_imputation(feature_specs, get_registry())
+        augmented_cols = feature_cols + build_result.aux_base_col_names
+        n_model = build_result.n_model_features
+
+        X = df.select(pl.col(c).cast(pl.Float64) for c in augmented_cols).to_numpy()
         y = df["won"].to_numpy().astype(int)
 
         logger.info("Training on %d rows with %d features", len(y), len(feature_cols))
 
         # Impute using per-feature strategy with circuit-stratified medians
         circuit = df["circuit"].to_numpy()
-        impute_specs = build_impute_specs(feature_specs, get_registry())
-        impute_state = fit_imputation(X, circuit, impute_specs)
+        impute_state = fit_imputation(X, circuit, build_result.specs)
 
-        # Scaling stats from real data (before imputation)
+        # Scaling stats from real data (before imputation), model cols only
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", RuntimeWarning)
-            scaler_mean = np.nanmean(X, axis=0)
-            scaler_std = np.nanstd(X, axis=0)
+            scaler_mean = np.nanmean(X[:, :n_model], axis=0)
+            scaler_std = np.nanstd(X[:, :n_model], axis=0)
         scaler_mean = np.where(np.isnan(scaler_mean), 0.0, scaler_mean)
         scaler_std = np.where(np.isnan(scaler_std), 1.0, scaler_std)
         scaler_std[scaler_std == 0] = 1.0
 
         X = apply_imputation(X, circuit, impute_state)
+        X = X[:, :n_model]
         X = (X - scaler_mean) / scaler_std
 
         # Train
@@ -207,8 +211,9 @@ class ProductionPredictor:
                 "scaler": {"mean": scaler_mean, "std": scaler_std},
                 "feature_cols": feature_cols,
                 "calibrator": calibrator,
+                "aux_base_col_names": build_result.aux_base_col_names,
                 # Backward compat: keep medians for old code paths
-                "medians": impute_state.global_medians,
+                "medians": impute_state.global_medians[:n_model],
             },
             artifact_path,
         )
@@ -336,12 +341,15 @@ class ProductionPredictor:
                 canonical = pl.concat([canonical, missing], how="diagonal_relaxed")
 
         # Predict
+        aux_cols = artifact.get("aux_base_col_names", [])
+        augmented_cols = list(feature_cols) + aux_cols
         X = canonical.select(
-            pl.col(c).cast(pl.Float64) for c in feature_cols
+            pl.col(c).cast(pl.Float64) for c in augmented_cols
         ).to_numpy()
         circuit_arr = canonical["circuit"].to_numpy()
         if "impute_state" in artifact:
             X = apply_imputation(X, circuit_arr, artifact["impute_state"])
+            X = X[:, :len(feature_cols)]
             scaler = artifact["scaler"]
             X = (X - scaler["mean"]) / scaler["std"]
         else:
@@ -507,12 +515,15 @@ class ProductionPredictor:
             return pl.DataFrame()
 
         # Extract features and predict
+        aux_cols = artifact.get("aux_base_col_names", [])
+        augmented_cols = list(feature_cols) + aux_cols
         X = pending.select(
-            pl.col(c).cast(pl.Float64) for c in feature_cols
+            pl.col(c).cast(pl.Float64) for c in augmented_cols
         ).to_numpy()
         circuit_arr = pending["circuit"].to_numpy()
         if "impute_state" in artifact:
             X = apply_imputation(X, circuit_arr, artifact["impute_state"])
+            X = X[:, :len(feature_cols)]
             scaler = artifact["scaler"]
             X = (X - scaler["mean"]) / scaler["std"]
         else:

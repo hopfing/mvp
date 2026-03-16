@@ -15,7 +15,8 @@ from mvp.model.discovery.config import DiscoveryConfig
 from mvp.model.engine import FeatureEngine, get_feature_columns
 from mvp.model.imputation import (
     apply_imputation,
-    build_impute_specs,
+    augmented_col_indices,
+    build_imputation,
     fit_imputation,
     subset_impute_state,
 )
@@ -161,15 +162,17 @@ class FastForwardSelector:
             )
 
         all_col_names = get_feature_columns(self.all_feature_specs)
-        self.col_to_idx = {c: i for i, c in enumerate(all_col_names)}
+        self._build_result = build_imputation(self.all_feature_specs, get_registry())
+        augmented_col_names = all_col_names + self._build_result.aux_base_col_names
+        self.col_to_idx = {c: i for i, c in enumerate(augmented_col_names)}
 
         logger.info(
-            "Extracting %d features x %d rows to numpy",
-            len(all_col_names), len(df),
+            "Extracting %d features (%d aux) x %d rows to numpy",
+            len(all_col_names), len(self._build_result.aux_base_col_names), len(df),
         )
         t0 = time.perf_counter()
         self.X_wide = (
-            df.select(pl.col(c).cast(pl.Float64) for c in all_col_names)
+            df.select(pl.col(c).cast(pl.Float64) for c in augmented_col_names)
             .to_numpy()
         )
         self.y = df[target_col].to_numpy().astype(int)
@@ -204,7 +207,7 @@ class FastForwardSelector:
 
         logger.info("Fitting imputation states for %d folds", len(self.folds))
         t0 = time.perf_counter()
-        self.impute_specs = build_impute_specs(self.all_feature_specs, get_registry())
+        self.impute_specs = self._build_result.specs
         self.fold_impute_states = []
         for train_idx, _test_idx in self.folds:
             state = fit_imputation(
@@ -246,6 +249,8 @@ class FastForwardSelector:
         # when we only need one.
         metric_fn = _make_metric_fn(metric)
 
+        impute_specs = self.impute_specs
+
         def scorer(features: list[str]) -> float:
             if not features:
                 return float("inf")
@@ -256,21 +261,28 @@ class FastForwardSelector:
             except KeyError:
                 return float("inf")
 
+            # Augment with aux base columns needed for recompute
+            aug_indices, n_model = augmented_col_indices(col_indices, impute_specs)
+
             fold_metrics = []
             for fold_idx, (train_idx, test_idx) in enumerate(folds):
                 y_train, y_test = y[train_idx], y[test_idx]
 
-                # Slice to selected columns, remap impute state to match
-                X_train = X_wide[np.ix_(train_idx, col_indices)].copy()
-                X_test = X_wide[np.ix_(test_idx, col_indices)].copy()
+                # Slice to augmented columns, remap impute state to match
+                X_train = X_wide[np.ix_(train_idx, aug_indices)].copy()
+                X_test = X_wide[np.ix_(test_idx, aug_indices)].copy()
                 sub_state = subset_impute_state(
-                    fold_impute_states[fold_idx], col_indices
+                    fold_impute_states[fold_idx], aug_indices
                 )
                 X_train = apply_imputation(X_train, circuit[train_idx], sub_state)
                 X_test = apply_imputation(X_test, circuit[test_idx], sub_state)
 
+                # Strip aux columns
+                X_train = X_train[:, :n_model]
+                X_test = X_test[:, :n_model]
+
                 if scale:
-                    # Scaling stats from real (pre-imputation) data
+                    # Scaling stats from real (pre-imputation) model columns
                     X_train_raw = X_wide[np.ix_(train_idx, col_indices)]
                     with warnings.catch_warnings():
                         warnings.simplefilter("ignore", RuntimeWarning)
