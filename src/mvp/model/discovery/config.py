@@ -107,6 +107,21 @@ class DiscoveryConfig(BaseModel):
         with open(path) as f:
             return cls.from_yaml(f.read())
 
+    def _ordered_validation_dump(self) -> dict[str, Any]:
+        """Dump validation config with explicitly-set fields first."""
+        all_fields = self.validation.model_dump()
+        set_fields = self.validation.model_fields_set
+        ordered: dict[str, Any] = {}
+        # Explicitly-set fields first (preserving their relative order)
+        for key in all_fields:
+            if key in set_fields:
+                ordered[key] = all_fields[key]
+        # Then defaults
+        for key in all_fields:
+            if key not in set_fields:
+                ordered[key] = all_fields[key]
+        return ordered
+
     def to_experiment_config_dict(self, features: list[str]) -> dict[str, Any]:
         """Convert to experiment config dict with given features.
 
@@ -124,7 +139,7 @@ class DiscoveryConfig(BaseModel):
             "data": self.data.model_dump(),
             "features": features_dict,
             "model": self.model.model_dump(),
-            "validation": self.validation.model_dump(),
+            "validation": self._ordered_validation_dump(),
             "metrics": {"primary": self.discovery.metric},
         }
         if self.target != "won":

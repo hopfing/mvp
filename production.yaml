@@ -29,7 +29,7 @@ voters:
   name: blowout_specialist
   scoped: true
 - artifact: data/models/voter_tour_specialist.joblib
-  config: models/voters/tour_only.yaml
+  config: models/voters/tour_specialist.yaml
   name: tour_specialist
   scoped: true
 - artifact: data/models/voter_chal_specialist.joblib
