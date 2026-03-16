@@ -43,3 +43,30 @@ class TestFeatureDecorator:
 
         feat = isolated_registry.get("derived_feature")
         assert feat.depends_on == ["base_feature"]
+
+    def test_decorator_stores_impute_default(self, isolated_registry):
+        """Default impute is 'median'."""
+        @feature(name="test_impute_default")
+        def f() -> pl.Expr:
+            return pl.lit(1)
+
+        feat = isolated_registry.get("test_impute_default")
+        assert feat.impute == "median"
+
+    def test_decorator_stores_impute_constant(self, isolated_registry):
+        """Impute can be a numeric constant."""
+        @feature(name="test_impute_const", impute=0.5)
+        def f() -> pl.Expr:
+            return pl.lit(1)
+
+        feat = isolated_registry.get("test_impute_const")
+        assert feat.impute == 0.5
+
+    def test_decorator_stores_impute_zero(self, isolated_registry):
+        """Impute=0 is distinct from default."""
+        @feature(name="test_impute_zero", impute=0)
+        def f() -> pl.Expr:
+            return pl.lit(1)
+
+        feat = isolated_registry.get("test_impute_zero")
+        assert feat.impute == 0

@@ -22,6 +22,7 @@ class FeatureDef:
     depends_on: list[str] = field(default_factory=list)
     mirror: bool = True  # Whether to generate opp_* column
     match_level: bool = False  # Whether this is a match-level feature (no prefix)
+    impute: float | str = "median"  # Imputation strategy: "median" or numeric constant
 
 
 class FeatureRegistry:
@@ -70,6 +71,7 @@ def feature(
     depends_on: list[str] | None = None,
     mirror: bool = True,
     match_level: bool = False,
+    impute: float | str = "median",
 ) -> Callable[[Callable[..., pl.Expr]], Callable[..., pl.Expr]]:
     """Decorator to register a feature function.
 
@@ -80,6 +82,7 @@ def feature(
         depends_on: Names of features that must be computed first.
         mirror: Whether to auto-generate opp_* column (default True).
         match_level: Whether this is a match-level feature with no prefix (default False).
+        impute: Imputation strategy — "median" (default) or a numeric constant.
 
     Returns:
         Decorator function.
@@ -94,6 +97,7 @@ def feature(
             depends_on=depends_on or [],
             mirror=mirror,
             match_level=match_level,
+            impute=impute,
         )
         get_registry().register(feature_def)
         return func
