@@ -73,13 +73,17 @@ class FeatureSelector:
             return float("inf")
         return float("-inf")
 
-    def forward_selection(self, verbose: bool = False) -> SelectionResult:
+    def forward_selection(self, verbose: bool = True) -> SelectionResult:
         """Select features by iteratively adding the best one.
 
         Starts with empty set, adds feature that improves metric most,
         repeats until no improvement.
         """
+        import logging
+
         from tqdm import tqdm
+
+        sel_logger = logging.getLogger(__name__)
 
         selected: list[str] = list(self.base_features)
         remaining = set(self.all_features) - set(selected)
@@ -104,14 +108,12 @@ class FeatureSelector:
             round_results: list[tuple[str, float]] = []
 
             # Try adding each remaining feature
-            feature_iter = remaining
-            if verbose:
-                feature_iter = tqdm(
-                    remaining,
-                    desc=f"Round {round_num}/{self.max_features}",
-                    leave=False,
-                    ncols=80,
-                )
+            feature_iter = tqdm(
+                remaining,
+                desc=f"Round {round_num}/{self.max_features}",
+                leave=False,
+                ncols=80,
+            )
 
             for feature in feature_iter:
                 candidate = selected + [feature]
@@ -125,7 +127,7 @@ class FeatureSelector:
                 if self._is_better(metric, best_feature_metric):
                     best_feature = feature
                     best_feature_metric = metric
-                    if verbose and hasattr(feature_iter, "set_postfix"):
+                    if hasattr(feature_iter, "set_postfix"):
                         feature_iter.set_postfix(best=f"{best_feature_metric:.4f}")
 
             # If no improvement, stop
@@ -145,8 +147,7 @@ class FeatureSelector:
             remaining.remove(best_feature)
             best_metric = best_feature_metric
 
-            if verbose:
-                print(f"  + {best_feature} -> {best_metric:.4f}")
+            sel_logger.info("  + %s -> %.4f", best_feature, best_metric)
 
             # Sort round results by metric (best first)
             reverse = self.direction == "maximize"

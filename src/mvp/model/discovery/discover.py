@@ -1,6 +1,7 @@
 """Main discovery orchestration."""
 
 
+import logging
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -27,6 +28,8 @@ from mvp.model.discovery.sweeps import (
     parse_feature_spec,
 )
 from mvp.model.registry import get_registry
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -198,9 +201,8 @@ class FeatureDiscovery:
         self._experiment_count = 0
 
     def _log(self, msg: str) -> None:
-        """Print if verbose."""
-        if self.verbose:
-            print(msg)
+        """Log discovery progress."""
+        logger.info(msg)
 
     def _create_temp_config(self, features: list[str]) -> Path:
         """Create temporary experiment config with given features."""
@@ -415,7 +417,7 @@ class FeatureDiscovery:
             base_features=base,
         )
 
-        result = selector.run(verbose=self.verbose)
+        result = selector.run(verbose=True)
 
         self._log(f"Selected {len(result.selected_features)} features")
         for step in result.history:
@@ -472,7 +474,7 @@ class FeatureDiscovery:
                 matches_path=self.matches_path,
                 cache_dir=self.cache_dir,
             )
-            result = sweep.run(verbose=self.verbose)
+            result = sweep.run(verbose=True)
 
             for name, params in result.best_params.items():
                 for param, value in params.items():
