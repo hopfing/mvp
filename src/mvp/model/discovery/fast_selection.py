@@ -261,6 +261,8 @@ class FastForwardSelector:
                         warnings.simplefilter("ignore", RuntimeWarning)
                         mean = np.nanmean(X_train_raw, axis=0)
                         std = np.nanstd(X_train_raw, axis=0)
+                        mean = np.where(np.isnan(mean), 0.0, mean)
+                        std = np.where(np.isnan(std), 1.0, std)
                         std[std == 0] = 1.0
                         X_train = (X_train - mean) / std
                         X_test = (X_test - mean) / std

@@ -350,6 +350,8 @@ class ExperimentRunner:
                     _w.simplefilter("ignore", RuntimeWarning)
                     train_mean = np.nanmean(X_train, axis=0)
                     train_std = np.nanstd(X_train, axis=0)
+                train_mean = np.where(np.isnan(train_mean), 0.0, train_mean)
+                train_std = np.where(np.isnan(train_std), 1.0, train_std)
                 train_std[train_std == 0] = 1.0
 
                 # Then impute and scale

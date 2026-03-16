@@ -163,6 +163,8 @@ class ProductionPredictor:
             warnings.simplefilter("ignore", RuntimeWarning)
             scaler_mean = np.nanmean(X, axis=0)
             scaler_std = np.nanstd(X, axis=0)
+        scaler_mean = np.where(np.isnan(scaler_mean), 0.0, scaler_mean)
+        scaler_std = np.where(np.isnan(scaler_std), 1.0, scaler_std)
         scaler_std[scaler_std == 0] = 1.0
 
         X = apply_imputation(X, circuit, impute_state)
