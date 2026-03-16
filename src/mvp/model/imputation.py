@@ -80,3 +80,135 @@ def build_impute_specs(
                 )
             )
     return specs
+
+
+# ---------------------------------------------------------------------------
+# fit_imputation
+# ---------------------------------------------------------------------------
+
+def fit_imputation(
+    X_train: np.ndarray,
+    circuit_train: np.ndarray,
+    specs: list[ImputeSpec],
+    min_circuit_samples: int = 30,
+) -> ImputeState:
+    """Fit imputation parameters from training data.
+
+    Computes global and per-circuit medians for median-strategy features.
+    Circuit buckets with fewer than *min_circuit_samples* non-NaN values
+    fall back to the global median.
+
+    Parameters
+    ----------
+    X_train:
+        Training feature matrix, shape ``(n_samples, n_features)``.
+    circuit_train:
+        Circuit label for each row (e.g. ``"TOUR"``, ``"CHAL"``).
+    specs:
+        Imputation specs (from :func:`build_impute_specs`).
+    min_circuit_samples:
+        Minimum non-NaN values per circuit to trust the circuit median.
+
+    Returns
+    -------
+    ImputeState
+        Fitted state ready for :func:`apply_imputation`.
+    """
+    n_cols = X_train.shape[1]
+
+    # Global medians (NaN-safe); replace any remaining NaN with 0.0
+    global_medians = np.nanmedian(X_train, axis=0)
+    nan_mask = np.isnan(global_medians)
+    global_medians[nan_mask] = 0.0
+
+    # Identify which columns need circuit medians (median strategy only)
+    median_col_indices = {s.col_index for s in specs if s.strategy == "median"}
+
+    # Per-circuit medians
+    unique_circuits = np.unique(circuit_train)
+    circuit_labels = list(unique_circuits)
+    circuit_medians: dict[str, np.ndarray] = {}
+
+    for circ in unique_circuits:
+        circ_mask = circuit_train == circ
+        X_circ = X_train[circ_mask]
+        circ_med = np.full(n_cols, np.nan)
+
+        for col_idx in range(n_cols):
+            if col_idx not in median_col_indices:
+                # Not a median-strategy column — just copy global
+                circ_med[col_idx] = global_medians[col_idx]
+                continue
+
+            col_vals = X_circ[:, col_idx]
+            non_nan_count = int(np.sum(~np.isnan(col_vals)))
+
+            if non_nan_count >= min_circuit_samples:
+                circ_med[col_idx] = np.nanmedian(col_vals)
+                # If all values in the circuit bucket are NaN (shouldn't
+                # happen given count check, but be safe)
+                if np.isnan(circ_med[col_idx]):
+                    circ_med[col_idx] = global_medians[col_idx]
+            else:
+                circ_med[col_idx] = global_medians[col_idx]
+
+        circuit_medians[circ] = circ_med
+
+    return ImputeState(
+        specs=specs,
+        circuit_medians=circuit_medians,
+        global_medians=global_medians,
+        circuit_labels=circuit_labels,
+    )
+
+
+# ---------------------------------------------------------------------------
+# apply_imputation
+# ---------------------------------------------------------------------------
+
+def apply_imputation(
+    X: np.ndarray,
+    circuit: np.ndarray,
+    state: ImputeState,
+) -> np.ndarray:
+    """Apply fitted imputation to a feature matrix.
+
+    Returns a **copy** of *X* with NaN values replaced according to the
+    imputation state.
+
+    Parameters
+    ----------
+    X:
+        Feature matrix, shape ``(n_samples, n_features)``.
+    circuit:
+        Circuit label for each row.
+    state:
+        Fitted state from :func:`fit_imputation`.
+
+    Returns
+    -------
+    np.ndarray
+        Copy of *X* with NaN values imputed.
+    """
+    result = X.copy()
+
+    for spec in state.specs:
+        col = spec.col_index
+
+        if spec.strategy == "constant":
+            nan_mask = np.isnan(result[:, col])
+            result[nan_mask, col] = spec.constant
+        else:
+            # Median strategy: use circuit-specific medians
+            nan_mask = np.isnan(result[:, col])
+            if not np.any(nan_mask):
+                continue
+
+            for row_idx in np.where(nan_mask)[0]:
+                circ_label = circuit[row_idx]
+                if circ_label in state.circuit_medians:
+                    result[row_idx, col] = state.circuit_medians[circ_label][col]
+                else:
+                    result[row_idx, col] = state.global_medians[col]
+
+    return result

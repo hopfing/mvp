@@ -68,7 +68,7 @@ class TestFitImputation:
         X = np.array([[10.0], [20.0], [30.0], [100.0], [200.0], [300.0]])
         circuit = np.array(["TOUR", "TOUR", "TOUR", "CHAL", "CHAL", "CHAL"])
 
-        state = fit_imputation(X, circuit, specs)
+        state = fit_imputation(X, circuit, specs, min_circuit_samples=1)
 
         assert state.circuit_medians["TOUR"][0] == pytest.approx(20.0)
         assert state.circuit_medians["CHAL"][0] == pytest.approx(200.0)
@@ -129,7 +129,7 @@ class TestApplyImputation:
         specs = [ImputeSpec(col_index=0, strategy="median")]
         X_train = np.array([[10.0], [20.0], [30.0], [100.0], [200.0], [300.0]])
         circuit_train = np.array(["TOUR", "TOUR", "TOUR", "CHAL", "CHAL", "CHAL"])
-        state = fit_imputation(X_train, circuit_train, specs)
+        state = fit_imputation(X_train, circuit_train, specs, min_circuit_samples=1)
 
         X_test = np.array([[np.nan], [np.nan]])
         circuit_test = np.array(["TOUR", "CHAL"])
