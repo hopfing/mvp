@@ -212,3 +212,52 @@ def apply_imputation(
                     result[row_idx, col] = state.global_medians[col]
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# subset_impute_state
+# ---------------------------------------------------------------------------
+
+def subset_impute_state(
+    state: ImputeState,
+    col_indices: np.ndarray,
+) -> ImputeState:
+    """Create an ImputeState remapped for a column subset.
+
+    When the scorer selects a subset of columns from X_wide, the
+    ``col_index`` values in the original ImputeState no longer match.
+    This function remaps indices and slices median arrays so that
+    ``apply_imputation`` works on the narrow matrix.
+
+    Parameters
+    ----------
+    state:
+        Original ImputeState fitted on the full feature set.
+    col_indices:
+        Column indices into the full feature set (e.g. ``[5, 12, 47]``).
+
+    Returns
+    -------
+    ImputeState
+        New state where ``col_index`` values map to positions in the subset.
+    """
+    idx_map = {int(old): new for new, old in enumerate(col_indices)}
+    new_specs = [
+        ImputeSpec(
+            col_index=idx_map[spec.col_index],
+            strategy=spec.strategy,
+            constant=spec.constant,
+        )
+        for spec in state.specs
+        if spec.col_index in idx_map
+    ]
+    new_circuit_medians = {
+        label: medians[col_indices]
+        for label, medians in state.circuit_medians.items()
+    }
+    return ImputeState(
+        specs=new_specs,
+        circuit_medians=new_circuit_medians,
+        global_medians=state.global_medians[col_indices],
+        circuit_labels=state.circuit_labels,
+    )

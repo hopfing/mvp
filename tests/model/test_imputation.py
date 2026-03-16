@@ -208,3 +208,65 @@ class TestApplyImputation:
         result = apply_imputation(X, circuit, state)
 
         np.testing.assert_array_equal(result, X)
+
+
+class TestSubsetImputeState:
+    """Tests for subset_impute_state."""
+
+    def test_remaps_indices(self):
+        """Column indices are remapped to subset positions."""
+        from mvp.model.imputation import ImputeSpec, ImputeState, subset_impute_state
+
+        state = ImputeState(
+            specs=[
+                ImputeSpec(col_index=0, strategy="median"),
+                ImputeSpec(col_index=1, strategy="constant", constant=0.5),
+                ImputeSpec(col_index=2, strategy="median"),
+            ],
+            circuit_medians={"TOUR": np.array([10.0, 20.0, 30.0])},
+            global_medians=np.array([10.0, 20.0, 30.0]),
+            circuit_labels=["TOUR"],
+        )
+        # Select columns 0 and 2 (skip 1)
+        sub = subset_impute_state(state, np.array([0, 2]))
+        assert len(sub.specs) == 2
+        assert sub.specs[0].col_index == 0  # was 0, now 0
+        assert sub.specs[0].strategy == "median"
+        assert sub.specs[1].col_index == 1  # was 2, now 1
+        assert sub.specs[1].strategy == "median"
+        np.testing.assert_array_equal(sub.global_medians, [10.0, 30.0])
+        np.testing.assert_array_equal(sub.circuit_medians["TOUR"], [10.0, 30.0])
+
+    def test_works_with_apply_imputation(self):
+        """Subset state produces correct imputation on narrow matrix."""
+        from mvp.model.imputation import (
+            ImputeSpec,
+            ImputeState,
+            apply_imputation,
+            subset_impute_state,
+        )
+
+        state = ImputeState(
+            specs=[
+                ImputeSpec(col_index=0, strategy="median"),
+                ImputeSpec(col_index=1, strategy="constant", constant=0.5),
+                ImputeSpec(col_index=2, strategy="median"),
+            ],
+            circuit_medians={"TOUR": np.array([10.0, 20.0, 30.0])},
+            global_medians=np.array([10.0, 20.0, 30.0]),
+            circuit_labels=["TOUR"],
+        )
+        # Full matrix: 3 columns
+        X_full = np.array([[np.nan, np.nan, np.nan]])
+        circuit = np.array(["TOUR"])
+        full_result = apply_imputation(X_full, circuit, state)
+
+        # Subset to columns [0, 2]
+        col_indices = np.array([0, 2])
+        X_sub = X_full[:, col_indices].copy()
+        sub_state = subset_impute_state(state, col_indices)
+        sub_result = apply_imputation(X_sub, circuit, sub_state)
+
+        # Should match the corresponding columns from full imputation
+        np.testing.assert_array_equal(sub_result[:, 0], full_result[:, 0])
+        np.testing.assert_array_equal(sub_result[:, 1], full_result[:, 2])

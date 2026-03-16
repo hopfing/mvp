@@ -11,7 +11,12 @@ from sklearn.linear_model import LogisticRegression
 from mvp.model.config import apply_filters
 from mvp.model.discovery.config import DiscoveryConfig
 from mvp.model.engine import FeatureEngine, get_feature_columns
-from mvp.model.imputation import apply_imputation, build_impute_specs, fit_imputation
+from mvp.model.imputation import (
+    apply_imputation,
+    build_impute_specs,
+    fit_imputation,
+    subset_impute_state,
+)
 from mvp.model.metrics import compute_metrics
 from mvp.model.models import get_model
 from mvp.model.registry import get_registry
@@ -242,21 +247,18 @@ class FastForwardSelector:
             for fold_idx, (train_idx, test_idx) in enumerate(folds):
                 y_train, y_test = y[train_idx], y[test_idx]
 
-                # Get pre-imputation column slice for scaling stats
-                X_train_raw = X_wide[np.ix_(train_idx, col_indices)]
-
-                state = fold_impute_states[fold_idx]
-                # Apply imputation on full-width slices, then select columns
-                X_train_full = apply_imputation(
-                    X_wide[train_idx], circuit[train_idx], state
+                # Slice to selected columns, remap impute state to match
+                X_train = X_wide[np.ix_(train_idx, col_indices)].copy()
+                X_test = X_wide[np.ix_(test_idx, col_indices)].copy()
+                sub_state = subset_impute_state(
+                    fold_impute_states[fold_idx], col_indices
                 )
-                X_test_full = apply_imputation(
-                    X_wide[test_idx], circuit[test_idx], state
-                )
-                X_train = X_train_full[:, col_indices]
-                X_test = X_test_full[:, col_indices]
+                X_train = apply_imputation(X_train, circuit[train_idx], sub_state)
+                X_test = apply_imputation(X_test, circuit[test_idx], sub_state)
 
                 if scale:
+                    # Scaling stats from real (pre-imputation) data
+                    X_train_raw = X_wide[np.ix_(train_idx, col_indices)]
                     with warnings.catch_warnings():
                         warnings.simplefilter("ignore", RuntimeWarning)
                         mean = np.nanmean(X_train_raw, axis=0)
