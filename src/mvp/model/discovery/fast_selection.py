@@ -292,8 +292,6 @@ class FastForwardSelector:
                     fit_kwargs: dict = {}
                     if sample_weights is not None:
                         fit_kwargs["sample_weight"] = sample_weights[train_idx]
-                    if model_type == "xgboost":
-                        fit_kwargs["eval_set"] = [(X_test, y_test)]
                     model.fit(X_train, y_train, **fit_kwargs)
                     y_prob = model.predict_proba(X_test)
 
