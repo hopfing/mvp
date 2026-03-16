@@ -11,8 +11,10 @@ from sklearn.linear_model import LogisticRegression
 from mvp.model.config import apply_filters
 from mvp.model.discovery.config import DiscoveryConfig
 from mvp.model.engine import FeatureEngine, get_feature_columns
+from mvp.model.imputation import apply_imputation, build_impute_specs, fit_imputation
 from mvp.model.metrics import compute_metrics
 from mvp.model.models import get_model
+from mvp.model.registry import get_registry
 from mvp.model.splitters import make_splitter
 
 warnings.filterwarnings("ignore", message="All-NaN slice encountered")
@@ -73,7 +75,8 @@ class FastForwardSelector:
         self.sample_weights: np.ndarray | None = None
         self.col_to_idx: dict[str, int] = {}
         self.folds: list[tuple[np.ndarray, np.ndarray]] = []
-        self.fold_medians: list[np.ndarray] = []
+        self.circuit: np.ndarray | None = None
+        self.fold_impute_states: list = []
 
     def precompute(
         self,
@@ -156,12 +159,14 @@ class FastForwardSelector:
             .to_numpy()
         )
         self.y = df[target_col].to_numpy().astype(int)
+        self.circuit = df["circuit"].to_numpy()
 
         if override_y is not None:
             self.y = override_y
         if row_mask is not None:
             self.X_wide = self.X_wide[row_mask]
             self.y = self.y[row_mask]
+            self.circuit = self.circuit[row_mask]
             if sample_weights is not None:
                 sample_weights = sample_weights[row_mask]
             df = df.filter(pl.Series(row_mask))
@@ -182,12 +187,15 @@ class FastForwardSelector:
             for train_idx, test_idx in splitter.split(df)
         ]
 
-        self.fold_medians = []
+        self.impute_specs = build_impute_specs(self.all_feature_specs, get_registry())
+        self.fold_impute_states = []
         for train_idx, _test_idx in self.folds:
-            train_data = self.X_wide[train_idx]
-            medians = np.nanmedian(train_data, axis=0)
-            medians = np.where(np.isnan(medians), 0.0, medians)
-            self.fold_medians.append(medians)
+            state = fit_imputation(
+                self.X_wide[train_idx],
+                self.circuit[train_idx],
+                self.impute_specs,
+            )
+            self.fold_impute_states.append(state)
 
     def create_scorer(self, metric: str) -> Callable[[list[str]], float]:
         """Return a fast scorer function that evaluates feature subsets.
@@ -203,7 +211,8 @@ class FastForwardSelector:
         sample_weights = self.sample_weights
         col_to_idx = self.col_to_idx
         folds = self.folds
-        fold_medians = self.fold_medians
+        fold_impute_states = self.fold_impute_states
+        circuit = self.circuit
         model_type = self.config.model.type
         model_params = self.config.model.params or {}
         scale = model_type in ("logistic",)
@@ -231,13 +240,18 @@ class FastForwardSelector:
 
             fold_metrics = []
             for fold_idx, (train_idx, test_idx) in enumerate(folds):
-                X_train = X_wide[np.ix_(train_idx, col_indices)].copy()
-                X_test = X_wide[np.ix_(test_idx, col_indices)].copy()
                 y_train, y_test = y[train_idx], y[test_idx]
 
-                medians = fold_medians[fold_idx][col_indices]
-                X_train = np.where(np.isnan(X_train), medians, X_train)
-                X_test = np.where(np.isnan(X_test), medians, X_test)
+                state = fold_impute_states[fold_idx]
+                # Apply imputation on full-width slices, then select columns
+                X_train_full = apply_imputation(
+                    X_wide[train_idx], circuit[train_idx], state
+                )
+                X_test_full = apply_imputation(
+                    X_wide[test_idx], circuit[test_idx], state
+                )
+                X_train = X_train_full[:, col_indices]
+                X_test = X_test_full[:, col_indices]
 
                 if scale:
                     with warnings.catch_warnings():
