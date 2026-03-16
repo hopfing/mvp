@@ -1,7 +1,6 @@
 """Model wrappers for experiments."""
 
 
-import warnings
 from abc import ABC, abstractmethod
 from typing import Any
 
@@ -66,27 +65,16 @@ class LogisticModel(BaseModel):
     def __init__(self, params: dict[str, Any]) -> None:
         self.params = {"random_state": 42, "max_iter": 1000, **params}
         self._model = None
-        self._mean: np.ndarray | None = None
-        self._std: np.ndarray | None = None
 
     def fit(self, X: np.ndarray, y: np.ndarray, sample_weight: np.ndarray | None = None) -> None:
         from sklearn.linear_model import LogisticRegression
 
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", RuntimeWarning)
-            self._mean = np.nanmean(X, axis=0)
-            self._std = np.nanstd(X, axis=0)
-        self._std[self._std == 0] = 1.0
-        X = (X - self._mean) / self._std
-        np.nan_to_num(X, copy=False, nan=0.0)
         self._model = LogisticRegression(**self.params)
         self._model.fit(X, y, sample_weight=sample_weight)
 
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
         if self._model is None:
             raise RuntimeError("Model not fitted")
-        X = (X - self._mean) / self._std
-        np.nan_to_num(X, copy=False, nan=0.0)
         return self._model.predict_proba(X)[:, 1]
 
 
