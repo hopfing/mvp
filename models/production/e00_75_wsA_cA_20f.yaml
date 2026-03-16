@@ -33,15 +33,9 @@ features:
 metrics:
   primary: log_loss
 model:
-  type: random_forest
-  params:
-    n_estimators: 500
-    max_depth: 8
-    min_samples_leaf: 20
-    max_features: sqrt
-    n_jobs: -1
-    random_state: 42
+  params: null
+  type: logistic
 validation:
-  type: expanding_window
   initial_train_size: 20000
   step_size: 10000
+  type: expanding_window
