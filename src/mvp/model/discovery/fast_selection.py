@@ -242,6 +242,9 @@ class FastForwardSelector:
             for fold_idx, (train_idx, test_idx) in enumerate(folds):
                 y_train, y_test = y[train_idx], y[test_idx]
 
+                # Get pre-imputation column slice for scaling stats
+                X_train_raw = X_wide[np.ix_(train_idx, col_indices)]
+
                 state = fold_impute_states[fold_idx]
                 # Apply imputation on full-width slices, then select columns
                 X_train_full = apply_imputation(
@@ -256,8 +259,8 @@ class FastForwardSelector:
                 if scale:
                     with warnings.catch_warnings():
                         warnings.simplefilter("ignore", RuntimeWarning)
-                        mean = X_train.mean(axis=0)
-                        std = X_train.std(axis=0)
+                        mean = np.nanmean(X_train_raw, axis=0)
+                        std = np.nanstd(X_train_raw, axis=0)
                         std[std == 0] = 1.0
                         X_train = (X_train - mean) / std
                         X_test = (X_test - mean) / std

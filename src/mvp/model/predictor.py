@@ -157,12 +157,15 @@ class ProductionPredictor:
         circuit = df["circuit"].to_numpy()
         impute_specs = build_impute_specs(feature_specs, get_registry())
         impute_state = fit_imputation(X, circuit, impute_specs)
-        X = apply_imputation(X, circuit, impute_state)
 
-        # Z-score scale
-        scaler_mean = X.mean(axis=0)
-        scaler_std = X.std(axis=0)
+        # Scaling stats from real data (before imputation)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            scaler_mean = np.nanmean(X, axis=0)
+            scaler_std = np.nanstd(X, axis=0)
         scaler_std[scaler_std == 0] = 1.0
+
+        X = apply_imputation(X, circuit, impute_state)
         X = (X - scaler_mean) / scaler_std
 
         # Train

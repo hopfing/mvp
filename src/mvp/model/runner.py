@@ -343,13 +343,18 @@ class ExperimentRunner:
                 circuit_train = train_df["circuit"].to_numpy()
                 circuit_test = test_df["circuit"].to_numpy()
                 impute_state = fit_imputation(X_train, circuit_train, impute_specs)
+
+                # Compute scaling stats from real data (before imputation)
+                import warnings as _w
+                with _w.catch_warnings():
+                    _w.simplefilter("ignore", RuntimeWarning)
+                    train_mean = np.nanmean(X_train, axis=0)
+                    train_std = np.nanstd(X_train, axis=0)
+                train_std[train_std == 0] = 1.0
+
+                # Then impute and scale
                 X_train = apply_imputation(X_train, circuit_train, impute_state)
                 X_test = apply_imputation(X_test, circuit_test, impute_state)
-
-                # Z-score scale (logistic needs it; tree models are invariant)
-                train_mean = X_train.mean(axis=0)
-                train_std = X_train.std(axis=0)
-                train_std[train_std == 0] = 1.0
                 X_train = (X_train - train_mean) / train_std
                 X_test = (X_test - train_mean) / train_std
 
