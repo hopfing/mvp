@@ -13,6 +13,14 @@ from mvp.model.confidence.dimensions import (
     get_structural_slices,
 )
 from mvp.model.confidence.metrics import ReliabilityProfile, compute_reliability_profile
+from mvp.model.confidence.voter_analysis import (
+    CoverageCurveResult,
+    VoterCorrelationResult,
+    VoterMarginalResult,
+    compute_coverage_curve,
+    compute_voter_correlation,
+    compute_voter_marginal_value,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +84,9 @@ def prepare_oof(
 class ValidationResult:
     profiles: dict[str, dict[str, ReliabilityProfile]] = field(default_factory=dict)
     n_total: int = 0
+    voter_correlation: VoterCorrelationResult | None = None
+    coverage_curve: CoverageCurveResult | None = None
+    voter_marginal: VoterMarginalResult | None = None
 
 
 class ConfidenceValidator:
@@ -162,6 +173,21 @@ class ConfidenceValidator:
                     label = f"voter_count:{count}"
                     logger.debug("Computing profiles for %s (n=%d)", label, len(slice_df))
                     result.profiles[label] = self._compute_slice_profiles(slice_df)
+
+        # Voter analysis (voter-system configs only)
+        if self._voter_names is not None and "voter_consensus" in self._oof.columns:
+            logger.debug("Computing voter correlation matrix")
+            result.voter_correlation = compute_voter_correlation(
+                self._oof, self._voter_names
+            )
+            logger.debug("Computing coverage curve")
+            result.coverage_curve = compute_coverage_curve(
+                self._oof, self._voter_names
+            )
+            logger.debug("Computing voter marginal value")
+            result.voter_marginal = compute_voter_marginal_value(
+                self._oof, self._voter_names
+            )
 
         return result
 

@@ -849,6 +849,63 @@ def _save_validation_json(result, path):
                     }
             data["profiles"][slice_label][bucket_label] = p
 
+    # Voter analysis results
+    if result.voter_correlation is not None:
+        corr = result.voter_correlation
+        data["voter_correlation"] = {
+            "voter_names": corr.voter_names,
+            "pairs": {
+                f"{a}|{b}": {
+                    "agreement_pct": s.agreement_pct,
+                    "n_overlap": s.n_overlap,
+                    "disagree_a_correct_pct": s.disagree_a_correct_pct,
+                    "disagree_b_correct_pct": s.disagree_b_correct_pct,
+                    "n_disagree": s.n_disagree,
+                }
+                for (a, b), s in corr.pairs.items()
+            },
+        }
+
+    if result.coverage_curve is not None and result.coverage_curve.points:
+        data["coverage_curve"] = {
+            "n_total": result.coverage_curve.n_total,
+            "points": [
+                {
+                    "threshold_pct": pt.threshold_pct,
+                    "n_matches": pt.n_matches,
+                    "coverage_pct": pt.coverage_pct,
+                    "accuracy": pt.profile.accuracy,
+                    "err80": pt.profile.err80,
+                    "signed_cal": pt.profile.signed_cal,
+                    "log_loss": pt.profile.log_loss,
+                }
+                for pt in result.coverage_curve.points
+            ],
+        }
+
+    if result.voter_marginal is not None and result.voter_marginal.voters:
+        data["voter_marginal"] = {
+            "baseline_cov_100": result.voter_marginal.baseline_cov_100,
+            "baseline_acc_100": result.voter_marginal.baseline_acc_100,
+            "baseline_cov_80": result.voter_marginal.baseline_cov_80,
+            "baseline_acc_80": result.voter_marginal.baseline_acc_80,
+            "voters": [
+                {
+                    "name": v.name,
+                    "scope_pct": v.scope_pct,
+                    "cov_delta_100": v.cov_delta_100,
+                    "acc_delta_100": v.acc_delta_100,
+                    "cal_delta_100": v.cal_delta_100,
+                    "err80_delta_100": v.err80_delta_100,
+                    "cov_delta_80": v.cov_delta_80,
+                    "acc_delta_80": v.acc_delta_80,
+                    "cal_delta_80": v.cal_delta_80,
+                    "err80_delta_80": v.err80_delta_80,
+                }
+                for v in result.voter_marginal.voters
+            ],
+        }
+
     Path(path).write_text(json.dumps(data, indent=2))
 
 

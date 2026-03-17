@@ -4,6 +4,11 @@ from __future__ import annotations
 
 from mvp.model.confidence.metrics import ReliabilityProfile, WindowDistribution
 from mvp.model.confidence.validator import ValidationResult
+from mvp.model.confidence.voter_analysis import (
+    CoverageCurveResult,
+    VoterCorrelationResult,
+    VoterMarginalResult,
+)
 
 BUCKET_ORDER = [
     "50-55%", "55-60%", "60-65%", "65-70%", "70-75%",
@@ -125,6 +130,19 @@ def format_report(result: ValidationResult, model_name: str = "") -> str:
                 _format_profile_summary(lines, overall, indent=4)
                 _format_bucket_breakdown(lines, profiles, indent=4)
 
+    # Voter analysis sections
+    if result.voter_correlation:
+        lines.append("")
+        _format_voter_correlation(lines, result.voter_correlation)
+
+    if result.coverage_curve and result.coverage_curve.points:
+        lines.append("")
+        _format_coverage_curve(lines, result.coverage_curve)
+
+    if result.voter_marginal and result.voter_marginal.voters:
+        lines.append("")
+        _format_voter_marginal(lines, result.voter_marginal)
+
     lines.append("")
     lines.append(sep)
     return "\n".join(lines)
@@ -198,4 +216,100 @@ def _format_bucket_breakdown(lines, profiles, indent):
         lines.append(
             f"{pad}    {bucket:>8}  n={p.n_matches:<5}  "
             f"cal:{sign}{p.signed_cal * 100:.1f}%  {iqr_3}  {iqr_6}"
+        )
+
+
+def _format_voter_correlation(
+    lines: list[str], corr: VoterCorrelationResult
+) -> None:
+    """Format voter correlation matrix."""
+    lines.append("--- VOTER CORRELATION (binary pick agreement) ---")
+    names = corr.voter_names
+    # Column header
+    col_w = 10
+    header = " " * 12
+    for name in names:
+        header += f"{name:>{col_w}}"
+    lines.append(header)
+
+    for i, a in enumerate(names):
+        row = f"  {a:<10}"
+        for j, b in enumerate(names):
+            if i == j:
+                row += f"{'—':>{col_w}}"
+            else:
+                key = (a, b) if (a, b) in corr.pairs else (b, a)
+                if key in corr.pairs:
+                    row += f"{corr.pairs[key].agreement_pct:>{col_w - 1}.1f}%"
+                else:
+                    row += f"{'n/a':>{col_w}}"
+        lines.append(row)
+
+    # Disagreement detail
+    lines.append("")
+    lines.append("  When they disagree, who's right?")
+    for (a, b), stats in sorted(corr.pairs.items()):
+        if stats.n_disagree == 0:
+            continue
+        a_pct = f"{stats.disagree_a_correct_pct:.1f}%" if stats.disagree_a_correct_pct is not None else "n/a"
+        b_pct = f"{stats.disagree_b_correct_pct:.1f}%" if stats.disagree_b_correct_pct is not None else "n/a"
+        lines.append(
+            f"    {a} vs {b}: {stats.n_disagree:,} disagreements — "
+            f"{a} correct {a_pct}, {b} correct {b_pct}"
+        )
+
+
+def _format_coverage_curve(
+    lines: list[str], curve: CoverageCurveResult
+) -> None:
+    """Format coverage vs quality curve."""
+    lines.append("--- COVERAGE vs QUALITY CURVE ---")
+    lines.append(
+        f"  {'Threshold':>10}  {'Coverage':>8}  {'n':>7}  "
+        f"{'Acc':>7}  {'Err80':>7}  {'Cal':>8}  {'LL':>8}"
+    )
+    for pt in curve.points:
+        p = pt.profile
+        sign = "+" if p.signed_cal >= 0 else ""
+        lines.append(
+            f"  {pt.threshold_pct:>9}%  {pt.coverage_pct:>7.1f}%  {pt.n_matches:>7,}  "
+            f"{p.accuracy * 100:>6.1f}%  {p.err80 * 100:>6.1f}%  "
+            f"{sign}{p.signed_cal * 100:>6.1f}%  {p.log_loss:>8.4f}"
+        )
+
+
+def _format_voter_marginal(
+    lines: list[str], marginal: VoterMarginalResult
+) -> None:
+    """Format voter marginal value (leave-one-out)."""
+    lines.append("--- VOTER MARGINAL VALUE (leave-one-out) ---")
+    lines.append(
+        f"  Baseline @100%: {marginal.baseline_cov_100:.1f}% coverage, "
+        f"{marginal.baseline_acc_100 * 100:.1f}% acc"
+    )
+    lines.append(
+        f"  Baseline @80%:  {marginal.baseline_cov_80:.1f}% coverage, "
+        f"{marginal.baseline_acc_80 * 100:.1f}% acc"
+    )
+    lines.append("")
+    lines.append(
+        f"  {'Voter':<16} {'Scope%':>7}  "
+        f"{'Cov@100':>8} {'Acc@100':>8} {'Cal@100':>8} {'E80@100':>8}  "
+        f"{'Cov@80':>8} {'Acc@80':>8} {'Cal@80':>8} {'E80@80':>8}"
+    )
+    for v in marginal.voters:
+        def _fmt_delta(val: float) -> str:
+            sign = "+" if val >= 0 else ""
+            return f"{sign}{val:.1f}%"
+
+        def _fmt_delta_small(val: float) -> str:
+            sign = "+" if val >= 0 else ""
+            return f"{sign}{val * 100:.1f}%"
+
+        lines.append(
+            f"  -{v.name:<15} {v.scope_pct:>6.1f}%  "
+            f"{_fmt_delta(v.cov_delta_100):>8} {_fmt_delta_small(v.acc_delta_100):>8} "
+            f"{_fmt_delta_small(v.cal_delta_100):>8} {_fmt_delta_small(v.err80_delta_100):>8}  "
+            f"{_fmt_delta(v.cov_delta_80):>8} {_fmt_delta_small(v.acc_delta_80):>8} "
+            f"{_fmt_delta_small(v.cal_delta_80):>8} {_fmt_delta_small(v.err80_delta_80):>8}"
         )
