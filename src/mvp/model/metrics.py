@@ -46,6 +46,47 @@ def compute_calibration_error(y_true: np.ndarray, y_prob: np.ndarray) -> float:
     return float(np.average(errors, weights=weights))
 
 
+def compute_signed_calibration(y_true: np.ndarray, y_prob: np.ndarray) -> float:
+    """Compute signed calibration for probabilities >= 0.50.
+
+    Positive = underconfident (actual win rate > predicted).
+    Negative = overconfident (actual win rate < predicted).
+    Same bucketing as compute_calibration_error.
+    """
+    mask = y_prob >= 0.50
+    y_true_filtered = y_true[mask]
+    y_prob_filtered = y_prob[mask]
+
+    if len(y_true_filtered) == 0:
+        return 0.0
+
+    bucket_edges = [0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95, 1.00]
+    errors = []
+    weights = []
+
+    for i in range(len(bucket_edges) - 1):
+        low, high = bucket_edges[i], bucket_edges[i + 1]
+        if i == len(bucket_edges) - 2:
+            bucket_mask = (y_prob_filtered >= low) & (y_prob_filtered <= high)
+        else:
+            bucket_mask = (y_prob_filtered >= low) & (y_prob_filtered < high)
+
+        if not bucket_mask.any():
+            continue
+
+        predicted_mean = float(np.mean(y_prob_filtered[bucket_mask]))
+        actual = float(np.mean(y_true_filtered[bucket_mask]))
+        n = int(bucket_mask.sum())
+        error = actual - predicted_mean  # positive = underconfident
+
+        errors.append(error)
+        weights.append(n)
+
+    if not errors:
+        return 0.0
+    return float(np.average(errors, weights=weights))
+
+
 def compute_error_rate_80plus(y_true: np.ndarray, y_prob: np.ndarray) -> float:
     """Compute error rate for predictions at 80%+ confidence."""
     y_pred = (y_prob >= 0.5).astype(int)

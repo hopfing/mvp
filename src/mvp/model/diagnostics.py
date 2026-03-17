@@ -9,7 +9,7 @@ import numpy as np
 import polars as pl
 from sklearn.metrics import accuracy_score, brier_score_loss, log_loss, roc_auc_score
 
-from mvp.model.metrics import compute_calibration_error, compute_error_rate_80plus
+from mvp.model.metrics import compute_calibration_error, compute_error_rate_80plus, compute_signed_calibration
 
 # Ordered rounds for per-round diagnostics
 ROUND_ORDER: list[str] = ["Q1", "Q2", "Q3", "RR", "R128", "R64", "R32", "R16", "QF", "SF", "F"]
@@ -257,6 +257,7 @@ def _compute_metrics_for_segment(
         }
         if include_calibration:
             result["calibration_error"] = 0.0
+            result["signed_calibration"] = 0.0
             result["error_rate_80plus"] = 0.0
         return result
 
@@ -278,6 +279,7 @@ def _compute_metrics_for_segment(
 
     if include_calibration:
         metrics["calibration_error"] = compute_calibration_error(y_true, y_prob)
+        metrics["signed_calibration"] = compute_signed_calibration(y_true, y_prob)
         metrics["error_rate_80plus"] = compute_error_rate_80plus(y_true, y_prob)
 
     return metrics
