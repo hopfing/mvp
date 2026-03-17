@@ -1,6 +1,6 @@
 active:
   artifact: data/models/production.joblib
-  config: models/production/e00_75_wsA_cA_20f.yaml
+  config: models/production/e00_75_wsA_cAll_20f.yaml
   filters:
     circuit:
     - tour

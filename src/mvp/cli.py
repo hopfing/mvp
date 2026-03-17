@@ -613,6 +613,13 @@ def _run_voter_confidence(args: argparse.Namespace, config_path: Path) -> int:
 
             voter_feature_cols = get_feature_columns(voter_feature_specs)
 
+            # Build imputation specs for voter features
+            from mvp.model.imputation import build_imputation, fit_imputation, apply_imputation
+            from mvp.model.registry import get_registry
+            voter_build = build_imputation(voter_feature_specs, get_registry())
+            voter_augmented_cols = voter_feature_cols + voter_build.aux_base_col_names
+            voter_n_model = voter_build.n_model_features
+
             # Replay primary folds on voter data
             voter_fold_probs: list[np.ndarray] = []
             voter_fold_keys: list[pl.DataFrame] = []
@@ -627,14 +634,36 @@ def _run_voter_confidence(args: argparse.Namespace, config_path: Path) -> int:
                     train_filtered = train_fold
 
                 X_train = train_filtered.select(
-                    pl.col(c).cast(pl.Float64) for c in voter_feature_cols
+                    pl.col(c).cast(pl.Float64) for c in voter_augmented_cols
                 ).to_numpy()
                 y_train = train_filtered["won"].to_numpy().astype(int)
 
                 # Predict on full (unfiltered) test set
                 X_test = test_fold.select(
-                    pl.col(c).cast(pl.Float64) for c in voter_feature_cols
+                    pl.col(c).cast(pl.Float64) for c in voter_augmented_cols
                 ).to_numpy()
+
+                # Impute and scale (matches runner preprocessing)
+                circuit_train = train_filtered["circuit"].to_numpy()
+                circuit_test = test_fold["circuit"].to_numpy()
+                impute_state = fit_imputation(X_train, circuit_train, voter_build.specs)
+
+                # Scaling stats from real data (before imputation), model cols only
+                import warnings as _w
+                with _w.catch_warnings():
+                    _w.simplefilter("ignore", RuntimeWarning)
+                    train_mean = np.nanmean(X_train[:, :voter_n_model], axis=0)
+                    train_std = np.nanstd(X_train[:, :voter_n_model], axis=0)
+                train_mean = np.where(np.isnan(train_mean), 0.0, train_mean)
+                train_std = np.where(np.isnan(train_std), 1.0, train_std)
+                train_std[train_std == 0] = 1.0
+
+                X_train = apply_imputation(X_train, circuit_train, impute_state)
+                X_test = apply_imputation(X_test, circuit_test, impute_state)
+                X_train = X_train[:, :voter_n_model]
+                X_test = X_test[:, :voter_n_model]
+                X_train = (X_train - train_mean) / train_std
+                X_test = (X_test - train_mean) / train_std
 
                 model = get_model(voter_cfg.model.type, voter_cfg.model.params or {})
                 model.fit(X_train, y_train)

@@ -13,23 +13,23 @@ features:
   - player_elo_surface_diff
   - player_glicko_rd_diff
   - player_match_count_diff(days=365)
+  - player_deciding_set_win_pct_diff(days=30)
+  - player_tourn_sets_lost_diff
   - player_age_diff
   - player_tour_match_pct_diff
   - player_venue_win_pct_diff
-  - player_elo_tb_clutch_diff
   - player_pts_service_won_pct_diff(days=15)
-  - player_deciding_set_win_pct_diff(days=90)
-  - player_match_count_diff(days=60)
-  - player_style_winner_rate_diff(days=30)
+  - player_opp_elo_faced_avg_diff(days=365)
+  - player_tourn_matches_played_diff
   - player_pts_total_won_pct_diff(days=365)
-  - player_svc_ace_pct_diff(days=15)
-  - player_svc_bp_save_pct_diff(days=15)
-  - player_svc_ace_pct_diff
-  - player_deciding_set_win_pct_diff(days=30)
-  - player_win_pct_diff(days=365)
-  - player_glicko_diff_x_rd_sum
-  - player_ret_ace_resistance_diff
-  - player_svc_second_serve_reliability_diff
+  - player_elo_clutch_diff
+  - player_opp_elo_beaten_avg_diff(days=30)
+  - player_straight_sets_win_pct_diff(days=15)
+  - player_tourn_games_lost_diff
+  - player_surface_switch_diff
+  - player_ranking_rank_diff
+  - player_quality_win_rate_diff(days=15)
+  - player_style_winner_rate_diff(days=30)
 metrics:
   primary: log_loss
 model:
