@@ -1,10 +1,13 @@
 """Feature Engine for computing features from matches data."""
 
 
+import ctypes
+import ctypes.wintypes
 import hashlib
 import inspect
 import json
 import logging
+import os
 import re
 import time
 from pathlib import Path
@@ -16,6 +19,54 @@ import mvp.model.features  # noqa: F401 - triggers feature registration
 from mvp.model.registry import get_registry
 
 logger = logging.getLogger(__name__)
+
+_MEMORY_LIMIT_PCT = int(os.environ.get("MVP_MEMORY_LIMIT_PCT", "75"))
+
+
+class MemoryLimitExceeded(RuntimeError):
+    """Raised when process memory usage exceeds the configured threshold."""
+
+
+def check_memory(context: str = "") -> None:
+    """Abort if system memory usage exceeds the configured threshold.
+
+    Uses Windows GlobalMemoryStatusEx to check physical memory usage.
+    No-op on non-Windows platforms.
+    """
+    if _MEMORY_LIMIT_PCT <= 0 or _MEMORY_LIMIT_PCT >= 100:
+        return
+    if not hasattr(ctypes, "windll"):
+        return
+
+    class MEMORYSTATUSEX(ctypes.Structure):
+        _fields_ = [
+            ("dwLength", ctypes.wintypes.DWORD),
+            ("dwMemoryLoad", ctypes.wintypes.DWORD),
+            ("ullTotalPhys", ctypes.c_uint64),
+            ("ullAvailPhys", ctypes.c_uint64),
+            ("ullTotalPageFile", ctypes.c_uint64),
+            ("ullAvailPageFile", ctypes.c_uint64),
+            ("ullTotalVirtual", ctypes.c_uint64),
+            ("ullAvailVirtual", ctypes.c_uint64),
+            ("ullAvailExtendedVirtual", ctypes.c_uint64),
+        ]
+
+    stat = MEMORYSTATUSEX()
+    stat.dwLength = ctypes.sizeof(stat)
+    if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat)):
+        return
+
+    used_pct = stat.dwMemoryLoad
+    if used_pct >= _MEMORY_LIMIT_PCT:
+        used_gb = (stat.ullTotalPhys - stat.ullAvailPhys) / (1024 ** 3)
+        total_gb = stat.ullTotalPhys / (1024 ** 3)
+        msg = (
+            f"Memory usage {used_pct}% ({used_gb:.1f}/{total_gb:.1f} GB) "
+            f"exceeds limit of {_MEMORY_LIMIT_PCT}%"
+        )
+        if context:
+            msg = f"[{context}] {msg}"
+        raise MemoryLimitExceeded(msg)
 
 
 def parse_feature_spec(spec: str) -> tuple[str | None, str, str, dict[str, Any]]:
@@ -343,12 +394,402 @@ class FeatureEngine:
 
         return result
 
-    def compute(self, feature_specs: list[str]) -> pl.DataFrame:
+    def _resolve_source_columns(
+        self, feature_specs: list[str], extra_columns: list[str] | None = None,
+    ) -> list[str]:
+        """Determine which parquet columns are needed for the given features.
+
+        Introspects base (non-derived) feature expressions via
+        ``expr.meta.root_names()`` to find referenced source columns.
+        Derived features reference computed columns, so they are skipped.
+
+        Args:
+            feature_specs: Resolved (dependency-expanded) feature specs.
+            extra_columns: Additional columns the caller needs (e.g., for
+                filtering, target resolution, diagnostics).
+
+        Returns:
+            Deduplicated list of parquet column names to load.
+        """
+        # Structural columns the engine always needs
+        needed: set[str] = {
+            "match_uid", "player_id", "opp_id", "effective_match_date",
+        }
+
+        if extra_columns:
+            needed.update(extra_columns)
+
+        # Introspect base (non-derived) feature expressions
+        seen_bases: set[str] = set()
+        for spec in feature_specs:
+            _prefix, base_name, _full_name, params = parse_feature_spec(spec)
+            if base_name in seen_bases:
+                continue
+            seen_bases.add(base_name)
+
+            feature_def = self._registry.get(base_name)
+            if feature_def.depends_on:
+                continue  # derived — references computed columns, not source
+
+            try:
+                expr = feature_def.func(**params)
+                root_names = expr.meta.root_names()
+                needed.update(root_names)
+            except Exception:
+                logger.debug(
+                    "Could not introspect columns for %s, will load all",
+                    base_name,
+                )
+                return []  # fall back to loading everything
+
+        # Validate against actual parquet schema
+        available = set(
+            pl.scan_parquet(self.matches_path).collect_schema().names()
+        )
+        pruned = sorted(needed & available)
+        missing = needed - available
+        if missing:
+            logger.debug("Requested columns not in parquet (computed?): %s", missing)
+
+        return pruned
+
+    def ensure_cached(
+        self,
+        feature_specs: list[str],
+        extra_columns: list[str] | None = None,
+        batch_size: int = 150,
+    ) -> str:
+        """Compute all features and cache them without holding them all in memory.
+
+        Processes base features in batches: compute batch, cache to disk, drop
+        computed columns from the DataFrame before the next batch. Derived
+        features load only their dependencies from cache.
+
+        Args:
+            feature_specs: Feature specs (will be dependency-resolved).
+            extra_columns: Additional parquet columns to load.
+            batch_size: Number of base features to compute per batch.
+
+        Returns:
+            The cache_key (callers need it to load from cache).
+        """
+        t0 = time.perf_counter()
+
+        # Resolve dependencies
+        feature_specs = self._resolve_dependencies(feature_specs)
+
+        # Categorize
+        match_level_specs: list[str] = []
+        match_level_derived_specs: list[str] = []
+        base_specs: list[str] = []
+        derived_specs: list[str] = []
+        for spec in feature_specs:
+            prefix, base_name, full_name, params = parse_feature_spec(spec)
+            feature_def = self._registry.get(base_name)
+            if prefix is None:
+                if feature_def.depends_on:
+                    match_level_derived_specs.append(spec)
+                else:
+                    match_level_specs.append(spec)
+            elif feature_def.depends_on:
+                derived_specs.append(spec)
+            else:
+                base_specs.append(spec)
+
+        logger.info(
+            "ensure_cached: %d features (%d base, %d derived, %d match-level)",
+            len(feature_specs), len(base_specs), len(derived_specs),
+            len(match_level_specs) + len(match_level_derived_specs),
+        )
+
+        # Load source data (pruned columns)
+        columns_to_load = self._resolve_source_columns(
+            feature_specs, extra_columns,
+        )
+        if columns_to_load:
+            df = pl.read_parquet(self.matches_path, columns=columns_to_load)
+        else:
+            df = pl.read_parquet(self.matches_path)
+        logger.info("Loaded matches: %d rows x %d columns", df.height, df.width)
+        check_memory("ensure_cached: after parquet load")
+
+        # Cache validity
+        cache_key = self._compute_cache_key()
+        if self._manifest.get("cache_key") != cache_key:
+            logger.info("Cache invalidated — recomputing all features")
+            self._invalidate_cache()
+
+        # Phase 0: match-level features (small, do all at once)
+        for spec in match_level_specs:
+            _prefix, base_name, full_name, params = parse_feature_spec(spec)
+            col_name = build_column_name(full_name, params)
+            cache_spec = base_name
+            if params:
+                param_str = ",".join(f"{k}={v}" for k, v in params.items())
+                cache_spec = f"{base_name}({param_str})"
+            if not self._is_cached(cache_spec, cache_key):
+                feature_def = self._registry.get(base_name)
+                expr = feature_def.func(**params)
+                df = df.with_columns(expr.alias(col_name))
+                self._cache_feature(cache_spec, df, [col_name], cache_key)
+                df = df.drop(col_name)
+
+        if match_level_specs:
+            logger.info("Phase 0: %d match-level cached", len(match_level_specs))
+
+        # Phase 1: base player_* features in batches
+        # Deduplicate to player_ versions
+        uncached_base: list[tuple[str, str, str, dict]] = []
+        seen_player_cols: set[str] = set()
+        for spec in base_specs:
+            prefix, base_name, full_name, params = parse_feature_spec(spec)
+            player_col = build_column_name(
+                f"player_{base_name}" if prefix == "opp" else full_name, params,
+            )
+            if player_col in seen_player_cols:
+                continue
+            seen_player_cols.add(player_col)
+            cache_spec = f"player_{base_name}"
+            if params:
+                param_str = ",".join(f"{k}={v}" for k, v in params.items())
+                cache_spec = f"player_{base_name}({param_str})"
+            if not self._is_cached(cache_spec, cache_key):
+                uncached_base.append((base_name, cache_spec, player_col, params))
+
+        # Process uncached base features in batches
+        for i in range(0, len(uncached_base), batch_size):
+            batch = uncached_base[i : i + batch_size]
+            for base_name, cache_spec, player_col, params in batch:
+                feature_def = self._registry.get(base_name)
+                expr = feature_def.func(**params)
+                df = df.with_columns(expr.alias(player_col))
+                self._cache_feature(cache_spec, df, [player_col], cache_key)
+            # Drop computed columns before next batch
+            cols_to_drop = [col for _, _, col, _ in batch if col in df.columns]
+            if cols_to_drop:
+                df = df.drop(cols_to_drop)
+            check_memory(f"ensure_cached: after base batch {i // batch_size + 1}")
+
+        logger.info(
+            "Phase 1: %d base features (%d computed, %d already cached)",
+            len(seen_player_cols), len(uncached_base),
+            len(seen_player_cols) - len(uncached_base),
+        )
+
+        # Phase 3: derived features — load dependencies from cache, compute, cache, drop
+        # First, handle opp mirroring: for opp derived features with mirror=True,
+        # we need the player_ version computed and mirrored. For ensure_cached we
+        # just need to compute the player_ version (mirroring happens at load time).
+        for spec in derived_specs:
+            prefix, base_name, full_name, params = parse_feature_spec(spec)
+            feature_def = self._registry.get(base_name)
+            col_name = build_column_name(full_name, params)
+
+            # opp_ derived with mirror: player_ version is what gets cached
+            if prefix == "opp" and feature_def.mirror:
+                prefix = "player"
+                full_name = f"player_{base_name}"
+                col_name = build_column_name(full_name, params)
+
+            if prefix == "opp":
+                continue  # opp_ non-mirror derived: handled via mirror at load time
+
+            cache_spec = f"player_{base_name}"
+            if params:
+                param_str = ",".join(f"{k}={v}" for k, v in params.items())
+                cache_spec = f"player_{base_name}({param_str})"
+            if self._is_cached(cache_spec, cache_key):
+                continue
+
+            # Load dependencies from cache onto df
+            dep_cache_specs = []
+            for dep_name in feature_def.depends_on:
+                for dep_prefix in ["player", "opp"]:
+                    dep_spec = f"{dep_prefix}_{dep_name}"
+                    if params:
+                        param_str = ",".join(f"{k}={v}" for k, v in params.items())
+                        dep_spec = f"{dep_prefix}_{dep_name}({param_str})"
+                    # Load player_ version from cache
+                    player_dep_spec = f"player_{dep_name}"
+                    if params:
+                        player_dep_spec = f"player_{dep_name}({param_str})"
+                    if player_dep_spec not in dep_cache_specs:
+                        dep_cache_specs.append(player_dep_spec)
+
+            # Join deps, compute, cache, drop
+            dep_cols_before = set(df.columns)
+            df = self._batch_join_cached(df, dep_cache_specs)
+            # Mirror player_ deps to opp_ if needed
+            player_dep_cols = [
+                c for c in df.columns
+                if c not in dep_cols_before and c.startswith("player_")
+            ]
+            if player_dep_cols:
+                df = self._mirror_features(df, player_dep_cols)
+
+            expr = feature_def.func(**params)
+            df = df.with_columns(expr.alias(col_name))
+            self._cache_feature(cache_spec, df, [col_name], cache_key)
+
+            # Drop everything we added
+            added_cols = [c for c in df.columns if c not in dep_cols_before]
+            if added_cols:
+                df = df.drop(added_cols)
+
+        if derived_specs:
+            logger.info("Phase 3: derived features cached")
+            check_memory("ensure_cached: after derived")
+
+        # Phase 6: match-level derived features
+        for spec in match_level_derived_specs:
+            _prefix, base_name, full_name, params = parse_feature_spec(spec)
+            col_name = build_column_name(full_name, params)
+            cache_spec = base_name
+            if params:
+                param_str = ",".join(f"{k}={v}" for k, v in params.items())
+                cache_spec = f"{base_name}({param_str})"
+            if self._is_cached(cache_spec, cache_key):
+                continue
+
+            feature_def = self._registry.get(base_name)
+            # Load dependencies
+            dep_cols_before = set(df.columns)
+            dep_cache_specs = []
+            for dep_name in feature_def.depends_on:
+                for dep_prefix in ["player", "opp"]:
+                    player_dep_spec = f"player_{dep_name}"
+                    if params:
+                        param_str = ",".join(f"{k}={v}" for k, v in params.items())
+                        player_dep_spec = f"player_{dep_name}({param_str})"
+                    if player_dep_spec not in dep_cache_specs:
+                        dep_cache_specs.append(player_dep_spec)
+            df = self._batch_join_cached(df, dep_cache_specs)
+            player_dep_cols = [
+                c for c in df.columns
+                if c not in dep_cols_before and c.startswith("player_")
+            ]
+            if player_dep_cols:
+                df = self._mirror_features(df, player_dep_cols)
+
+            expr = feature_def.func(**params)
+            df = df.with_columns(expr.alias(col_name))
+            self._cache_feature(cache_spec, df, [col_name], cache_key)
+            added_cols = [c for c in df.columns if c not in dep_cols_before]
+            if added_cols:
+                df = df.drop(added_cols)
+
+        elapsed = time.perf_counter() - t0
+        logger.info("ensure_cached complete in %.1fs", elapsed)
+        return cache_key
+
+    def load_features_numpy(
+        self,
+        feature_specs: list[str],
+        base_df: pl.DataFrame,
+        cache_key: str,
+    ) -> pl.DataFrame:
+        """Load computed features from cache onto a (filtered) base DataFrame.
+
+        Loads features one at a time from cache, joins to base_df, avoiding
+        ever holding all features in memory as one wide DataFrame.
+
+        Args:
+            feature_specs: Feature specs to load (must already be cached).
+            base_df: Filtered DataFrame with at least match_uid and player_id.
+            cache_key: Cache key from ensure_cached().
+
+        Returns:
+            base_df with feature columns joined on.
+        """
+        join_on = ["match_uid", "player_id"]
+
+        # Group specs by their cache spec to avoid duplicate loads
+        specs_to_load: list[tuple[str, str]] = []  # (cache_spec, col_name)
+        seen: set[str] = set()
+
+        for spec in feature_specs:
+            prefix, base_name, full_name, params = parse_feature_spec(spec)
+            col_name = build_column_name(full_name, params)
+            feature_def = self._registry.get(base_name)
+
+            if prefix == "opp" and feature_def.mirror:
+                # Need the player_ version, will mirror later
+                player_spec = f"player_{base_name}"
+                if params:
+                    param_str = ",".join(f"{k}={v}" for k, v in params.items())
+                    player_spec = f"player_{base_name}({param_str})"
+                player_col = build_column_name(f"player_{base_name}", params)
+                if player_col not in seen:
+                    specs_to_load.append((player_spec, player_col))
+                    seen.add(player_col)
+            elif prefix == "opp":
+                # opp_ non-mirror: load player_ version, will mirror
+                player_spec = f"player_{base_name}"
+                if params:
+                    param_str = ",".join(f"{k}={v}" for k, v in params.items())
+                    player_spec = f"player_{base_name}({param_str})"
+                player_col = build_column_name(f"player_{base_name}", params)
+                if player_col not in seen:
+                    specs_to_load.append((player_spec, player_col))
+                    seen.add(player_col)
+            elif prefix == "player":
+                cache_spec = f"player_{base_name}"
+                if params:
+                    param_str = ",".join(f"{k}={v}" for k, v in params.items())
+                    cache_spec = f"player_{base_name}({param_str})"
+                if col_name not in seen:
+                    specs_to_load.append((cache_spec, col_name))
+                    seen.add(col_name)
+            else:
+                # match-level
+                cache_spec = base_name
+                if params:
+                    param_str = ",".join(f"{k}={v}" for k, v in params.items())
+                    cache_spec = f"{base_name}({param_str})"
+                if col_name not in seen:
+                    specs_to_load.append((cache_spec, col_name))
+                    seen.add(col_name)
+
+        # Load features from cache in batches to limit join overhead
+        batch_size = 50
+        for i in range(0, len(specs_to_load), batch_size):
+            batch = specs_to_load[i : i + batch_size]
+            frames = []
+            for cache_spec, _col_name in batch:
+                cached = self._load_cached_feature(cache_spec)
+                frames.append(cached)
+            if frames:
+                merged = frames[0]
+                for frame in frames[1:]:
+                    merged = merged.join(frame, on=join_on, how="left")
+                base_df = base_df.join(merged, on=join_on, how="left")
+
+        # Mirror player_ → opp_ for any opp specs
+        player_cols_to_mirror: list[str] = []
+        for spec in feature_specs:
+            prefix, base_name, full_name, params = parse_feature_spec(spec)
+            if prefix == "opp":
+                player_col = build_column_name(f"player_{base_name}", params)
+                if player_col not in player_cols_to_mirror:
+                    player_cols_to_mirror.append(player_col)
+
+        if player_cols_to_mirror:
+            base_df = self._mirror_features(base_df, player_cols_to_mirror)
+
+        return base_df
+
+    def compute(
+        self,
+        feature_specs: list[str],
+        extra_columns: list[str] | None = None,
+    ) -> pl.DataFrame:
         """Compute features for the given feature specifications.
 
         Args:
             feature_specs: List of feature specs like ["player_win_rate(days=30)"].
                 Specs can start with "player_", "opp_", or have no prefix (match-level).
+            extra_columns: Additional parquet columns to load (for filtering,
+                target resolution, diagnostics, etc.).
 
         Returns:
             DataFrame with match data and computed feature columns.
@@ -397,9 +838,20 @@ class FeatureEngine:
             len(match_level_specs) + len(match_level_derived_specs),
         )
 
-        # Load matches data
-        df = pl.read_parquet(self.matches_path)
-        logger.info("Loaded matches: %d rows x %d columns", df.height, df.width)
+        # Column pruning: only load parquet columns that features actually need
+        columns_to_load = self._resolve_source_columns(
+            feature_specs, extra_columns,
+        )
+        if columns_to_load:
+            df = pl.read_parquet(self.matches_path, columns=columns_to_load)
+            logger.info(
+                "Loaded matches: %d rows x %d columns (pruned from parquet)",
+                df.height, df.width,
+            )
+        else:
+            df = pl.read_parquet(self.matches_path)
+            logger.info("Loaded matches: %d rows x %d columns", df.height, df.width)
+        check_memory("after parquet load")
 
         # Check cache validity — wipe everything if data or code changed
         cache_key = self._compute_cache_key()
@@ -478,6 +930,7 @@ class FeatureEngine:
             "Phase 1: %d base features (%d cached, %d computed)",
             len(computed_player_cols), len(cached_specs_p1), len(uncached_p1),
         )
+        check_memory("after phase 1")
 
         # Phase 2: mirror to create opp_* columns (BEFORE derived features)
         if opp_cols_to_mirror:
@@ -544,6 +997,7 @@ class FeatureEngine:
                 len(cached_specs_p3) + len(uncached_p3), len(cached_specs_p3),
                 len(uncached_p3), len(deferred_specs),
             )
+            check_memory("after phase 3")
 
         # Phase 4: mirror derived features that need opp_* columns
         if derived_opp_to_mirror:

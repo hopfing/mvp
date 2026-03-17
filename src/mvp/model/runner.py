@@ -17,7 +17,7 @@ run_logger = logging.getLogger(__name__)
 from mvp.model.calibration import PlattCalibrator
 from mvp.model.config import EnsembleParams, ExperimentConfig, apply_filters, get_filter_feature_specs
 from mvp.model.diagnostics import Diagnostics, EnsembleDiagnostics
-from mvp.model.engine import FeatureEngine, get_feature_columns
+from mvp.model.engine import FeatureEngine, check_memory, get_feature_columns
 from mvp.model.imputation import apply_imputation, build_imputation, fit_imputation
 from mvp.model.metrics import compute_calibration_error, compute_metrics
 from mvp.model.mlflow_logger import ExperimentLogger
@@ -218,7 +218,28 @@ class ExperimentRunner:
         extra = compute_only + filter_specs
         all_specs = feature_specs + [s for s in extra if s not in feature_specs]
         t_run = time.perf_counter()
-        df = self.engine.compute(all_specs)
+
+        # Columns the runner needs beyond what features reference:
+        # - target resolution: won, reason, sets_played, best_of
+        # - date filtering: effective_match_date (already structural)
+        # - diagnostics: circuit, surface, round
+        # - raw filter columns (draw_type, etc.) that aren't computed features
+        runner_columns = [
+            "won", "reason", "sets_played", "best_of",
+            "circuit", "surface", "round",
+        ]
+        if self.config.data.filters:
+            for col in self.config.data.filters:
+                if col not in runner_columns:
+                    runner_columns.append(col)
+        if is_ensemble and model_filters:
+            for filt in model_filters:
+                if filt:
+                    for col in filt:
+                        if col not in runner_columns:
+                            runner_columns.append(col)
+
+        df = self.engine.compute(all_specs, extra_columns=runner_columns)
 
         # Apply additional filters (e.g., draw_type: "singles")
         # These are applied AFTER feature computation so workload features
@@ -277,6 +298,7 @@ class ExperimentRunner:
         )
 
         # Train and evaluate
+        check_memory("before training loop")
         all_metrics: list[dict[str, float]] = []
         all_train_metrics: list[dict[str, float]] = []
         all_predictions: list[dict[str, Any]] = []
@@ -324,6 +346,7 @@ class ExperimentRunner:
 
         try:
             for fold_idx, (train_idx, test_idx) in enumerate(splitter.split(df)):
+                check_memory(f"fold {fold_idx + 1} start")
                 t_fold = time.perf_counter()
                 train_df = df[train_idx]
                 test_df = df[test_idx]

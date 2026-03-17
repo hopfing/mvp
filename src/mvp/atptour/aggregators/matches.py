@@ -610,12 +610,42 @@ class MatchesAggregator(BaseJob):
         combined = add_best_of(combined)
 
         # Compute Elo ratings for singles matches only
-        singles = combined.filter(pl.col("draw_type") == "singles")
-        if not singles.is_empty():
-            singles = compute_all_ratings(singles)
-            # Rejoin with non-singles rows
-            non_singles = combined.filter(pl.col("draw_type") != "singles")
-            combined = pl.concat([singles, non_singles], how="diagonal_relaxed")
+        # Pass only the columns ratings needs to avoid .to_dicts() on the full wide DF
+        _RATINGS_INPUT_COLS = [
+            "match_uid", "player_id", "opp_id", "effective_match_date",
+            "surface", "round", "tournament_level", "won", "indoor",
+            "player_rank", "opp_rank",
+            "pts_service_pts_won", "pts_service_pts_played",
+            "opp_pts_service_pts_won", "opp_pts_service_pts_played",
+            "svc_aces", "svc_first_serve_pts_won",
+            "svc_double_faults", "svc_second_serve_pts_played",
+            "opp_svc_aces", "ret_first_serve_pts_played", "ret_first_serve_pts_won",
+            "svc_bp_saved", "svc_bp_faced",
+            "ret_bp_converted", "ret_bp_opportunities",
+            "opp_svc_first_serve_pts_won",
+            "opp_svc_double_faults", "opp_svc_second_serve_pts_played",
+            "opp_ret_first_serve_pts_played", "opp_ret_first_serve_pts_won",
+            "opp_svc_bp_saved", "opp_svc_bp_faced",
+            "opp_ret_bp_converted", "opp_ret_bp_opportunities",
+        ] + [f"player_set{i}_tiebreak" for i in range(1, 6)] + [
+            f"opp_set{i}_tiebreak" for i in range(1, 6)
+        ]
+        _ratings_cols = [c for c in _RATINGS_INPUT_COLS if c in combined.columns]
+        singles_slim = combined.filter(
+            pl.col("draw_type") == "singles"
+        ).select(_ratings_cols)
+        if not singles_slim.is_empty():
+            ratings_result = compute_all_ratings(singles_slim)
+            # Extract only the new rating columns and join back
+            join_keys = ["match_uid", "player_id"]
+            rating_cols = [c for c in ratings_result.columns if c not in _ratings_cols]
+            if rating_cols:
+                combined = combined.join(
+                    ratings_result.select(join_keys + rating_cols),
+                    on=join_keys,
+                    how="left",
+                )
+            del singles_slim, ratings_result
 
         # Step 9: Add partner rows for doubles workload tracking
         combined = add_partner_workload_rows(combined)

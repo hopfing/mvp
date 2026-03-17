@@ -1,10 +1,17 @@
 """Model wrappers for experiments."""
 
 
+import os
 from abc import ABC, abstractmethod
 from typing import Any
 
 import numpy as np
+
+
+def _default_n_jobs() -> int:
+    """Return a capped n_jobs value, leaving 2 cores for the OS."""
+    cpu_count = os.cpu_count() or 4
+    return max(1, cpu_count - 2)
 
 
 class BaseModel(ABC):
@@ -28,7 +35,7 @@ class XGBoostModel(BaseModel):
         self.params = {
             "objective": "binary:logistic",
             "eval_metric": "logloss",
-            "n_jobs": -1,
+            "n_jobs": _default_n_jobs(),
             "random_state": 42,
             **params,
         }
@@ -82,7 +89,7 @@ class RandomForestModel(BaseModel):
     """Random forest classifier wrapper."""
 
     def __init__(self, params: dict[str, Any]) -> None:
-        self.params = {"random_state": 42, "n_jobs": -1, **params}
+        self.params = {"random_state": 42, "n_jobs": _default_n_jobs(), **params}
         self._model = None
 
     def fit(self, X: np.ndarray, y: np.ndarray, sample_weight: np.ndarray | None = None) -> None:

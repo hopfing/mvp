@@ -12,7 +12,7 @@ from sklearn.linear_model import LogisticRegression
 
 from mvp.model.config import apply_filters
 from mvp.model.discovery.config import DiscoveryConfig
-from mvp.model.engine import FeatureEngine, get_feature_columns
+from mvp.model.engine import FeatureEngine, check_memory, get_feature_columns
 from mvp.model.imputation import (
     apply_imputation,
     augmented_col_indices,
@@ -116,10 +116,31 @@ class FastForwardSelector:
         all_specs = self.all_feature_specs + [
             s for s in compute_only if s not in self.all_feature_specs
         ]
-        df = engine.compute(all_specs)
 
+        # Extra columns needed for filtering, target resolution, etc.
+        extra_columns = [
+            "won", "reason", "sets_played", "best_of",
+            "circuit", "surface", "round",
+        ]
         if self.config.data.filters:
-            df = apply_filters(df, self.config.data.filters)
+            for col in self.config.data.filters:
+                if col not in extra_columns:
+                    extra_columns.append(col)
+
+        # Phase A: ensure all features are cached (memory-bounded batches)
+        cache_key = engine.ensure_cached(
+            all_specs, extra_columns=extra_columns,
+        )
+
+        # Phase B: load a lightweight base DataFrame for filtering
+        structural_cols = [
+            "match_uid", "player_id", "opp_id", "effective_match_date",
+        ] + extra_columns
+        available = set(
+            pl.scan_parquet(self.matches_path).collect_schema().names()
+        )
+        structural_cols = [c for c in structural_cols if c in available]
+        df = pl.read_parquet(self.matches_path, columns=structural_cols)
 
         dr = self.config.data.date_range
         df = df.filter(
@@ -160,6 +181,18 @@ class FastForwardSelector:
                 .sort("_order")
                 .drop("_order")
             )
+
+        logger.info("Filtered to %d rows, loading features from cache", len(df))
+        check_memory("precompute: after filtering")
+
+        # Phase C: load features from cache onto the filtered DataFrame
+        df = engine.load_features_numpy(
+            self.all_feature_specs, df, cache_key,
+        )
+
+        # Apply filters AFTER features are loaded (filters may reference computed features)
+        if self.config.data.filters:
+            df = apply_filters(df, self.config.data.filters)
 
         all_col_names = get_feature_columns(self.all_feature_specs)
         self._build_result = build_imputation(self.all_feature_specs, get_registry())
