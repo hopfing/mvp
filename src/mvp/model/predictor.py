@@ -28,6 +28,16 @@ CACHE_DIR = Path("data/features/cache")
 PREDICTIONS_PATH = Path("data/predictions/predictions.parquet")
 PRODUCTION_CONFIG_PATH = Path("production.yaml")
 
+# Columns the predictor needs beyond what features reference
+_PREDICTOR_EXTRA_COLS = [
+    "won", "reason", "sets_played", "best_of",
+    "circuit", "surface", "round", "draw_type",
+    "tournament_id", "tournament_name",
+    "player_first_name", "player_last_name",
+    "opp_first_name", "opp_last_name",
+    "draw_p1_id", "scheduled_datetime", "match_date",
+]
+
 # Tolerance for prediction consistency checks
 PREDICTION_TOLERANCE = 1e-4
 # Threshold for drift alerts (5% probability swing)
@@ -130,7 +140,7 @@ class ProductionPredictor:
         filter_specs = get_filter_feature_specs(entry.get("filters"))
         extra = compute_only + filter_specs
         all_specs = feature_specs + [s for s in extra if s not in feature_specs]
-        df = engine.compute(all_specs)
+        df = engine.compute(all_specs, extra_columns=_PREDICTOR_EXTRA_COLS)
 
         # Apply training filters
         train_range = entry["train_date_range"]
@@ -291,7 +301,7 @@ class ProductionPredictor:
         filter_specs = get_filter_feature_specs(config.data.filters) if scoped else []
         extra = compute_only + filter_specs
         all_specs = feature_specs + [s for s in extra if s not in feature_specs]
-        df = engine.compute(all_specs)
+        df = engine.compute(all_specs, extra_columns=_PREDICTOR_EXTRA_COLS)
 
         # Determine in-scope match UIDs for scoped voters
         in_scope_uids: set[str] | None = None
@@ -491,7 +501,7 @@ class ProductionPredictor:
         filter_specs = get_filter_feature_specs(self.config["active"].get("filters"))
         extra = compute_only + filter_specs
         all_specs = feature_specs + [s for s in extra if s not in feature_specs]
-        df = engine.compute(all_specs)
+        df = engine.compute(all_specs, extra_columns=_PREDICTOR_EXTRA_COLS)
 
         # Apply non-date filters (same as training, minus date range)
         if self.config["active"].get("filters"):

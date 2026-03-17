@@ -596,7 +596,10 @@ def _run_voter_confidence(args: argparse.Namespace, config_path: Path) -> int:
                 matches_path=Path("data/aggregate/atptour/matches.parquet"),
                 cache_dir=Path("data/features/cache"),
             )
-            voter_df = voter_engine.compute(all_specs)
+            voter_df = voter_engine.compute(all_specs, extra_columns=[
+                "won", "reason", "sets_played", "best_of",
+                "circuit", "surface", "round", "draw_type",
+            ])
 
             # Apply primary's non-filter constraints (date range, target)
             # so voter_df aligns with the primary's row set
