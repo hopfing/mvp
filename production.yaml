@@ -1,6 +1,6 @@
 active:
   artifact: data/models/production.joblib
-  config: models/production/e00_75_wsA_cAll_20f.yaml
+  config: models/production/e00_35_wsA_cAll_15f.yaml
   filters:
     circuit:
     - tour
@@ -9,30 +9,10 @@ active:
   train_date_range:
     end: '2025-12-31'
     start: '2020-01-01'
-  trained_at: '2026-03-17T05:24:00.931254+00:00'
+  trained_at: '2026-03-18T03:25:56.132618+00:00'
 history: []
 voters:
-- artifact: data/models/voter_xgb.joblib
-  config: models/voters/xgb.yaml
+- artifact: data/models/xgb_e00_75_cAll_8f.joblib
+  config: models/voters/xgb_e00_75_cAll_8f.yaml
   name: xgb
   scoped: false
-- artifact: data/models/voter_rf.joblib
-  config: models/voters/rf.yaml
-  name: rf
-  scoped: false
-- artifact: data/models/voter_close_specialist.joblib
-  config: models/voters/close_specialist.yaml
-  name: close_specialist
-  scoped: true
-- artifact: data/models/voter_blowout_specialist.joblib
-  config: models/voters/blowout_specialist.yaml
-  name: blowout_specialist
-  scoped: true
-- artifact: data/models/voter_tour_specialist.joblib
-  config: models/voters/tour_specialist.yaml
-  name: tour_specialist
-  scoped: true
-- artifact: data/models/voter_chal_specialist.joblib
-  config: models/voters/chal_specialist.yaml
-  name: chal_specialist
-  scoped: true
