@@ -148,6 +148,9 @@ class FeatureSelector:
             best_metric = best_feature_metric
 
             sel_logger.info("  + %s -> %.4f", best_feature, best_metric)
+            Path("discovery_progress.txt").write_text(
+                "\n".join(f"{i+1}. {f}" for i, f in enumerate(selected))
+            )
 
             # Sort round results by metric (best first)
             reverse = self.direction == "maximize"
