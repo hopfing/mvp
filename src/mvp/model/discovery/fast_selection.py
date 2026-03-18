@@ -186,8 +186,9 @@ class FastForwardSelector:
         check_memory("precompute: after filtering")
 
         # Phase C: load features from cache onto the filtered DataFrame
+        # Use all_specs (includes compute_only) so filter columns are available
         df = engine.load_features_numpy(
-            self.all_feature_specs, df, cache_key,
+            all_specs, df, cache_key,
         )
 
         # Apply filters AFTER features are loaded (filters may reference computed features)
