@@ -9,7 +9,7 @@ active:
   train_date_range:
     end: '2025-12-31'
     start: '2020-01-01'
-  trained_at: '2026-03-18T17:11:26.047314+00:00'
+  trained_at: '2026-03-18T03:29:19.749441+00:00'
 history: []
 voters:
 - artifact: data/models/xgb_e00_45_cAll_7f.joblib
