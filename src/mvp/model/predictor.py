@@ -12,9 +12,15 @@ import numpy as np
 import polars as pl
 import yaml
 
+from mvp.common.base_job import get_data_root
 from mvp.model.calibration import PlattCalibrator
 from mvp.model.confidence.dimensions import MODIFIERS
-from mvp.model.config import EnsembleParams, ExperimentConfig, apply_filters, get_filter_feature_specs
+from mvp.model.config import (
+    EnsembleParams,
+    ExperimentConfig,
+    apply_filters,
+    get_filter_feature_specs,
+)
 from mvp.model.engine import FeatureEngine, get_feature_columns
 from mvp.model.features.elo import surface_elo_expr
 from mvp.model.imputation import apply_imputation, build_imputation, fit_imputation
@@ -23,9 +29,9 @@ from mvp.model.registry import get_registry
 
 logger = logging.getLogger(__name__)
 
-MATCHES_PATH = Path("data/aggregate/atptour/matches.parquet")
-CACHE_DIR = Path("data/features/cache")
-PREDICTIONS_PATH = Path("data/predictions/predictions.parquet")
+MATCHES_PATH = get_data_root() / "aggregate" / "atptour" / "matches.parquet"
+CACHE_DIR = get_data_root() / "features" / "cache"
+PREDICTIONS_PATH = get_data_root() / "predictions" / "predictions.parquet"
 PRODUCTION_CONFIG_PATH = Path("production.yaml")
 
 # Columns the predictor needs beyond what features reference

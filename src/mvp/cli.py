@@ -11,6 +11,7 @@ from typing import Any
 warnings.filterwarnings("ignore", message="All-NaN slice encountered")
 warnings.filterwarnings("ignore", category=UserWarning, module="sklearn.utils.parallel")
 
+from mvp.common.base_job import get_data_root
 from mvp.draftkings.odds import fetch_and_save
 
 logger = logging.getLogger(__name__)
@@ -538,7 +539,7 @@ def _run_voter_confidence(args: argparse.Namespace, config_path: Path) -> int:
         voter_config = yaml.safe_load(f)
 
     config_name = config_path.stem
-    oof_dir = Path("data/confidence") / config_name
+    oof_dir = get_data_root() / "confidence" / config_name
     oof_path = oof_dir / "oof.parquet"
     voter_names = [v["name"] for v in voter_config["voters"]]
 
@@ -572,8 +573,8 @@ def _run_voter_confidence(args: argparse.Namespace, config_path: Path) -> int:
 
         # Get primary's full filtered DataFrame for fold replay
         primary_engine = FeatureEngine(
-            matches_path=Path("data/aggregate/atptour/matches.parquet"),
-            cache_dir=Path("data/features/cache"),
+            matches_path=get_data_root() / "aggregate" / "atptour" / "matches.parquet",
+            cache_dir=get_data_root() / "features" / "cache",
         )
 
         # For each voter: replay primary folds, train on voter-filtered
@@ -593,8 +594,8 @@ def _run_voter_confidence(args: argparse.Namespace, config_path: Path) -> int:
             all_specs = voter_feature_specs + [s for s in extra if s not in voter_feature_specs]
 
             voter_engine = FeatureEngine(
-                matches_path=Path("data/aggregate/atptour/matches.parquet"),
-                cache_dir=Path("data/features/cache"),
+                matches_path=get_data_root() / "aggregate" / "atptour" / "matches.parquet",
+                cache_dir=get_data_root() / "features" / "cache",
             )
             voter_df = voter_engine.compute(all_specs, extra_columns=[
                 "won", "reason", "sets_played", "best_of",
@@ -759,7 +760,7 @@ def cmd_confidence(args: argparse.Namespace) -> int:
         return _run_voter_confidence(args, config_path)
 
     config_name = config_path.stem
-    oof_dir = Path("data/confidence") / config_name
+    oof_dir = get_data_root() / "confidence" / config_name
     oof_path = oof_dir / "oof.parquet"
 
     # Resolve base model names for ensemble identity slices
@@ -1168,7 +1169,7 @@ def cmd_live(args: argparse.Namespace) -> int:
         from mvp.gsheets.base import merge_predictions, prepare_predictions
         from mvp.gsheets.sheets import SheetsSync
 
-        matches_path = Path("data/aggregate/atptour/matches.parquet")
+        matches_path = get_data_root() / "aggregate" / "atptour" / "matches.parquet"
         sheets = SheetsSync()
         existing = sheets.read_existing()
 
@@ -1185,7 +1186,7 @@ def cmd_live(args: argparse.Namespace) -> int:
         merged = merge_predictions(existing, prepared, matches_df, odds_maps=book_odds or None)
         sheets.write(merged)
 
-        sheets_parquet = Path("data/sheets/bets.parquet")
+        sheets_parquet = get_data_root() / "sheets" / "bets.parquet"
         sheets_parquet.parent.mkdir(parents=True, exist_ok=True)
         merged.write_parquet(sheets_parquet)
 
@@ -1216,21 +1217,21 @@ def cmd_live(args: argparse.Namespace) -> int:
         event_map = load_event_map_with_overrides()
         all_odds = []
 
-        dk_odds_path = Path("data/stage/draftkings/moneyline.parquet")
+        dk_odds_path = get_data_root() / "stage" / "draftkings" / "moneyline.parquet"
         if dk_odds_path.exists():
             dk_staged = pl.read_parquet(dk_odds_path)
             dk_book_odds = compute_odds_by_book(dk_staged, event_map, "dk", "dk_event_id")
             if len(dk_book_odds) > 0:
                 all_odds.append(dk_book_odds)
 
-        br_odds_path = Path("data/stage/betrivers/moneyline.parquet")
+        br_odds_path = get_data_root() / "stage" / "betrivers" / "moneyline.parquet"
         if br_odds_path.exists():
             br_staged = pl.read_parquet(br_odds_path)
             br_book_odds = compute_odds_by_book(br_staged, event_map, "br", "br_event_id")
             if len(br_book_odds) > 0:
                 all_odds.append(br_book_odds)
 
-        mgm_odds_path = Path("data/stage/betmgm/moneyline.parquet")
+        mgm_odds_path = get_data_root() / "stage" / "betmgm" / "moneyline.parquet"
         if mgm_odds_path.exists():
             mgm_staged = pl.read_parquet(mgm_odds_path)
             mgm_book_odds = compute_odds_by_book(mgm_staged, event_map, "mgm", "mgm_event_id")
@@ -1240,15 +1241,15 @@ def cmd_live(args: argparse.Namespace) -> int:
         odds_by_book = pl.concat(all_odds, how="diagonal_relaxed") if all_odds else None
 
         # Load sheet data
-        sheets_path = Path("data/sheets/bets.parquet")
+        sheets_path = get_data_root() / "sheets" / "bets.parquet"
         sheet_data = pl.read_parquet(sheets_path) if sheets_path.exists() else None
 
         # Load ALL predictions (not just current batch) for full analysis
-        all_preds_path = Path("data/predictions/predictions.parquet")
+        all_preds_path = get_data_root() / "predictions" / "predictions.parquet"
         all_predictions = pl.read_parquet(all_preds_path) if all_preds_path.exists() else predictions
 
         # Build results from matches
-        matches_path = Path("data/aggregate/atptour/matches.parquet")
+        matches_path = get_data_root() / "aggregate" / "atptour" / "matches.parquet"
         results_df = None
         if matches_path.exists():
             matches_for_results = pl.read_parquet(matches_path)
@@ -1276,7 +1277,7 @@ def cmd_live(args: argparse.Namespace) -> int:
         )
 
         # Save analysis dataset
-        analysis_path = Path("data/analysis/analysis.parquet")
+        analysis_path = get_data_root() / "analysis" / "analysis.parquet"
         analysis_path.parent.mkdir(parents=True, exist_ok=True)
         ds.write_parquet(analysis_path)
 

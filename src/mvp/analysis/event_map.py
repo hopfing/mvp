@@ -7,6 +7,7 @@ from pathlib import Path
 import polars as pl
 import yaml
 
+from mvp.common.base_job import get_data_root
 from mvp.common.odds_matching import EventMatch
 
 logger = logging.getLogger(__name__)
@@ -21,8 +22,8 @@ EVENT_MAP_SCHEMA = {
     "source": pl.Utf8,
 }
 
-DEFAULT_PATH = Path("data/odds/event_map.parquet")
-DEFAULT_OVERRIDE_PATH = Path("data/odds/event_overrides.yaml")
+DEFAULT_PATH = get_data_root() / "odds" / "event_map.parquet"
+DEFAULT_OVERRIDE_PATH = get_data_root() / "odds" / "event_overrides.yaml"
 
 
 def load_event_map(path: Path = DEFAULT_PATH) -> pl.DataFrame:

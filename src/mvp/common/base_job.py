@@ -4,6 +4,7 @@ import datetime as dt
 import hashlib
 import json
 import logging
+import os
 from pathlib import Path
 
 import polars as pl
@@ -13,12 +14,23 @@ logger = logging.getLogger(__name__)
 BUCKETS = ("raw", "stage", "aggregate", "analytics")
 
 
+def get_data_root() -> Path:
+    """Get the data root directory.
+
+    Checks MVP_DATA_ROOT env var first, falls back to <project>/data.
+    """
+    env = os.environ.get("MVP_DATA_ROOT")
+    if env:
+        return Path(env)
+    return Path(__file__).resolve().parents[3] / "data"
+
+
 class BaseJob:
     """Base class providing file I/O and path management for pipeline jobs."""
 
     def __init__(self, domain: str, data_root: Path | None = None):
         if data_root is None:
-            data_root = Path(__file__).resolve().parents[3] / "data"
+            data_root = get_data_root()
         self.domain = domain
         self.data_root = data_root
         self._run_dt = dt.datetime.now()
