@@ -91,7 +91,10 @@ class ResultsParser:
             footer = match_div.find("div", class_="match-footer")
             match_id = self._parse_match_id(footer) if footer else None
 
-            result_type = self._derive_result_type(player_scores, opp_scores)
+            match_notes = self._parse_match_notes(match_div)
+            result_type = self._derive_result_type(
+                player_scores, opp_scores, match_notes
+            )
 
             matches.append(
                 {
@@ -175,7 +178,10 @@ class ResultsParser:
             footer = match_div.find("div", class_="match-footer")
             match_id = self._parse_match_id(footer) if footer else None
 
-            result_type = self._derive_result_type(player_scores, opp_scores)
+            match_notes = self._parse_match_notes(match_div)
+            result_type = self._derive_result_type(
+                player_scores, opp_scores, match_notes
+            )
 
             matches.append(
                 {
@@ -489,13 +495,31 @@ class ResultsParser:
         return None
 
     @staticmethod
-    def _derive_result_type(
-        player_scores: list[int], opp_scores: list[int]
-    ) -> str:
-        """Derive result type from score data.
+    def _parse_match_notes(match_div) -> str:
+        """Extract text from the match-notes div, if present."""
+        notes_div = match_div.find("div", class_="match-notes")
+        if notes_div:
+            return notes_div.get_text(strip=True)
+        return ""
 
-        Empty scores = walkover, last set max < 6 = retirement, else completed.
+    @staticmethod
+    def _derive_result_type(
+        player_scores: list[int],
+        opp_scores: list[int],
+        match_notes: str = "",
+    ) -> str:
+        """Derive result type from match-notes text, falling back to scores.
+
+        The match-notes div contains explicit markers like "RET." or "W/O".
+        These take priority over the score-based heuristic, which can miss
+        retirements where the final set had a score >= 6.
         """
+        notes_upper = match_notes.upper()
+        if "W/O" in notes_upper:
+            return "walkover"
+        if "RET" in notes_upper:
+            return "retirement"
+        # Fall back to score-based heuristic for pages without match-notes
         if not player_scores and not opp_scores:
             return "walkover"
         if not player_scores or not opp_scores:
