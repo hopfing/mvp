@@ -36,6 +36,9 @@ _PREDICTOR_EXTRA_COLS = [
     "player_first_name", "player_last_name",
     "opp_first_name", "opp_last_name",
     "draw_p1_id", "scheduled_datetime", "match_date",
+    "player_elo", "opp_elo",
+    "player_hard_adj", "player_clay_adj", "player_grass_adj",
+    "opp_hard_adj", "opp_clay_adj", "opp_grass_adj",
 ]
 
 # Tolerance for prediction consistency checks
