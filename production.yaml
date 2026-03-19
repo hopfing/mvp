@@ -1,6 +1,6 @@
 active:
   artifact: data/models/production.joblib
-  config: models/production/e00_35_wsA_cAll_15f.yaml
+  config: models/production/xgb_e00_45_cAll_9f.yaml
   filters:
     circuit:
     - tour
@@ -12,7 +12,15 @@ active:
   trained_at: '2026-03-18T17:18:48.500669+00:00'
 history: []
 voters:
-- artifact: data/models/xgb_e00_45_cAll_7f.joblib
-  config: models/voters/xgb_e00_45_cAll_7f.yaml
-  name: xgb
+- artifact: data/models/e00_35_wsA_cAll_15f.joblib
+  config: models/voters/e00_35_wsA_cAll_15f.yaml
+  name: lr
+  scoped: false
+- artifact: data/models/xgb_e00_45_cAll_6f.joblib
+  config: models/voters/xgb_e00_45_cAll_6f.yaml
+  name: xgb_02
+  scoped: false
+- artifact: data/models/xgb_e00_45_cAll_4f.joblib
+  config: models/voters/xgb_e00_45_cAll_4f.yaml
+  name: xgb_03
   scoped: false

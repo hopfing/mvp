@@ -1,0 +1,38 @@
+data:
+  date_range:
+    end: 2025-12-31
+    start: 2020-01-01
+  filters:
+    circuit:
+    - tour
+    - chal
+    draw_type: singles
+description: null
+features:
+  include:
+  - player_days_since_last_match
+  - opp_days_since_last_match
+  - opp_pts_return_won_pct
+  - player_pts_return_won_pct
+  - player_ret_first_serve_win_pct
+  - player_games_lost_per_set_diff(days=15)
+metrics:
+  primary: log_loss
+model:
+  params:
+    colsample_bytree: 0.8
+    learning_rate: 0.1
+    max_depth: 4
+    min_child_weight: 5
+    n_estimators: 100
+    random_state: 42
+    subsample: 0.8
+  type: xgboost
+validation:
+  initial_train_size: 20000
+  min_train_size: 50000
+  n_splits: 5
+  step_size: 10000
+  test_size: 10000
+  train_size: null
+  type: expanding_window
