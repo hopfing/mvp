@@ -12,9 +12,13 @@ active:
   trained_at: '2026-03-19T04:35:03.388071+00:00'
 history: []
 voters:
-- artifact: data/models/e00_35_wsA_cAll_15f.joblib
-  config: models/voters/e00_35_wsA_cAll_15f.yaml
-  name: lr
+- artifact: data/models/lr_ability.joblib
+  config: models/voters/lr_ability.yaml
+  name: lr_ability
+  scoped: false
+- artifact: data/models/lr_context_form.joblib
+  config: models/voters/lr_context_form.yaml
+  name: lr_context_form
   scoped: false
 - artifact: data/models/xgb_e00_45_cAll_6f.joblib
   config: models/voters/xgb_e00_45_cAll_6f.yaml
