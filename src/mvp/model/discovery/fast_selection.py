@@ -75,10 +75,14 @@ class FastForwardSelector:
     ) -> None:
         self.config = config
         self.all_feature_specs = all_feature_specs
-        self.matches_path = Path(
-            matches_path or "data/aggregate/atptour/matches.parquet"
+        from mvp.common.base_job import get_data_root
+
+        self.matches_path = Path(matches_path) if matches_path else (
+            get_data_root() / "aggregate" / "atptour" / "matches.parquet"
         )
-        self.cache_dir = Path(cache_dir or "data/features/cache")
+        self.cache_dir = Path(cache_dir) if cache_dir else (
+            get_data_root() / "features" / "cache"
+        )
 
         self.X_wide: np.ndarray | None = None
         self.y: np.ndarray | None = None
