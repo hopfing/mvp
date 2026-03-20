@@ -1,1 +1,3 @@
-1. a
+1. glicko_rd_sum
+2. player_neither_seeded
+3. elo_min

@@ -1,7 +1,6 @@
 """Experimentation platform for feature engineering and model training."""
 
 from mvp.model.config import ExperimentConfig
-from mvp.model.context import FeatureContext
 from mvp.model.diagnostics import DiagnosticResults, Diagnostics
 from mvp.model.engine import FeatureEngine
 from mvp.model.metrics import compute_metrics
@@ -27,7 +26,6 @@ __all__ = [
     "ExperimentLogger",
     "ExperimentRunner",
     "feature",
-    "FeatureContext",
     "FeatureEngine",
     "get_model",
     "get_registry",
