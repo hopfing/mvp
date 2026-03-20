@@ -84,11 +84,23 @@ class ProjectionDiscovery:
         finally:
             temp_path.unlink(missing_ok=True)
 
-    def _create_scorer(self) -> callable:
-        """Create scorer function for selection."""
-        target_metric = self.config.discovery.metric
+    def _create_fast_scorer(self, all_features: list[str]) -> callable:
+        """Create a fast scorer that precomputes all features once."""
+        from mvp.projection.fast_selection import FastProjectionSelector
 
-        # Suppress noisy per-candidate logging
+        target_metric = self.config.discovery.metric
+        fast = FastProjectionSelector(
+            config=self.config,
+            all_feature_specs=all_features,
+            matches_path=self.matches_path,
+            cache_dir=self.cache_dir,
+        )
+        fast.precompute()
+        return fast.create_scorer(target_metric)
+
+    def _create_slow_scorer(self) -> callable:
+        """Create scorer that runs full ProjectionRunner per candidate."""
+        target_metric = self.config.discovery.metric
         engine_logger = logging.getLogger("mvp.model.engine")
         runner_logger = logging.getLogger("mvp.projection.runner")
 
@@ -136,15 +148,20 @@ class ProjectionDiscovery:
             all_features = [f for f in all_features if f not in excluded]
             self._log(f"Excluding {len(excluded)} features")
 
-        self._log(f"Starting forward selection from {len(all_features)} features...")
-
-        scorer = self._create_scorer()
+        method = self.config.discovery.selection_method
         base = feat_cfg.base
+
+        if method == "forward":
+            self._log(f"Precomputing {len(all_features)} features for fast forward selection...")
+            scorer = self._create_fast_scorer(all_features)
+        else:
+            self._log(f"Starting {method} selection from {len(all_features)} features...")
+            scorer = self._create_slow_scorer()
 
         selector = FeatureSelector(
             scorer=scorer,
             all_features=all_features,
-            method=self.config.discovery.selection_method,
+            method=method,
             direction=self.config.discovery.direction,
             min_features=feat_cfg.min,
             max_features=feat_cfg.max,
