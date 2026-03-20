@@ -234,11 +234,32 @@ class FeatureEngine:
         self._manifest: dict[str, Any] = self._load_manifest()
 
     def _load_manifest(self) -> dict[str, Any]:
-        """Load the cache manifest from disk."""
-        if self._manifest_path.exists():
-            with open(self._manifest_path) as f:
-                return json.load(f)
-        return {"cache_key": None, "features": {}}
+        """Load the cache manifest from disk.
+
+        Validates that all referenced parquet files actually exist,
+        pruning stale entries (e.g., from partial syncs across machines).
+        """
+        if not self._manifest_path.exists():
+            return {"cache_key": None, "features": {}}
+        with open(self._manifest_path) as f:
+            manifest = json.load(f)
+        # Prune entries whose files are missing (partial sync, interrupted write)
+        features = manifest.get("features", {})
+        missing = [
+            spec for spec in features
+            if not self._get_cache_path(spec).exists()
+        ]
+        if missing:
+            for spec in missing:
+                del features[spec]
+            logger.info(
+                "Pruned %d stale manifest entries (files missing on disk)",
+                len(missing),
+            )
+            manifest["features"] = features
+            with open(self._manifest_path, "w") as f:
+                json.dump(manifest, f, indent=2)
+        return manifest
 
     def _save_manifest(self) -> None:
         """Save the cache manifest to disk."""
@@ -246,10 +267,21 @@ class FeatureEngine:
             json.dump(self._manifest, f, indent=2)
 
     def _compute_matches_hash(self) -> str:
-        """Compute a hash of the matches file for cache invalidation."""
+        """Compute a hash of the matches file for cache invalidation.
+
+        Uses file size + content hash (first/last 64KB) for stability
+        across machines where mtime may differ for identical files.
+        """
         stat = self.matches_path.stat()
-        content = f"{stat.st_size}:{stat.st_mtime}"
-        return hashlib.md5(content.encode()).hexdigest()
+        h = hashlib.md5()
+        h.update(str(stat.st_size).encode())
+        chunk_size = 65536
+        with open(self.matches_path, "rb") as f:
+            h.update(f.read(chunk_size))
+            if stat.st_size > chunk_size:
+                f.seek(max(0, stat.st_size - chunk_size))
+                h.update(f.read(chunk_size))
+        return h.hexdigest()
 
     def _compute_registry_hash(self) -> str:
         """Compute a hash of all feature function source code.
