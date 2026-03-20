@@ -11,7 +11,7 @@ from typing import Any
 warnings.filterwarnings("ignore", message="All-NaN slice encountered")
 warnings.filterwarnings("ignore", category=UserWarning, module="sklearn.utils.parallel")
 
-from mvp.common.base_job import get_data_root
+from mvp.common.base_job import get_data_root, get_local_data_root
 from mvp.draftkings.odds import fetch_and_save
 
 logger = logging.getLogger(__name__)
@@ -574,7 +574,7 @@ def _run_voter_confidence(args: argparse.Namespace, config_path: Path) -> int:
         # Get primary's full filtered DataFrame for fold replay
         primary_engine = FeatureEngine(
             matches_path=get_data_root() / "aggregate" / "atptour" / "matches.parquet",
-            cache_dir=get_data_root() / "features" / "cache",
+            cache_dir=get_local_data_root() / "features" / "cache",
         )
 
         # For each voter: replay primary folds, train on voter-filtered
@@ -595,7 +595,7 @@ def _run_voter_confidence(args: argparse.Namespace, config_path: Path) -> int:
 
             voter_engine = FeatureEngine(
                 matches_path=get_data_root() / "aggregate" / "atptour" / "matches.parquet",
-                cache_dir=get_data_root() / "features" / "cache",
+                cache_dir=get_local_data_root() / "features" / "cache",
             )
             voter_df = voter_engine.compute(all_specs, extra_columns=[
                 "won", "reason", "sets_played", "best_of",

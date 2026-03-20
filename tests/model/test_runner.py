@@ -84,7 +84,9 @@ validation:
             config_path=sample_config,
             matches_path=sample_matches,
         )
-        assert runner.cache_dir == Path("data/features/cache")
+        from mvp.common.base_job import get_local_data_root
+
+        assert runner.cache_dir == get_local_data_root() / "features" / "cache"
         assert runner.mlflow_dir is None
 
     def test_runner_init_with_custom_paths(

@@ -25,6 +25,15 @@ def get_data_root() -> Path:
     return Path(__file__).resolve().parents[3] / "data"
 
 
+def get_local_data_root() -> Path:
+    """Get the local (non-shared) data root for caches and ephemeral files.
+
+    Always resolves to <project>/data, ignoring MVP_DATA_ROOT.
+    Use this for machine-specific caches that shouldn't be shared.
+    """
+    return Path(__file__).resolve().parents[3] / "data"
+
+
 class BaseJob:
     """Base class providing file I/O and path management for pipeline jobs."""
 

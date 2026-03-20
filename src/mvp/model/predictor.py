@@ -12,7 +12,7 @@ import numpy as np
 import polars as pl
 import yaml
 
-from mvp.common.base_job import get_data_root
+from mvp.common.base_job import get_data_root, get_local_data_root
 from mvp.model.calibration import PlattCalibrator
 from mvp.model.confidence.dimensions import MODIFIERS
 from mvp.model.config import (
@@ -30,7 +30,7 @@ from mvp.model.registry import get_registry
 logger = logging.getLogger(__name__)
 
 MATCHES_PATH = get_data_root() / "aggregate" / "atptour" / "matches.parquet"
-CACHE_DIR = get_data_root() / "features" / "cache"
+CACHE_DIR = get_local_data_root() / "features" / "cache"
 PREDICTIONS_PATH = get_data_root() / "predictions" / "predictions.parquet"
 PRODUCTION_CONFIG_PATH = Path("production.yaml")
 

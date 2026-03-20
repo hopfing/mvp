@@ -52,13 +52,13 @@ class ExperimentRunner:
         """
         self.config_path = Path(config_path)
         self.config = ExperimentConfig.from_file(str(config_path))
-        from mvp.common.base_job import get_data_root
+        from mvp.common.base_job import get_data_root, get_local_data_root
 
         self.matches_path = Path(matches_path) if matches_path else (
             get_data_root() / "aggregate" / "atptour" / "matches.parquet"
         )
         self.cache_dir = Path(cache_dir) if cache_dir else (
-            get_data_root() / "features" / "cache"
+            get_local_data_root() / "features" / "cache"
         )
         self.mlflow_dir = Path(mlflow_dir) if mlflow_dir else None
         self.workflow = workflow
