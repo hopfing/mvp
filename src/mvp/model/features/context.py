@@ -199,6 +199,17 @@ def is_grass() -> pl.Expr:
 
 
 @feature(
+    name="best_of",
+    params=[],
+    description="Best-of format (3 or 5)",
+    match_level=True,
+)
+def best_of() -> pl.Expr:
+    """Best-of format for the match."""
+    return pl.col("best_of").fill_null(3).cast(pl.Float64)
+
+
+@feature(
     name="is_indoor",
     params=[],
     description="1 if match is indoors, 0 otherwise",

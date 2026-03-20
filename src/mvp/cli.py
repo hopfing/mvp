@@ -365,6 +365,7 @@ def print_predictions(
 # Default directories for each command
 MODEL_DIR = Path("models")
 EXPERIMENT_DIR = Path("experiments")
+PROJECTION_DIR = Path("projections")
 
 
 def resolve_config_path(name: str, default_dir: Path) -> Path:
@@ -462,6 +463,17 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
     conf_parser.add_argument(
         "--refresh", action="store_true",
         help="Force re-run model even if cached OOF exists"
+    )
+
+    # project subcommand - game projection from projections/ directory
+    proj_parser = subparsers.add_parser(
+        "project", help="Run game projection (looks in projections/ by default)"
+    )
+    proj_parser.add_argument(
+        "config", type=str, help="Config name or path (e.g., 'baseline')"
+    )
+    proj_parser.add_argument(
+        "--refresh", action="store_true", help="Rebuild matches.parquet before running"
     )
 
     return parser.parse_args(args)
@@ -953,24 +965,44 @@ def _save_validation_json(result, path):
     Path(path).write_text(json.dumps(data, indent=2))
 
 
+_PROJECTION_MODEL_TYPES = {"xgb_regressor", "linear", "ridge"}
+
+
+def _is_projection_discovery(config_path: Path) -> bool:
+    """Detect whether a discovery config targets projection (regression)."""
+    import yaml
+
+    with open(config_path) as f:
+        raw = yaml.safe_load(f)
+    model_type = (raw.get("model") or {}).get("type", "")
+    return model_type in _PROJECTION_MODEL_TYPES
+
+
 def cmd_experiment(args: argparse.Namespace) -> int:
     """Run automated feature discovery."""
-    from mvp.model.discovery import FeatureDiscovery
-
     config_path = resolve_config_path(args.config, EXPERIMENT_DIR)
     if not config_path.exists():
         raise FileNotFoundError(f"Config file not found: {args.config} (tried {config_path})")
+
+    if args.refresh:
+        from mvp.atptour.aggregators.matches import MatchesAggregator
+        logger.info("Rebuilding matches.parquet")
+        MatchesAggregator().run()
+
+    if _is_projection_discovery(config_path):
+        return _cmd_experiment_projection(args, config_path)
+    return _cmd_experiment_classification(args, config_path)
+
+
+def _cmd_experiment_classification(args: argparse.Namespace, config_path: Path) -> int:
+    """Run classification feature discovery."""
+    from mvp.model.discovery import FeatureDiscovery
 
     # Normalize output path: always in models/, add .yaml if needed
     output_name = args.output
     if not output_name.endswith(".yaml"):
         output_name = f"{output_name}.yaml"
     output_path = MODEL_DIR / output_name
-
-    if args.refresh:
-        from mvp.atptour.aggregators.matches import MatchesAggregator
-        logger.info("Rebuilding matches.parquet")
-        MatchesAggregator().run()
 
     discovery = FeatureDiscovery(
         config_path=config_path,
@@ -988,6 +1020,126 @@ def cmd_experiment(args: argparse.Namespace) -> int:
         print("\nNo features selected - no config saved")
 
     return 0
+
+
+def _cmd_experiment_projection(args: argparse.Namespace, config_path: Path) -> int:
+    """Run projection feature discovery."""
+    from mvp.projection.discovery import ProjectionDiscovery
+
+    # Normalize output path: always in projections/, add .yaml if needed
+    output_name = args.output
+    if not output_name.endswith(".yaml"):
+        output_name = f"{output_name}.yaml"
+    output_path = PROJECTION_DIR / output_name
+
+    discovery = ProjectionDiscovery(
+        config_path=config_path,
+        verbose=args.verbose,
+    )
+
+    result = discovery.run()
+
+    if result.selected_features:
+        discovery.save_config(output_path, result)
+        print(f"\nSaved config to: {output_path}")
+        print(f"Run with: poetry run py -m mvp project {output_path.stem}")
+    else:
+        print("\nNo features selected - no config saved")
+
+    return 0
+
+
+def print_projection_summary(results: dict[str, Any], name: str | None = None) -> None:
+    """Print formatted summary of projection results."""
+    metrics = results.get("metrics", {})
+    train_metrics = results.get("train_metrics", {})
+    diagnostics = results.get("diagnostics")
+
+    print("\n" + "=" * 70)
+    title = name or "PROJECTION RESULTS"
+    print(f"{title:^70}")
+    print("=" * 70)
+
+    # Train vs Test metrics
+    test_mae = metrics.get("mae", 0)
+    test_rmse = metrics.get("rmse", 0)
+    test_r2 = metrics.get("r_squared", 0)
+    test_med = metrics.get("median_ae", 0)
+
+    if train_metrics:
+        train_mae = train_metrics.get("mae", 0)
+        train_rmse = train_metrics.get("rmse", 0)
+        train_r2 = train_metrics.get("r_squared", 0)
+        print(f"\n{'':8} {'MAE':>10} {'RMSE':>10} {'R²':>10} {'MedAE':>10}")
+        print(f"{'Train':8} {train_mae:>10.3f} {train_rmse:>10.3f} {train_r2:>10.3f} {'':>10}")
+        print(f"{'Test':8} {test_mae:>10.3f} {test_rmse:>10.3f} {test_r2:>10.3f} {test_med:>10.3f}")
+    else:
+        print(f"\nTest: {test_mae:.3f} MAE | {test_rmse:.3f} RMSE | {test_r2:.3f} R² | {test_med:.3f} MedAE")
+
+    if not diagnostics:
+        print(f"\nMLflow run: {results.get('run_id', 'N/A')}")
+        print("=" * 70 + "\n")
+        return
+
+    # Residual summary
+    residuals = diagnostics.residuals
+    if residuals:
+        print(f"\nResiduals: mean={residuals.get('mean_residual', 0):.3f}, "
+              f"std={residuals.get('std_residual', 0):.3f}, "
+              f"skew={residuals.get('skewness', 0):.3f}")
+        bins = residuals.get("by_predicted_bin", [])
+        if bins:
+            print("  By predicted value:")
+            for b in bins:
+                low, high = b["range"]
+                print(f"    {low:5.1f}-{high:5.1f}  mean_resid={b['mean_residual']:+.3f}  "
+                      f"mae={b['mae']:.3f}  n={b['n']:,}")
+
+    # Segment breakdowns
+    segments = diagnostics.segments
+    for seg_type in ["circuit", "surface", "round", "best_of"]:
+        seg_data = segments.get(seg_type, {})
+        if not seg_data:
+            continue
+        print(f"\n  {seg_type}:")
+        print(f"    {'':12} {'MAE':>8} {'RMSE':>8} {'R²':>8} {'n':>8}")
+        for seg_val, m in sorted(seg_data.items()):
+            print(f"    {seg_val:12} {m.get('mae', 0):>8.3f} {m.get('rmse', 0):>8.3f} "
+                  f"{m.get('r_squared', 0):>8.3f} {m.get('n', 0):>8,}")
+
+    # Match-level analysis
+    match = diagnostics.match_level
+    if match:
+        print(f"\nMatch-Level Analysis ({match.get('n_matches', 0):,} matches):")
+        print(f"  Total games: MAE={match.get('total_games_mae', 0):.3f} "
+              f"(actual avg={match.get('total_games_mean_actual', 0):.1f}, "
+              f"pred avg={match.get('total_games_mean_pred', 0):.1f})")
+        print(f"  Spread: MAE={match.get('spread_mae', 0):.3f}")
+        print(f"  Directional accuracy: {match.get('directional_accuracy', 0):.1%}")
+
+    print(f"\nMLflow run: {results.get('run_id', 'N/A')}")
+    print("=" * 70 + "\n")
+
+
+def cmd_project(args: argparse.Namespace) -> int:
+    """Run game projection from config."""
+    from mvp.projection.runner import ProjectionRunner
+
+    config_path = resolve_config_path(args.config, PROJECTION_DIR)
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config file not found: {args.config} (tried {config_path})")
+
+    if args.refresh:
+        from mvp.atptour.aggregators.matches import MatchesAggregator
+        logger.info("Rebuilding matches.parquet")
+        MatchesAggregator().run()
+
+    runner = ProjectionRunner(config_path=config_path)
+    results = runner.run()
+
+    print_projection_summary(results, name=runner.run_name)
+    return 0
+
 
 
 def _fetch_dk_quiet() -> int:
@@ -1380,6 +1532,8 @@ def main(args: list[str] | None = None) -> int:
         return cmd_live(parsed)
     elif parsed.command == "confidence":
         return cmd_confidence(parsed)
+    elif parsed.command == "project":
+        return cmd_project(parsed)
 
     return 1
 
