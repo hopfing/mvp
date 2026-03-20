@@ -27,6 +27,7 @@ from mvp.projection.models import get_regression_model
 logger = logging.getLogger(__name__)
 
 warnings.filterwarnings("ignore", message="All-NaN slice encountered")
+warnings.filterwarnings("ignore", message="invalid value encountered", category=RuntimeWarning)
 
 
 def _make_regression_metric_fn(metric: str) -> Callable[[np.ndarray, np.ndarray], float]:
