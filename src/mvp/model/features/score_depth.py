@@ -3,31 +3,13 @@
 
 import polars as pl
 
+from mvp.model.features._score_helpers import (
+    is_straight_set_win as _is_straight_set_win,
+    total_games_lost as _total_games_lost,
+    total_games_won as _total_games_won,
+)
+from mvp.model.primitives import cumulative_mean, ratio_feature, rolling_mean
 from mvp.model.registry import feature
-
-DATE_COL = "effective_match_date"
-
-
-def _total_games_won() -> pl.Expr:
-    """Sum of player_set{1-5}_games, null->0 for unplayed sets."""
-    total = pl.lit(0)
-    for i in range(1, 6):
-        total = total + pl.col(f"player_set{i}_games").fill_null(0)
-    return total
-
-
-def _total_games_lost() -> pl.Expr:
-    """Sum of opp_set{1-5}_games, null->0 for unplayed sets."""
-    total = pl.lit(0)
-    for i in range(1, 6):
-        total = total + pl.col(f"opp_set{i}_games").fill_null(0)
-    return total
-
-
-def _is_straight_set_win() -> pl.Expr:
-    """1 if player won in straight sets, 0 otherwise."""
-    best_of = pl.col("best_of").fill_null(3)
-    return (pl.col("won").cast(pl.Boolean) & (pl.col("sets_played") < best_of)).cast(pl.Int64)
 
 
 def _games_won_per_set() -> pl.Expr:
@@ -50,35 +32,6 @@ def _games_per_set() -> pl.Expr:
     return (_total_games_won() + _total_games_lost()).cast(pl.Float64) / pl.col("sets_played").cast(pl.Float64)
 
 
-def _rolling_ratio(numerator: pl.Expr, denominator: pl.Expr, days: int) -> pl.Expr:
-    """Rolling sum(numerator) / rolling sum(denominator) over past N days."""
-    num = numerator.rolling_sum_by(by=DATE_COL, window_size=f"{days}d", closed="left").over("player_id").fill_null(0)
-    den = denominator.rolling_sum_by(by=DATE_COL, window_size=f"{days}d", closed="left").over("player_id").fill_null(0)
-    return pl.when(den > 0).then(num / den).otherwise(None)
-
-
-def _cumulative_ratio(numerator: pl.Expr, denominator: pl.Expr) -> pl.Expr:
-    """Cumulative sum(numerator) / cumulative sum(denominator), excluding current row."""
-    num = numerator.cum_sum().shift(1).over("player_id", order_by=DATE_COL).fill_null(0)
-    den = denominator.cum_sum().shift(1).over("player_id", order_by=DATE_COL).fill_null(0)
-    return pl.when(den > 0).then(num / den).otherwise(None)
-
-
-def _rolling_mean(expr: pl.Expr, days: int) -> pl.Expr:
-    """Rolling mean of an expression over past N days."""
-    return expr.rolling_mean_by(by=DATE_COL, window_size=f"{days}d", closed="left").over("player_id")
-
-
-def _cumulative_mean(expr: pl.Expr) -> pl.Expr:
-    """Cumulative mean of an expression, excluding current row."""
-    cum_s = expr.cum_sum().shift(1).over("player_id", order_by=DATE_COL)
-    cum_c = (
-        pl.col(DATE_COL).is_not_null().cast(pl.Int64)
-        .cum_sum().shift(1).over("player_id", order_by=DATE_COL)
-    )
-    return cum_s / cum_c
-
-
 # --- Base features ---
 
 
@@ -92,8 +45,8 @@ def _cumulative_mean(expr: pl.Expr) -> pl.Expr:
 def sets_per_match(days: int | None = None) -> pl.Expr:
     expr = pl.col("sets_played").cast(pl.Float64)
     if days is None:
-        return _cumulative_mean(expr)
-    return _rolling_mean(expr, days)
+        return cumulative_mean(expr, group_by="player_id")
+    return rolling_mean(expr, days=days, group_by="player_id")
 
 
 @feature(
@@ -106,9 +59,7 @@ def sets_per_match(days: int | None = None) -> pl.Expr:
 def straight_sets_win_pct(days: int | None = None) -> pl.Expr:
     wins = pl.col("won").cast(pl.Int64)
     ss_wins = _is_straight_set_win()
-    if days is None:
-        return _cumulative_ratio(ss_wins, wins)
-    return _rolling_ratio(ss_wins, wins, days)
+    return ratio_feature(ss_wins, wins, days)
 
 
 @feature(
@@ -120,8 +71,8 @@ def straight_sets_win_pct(days: int | None = None) -> pl.Expr:
 )
 def games_won_per_set(days: int | None = None) -> pl.Expr:
     if days is None:
-        return _cumulative_mean(_games_won_per_set())
-    return _rolling_mean(_games_won_per_set(), days)
+        return cumulative_mean(_games_won_per_set(), group_by="player_id")
+    return rolling_mean(_games_won_per_set(), days=days, group_by="player_id")
 
 
 @feature(
@@ -133,8 +84,8 @@ def games_won_per_set(days: int | None = None) -> pl.Expr:
 )
 def games_lost_per_set(days: int | None = None) -> pl.Expr:
     if days is None:
-        return _cumulative_mean(_games_lost_per_set())
-    return _rolling_mean(_games_lost_per_set(), days)
+        return cumulative_mean(_games_lost_per_set(), group_by="player_id")
+    return rolling_mean(_games_lost_per_set(), days=days, group_by="player_id")
 
 
 @feature(
@@ -146,8 +97,8 @@ def games_lost_per_set(days: int | None = None) -> pl.Expr:
 )
 def games_margin_per_set(days: int | None = None) -> pl.Expr:
     if days is None:
-        return _cumulative_mean(_games_margin_per_set())
-    return _rolling_mean(_games_margin_per_set(), days)
+        return cumulative_mean(_games_margin_per_set(), group_by="player_id")
+    return rolling_mean(_games_margin_per_set(), days=days, group_by="player_id")
 
 
 @feature(
@@ -159,8 +110,8 @@ def games_margin_per_set(days: int | None = None) -> pl.Expr:
 )
 def games_per_set(days: int | None = None) -> pl.Expr:
     if days is None:
-        return _cumulative_mean(_games_per_set())
-    return _rolling_mean(_games_per_set(), days)
+        return cumulative_mean(_games_per_set(), group_by="player_id")
+    return rolling_mean(_games_per_set(), days=days, group_by="player_id")
 
 
 # --- Derived diff features ---

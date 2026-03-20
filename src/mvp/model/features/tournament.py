@@ -3,46 +3,16 @@
 
 import polars as pl
 
+from mvp.model.features._score_helpers import (
+    sets_lost as _sets_lost,
+    sets_won as _sets_won,
+    total_games_lost as _total_games_lost,
+    total_games_won as _total_games_won,
+)
 from mvp.model.registry import feature
 
 DATE_COL = "effective_match_date"
 TOURN_GROUP = ["player_id", "tournament_id", "year", "draw_type"]
-
-
-def _sets_won() -> pl.Expr:
-    """Count sets where player_set{i}_games > opp_set{i}_games across sets 1-5."""
-    total = pl.lit(0)
-    for i in range(1, 6):
-        p = pl.col(f"player_set{i}_games")
-        o = pl.col(f"opp_set{i}_games")
-        total = total + (p > o).fill_null(False).cast(pl.Int64)
-    return total
-
-
-def _sets_lost() -> pl.Expr:
-    """Count sets where opp_set{i}_games > player_set{i}_games across sets 1-5."""
-    total = pl.lit(0)
-    for i in range(1, 6):
-        p = pl.col(f"player_set{i}_games")
-        o = pl.col(f"opp_set{i}_games")
-        total = total + (o > p).fill_null(False).cast(pl.Int64)
-    return total
-
-
-def _total_games_won() -> pl.Expr:
-    """Sum of player_set{1-5}_games, null->0 for unplayed sets."""
-    total = pl.lit(0)
-    for i in range(1, 6):
-        total = total + pl.col(f"player_set{i}_games").fill_null(0)
-    return total
-
-
-def _total_games_lost() -> pl.Expr:
-    """Sum of opp_set{1-5}_games, null->0 for unplayed sets."""
-    total = pl.lit(0)
-    for i in range(1, 6):
-        total = total + pl.col(f"opp_set{i}_games").fill_null(0)
-    return total
 
 
 def _tourn_cumulative(expr: pl.Expr) -> pl.Expr:

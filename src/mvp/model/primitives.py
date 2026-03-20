@@ -8,8 +8,13 @@ with strictly earlier effective_match_date is included.
 import polars as pl
 
 
+def _to_expr(col: str | pl.Expr) -> pl.Expr:
+    """Convert a column name or expression to a Polars expression."""
+    return pl.col(col) if isinstance(col, str) else col
+
+
 def rolling_sum(
-    col: str,
+    col: str | pl.Expr,
     days: int,
     group_by: str | list[str],
     date_col: str = "effective_match_date",
@@ -17,7 +22,7 @@ def rolling_sum(
     """Sum of column over past N days, excluding current row.
 
     Args:
-        col: Column to sum.
+        col: Column name or expression to sum.
         days: Window size in days.
         group_by: Column(s) to group by (e.g., "player_id").
         date_col: Date column for temporal ordering.
@@ -30,7 +35,7 @@ def rolling_sum(
 
     # Window is "Nd" meaning N days, closed="left" excludes current row's date
     return (
-        pl.col(col)
+        _to_expr(col)
         .rolling_sum_by(
             by=date_col,
             window_size=f"{days}d",
@@ -42,7 +47,7 @@ def rolling_sum(
 
 
 def rolling_mean(
-    col: str,
+    col: str | pl.Expr,
     days: int,
     group_by: str | list[str],
     date_col: str = "effective_match_date",
@@ -50,7 +55,7 @@ def rolling_mean(
     """Mean of column over past N days, excluding current row.
 
     Args:
-        col: Column to average.
+        col: Column name or expression to average.
         days: Window size in days.
         group_by: Column(s) to group by (e.g., "player_id").
         date_col: Date column for temporal ordering.
@@ -62,14 +67,14 @@ def rolling_mean(
         group_by = [group_by]
 
     return (
-        pl.col(col)
+        _to_expr(col)
         .rolling_mean_by(by=date_col, window_size=f"{days}d", closed="left")
         .over(group_by)
     )
 
 
 def rolling_max(
-    col: str,
+    col: str | pl.Expr,
     days: int,
     group_by: str | list[str],
     date_col: str = "effective_match_date",
@@ -77,7 +82,7 @@ def rolling_max(
     """Max of column over past N days, excluding current row.
 
     Args:
-        col: Column to find max of.
+        col: Column name or expression to find max of.
         days: Window size in days.
         group_by: Column(s) to group by (e.g., "player_id").
         date_col: Date column for temporal ordering.
@@ -89,7 +94,7 @@ def rolling_max(
         group_by = [group_by]
 
     return (
-        pl.col(col)
+        _to_expr(col)
         .rolling_max_by(by=date_col, window_size=f"{days}d", closed="left")
         .over(group_by)
     )
@@ -126,14 +131,14 @@ def rolling_count(
 
 
 def cumulative_sum(
-    col: str,
+    col: str | pl.Expr,
     group_by: str | list[str],
     date_col: str = "effective_match_date",
 ) -> pl.Expr:
     """Cumulative sum over all prior rows, excluding current row.
 
     Args:
-        col: Column to sum.
+        col: Column name or expression to sum.
         group_by: Column(s) to group by (e.g., "player_id").
         date_col: Date column for temporal ordering.
 
@@ -143,7 +148,7 @@ def cumulative_sum(
     if isinstance(group_by, str):
         group_by = [group_by]
 
-    return pl.col(col).cum_sum().shift(1).over(group_by, order_by=date_col).fill_null(0)
+    return _to_expr(col).cum_sum().shift(1).over(group_by, order_by=date_col).fill_null(0)
 
 
 def cumulative_count(
@@ -174,14 +179,14 @@ def cumulative_count(
 
 
 def cumulative_mean(
-    col: str,
+    col: str | pl.Expr,
     group_by: str | list[str],
     date_col: str = "effective_match_date",
 ) -> pl.Expr:
     """Cumulative mean over all prior rows, excluding current row.
 
     Args:
-        col: Column to average.
+        col: Column name or expression to average.
         group_by: Column(s) to group by (e.g., "player_id").
         date_col: Date column for temporal ordering.
 
@@ -191,7 +196,7 @@ def cumulative_mean(
     if isinstance(group_by, str):
         group_by = [group_by]
 
-    cum_sum = pl.col(col).cum_sum().shift(1).over(group_by, order_by=date_col)
+    cum_sum = _to_expr(col).cum_sum().shift(1).over(group_by, order_by=date_col)
     # Use is_not_null().cast(Int64) because pl.lit(1) doesn't work with .over()
     cum_count = (
         pl.col(date_col)
@@ -205,18 +210,18 @@ def cumulative_mean(
 
 
 def ratio_feature(
-    numerator_col: str,
-    denominator_col: str,
+    numerator_col: str | pl.Expr,
+    denominator_col: str | pl.Expr,
     days: int | None = None,
     group_by: str | list[str] = "player_id",
 ) -> pl.Expr:
-    """Ratio of two columns (windowed or all-time).
+    """Ratio of two columns or expressions (windowed or all-time).
 
     Computes sum(numerator) / sum(denominator) with null when denominator is 0.
 
     Args:
-        numerator_col: Column for the numerator.
-        denominator_col: Column for the denominator.
+        numerator_col: Column name or expression for the numerator.
+        denominator_col: Column name or expression for the denominator.
         days: Window size in days. If None, uses all-time cumulative.
         group_by: Column(s) to group by.
 

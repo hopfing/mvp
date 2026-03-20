@@ -3,49 +3,15 @@
 
 import polars as pl
 
+from mvp.model.features._score_helpers import (
+    deciding_set_flag as _deciding_set_flag,
+    tiebreaks_played as _tiebreaks_played,
+    tiebreaks_won as _tiebreaks_won,
+)
+from mvp.model.primitives import cumulative_sum, ratio_feature, rolling_sum
 from mvp.model.registry import feature
 
 DATE_COL = "effective_match_date"
-
-
-def _tiebreaks_played() -> pl.Expr:
-    """Count tiebreaks played in this match."""
-    return (
-        pl.col("player_set1_tiebreak").is_not_null().cast(pl.Int64)
-        + pl.col("player_set2_tiebreak").is_not_null().cast(pl.Int64)
-        + pl.col("player_set3_tiebreak").is_not_null().cast(pl.Int64)
-        + pl.col("player_set4_tiebreak").is_not_null().cast(pl.Int64)
-        + pl.col("player_set5_tiebreak").is_not_null().cast(pl.Int64)
-    )
-
-
-def _tiebreaks_won() -> pl.Expr:
-    """Count tiebreaks won in this match."""
-    tb1_won = (pl.col("player_set1_tiebreak") > pl.col("opp_set1_tiebreak")).fill_null(False).cast(pl.Int64)
-    tb2_won = (pl.col("player_set2_tiebreak") > pl.col("opp_set2_tiebreak")).fill_null(False).cast(pl.Int64)
-    tb3_won = (pl.col("player_set3_tiebreak") > pl.col("opp_set3_tiebreak")).fill_null(False).cast(pl.Int64)
-    tb4_won = (pl.col("player_set4_tiebreak") > pl.col("opp_set4_tiebreak")).fill_null(False).cast(pl.Int64)
-    tb5_won = (pl.col("player_set5_tiebreak") > pl.col("opp_set5_tiebreak")).fill_null(False).cast(pl.Int64)
-    return tb1_won + tb2_won + tb3_won + tb4_won + tb5_won
-
-
-def _deciding_set_flag() -> pl.Expr:
-    """1 if this match went to a deciding set, 0 otherwise."""
-    return (pl.col("sets_played") == pl.col("best_of")).cast(pl.Int64)
-
-
-def _rolling_ratio(numerator: pl.Expr, denominator: pl.Expr, days: int) -> pl.Expr:
-    """Rolling sum(numerator) / rolling sum(denominator) over past N days."""
-    num = numerator.rolling_sum_by(by=DATE_COL, window_size=f"{days}d", closed="left").over("player_id").fill_null(0)
-    den = denominator.rolling_sum_by(by=DATE_COL, window_size=f"{days}d", closed="left").over("player_id").fill_null(0)
-    return pl.when(den > 0).then(num / den).otherwise(None)
-
-
-def _cumulative_ratio(numerator: pl.Expr, denominator: pl.Expr) -> pl.Expr:
-    """Cumulative sum(numerator) / cumulative sum(denominator), excluding current row."""
-    num = numerator.cum_sum().shift(1).over("player_id", order_by=DATE_COL).fill_null(0)
-    den = denominator.cum_sum().shift(1).over("player_id", order_by=DATE_COL).fill_null(0)
-    return pl.when(den > 0).then(num / den).otherwise(None)
 
 
 @feature(
@@ -57,9 +23,7 @@ def _cumulative_ratio(numerator: pl.Expr, denominator: pl.Expr) -> pl.Expr:
 )
 def tiebreak_win_pct(days: int | None = None) -> pl.Expr:
     """Percentage of tiebreaks won."""
-    if days is None:
-        return _cumulative_ratio(_tiebreaks_won(), _tiebreaks_played())
-    return _rolling_ratio(_tiebreaks_won(), _tiebreaks_played(), days)
+    return ratio_feature(_tiebreaks_won(), _tiebreaks_played(), days)
 
 
 @feature(
@@ -85,12 +49,7 @@ def tiebreak_win_pct_diff(days: int | None = None) -> pl.Expr:
 )
 def tiebreak_pct(days: int | None = None) -> pl.Expr:
     """How often player's sets go to tiebreak."""
-    if days is None:
-        return _cumulative_ratio(
-            _tiebreaks_played(),
-            pl.col("sets_played").cast(pl.Int64),
-        )
-    return _rolling_ratio(
+    return ratio_feature(
         _tiebreaks_played(),
         pl.col("sets_played").cast(pl.Int64),
         days,
@@ -104,17 +63,12 @@ def tiebreak_pct(days: int | None = None) -> pl.Expr:
     mirror=True,
     impute=0,
 )
-def tiebreaks_played(days: int | None = None) -> pl.Expr:
+def tiebreaks_played_feat(days: int | None = None) -> pl.Expr:
     """Volume of tiebreaks played."""
     played = _tiebreaks_played()
     if days is None:
-        return played.cum_sum().shift(1).over("player_id", order_by=DATE_COL).fill_null(0)
-    return (
-        played
-        .rolling_sum_by(by=DATE_COL, window_size=f"{days}d", closed="left")
-        .over("player_id")
-        .fill_null(0)
-    )
+        return cumulative_sum(played, group_by="player_id")
+    return rolling_sum(played, days=days, group_by="player_id")
 
 
 @feature(
@@ -127,9 +81,7 @@ def deciding_set_pct(days: int | None = None) -> pl.Expr:
     """Percentage of matches going to deciding set."""
     deciding = _deciding_set_flag()
     total = pl.col(DATE_COL).is_not_null().cast(pl.Int64)
-    if days is None:
-        return _cumulative_ratio(deciding, total)
-    return _rolling_ratio(deciding, total, days)
+    return ratio_feature(deciding, total, days)
 
 
 @feature(
@@ -143,9 +95,7 @@ def deciding_set_win_pct(days: int | None = None) -> pl.Expr:
     """Win percentage when match goes to deciding set."""
     deciding = _deciding_set_flag()
     deciding_won = deciding * pl.col("won").cast(pl.Int64)
-    if days is None:
-        return _cumulative_ratio(deciding_won, deciding)
-    return _rolling_ratio(deciding_won, deciding, days)
+    return ratio_feature(deciding_won, deciding, days)
 
 
 @feature(
