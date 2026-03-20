@@ -9,7 +9,7 @@ from mvp.model.features._score_helpers import (
     total_games_won as _total_games_won,
 )
 from mvp.model.primitives import cumulative_mean, ratio_feature, rolling_mean
-from mvp.model.registry import feature
+from mvp.model.registry import feature, register_diff
 
 
 def _games_won_per_set() -> pl.Expr:
@@ -116,86 +116,8 @@ def games_per_set(days: int | None = None) -> pl.Expr:
 
 # --- Derived diff features ---
 
-
-@feature(
-    name="sets_per_match_diff",
-    params=["days"],
-    description="Player - opponent sets per match",
-    depends_on=["sets_per_match"],
-    mirror=False,
-    impute=0,
-)
-def sets_per_match_diff(days: int | None = None) -> pl.Expr:
-    if days is None:
-        return pl.col("player_sets_per_match") - pl.col("opp_sets_per_match")
-    return pl.col(f"player_sets_per_match_{days}d") - pl.col(f"opp_sets_per_match_{days}d")
-
-
-@feature(
-    name="straight_sets_win_pct_diff",
-    params=["days"],
-    description="Player - opponent straight sets win pct",
-    depends_on=["straight_sets_win_pct"],
-    mirror=False,
-    impute=0,
-)
-def straight_sets_win_pct_diff(days: int | None = None) -> pl.Expr:
-    if days is None:
-        return pl.col("player_straight_sets_win_pct") - pl.col("opp_straight_sets_win_pct")
-    return pl.col(f"player_straight_sets_win_pct_{days}d") - pl.col(f"opp_straight_sets_win_pct_{days}d")
-
-
-@feature(
-    name="games_won_per_set_diff",
-    params=["days"],
-    description="Player - opponent games won per set",
-    depends_on=["games_won_per_set"],
-    mirror=False,
-    impute=0,
-)
-def games_won_per_set_diff(days: int | None = None) -> pl.Expr:
-    if days is None:
-        return pl.col("player_games_won_per_set") - pl.col("opp_games_won_per_set")
-    return pl.col(f"player_games_won_per_set_{days}d") - pl.col(f"opp_games_won_per_set_{days}d")
-
-
-@feature(
-    name="games_lost_per_set_diff",
-    params=["days"],
-    description="Player - opponent games lost per set",
-    depends_on=["games_lost_per_set"],
-    mirror=False,
-    impute=0,
-)
-def games_lost_per_set_diff(days: int | None = None) -> pl.Expr:
-    if days is None:
-        return pl.col("player_games_lost_per_set") - pl.col("opp_games_lost_per_set")
-    return pl.col(f"player_games_lost_per_set_{days}d") - pl.col(f"opp_games_lost_per_set_{days}d")
-
-
-@feature(
-    name="games_margin_per_set_diff",
-    params=["days"],
-    description="Player - opponent games margin per set",
-    depends_on=["games_margin_per_set"],
-    mirror=False,
-    impute=0,
-)
-def games_margin_per_set_diff(days: int | None = None) -> pl.Expr:
-    if days is None:
-        return pl.col("player_games_margin_per_set") - pl.col("opp_games_margin_per_set")
-    return pl.col(f"player_games_margin_per_set_{days}d") - pl.col(f"opp_games_margin_per_set_{days}d")
-
-
-@feature(
-    name="games_per_set_diff",
-    params=["days"],
-    description="Player - opponent games per set",
-    depends_on=["games_per_set"],
-    mirror=False,
-    impute=0,
-)
-def games_per_set_diff(days: int | None = None) -> pl.Expr:
-    if days is None:
-        return pl.col("player_games_per_set") - pl.col("opp_games_per_set")
-    return pl.col(f"player_games_per_set_{days}d") - pl.col(f"opp_games_per_set_{days}d")
+for _base in [
+    "sets_per_match", "straight_sets_win_pct", "games_won_per_set",
+    "games_lost_per_set", "games_margin_per_set", "games_per_set",
+]:
+    register_diff(_base)

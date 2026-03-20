@@ -4,7 +4,7 @@
 import polars as pl
 
 from mvp.model.primitives import cumulative_mean, ratio_feature, rolling_mean
-from mvp.model.registry import feature
+from mvp.model.registry import feature, register_diff
 
 
 # --- Base features ---
@@ -55,44 +55,6 @@ def opp_elo_faced_avg(days: int | None = None) -> pl.Expr:
 
 # --- Derived diff features ---
 
-
-@feature(
-    name="quality_win_rate_diff",
-    params=["days"],
-    description="Player - opponent quality win rate",
-    depends_on=["quality_win_rate"],
-    mirror=False,
-    impute=0,
-)
-def quality_win_rate_diff(days: int | None = None) -> pl.Expr:
-    if days is None:
-        return pl.col("player_quality_win_rate") - pl.col("opp_quality_win_rate")
-    return pl.col(f"player_quality_win_rate_{days}d") - pl.col(f"opp_quality_win_rate_{days}d")
-
-
-@feature(
-    name="opp_elo_beaten_avg_diff",
-    params=["days"],
-    description="Player - opponent avg beaten Elo",
-    depends_on=["opp_elo_beaten_avg"],
-    mirror=False,
-    impute=0,
-)
-def opp_elo_beaten_avg_diff(days: int | None = None) -> pl.Expr:
-    if days is None:
-        return pl.col("player_opp_elo_beaten_avg") - pl.col("opp_opp_elo_beaten_avg")
-    return pl.col(f"player_opp_elo_beaten_avg_{days}d") - pl.col(f"opp_opp_elo_beaten_avg_{days}d")
-
-
-@feature(
-    name="opp_elo_faced_avg_diff",
-    params=["days"],
-    description="Player - opponent avg faced Elo",
-    depends_on=["opp_elo_faced_avg"],
-    mirror=False,
-    impute=0,
-)
-def opp_elo_faced_avg_diff(days: int | None = None) -> pl.Expr:
-    if days is None:
-        return pl.col("player_opp_elo_faced_avg") - pl.col("opp_opp_elo_faced_avg")
-    return pl.col(f"player_opp_elo_faced_avg_{days}d") - pl.col(f"opp_opp_elo_faced_avg_{days}d")
+register_diff("quality_win_rate")
+register_diff("opp_elo_beaten_avg")
+register_diff("opp_elo_faced_avg")

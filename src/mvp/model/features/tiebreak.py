@@ -9,7 +9,7 @@ from mvp.model.features._score_helpers import (
     tiebreaks_won as _tiebreaks_won,
 )
 from mvp.model.primitives import cumulative_sum, ratio_feature, rolling_sum
-from mvp.model.registry import feature
+from mvp.model.registry import feature, register_diff
 
 DATE_COL = "effective_match_date"
 
@@ -26,19 +26,7 @@ def tiebreak_win_pct(days: int | None = None) -> pl.Expr:
     return ratio_feature(_tiebreaks_won(), _tiebreaks_played(), days)
 
 
-@feature(
-    name="tiebreak_win_pct_diff",
-    params=["days"],
-    description="Player tiebreak win pct minus opponent tiebreak win pct",
-    depends_on=["tiebreak_win_pct"],
-    mirror=False,
-    impute=0,
-)
-def tiebreak_win_pct_diff(days: int | None = None) -> pl.Expr:
-    """Tiebreak win percentage difference."""
-    if days is None:
-        return pl.col("player_tiebreak_win_pct") - pl.col("opp_tiebreak_win_pct")
-    return pl.col(f"player_tiebreak_win_pct_{days}d") - pl.col(f"opp_tiebreak_win_pct_{days}d")
+register_diff("tiebreak_win_pct")
 
 
 @feature(
@@ -98,16 +86,4 @@ def deciding_set_win_pct(days: int | None = None) -> pl.Expr:
     return ratio_feature(deciding_won, deciding, days)
 
 
-@feature(
-    name="deciding_set_win_pct_diff",
-    params=["days"],
-    description="Player deciding set win pct minus opponent deciding set win pct",
-    depends_on=["deciding_set_win_pct"],
-    mirror=False,
-    impute=0,
-)
-def deciding_set_win_pct_diff(days: int | None = None) -> pl.Expr:
-    """Deciding set win percentage difference."""
-    if days is None:
-        return pl.col("player_deciding_set_win_pct") - pl.col("opp_deciding_set_win_pct")
-    return pl.col(f"player_deciding_set_win_pct_{days}d") - pl.col(f"opp_deciding_set_win_pct_{days}d")
+register_diff("deciding_set_win_pct")

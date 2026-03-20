@@ -4,7 +4,7 @@
 import polars as pl
 
 from mvp.model.primitives import cumulative_count, rolling_count
-from mvp.model.registry import feature
+from mvp.model.registry import feature, register_diff
 
 DATE_COL = "effective_match_date"
 
@@ -56,43 +56,6 @@ def pct_matches_on_surface(days: int | None = None) -> pl.Expr:
 
 # --- Derived diff features ---
 
-
-@feature(
-    name="days_since_surface_diff",
-    params=[],
-    description="Player days_since_surface minus opponent",
-    depends_on=["days_since_surface"],
-    mirror=False,
-    impute=0,
-)
-def days_since_surface_diff() -> pl.Expr:
-    """Days-since-surface difference (player - opponent)."""
-    return pl.col("player_days_since_surface") - pl.col("opp_days_since_surface")
-
-
-@feature(
-    name="surface_switch_diff",
-    params=[],
-    description="Player surface_switch minus opponent",
-    depends_on=["surface_switch"],
-    mirror=False,
-    impute=0,
-)
-def surface_switch_diff() -> pl.Expr:
-    """Surface switch difference (player - opponent)."""
-    return pl.col("player_surface_switch") - pl.col("opp_surface_switch")
-
-
-@feature(
-    name="pct_matches_on_surface_diff",
-    params=["days"],
-    description="Player pct_matches_on_surface minus opponent",
-    depends_on=["pct_matches_on_surface"],
-    mirror=False,
-    impute=0,
-)
-def pct_matches_on_surface_diff(days: int | None = None) -> pl.Expr:
-    """Pct matches on surface difference (player - opponent)."""
-    if days is None:
-        return pl.col("player_pct_matches_on_surface") - pl.col("opp_pct_matches_on_surface")
-    return pl.col(f"player_pct_matches_on_surface_{days}d") - pl.col(f"opp_pct_matches_on_surface_{days}d")
+register_diff("days_since_surface")
+register_diff("surface_switch")
+register_diff("pct_matches_on_surface")

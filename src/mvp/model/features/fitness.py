@@ -4,7 +4,7 @@
 import polars as pl
 
 from mvp.model.primitives import cumulative_count, rolling_count
-from mvp.model.registry import feature
+from mvp.model.registry import feature, register_diff
 
 DATE_COL = "effective_match_date"
 
@@ -61,30 +61,5 @@ def last_match_retirement() -> pl.Expr:
 
 # --- Derived diff features ---
 
-
-@feature(
-    name="retirement_rate_diff",
-    params=["days"],
-    description="Player retirement rate minus opponent",
-    depends_on=["retirement_rate"],
-    mirror=False,
-    impute=0,
-)
-def retirement_rate_diff(days: int | None = None) -> pl.Expr:
-    """Retirement rate difference (player - opponent)."""
-    if days is None:
-        return pl.col("player_retirement_rate") - pl.col("opp_retirement_rate")
-    return pl.col(f"player_retirement_rate_{days}d") - pl.col(f"opp_retirement_rate_{days}d")
-
-
-@feature(
-    name="last_match_retirement_diff",
-    params=[],
-    description="Player last_match_retirement minus opponent",
-    depends_on=["last_match_retirement"],
-    mirror=False,
-    impute=0,
-)
-def last_match_retirement_diff() -> pl.Expr:
-    """Last match retirement difference (player - opponent)."""
-    return pl.col("player_last_match_retirement") - pl.col("opp_last_match_retirement")
+register_diff("retirement_rate")
+register_diff("last_match_retirement")

@@ -4,7 +4,7 @@
 import polars as pl
 
 from mvp.model.primitives import cumulative_mean, ratio_feature, rolling_mean
-from mvp.model.registry import feature
+from mvp.model.registry import feature, register_diff, register_matchup
 
 
 # =============================================================================
@@ -62,124 +62,32 @@ def ret_rating(days: int | None = None) -> pl.Expr:
 # Diff Features (player - opponent, same stat)
 # =============================================================================
 
-
-@feature(
-    name="ret_first_serve_win_pct_diff",
-    params=["days"],
-    description="First serve return win pct difference (player - opponent)",
-    depends_on=["ret_first_serve_win_pct"],
-    mirror=False,
-    impute=0,
-)
-def ret_first_serve_win_pct_diff(days: int | None = None) -> pl.Expr:
-    """First serve return win percentage difference."""
-    if days is None:
-        return pl.col("player_ret_first_serve_win_pct") - pl.col("opp_ret_first_serve_win_pct")
-    return (
-        pl.col(f"player_ret_first_serve_win_pct_{days}d")
-        - pl.col(f"opp_ret_first_serve_win_pct_{days}d")
-    )
-
-
-@feature(
-    name="ret_second_serve_win_pct_diff",
-    params=["days"],
-    description="Second serve return win pct difference (player - opponent)",
-    depends_on=["ret_second_serve_win_pct"],
-    mirror=False,
-    impute=0,
-)
-def ret_second_serve_win_pct_diff(days: int | None = None) -> pl.Expr:
-    """Second serve return win percentage difference."""
-    if days is None:
-        return pl.col("player_ret_second_serve_win_pct") - pl.col("opp_ret_second_serve_win_pct")
-    return (
-        pl.col(f"player_ret_second_serve_win_pct_{days}d")
-        - pl.col(f"opp_ret_second_serve_win_pct_{days}d")
-    )
-
-
-@feature(
-    name="ret_bp_convert_pct_diff",
-    params=["days"],
-    description="Break point convert percentage difference (player - opponent)",
-    depends_on=["ret_bp_convert_pct"],
-    mirror=False,
-    impute=0,
-)
-def ret_bp_convert_pct_diff(days: int | None = None) -> pl.Expr:
-    """Break point convert percentage difference."""
-    if days is None:
-        return pl.col("player_ret_bp_convert_pct") - pl.col("opp_ret_bp_convert_pct")
-    return pl.col(f"player_ret_bp_convert_pct_{days}d") - pl.col(f"opp_ret_bp_convert_pct_{days}d")
-
-
-@feature(
-    name="ret_rating_diff",
-    params=["days"],
-    description="ATP return rating difference (player - opponent)",
-    depends_on=["ret_rating"],
-    mirror=False,
-    impute=0,
-)
-def ret_rating_diff(days: int | None = None) -> pl.Expr:
-    """ATP return rating difference."""
-    if days is None:
-        return pl.col("player_ret_rating") - pl.col("opp_ret_rating")
-    return pl.col(f"player_ret_rating_{days}d") - pl.col(f"opp_ret_rating_{days}d")
+for _base in [
+    "ret_first_serve_win_pct", "ret_second_serve_win_pct",
+    "ret_bp_convert_pct", "ret_rating",
+]:
+    register_diff(_base)
 
 
 # =============================================================================
 # Matchup Features (player return vs opponent serve)
 # =============================================================================
 
-
-@feature(
-    name="ret_first_serve_win_pct_matchup",
-    params=["days"],
-    description="Player first return win % minus opponent first serve win %",
-    depends_on=["ret_first_serve_win_pct", "svc_first_serve_win_pct"],
-    mirror=False,
-    impute=0,
+register_matchup(
+    "ret_first_serve_win_pct_matchup",
+    "player_ret_first_serve_win_pct", "opp_svc_first_serve_win_pct",
+    "ret_first_serve_win_pct", "svc_first_serve_win_pct",
+    "Player first return win % minus opponent first serve win %",
 )
-def ret_first_serve_win_pct_matchup(days: int | None = None) -> pl.Expr:
-    """Player's first serve return vs opponent's first serve."""
-    if days is None:
-        return pl.col("player_ret_first_serve_win_pct") - pl.col("opp_svc_first_serve_win_pct")
-    return (
-        pl.col(f"player_ret_first_serve_win_pct_{days}d")
-        - pl.col(f"opp_svc_first_serve_win_pct_{days}d")
-    )
-
-
-@feature(
-    name="ret_second_serve_win_pct_matchup",
-    params=["days"],
-    description="Player second return win % minus opponent second serve win %",
-    depends_on=["ret_second_serve_win_pct", "svc_second_serve_win_pct"],
-    mirror=False,
-    impute=0,
+register_matchup(
+    "ret_second_serve_win_pct_matchup",
+    "player_ret_second_serve_win_pct", "opp_svc_second_serve_win_pct",
+    "ret_second_serve_win_pct", "svc_second_serve_win_pct",
+    "Player second return win % minus opponent second serve win %",
 )
-def ret_second_serve_win_pct_matchup(days: int | None = None) -> pl.Expr:
-    """Player's second serve return vs opponent's second serve."""
-    if days is None:
-        return pl.col("player_ret_second_serve_win_pct") - pl.col("opp_svc_second_serve_win_pct")
-    return (
-        pl.col(f"player_ret_second_serve_win_pct_{days}d")
-        - pl.col(f"opp_svc_second_serve_win_pct_{days}d")
-    )
-
-
-@feature(
-    name="ret_bp_pct_matchup",
-    params=["days"],
-    description="Player BP convert % minus opponent BP save %",
-    depends_on=["ret_bp_convert_pct", "svc_bp_save_pct"],
-    mirror=False,
-    impute=0,
+register_matchup(
+    "ret_bp_pct_matchup",
+    "player_ret_bp_convert_pct", "opp_svc_bp_save_pct",
+    "ret_bp_convert_pct", "svc_bp_save_pct",
+    "Player BP convert % minus opponent BP save %",
 )
-def ret_bp_pct_matchup(days: int | None = None) -> pl.Expr:
-    """Player's clutch returning vs opponent's clutch serving."""
-    if days is None:
-        return pl.col("player_ret_bp_convert_pct") - pl.col("opp_svc_bp_save_pct")
-    return pl.col(f"player_ret_bp_convert_pct_{days}d") - pl.col(f"opp_svc_bp_save_pct_{days}d")

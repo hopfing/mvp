@@ -12,7 +12,7 @@ Layer 3: Explicit matchup interaction terms (7)
 import polars as pl
 
 from mvp.model.primitives import ratio_feature, rolling_max, rolling_mean
-from mvp.model.registry import feature
+from mvp.model.registry import feature, register_diff, register_matchup
 
 _DEFAULT_DAYS = 365
 _GRP = "player_id"
@@ -462,28 +462,8 @@ _STYLE_SINGLE_FEATURES = [
 ]
 
 
-def _register_diff(base_name: str) -> None:
-    """Register a diff feature for a single stat."""
-    diff_name = f"{base_name}_diff"
-
-    @feature(
-        name=diff_name,
-        params=["days"],
-        description=f"{base_name} difference (player - opponent)",
-        depends_on=[base_name],
-        mirror=False,
-        impute=0,
-    )
-    def _diff(days: int | None = None, _bn: str = base_name) -> pl.Expr:
-        if days is None:
-            return pl.col(f"player_{_bn}") - pl.col(f"opp_{_bn}")
-        return pl.col(f"player_{_bn}_{days}d") - pl.col(f"opp_{_bn}_{days}d")
-
-    globals()[diff_name] = _diff
-
-
 for _base in _STYLE_SINGLE_FEATURES:
-    _register_diff(_base)
+    register_diff(_base)
 
 
 # =============================================================================
@@ -555,36 +535,8 @@ _STYLE_MATCHUP_PAIRS = [
 ]
 
 
-def _register_matchup(
-    name: str,
-    player_col: str,
-    opp_col: str,
-    dep1: str,
-    dep2: str,
-    description: str,
-) -> None:
-    """Register a cross-domain matchup feature."""
-
-    @feature(
-        name=name,
-        params=["days"],
-        description=description,
-        depends_on=[dep1, dep2],
-        mirror=False,
-        impute=0,
-    )
-    def _matchup(
-        days: int | None = None, _pc: str = player_col, _oc: str = opp_col
-    ) -> pl.Expr:
-        if days is None:
-            return pl.col(_pc) - pl.col(_oc)
-        return pl.col(f"{_pc}_{days}d") - pl.col(f"{_oc}_{days}d")
-
-    globals()[name] = _matchup
-
-
 for _m in _STYLE_MATCHUP_PAIRS:
-    _register_matchup(*_m)
+    register_matchup(*_m)
 
 
 # =============================================================================

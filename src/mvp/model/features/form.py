@@ -4,7 +4,7 @@
 import polars as pl
 
 from mvp.model.primitives import rolling_count
-from mvp.model.registry import feature
+from mvp.model.registry import feature, register_diff
 
 DATE_COL = "effective_match_date"
 
@@ -28,19 +28,7 @@ def match_count(days: int | None = None) -> pl.Expr:
     return rolling_count(days=days, group_by="player_id")
 
 
-@feature(
-    name="match_count_diff",
-    params=["days"],
-    description="Match count difference (player - opponent)",
-    depends_on=["match_count"],
-    mirror=False,
-    impute=0,
-)
-def match_count_diff(days: int | None = None) -> pl.Expr:
-    """Activity difference between player and opponent."""
-    if days is None:
-        return pl.col("player_match_count") - pl.col("opp_match_count")
-    return pl.col(f"player_match_count_{days}d") - pl.col(f"opp_match_count_{days}d")
+register_diff("match_count")
 
 
 @feature(
@@ -56,17 +44,7 @@ def days_since_last_match() -> pl.Expr:
     return (pl.col(DATE_COL) - prev_date).dt.total_days().cast(pl.Float64)
 
 
-@feature(
-    name="days_since_last_match_diff",
-    params=[],
-    description="Player days_since_last_match minus opponent",
-    depends_on=["days_since_last_match"],
-    mirror=False,
-    impute=0,
-)
-def days_since_last_match_diff() -> pl.Expr:
-    """Days since last match difference (player - opponent)."""
-    return pl.col("player_days_since_last_match") - pl.col("opp_days_since_last_match")
+register_diff("days_since_last_match")
 
 
 @feature(
@@ -87,14 +65,4 @@ def prev_tourn_round_reached() -> pl.Expr:
     ).over(["player_id", "draw_type"], order_by=DATE_COL)
 
 
-@feature(
-    name="prev_tourn_round_reached_diff",
-    params=[],
-    description="Player prev_tourn_round_reached minus opponent",
-    depends_on=["prev_tourn_round_reached"],
-    mirror=False,
-    impute=0,
-)
-def prev_tourn_round_reached_diff() -> pl.Expr:
-    """Previous tournament depth difference (player - opponent)."""
-    return pl.col("player_prev_tourn_round_reached") - pl.col("opp_prev_tourn_round_reached")
+register_diff("prev_tourn_round_reached")

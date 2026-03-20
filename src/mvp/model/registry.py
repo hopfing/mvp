@@ -103,3 +103,59 @@ def feature(
         return func
 
     return decorator
+
+
+def register_diff(base_name: str) -> None:
+    """Register a diff feature (player - opponent) for a base feature.
+
+    Infers whether the diff is windowed from the base feature's params.
+    Must be called after the base feature is registered.
+    """
+    base = get_registry().get(base_name)
+    has_days = "days" in base.params
+    diff_name = f"{base_name}_diff"
+
+    @feature(
+        name=diff_name,
+        params=["days"] if has_days else [],
+        description=f"{base_name} difference (player - opponent)",
+        depends_on=[base_name],
+        mirror=False,
+        impute=0,
+    )
+    def _diff(days: int | None = None, _bn: str = base_name) -> pl.Expr:
+        if days is None:
+            return pl.col(f"player_{_bn}") - pl.col(f"opp_{_bn}")
+        return pl.col(f"player_{_bn}_{days}d") - pl.col(f"opp_{_bn}_{days}d")
+
+
+def register_matchup(
+    name: str,
+    player_col: str,
+    opp_col: str,
+    dep1: str,
+    dep2: str,
+    description: str = "",
+) -> None:
+    """Register a cross-domain matchup feature (player_A - opp_B).
+
+    Infers whether the matchup is windowed from dep1's params.
+    Must be called after both dependency features are registered.
+    """
+    base = get_registry().get(dep1)
+    has_days = "days" in base.params
+
+    @feature(
+        name=name,
+        params=["days"] if has_days else [],
+        description=description,
+        depends_on=[dep1, dep2],
+        mirror=False,
+        impute=0,
+    )
+    def _matchup(
+        days: int | None = None, _pc: str = player_col, _oc: str = opp_col,
+    ) -> pl.Expr:
+        if days is None:
+            return pl.col(_pc) - pl.col(_oc)
+        return pl.col(f"{_pc}_{days}d") - pl.col(f"{_oc}_{days}d")

@@ -4,7 +4,7 @@
 import polars as pl
 
 from mvp.model.primitives import cumulative_mean, cumulative_sum, cumulative_count, rolling_mean, rolling_sum, rolling_count
-from mvp.model.registry import feature
+from mvp.model.registry import feature, register_diff
 
 
 @feature(
@@ -25,19 +25,7 @@ def venue_win_pct(days: int | None = None) -> pl.Expr:
     return pl.when(matches > 0).then(wins / matches).otherwise(None)
 
 
-@feature(
-    name="venue_win_pct_diff",
-    params=["days"],
-    description="Player venue win pct minus opponent venue win pct",
-    depends_on=["venue_win_pct"],
-    mirror=False,
-    impute=0,
-)
-def venue_win_pct_diff(days: int | None = None) -> pl.Expr:
-    """Venue win percentage difference (indoor/outdoor)."""
-    if days is None:
-        return pl.col("player_venue_win_pct") - pl.col("opp_venue_win_pct")
-    return pl.col(f"player_venue_win_pct_{days}d") - pl.col(f"opp_venue_win_pct_{days}d")
+register_diff("venue_win_pct")
 
 
 @feature(
@@ -58,19 +46,7 @@ def circuit_win_pct(days: int | None = None) -> pl.Expr:
     return pl.when(matches > 0).then(wins / matches).otherwise(None)
 
 
-@feature(
-    name="circuit_win_pct_diff",
-    params=["days"],
-    description="Player circuit win pct minus opponent circuit win pct",
-    depends_on=["circuit_win_pct"],
-    mirror=False,
-    impute=0,
-)
-def circuit_win_pct_diff(days: int | None = None) -> pl.Expr:
-    """Circuit win percentage difference."""
-    if days is None:
-        return pl.col("player_circuit_win_pct") - pl.col("opp_circuit_win_pct")
-    return pl.col(f"player_circuit_win_pct_{days}d") - pl.col(f"opp_circuit_win_pct_{days}d")
+register_diff("circuit_win_pct")
 
 
 @feature(
@@ -99,19 +75,7 @@ def tour_match_pct(days: int | None = None) -> pl.Expr:
     return pl.when(total > 0).then(tour_count / total).otherwise(None)
 
 
-@feature(
-    name="tour_match_pct_diff",
-    params=["days"],
-    description="Player tour match pct minus opponent tour match pct",
-    depends_on=["tour_match_pct"],
-    mirror=False,
-    impute=0,
-)
-def tour_match_pct_diff(days: int | None = None) -> pl.Expr:
-    """Tour match percentage difference between player and opponent."""
-    if days is None:
-        return pl.col("player_tour_match_pct") - pl.col("opp_tour_match_pct")
-    return pl.col(f"player_tour_match_pct_{days}d") - pl.col(f"opp_tour_match_pct_{days}d")
+register_diff("tour_match_pct")
 
 
 @feature(

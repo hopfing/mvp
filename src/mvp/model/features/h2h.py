@@ -9,7 +9,7 @@ from mvp.model.primitives import (
     rolling_count,
     rolling_sum,
 )
-from mvp.model.registry import feature
+from mvp.model.registry import feature, register_diff
 
 
 @feature(
@@ -54,19 +54,7 @@ def h2h_win_pct(days: int | None = None) -> pl.Expr:
     return pl.when(matches > 0).then(wins / matches).otherwise(None)
 
 
-@feature(
-    name="h2h_wins_diff",
-    params=["days"],
-    description="H2H wins difference (player - opponent)",
-    depends_on=["h2h_wins"],
-    mirror=False,
-    impute=0,
-)
-def h2h_wins_diff(days: int | None = None) -> pl.Expr:
-    """H2H wins difference between player and opponent."""
-    if days is None:
-        return pl.col("player_h2h_wins") - pl.col("opp_h2h_wins")
-    return pl.col(f"player_h2h_wins_{days}d") - pl.col(f"opp_h2h_wins_{days}d")
+register_diff("h2h_wins")
 
 
 @feature(

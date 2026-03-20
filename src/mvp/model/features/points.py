@@ -4,7 +4,7 @@
 import polars as pl
 
 from mvp.model.primitives import ratio_feature
-from mvp.model.registry import feature
+from mvp.model.registry import feature, register_diff, register_matchup
 
 
 # =============================================================================
@@ -49,100 +49,23 @@ def pts_return_won_pct(days: int | None = None) -> pl.Expr:
 # Diff Features (player - opponent, same stat)
 # =============================================================================
 
-
-@feature(
-    name="pts_total_won_pct_diff",
-    params=["days"],
-    description="Total points won pct difference (player - opponent)",
-    depends_on=["pts_total_won_pct"],
-    mirror=False,
-    impute=0,
-)
-def pts_total_won_pct_diff(days: int | None = None) -> pl.Expr:
-    """Total points won percentage difference."""
-    if days is None:
-        return pl.col("player_pts_total_won_pct") - pl.col("opp_pts_total_won_pct")
-    return pl.col(f"player_pts_total_won_pct_{days}d") - pl.col(f"opp_pts_total_won_pct_{days}d")
-
-
-@feature(
-    name="pts_service_won_pct_diff",
-    params=["days"],
-    description="Service points won pct difference (player - opponent)",
-    depends_on=["pts_service_won_pct"],
-    mirror=False,
-    impute=0,
-)
-def pts_service_won_pct_diff(days: int | None = None) -> pl.Expr:
-    """Service points won percentage difference."""
-    if days is None:
-        return pl.col("player_pts_service_won_pct") - pl.col("opp_pts_service_won_pct")
-    return (
-        pl.col(f"player_pts_service_won_pct_{days}d")
-        - pl.col(f"opp_pts_service_won_pct_{days}d")
-    )
-
-
-@feature(
-    name="pts_return_won_pct_diff",
-    params=["days"],
-    description="Return points won pct difference (player - opponent)",
-    depends_on=["pts_return_won_pct"],
-    mirror=False,
-    impute=0,
-)
-def pts_return_won_pct_diff(days: int | None = None) -> pl.Expr:
-    """Return points won percentage difference."""
-    if days is None:
-        return pl.col("player_pts_return_won_pct") - pl.col("opp_pts_return_won_pct")
-    return (
-        pl.col(f"player_pts_return_won_pct_{days}d")
-        - pl.col(f"opp_pts_return_won_pct_{days}d")
-    )
+for _base in ["pts_total_won_pct", "pts_service_won_pct", "pts_return_won_pct"]:
+    register_diff(_base)
 
 
 # =============================================================================
 # Matchup Features (player domain vs opponent opposite domain)
 # =============================================================================
 
-
-@feature(
-    name="svc_pts_won_pct_matchup",
-    params=["days"],
-    description="Player service pts % minus opponent return pts % (serve advantage)",
-    depends_on=["pts_service_won_pct", "pts_return_won_pct"],
-    mirror=False,
-    impute=0,
+register_matchup(
+    "svc_pts_won_pct_matchup",
+    "player_pts_service_won_pct", "opp_pts_return_won_pct",
+    "pts_service_won_pct", "pts_return_won_pct",
+    "Player service pts % minus opponent return pts % (serve advantage)",
 )
-def svc_pts_won_pct_matchup(days: int | None = None) -> pl.Expr:
-    """Player's serve strength vs opponent's return strength.
-
-    Positive means player's serve is stronger than opponent's return.
-    """
-    if days is None:
-        return pl.col("player_pts_service_won_pct") - pl.col("opp_pts_return_won_pct")
-    return (
-        pl.col(f"player_pts_service_won_pct_{days}d")
-        - pl.col(f"opp_pts_return_won_pct_{days}d")
-    )
-
-
-@feature(
-    name="ret_pts_won_pct_matchup",
-    params=["days"],
-    description="Player return pts % minus opponent service pts % (return advantage)",
-    depends_on=["pts_service_won_pct", "pts_return_won_pct"],
-    mirror=False,
-    impute=0,
+register_matchup(
+    "ret_pts_won_pct_matchup",
+    "player_pts_return_won_pct", "opp_pts_service_won_pct",
+    "pts_return_won_pct", "pts_service_won_pct",
+    "Player return pts % minus opponent service pts % (return advantage)",
 )
-def ret_pts_won_pct_matchup(days: int | None = None) -> pl.Expr:
-    """Player's return strength vs opponent's serve strength.
-
-    Positive means player's return is stronger than opponent's serve.
-    """
-    if days is None:
-        return pl.col("player_pts_return_won_pct") - pl.col("opp_pts_service_won_pct")
-    return (
-        pl.col(f"player_pts_return_won_pct_{days}d")
-        - pl.col(f"opp_pts_service_won_pct_{days}d")
-    )

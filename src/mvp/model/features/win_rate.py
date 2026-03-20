@@ -9,7 +9,7 @@ from mvp.model.primitives import (
     rolling_count,
     rolling_mean,
 )
-from mvp.model.registry import feature
+from mvp.model.registry import feature, register_diff
 
 
 @feature(
@@ -53,25 +53,4 @@ def matches_played(days: int | None = None) -> pl.Expr:
     return rolling_count(days=days, group_by="player_id")
 
 
-@feature(
-    name="win_pct_diff",
-    params=["days"],
-    description="Difference between player and opponent win percentage",
-    depends_on=["win_pct"],
-    mirror=False,
-    impute=0,
-)
-def win_pct_diff(days: int | None = None) -> pl.Expr:
-    """Difference between player and opponent win percentage.
-
-    Requires win_pct to be computed first for both player and opponent.
-
-    Args:
-        days: Window size in days. If None, uses all-time.
-
-    Returns:
-        Polars expression computing player_win_pct - opp_win_pct.
-    """
-    if days is None:
-        return pl.col("player_win_pct") - pl.col("opp_win_pct")
-    return pl.col(f"player_win_pct_{days}d") - pl.col(f"opp_win_pct_{days}d")
+register_diff("win_pct")

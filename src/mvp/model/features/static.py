@@ -3,7 +3,7 @@
 
 import polars as pl
 
-from mvp.model.registry import feature
+from mvp.model.registry import feature, register_diff
 
 
 @feature(
@@ -34,17 +34,7 @@ def age() -> pl.Expr:
     return pl.when((raw_age >= 14) & (raw_age <= 55)).then(raw_age).otherwise(None)
 
 
-@feature(
-    name="age_diff",
-    params=[],
-    description="Player age minus opponent age in years",
-    depends_on=["age"],
-    mirror=False,
-    impute=0,
-)
-def age_diff() -> pl.Expr:
-    """Age difference (positive = player older)."""
-    return pl.col("player_age") - pl.col("opp_age")
+register_diff("age")
 
 
 @feature(
