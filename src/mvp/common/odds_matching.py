@@ -57,35 +57,8 @@ class BaseOddsMatcher(BaseJob):
 
     def __init__(self, domain: str, data_root: Path | None = None):
         super().__init__(domain=domain, data_root=data_root)
-        self._name_to_id: dict[str, str] | None = None
         self._aliases: dict[str, str] | None = None
         self._logger = logging.getLogger(f"mvp.{domain}.matcher")
-
-    def _load_players(self) -> dict[str, str]:
-        """Build normalized name -> player_id from players.parquet."""
-        if self._name_to_id is not None:
-            return self._name_to_id
-
-        self._name_to_id = {}
-        players_path = self.data_root / "stage" / "atptour" / "players.parquet"
-        if players_path.exists():
-            players = pl.read_parquet(
-                players_path, columns=["player_id", "first_name", "last_name"]
-            )
-            for row in players.iter_rows(named=True):
-                first = row.get("first_name") or ""
-                last = row.get("last_name") or ""
-                pid = row.get("player_id") or ""
-                if first and last and pid:
-                    normed = normalize_name(f"{first} {last}")
-                    existing = self._name_to_id.get(normed)
-                    if existing is not None and existing != pid:
-                        self._logger.warning(
-                            "Player name collision: '%s' -> %s and %s (keeping %s)",
-                            normed, existing, pid, pid,
-                        )
-                    self._name_to_id[normed] = pid
-        return self._name_to_id
 
     def _load_aliases(self) -> dict[str, str]:
         """Load alias YAML (normalized book name -> player_id)."""
@@ -105,13 +78,13 @@ class BaseOddsMatcher(BaseJob):
         }
         return self._aliases
 
-    def _resolve_id(self, name: str) -> str | None:
+    def _resolve_id(self, name: str, pred_names: dict[str, str]) -> str | None:
         """Resolve a book player name to our player_id."""
         normed = normalize_name(name)
         aliases = self._load_aliases()
         if normed in aliases:
             return aliases[normed]
-        return self._load_players().get(normed)
+        return pred_names.get(normed)
 
     def get_latest_odds(self) -> pl.DataFrame:
         """Read odds parquet, deduplicated to latest per event+player."""
@@ -151,12 +124,26 @@ class BaseOddsMatcher(BaseJob):
             book_events.setdefault(row[self.event_id_column], []).append(row)
 
         # Build prediction lookup: frozenset({p1_id, p2_id}) -> prediction row
+        # Also build name -> id scoped to today's predictions only
         pred_by_pair: dict[frozenset, dict] = {}
+        pred_names: dict[str, str] = {}
         for row in predictions.iter_rows(named=True):
             p1_id = row.get("p1_id") or ""
             p2_id = row.get("p2_id") or ""
             if p1_id and p2_id:
                 pred_by_pair[frozenset({p1_id, p2_id})] = row
+            for name_col, id_col in [("p1_name", "p1_id"), ("p2_name", "p2_id")]:
+                name = row.get(name_col) or ""
+                pid = row.get(id_col) or ""
+                if name and pid:
+                    normed = normalize_name(name)
+                    existing = pred_names.get(normed)
+                    if existing is not None and existing != pid:
+                        self._logger.warning(
+                            "Player name collision: '%s' -> %s and %s (keeping %s)",
+                            normed, existing, pid, pid,
+                        )
+                    pred_names[normed] = pid
 
         result: dict[str, dict[str, float]] = {}
         unmatched_names: set[str] = set()
@@ -169,7 +156,7 @@ class BaseOddsMatcher(BaseJob):
 
             ids_and_odds: list[tuple[str, float]] = []
             for book_row in book_rows[:2]:
-                pid = self._resolve_id(book_row["player_name"])
+                pid = self._resolve_id(book_row["player_name"], pred_names)
                 if pid is None:
                     unmatched_names.add(book_row["player_name"])
                 else:

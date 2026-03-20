@@ -21,19 +21,6 @@ class _TestMatcher(BaseOddsMatcher):
         super().__init__(domain="testbook", data_root=data_root)
 
 
-def _make_players(tmp_path, rows=None):
-    """Write a players.parquet with test data."""
-    if rows is None:
-        rows = {
-            "player_id": ["PLAYER_A", "PLAYER_B", "PLAYER_C", "PLAYER_D"],
-            "first_name": ["Alice", "Bob", "Carlos", "David"],
-            "last_name": ["Smith", "Jones", "López", "García"],
-        }
-    players_dir = tmp_path / "stage" / "atptour"
-    players_dir.mkdir(parents=True, exist_ok=True)
-    pl.DataFrame(rows).write_parquet(players_dir / "players.parquet")
-
-
 def _make_odds(tmp_path, events):
     """Write a moneyline.parquet with test data.
 
@@ -62,44 +49,8 @@ def _make_predictions():
     })
 
 
-class TestLoadPlayers:
-    def test_builds_name_map(self, tmp_path):
-        _make_players(tmp_path)
-        matcher = _TestMatcher(data_root=tmp_path)
-        name_map = matcher._load_players()
-        assert name_map["alice smith"] == "PLAYER_A"
-        assert name_map["bob jones"] == "PLAYER_B"
-        assert name_map["carlos lopez"] == "PLAYER_C"
-
-    def test_caches_result(self, tmp_path):
-        _make_players(tmp_path)
-        matcher = _TestMatcher(data_root=tmp_path)
-        first = matcher._load_players()
-        second = matcher._load_players()
-        assert first is second
-
-    def test_warns_on_collision(self, tmp_path, caplog):
-        _make_players(tmp_path, {
-            "player_id": ["P_SR", "P_JR"],
-            "first_name": ["Martin", "Martin"],
-            "last_name": ["Damm", "Damm"],
-        })
-        matcher = _TestMatcher(data_root=tmp_path)
-        with caplog.at_level(logging.WARNING, logger="mvp.testbook.matcher"):
-            name_map = matcher._load_players()
-        assert "Player name collision" in caplog.text
-        assert "martin damm" in caplog.text
-        # Last one wins
-        assert name_map["martin damm"] == "P_JR"
-
-    def test_missing_players_file(self, tmp_path):
-        matcher = _TestMatcher(data_root=tmp_path)
-        assert matcher._load_players() == {}
-
-
 class TestLoadAliases:
     def test_loads_from_yaml(self, tmp_path):
-        _make_players(tmp_path)
         alias_path = tmp_path / "aliases.yaml"
         alias_path.write_text('"A. Smithy": "PLAYER_A"\n"B. Jonesy": "PLAYER_B"\n')
 
@@ -123,24 +74,23 @@ class TestLoadAliases:
 
 class TestResolveId:
     def test_alias_takes_precedence(self, tmp_path):
-        _make_players(tmp_path)
         alias_path = tmp_path / "aliases.yaml"
         # Alias maps "Alice Smith" to a different ID
         alias_path.write_text('"Alice Smith": "ALIAS_A"\n')
 
         matcher = _TestMatcher(data_root=tmp_path)
         matcher.ALIASES_PATH = alias_path
-        assert matcher._resolve_id("Alice Smith") == "ALIAS_A"
+        pred_names = {"alice smith": "PLAYER_A"}
+        assert matcher._resolve_id("Alice Smith", pred_names) == "ALIAS_A"
 
-    def test_falls_back_to_players(self, tmp_path):
-        _make_players(tmp_path)
+    def test_falls_back_to_pred_names(self, tmp_path):
         matcher = _TestMatcher(data_root=tmp_path)
-        assert matcher._resolve_id("Alice Smith") == "PLAYER_A"
+        pred_names = {"alice smith": "PLAYER_A"}
+        assert matcher._resolve_id("Alice Smith", pred_names) == "PLAYER_A"
 
     def test_returns_none_for_unknown(self, tmp_path):
-        _make_players(tmp_path)
         matcher = _TestMatcher(data_root=tmp_path)
-        assert matcher._resolve_id("Unknown Player") is None
+        assert matcher._resolve_id("Unknown Player", {}) is None
 
 
 class TestGetLatestOdds:
@@ -194,7 +144,6 @@ class TestGetLatestOdds:
 
 class TestMatch:
     def test_basic_pairing(self, tmp_path):
-        _make_players(tmp_path)
         _make_odds(tmp_path, [
             ("e1", "Alice Smith", 1.5),
             ("e1", "Bob Jones", 2.5),
@@ -207,13 +156,11 @@ class TestMatch:
         assert result.odds["m1"]["PLAYER_B"] == 2.5
 
     def test_empty_odds(self, tmp_path):
-        _make_players(tmp_path)
         matcher = _TestMatcher(data_root=tmp_path)
         result = matcher.match(_make_predictions())
         assert result.odds == {}
 
     def test_empty_predictions(self, tmp_path):
-        _make_players(tmp_path)
         _make_odds(tmp_path, [
             ("e1", "Alice Smith", 1.5),
             ("e1", "Bob Jones", 2.5),
@@ -223,7 +170,6 @@ class TestMatch:
         assert result.odds == {}
 
     def test_unmatched_names(self, tmp_path):
-        _make_players(tmp_path)
         _make_odds(tmp_path, [
             ("e99", "Unknown Player", 1.5),
             ("e99", "Another Unknown", 2.5),
@@ -234,7 +180,6 @@ class TestMatch:
         assert result.unmatched_names == {"Unknown Player", "Another Unknown"}
 
     def test_event_matches_populated(self, tmp_path):
-        _make_players(tmp_path)
         _make_odds(tmp_path, [
             ("e1", "Alice Smith", 1.5),
             ("e1", "Bob Jones", 2.5),
@@ -250,7 +195,6 @@ class TestMatch:
         assert em.p2_book_name == "Bob Jones"
 
     def test_log_output(self, tmp_path, caplog):
-        _make_players(tmp_path)
         _make_odds(tmp_path, [
             ("e1", "Alice Smith", 1.5),
             ("e1", "Bob Jones", 2.5),
@@ -259,3 +203,42 @@ class TestMatch:
         with caplog.at_level(logging.INFO, logger="mvp.testbook.matcher"):
             matcher.match(_make_predictions())
         assert "TEST events" in caplog.text
+
+    def test_collision_only_within_predictions(self, tmp_path, caplog):
+        """Collisions from players outside the prediction set should not appear."""
+        _make_odds(tmp_path, [
+            ("e1", "Martin Damm", 1.5),
+            ("e1", "Bob Jones", 2.5),
+        ])
+        # Predictions have one Martin Damm — no collision
+        preds = pl.DataFrame({
+            "match_uid": ["m1"],
+            "p1_id": ["D214"],
+            "p2_id": ["PLAYER_B"],
+            "p1_name": ["Martin Damm"],
+            "p2_name": ["Bob Jones"],
+        })
+        matcher = _TestMatcher(data_root=tmp_path)
+        with caplog.at_level(logging.WARNING, logger="mvp.testbook.matcher"):
+            matcher.match(preds)
+        assert "Player name collision" not in caplog.text
+
+    def test_collision_warned_when_in_predictions(self, tmp_path, caplog):
+        """Collisions between prediction players ARE warned."""
+        _make_odds(tmp_path, [
+            ("e1", "Martin Damm", 1.5),
+            ("e1", "Bob Jones", 2.5),
+        ])
+        # Two different players named Martin Damm in predictions
+        preds = pl.DataFrame({
+            "match_uid": ["m1", "m2"],
+            "p1_id": ["D0DT", "D214"],
+            "p2_id": ["PLAYER_B", "PLAYER_C"],
+            "p1_name": ["Martin Damm", "Martin Damm"],
+            "p2_name": ["Bob Jones", "Carlos López"],
+        })
+        matcher = _TestMatcher(data_root=tmp_path)
+        with caplog.at_level(logging.WARNING, logger="mvp.testbook.matcher"):
+            matcher.match(preds)
+        assert "Player name collision" in caplog.text
+        assert "martin damm" in caplog.text
