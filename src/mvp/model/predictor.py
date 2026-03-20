@@ -62,18 +62,72 @@ class ProductionPredictor:
         matches_path: Path | str = MATCHES_PATH,
         cache_dir: Path | str = CACHE_DIR,
         predictions_path: Path | str = PREDICTIONS_PATH,
+        *,
+        target_section: str = "winner",
     ) -> None:
         self.production_config_path = Path(production_config_path)
         self.matches_path = Path(matches_path)
         self.cache_dir = Path(cache_dir)
         self.predictions_path = Path(predictions_path)
+        self.target_section = target_section
 
         with open(self.production_config_path) as f:
-            self.config: dict[str, Any] = yaml.safe_load(f)
+            raw_config: dict[str, Any] = yaml.safe_load(f)
+
+        # Support both flat (legacy) and sectioned (multi-target) config formats.
+        # Flat: {active: ..., voters: [...]}
+        # Sectioned: {winner: {active: ..., voters: [...]}, deciding_set: {...}}
+        if "active" in raw_config:
+            # Legacy flat format — treat as "winner" section
+            self.full_config = raw_config
+            self.config = raw_config
+        else:
+            self.full_config = raw_config
+            if target_section not in raw_config:
+                raise ValueError(
+                    f"Target section '{target_section}' not found "
+                    f"in {self.production_config_path}"
+                )
+            self.config = raw_config[target_section]
 
         self._experiment_config = ExperimentConfig.from_file(
             self.config["active"]["config"]
         )
+
+    @property
+    def target(self) -> str:
+        """The target this predictor is configured for ('won' or 'deciding_set')."""
+        return self._experiment_config.target
+
+    def _resolve_target(self, df: pl.DataFrame) -> tuple[pl.DataFrame, str]:
+        """Add the target column and filter invalid rows.
+
+        Mirrors ExperimentRunner._resolve_target().
+        """
+        target = self.target
+        if "reason" in df.columns:
+            df = df.filter(pl.col("reason").fill_null("").ne("W/O"))
+        if target == "won":
+            return df, "won"
+        if target == "deciding_set":
+            target_col = "_target_deciding_set"
+            df = df.filter(pl.col("sets_played").is_not_null())
+            if "reason" in df.columns:
+                reason = pl.col("reason").fill_null("")
+                df = df.filter(
+                    ~reason.is_in(["DEF", "UNP"])
+                    & ~(
+                        reason.is_in(["RET"])
+                        & (pl.col("sets_played") < pl.col("best_of"))
+                    )
+                )
+            df = df.with_columns(
+                (pl.col("sets_played") == pl.col("best_of"))
+                .cast(pl.Int64)
+                .alias(target_col)
+            )
+            return df, target_col
+        raise ValueError(f"Unknown target: {target}")
 
     def _resolve_ensemble_features(self) -> tuple[list[str], list[dict]]:
         """Resolve ensemble config to union features and base model specs."""
@@ -163,8 +217,11 @@ class ProductionPredictor:
         if entry.get("filters"):
             df = apply_filters(df, entry["filters"])
 
+        # Resolve target column and filter invalid rows
+        df, target_col = self._resolve_target(df)
+
         # Drop rows without outcomes
-        df = df.filter(pl.col("won").is_not_null())
+        df = df.filter(pl.col(target_col).is_not_null())
 
         feature_cols = get_feature_columns(feature_specs)
         build_result = build_imputation(feature_specs, get_registry())
@@ -172,7 +229,7 @@ class ProductionPredictor:
         n_model = build_result.n_model_features
 
         X = df.select(pl.col(c).cast(pl.Float64) for c in augmented_cols).to_numpy()
-        y = df["won"].to_numpy().astype(int)
+        y = df[target_col].to_numpy().astype(int)
 
         logger.info("Training on %d rows with %d features", len(y), len(feature_cols))
 
@@ -231,6 +288,7 @@ class ProductionPredictor:
                 "feature_cols": feature_cols,
                 "calibrator": calibrator,
                 "aux_base_col_names": build_result.aux_base_col_names,
+                "target": self.target,
                 # Backward compat: keep medians for old code paths
                 "medians": impute_state.global_medians[:n_model],
             },
@@ -240,7 +298,7 @@ class ProductionPredictor:
         # Update trained_at in config
         entry["trained_at"] = datetime.now(timezone.utc).isoformat()
         with open(self.production_config_path, "w") as f:
-            yaml.dump(self.config, f, default_flow_style=False)
+            yaml.dump(self.full_config, f, default_flow_style=False)
 
         logger.info("Model saved to %s", artifact_path)
 
@@ -379,7 +437,9 @@ class ProductionPredictor:
         if calibrator is not None:
             probs = calibrator.transform(probs)
 
-        # For non-canonical rows that were included, flip the prob
+        # For non-canonical rows that were included, flip the prob (winner only;
+        # deciding_set prob is symmetric — no flip needed)
+        is_deciding_set = self.target == "deciding_set"
         result: dict[str, float] = {}
         for i, row in enumerate(canonical.iter_rows(named=True)):
             uid = row["match_uid"]
@@ -388,7 +448,7 @@ class ProductionPredictor:
                 continue
             p = float(probs[i])
             is_canonical = row["_is_canonical"]
-            if not is_canonical:
+            if not is_canonical and not is_deciding_set:
                 p = 1.0 - p
             result[uid] = p
 
@@ -441,9 +501,11 @@ class ProductionPredictor:
         match_uids = set(predictions["match_uid"].to_list())
 
         # Production binary pick per match
+        is_ds = self.target == "deciding_set"
+        prob_col = "deciding_set_prob" if is_ds else "p1_win_prob"
         prod_picks: dict[str, bool] = {}
         for row in predictions.iter_rows(named=True):
-            prod_picks[row["match_uid"]] = row["p1_win_prob"] >= 0.5
+            prod_picks[row["match_uid"]] = row[prob_col] >= 0.5
 
         # Collect voter picks (scoped voters will have fewer UIDs)
         voter_picks: list[dict[str, bool]] = []
@@ -554,13 +616,16 @@ class ProductionPredictor:
             probs = calibrator.transform(probs)
 
         # Add probabilities to pending matches
-        pending = pending.with_columns(pl.Series("_p1_win_prob", probs))
+        pending = pending.with_columns(pl.Series("_prob", probs))
+
+        is_deciding_set = self.target == "deciding_set"
 
         # Compute surface-adjusted Elo before the canonical split
-        pending = pending.with_columns(
-            surface_elo_expr("player").alias("_player_surface_elo"),
-            surface_elo_expr("opp").alias("_opp_surface_elo"),
-        )
+        if not is_deciding_set:
+            pending = pending.with_columns(
+                surface_elo_expr("player").alias("_player_surface_elo"),
+                surface_elo_expr("opp").alias("_opp_surface_elo"),
+            )
 
         # Deduplicate to one row per match using draw order (fall back to alphabetical)
         if "draw_p1_id" in pending.columns:
@@ -577,81 +642,119 @@ class ProductionPredictor:
         canonical = pending.filter(pl.col("_is_canonical"))
         non_canonical = pending.filter(~pl.col("_is_canonical"))
 
-        # For matches where we only have the non-canonical row, flip the prob
+        # For matches where we only have the non-canonical row
         if len(non_canonical) > 0:
             seen_uids = set(canonical["match_uid"].to_list())
             missing = non_canonical.filter(
                 ~pl.col("match_uid").is_in(list(seen_uids))
             )
             if len(missing) > 0:
-                # Flip: this row's player is actually p2
-                missing = missing.with_columns(
-                    (1.0 - pl.col("_p1_win_prob")).alias("_p1_win_prob"),
-                    pl.col("opp_id").alias("_tmp_player_id"),
-                    pl.col("player_id").alias("_tmp_opp_id"),
-                    pl.col("opp_first_name").alias("_tmp_pfn"),
-                    pl.col("opp_last_name").alias("_tmp_pln"),
-                    pl.col("player_first_name").alias("_tmp_ofn"),
-                    pl.col("player_last_name").alias("_tmp_oln"),
-                    pl.col("_opp_surface_elo").alias("_tmp_player_elo"),
-                    pl.col("_player_surface_elo").alias("_tmp_opp_elo"),
-                ).with_columns(
-                    pl.col("_tmp_player_id").alias("player_id"),
-                    pl.col("_tmp_opp_id").alias("opp_id"),
-                    pl.col("_tmp_pfn").alias("player_first_name"),
-                    pl.col("_tmp_pln").alias("player_last_name"),
-                    pl.col("_tmp_ofn").alias("opp_first_name"),
-                    pl.col("_tmp_oln").alias("opp_last_name"),
-                    pl.col("_tmp_player_elo").alias("_player_surface_elo"),
-                    pl.col("_tmp_opp_elo").alias("_opp_surface_elo"),
-                )
+                if is_deciding_set:
+                    # Deciding set prob is symmetric — just swap player/opp identity
+                    missing = missing.with_columns(
+                        pl.col("opp_id").alias("_tmp_player_id"),
+                        pl.col("player_id").alias("_tmp_opp_id"),
+                        pl.col("opp_first_name").alias("_tmp_pfn"),
+                        pl.col("opp_last_name").alias("_tmp_pln"),
+                        pl.col("player_first_name").alias("_tmp_ofn"),
+                        pl.col("player_last_name").alias("_tmp_oln"),
+                    ).with_columns(
+                        pl.col("_tmp_player_id").alias("player_id"),
+                        pl.col("_tmp_opp_id").alias("opp_id"),
+                        pl.col("_tmp_pfn").alias("player_first_name"),
+                        pl.col("_tmp_pln").alias("player_last_name"),
+                        pl.col("_tmp_ofn").alias("opp_first_name"),
+                        pl.col("_tmp_oln").alias("opp_last_name"),
+                    )
+                else:
+                    # Winner prob is directional — flip prob and swap identities
+                    missing = missing.with_columns(
+                        (1.0 - pl.col("_prob")).alias("_prob"),
+                        pl.col("opp_id").alias("_tmp_player_id"),
+                        pl.col("player_id").alias("_tmp_opp_id"),
+                        pl.col("opp_first_name").alias("_tmp_pfn"),
+                        pl.col("opp_last_name").alias("_tmp_pln"),
+                        pl.col("player_first_name").alias("_tmp_ofn"),
+                        pl.col("player_last_name").alias("_tmp_oln"),
+                        pl.col("_opp_surface_elo").alias("_tmp_player_elo"),
+                        pl.col("_player_surface_elo").alias("_tmp_opp_elo"),
+                    ).with_columns(
+                        pl.col("_tmp_player_id").alias("player_id"),
+                        pl.col("_tmp_opp_id").alias("opp_id"),
+                        pl.col("_tmp_pfn").alias("player_first_name"),
+                        pl.col("_tmp_pln").alias("player_last_name"),
+                        pl.col("_tmp_ofn").alias("opp_first_name"),
+                        pl.col("_tmp_oln").alias("opp_last_name"),
+                        pl.col("_tmp_player_elo").alias("_player_surface_elo"),
+                        pl.col("_tmp_opp_elo").alias("_opp_surface_elo"),
+                    )
                 canonical = pl.concat(
                     [canonical, missing], how="diagonal_relaxed"
                 )
 
-        # Compute confidence modifier values for Layer 2 enrichment
-        for mod in MODIFIERS:
-            if all(c in canonical.columns for c in mod.required_columns):
-                try:
-                    canonical = canonical.with_columns(
-                        mod.compute_value(canonical).alias(f"conf_{mod.name}")
-                    )
-                except Exception:
-                    logger.debug("Modifier %s failed, skipping", mod.name)
+        # Compute confidence modifier values for Layer 2 enrichment (winner only)
+        if not is_deciding_set:
+            for mod in MODIFIERS:
+                if all(c in canonical.columns for c in mod.required_columns):
+                    try:
+                        canonical = canonical.with_columns(
+                            mod.compute_value(canonical).alias(f"conf_{mod.name}")
+                        )
+                    except Exception:
+                        logger.debug("Modifier %s failed, skipping", mod.name)
 
         # Build output
         model_version = Path(self.config["active"]["config"]).stem
         now = datetime.now(timezone.utc)
 
-        select_exprs = [
-            pl.col("match_uid"),
-            pl.col("player_id").alias("p1_id"),
-            pl.col("opp_id").alias("p2_id"),
-            (pl.col("player_first_name") + pl.lit(" ") + pl.col("player_last_name")).alias("p1_name"),
-            (pl.col("opp_first_name") + pl.lit(" ") + pl.col("opp_last_name")).alias("p2_name"),
-            pl.col("_p1_win_prob").alias("p1_win_prob"),
-            (1.0 - pl.col("_p1_win_prob")).alias("p2_win_prob"),
-            pl.col("_player_surface_elo").alias("p1_elo"),
-            pl.col("_opp_surface_elo").alias("p2_elo"),
-            pl.col("tournament_id"),
-            pl.col("tournament_name"),
-            pl.col("circuit"),
-            pl.col("surface"),
-            pl.col("round"),
-            pl.col("effective_match_date"),
-            pl.lit(model_version).alias("model_version"),
-            pl.lit(now).alias("predicted_at"),
-        ]
+        if is_deciding_set:
+            select_exprs = [
+                pl.col("match_uid"),
+                pl.col("player_id").alias("p1_id"),
+                pl.col("opp_id").alias("p2_id"),
+                (pl.col("player_first_name") + pl.lit(" ") + pl.col("player_last_name")).alias("p1_name"),
+                (pl.col("opp_first_name") + pl.lit(" ") + pl.col("opp_last_name")).alias("p2_name"),
+                pl.col("_prob").alias("deciding_set_prob"),
+                pl.col("tournament_id"),
+                pl.col("tournament_name"),
+                pl.col("circuit"),
+                pl.col("surface"),
+                pl.col("round"),
+                pl.col("effective_match_date"),
+                pl.lit(model_version).alias("model_version"),
+                pl.lit(now).alias("predicted_at"),
+            ]
+        else:
+            select_exprs = [
+                pl.col("match_uid"),
+                pl.col("player_id").alias("p1_id"),
+                pl.col("opp_id").alias("p2_id"),
+                (pl.col("player_first_name") + pl.lit(" ") + pl.col("player_last_name")).alias("p1_name"),
+                (pl.col("opp_first_name") + pl.lit(" ") + pl.col("opp_last_name")).alias("p2_name"),
+                pl.col("_prob").alias("p1_win_prob"),
+                (1.0 - pl.col("_prob")).alias("p2_win_prob"),
+                pl.col("_player_surface_elo").alias("p1_elo"),
+                pl.col("_opp_surface_elo").alias("p2_elo"),
+                pl.col("tournament_id"),
+                pl.col("tournament_name"),
+                pl.col("circuit"),
+                pl.col("surface"),
+                pl.col("round"),
+                pl.col("effective_match_date"),
+                pl.lit(model_version).alias("model_version"),
+                pl.lit(now).alias("predicted_at"),
+            ]
         if "scheduled_datetime" in canonical.columns:
             select_exprs.append(pl.col("scheduled_datetime"))
         if "match_date" in canonical.columns:
             select_exprs.append(pl.col("match_date"))
-        for col in canonical.columns:
-            if col.startswith("conf_"):
-                select_exprs.append(pl.col(col))
+        if not is_deciding_set:
+            for col in canonical.columns:
+                if col.startswith("conf_"):
+                    select_exprs.append(pl.col(col))
         result = canonical.select(select_exprs)
 
-        logger.info("Generated %d predictions", len(result))
+        logger.info("Generated %d %s predictions", len(result), self.target)
         return result
 
     def save_predictions(self, predictions: pl.DataFrame) -> pl.DataFrame:
@@ -678,18 +781,21 @@ class ProductionPredictor:
             )
 
             # Consistency validation on overlapping predictions
+            is_ds = self.target == "deciding_set"
+            prob_col = "deciding_set_prob" if is_ds else "p1_win_prob"
+            prev_prob_col = f"prev_{prob_col}"
             updated_uids: set[str] = set()
-            if len(overlap) > 0:
-                merged = overlap.select("match_uid", "p1_win_prob", "predicted_at").join(
+            if len(overlap) > 0 and prob_col in existing.columns:
+                merged = overlap.select("match_uid", prob_col, "predicted_at").join(
                     existing.select(
                         "match_uid",
-                        pl.col("p1_win_prob").alias("prev_p1_win_prob"),
+                        pl.col(prob_col).alias(prev_prob_col),
                         pl.col("predicted_at").alias("prev_predicted_at"),
                     ),
                     on="match_uid",
                     how="inner",
                 )
-                diffs = (merged["p1_win_prob"] - merged["prev_p1_win_prob"]).abs()
+                diffs = (merged[prob_col] - merged[prev_prob_col]).abs()
                 mismatched = merged.filter(diffs > PREDICTION_TOLERANCE)
                 if len(mismatched) > 0:
                     updated_uids = set(mismatched["match_uid"].to_list())
@@ -698,7 +804,7 @@ class ProductionPredictor:
                         len(updated_uids),
                         diffs.filter(diffs > PREDICTION_TOLERANCE).max(),
                     )
-                    self._log_prediction_changes(mismatched)
+                    self._log_prediction_changes(mismatched, prob_col=prob_col)
 
             # Replace updated predictions in existing, then append new
             if updated_uids:
@@ -722,16 +828,19 @@ class ProductionPredictor:
             logger.info("Saved %d predictions", len(predictions))
             return predictions
 
-    def _log_prediction_changes(self, mismatched: pl.DataFrame) -> None:
+    def _log_prediction_changes(
+        self, mismatched: pl.DataFrame, prob_col: str = "p1_win_prob"
+    ) -> None:
         """Append changed predictions to the prediction drift log and emit alerts."""
         log_path = self.predictions_path.parent / "prediction_drift.parquet"
+        prev_col = f"prev_{prob_col}"
 
-        diff_abs = (mismatched["p1_win_prob"] - mismatched["prev_p1_win_prob"]).abs()
-        # Detect winner flip: previous and current on opposite sides of 0.5
+        diff_abs = (mismatched[prob_col] - mismatched[prev_col]).abs()
+        # Detect flip: previous and current on opposite sides of 0.5
         flipped = (
-            (mismatched["prev_p1_win_prob"] > 0.5) & (mismatched["p1_win_prob"] < 0.5)
+            (mismatched[prev_col] > 0.5) & (mismatched[prob_col] < 0.5)
         ) | (
-            (mismatched["prev_p1_win_prob"] < 0.5) & (mismatched["p1_win_prob"] > 0.5)
+            (mismatched[prev_col] < 0.5) & (mismatched[prob_col] > 0.5)
         )
 
         n_flips = flipped.sum()
@@ -743,8 +852,8 @@ class ProductionPredictor:
                 logger.warning(
                     "FLIP %s: %.1f%% -> %.1f%%",
                     row["match_uid"],
-                    row["prev_p1_win_prob"] * 100,
-                    row["p1_win_prob"] * 100,
+                    row[prev_col] * 100,
+                    row[prob_col] * 100,
                 )
 
         if n_drifts > 0:
@@ -753,19 +862,21 @@ class ProductionPredictor:
                 logger.info(
                     "DRIFT %s: %.1f%% -> %.1f%%",
                     row["match_uid"],
-                    row["prev_p1_win_prob"] * 100,
-                    row["p1_win_prob"] * 100,
+                    row[prev_col] * 100,
+                    row[prob_col] * 100,
                 )
 
-        log_entry = mismatched.select(
+        log_cols = [
             "match_uid",
-            pl.col("p1_win_prob"),
-            (1 - pl.col("p1_win_prob")).alias("p2_win_prob"),
-            pl.col("prev_p1_win_prob"),
-            (1 - pl.col("prev_p1_win_prob")).alias("prev_p2_win_prob"),
+            pl.col(prob_col),
+            pl.col(prev_col),
             "prev_predicted_at",
             pl.col("predicted_at").alias("updated_at"),
-        )
+        ]
+        if prob_col == "p1_win_prob":
+            log_cols.insert(2, (1 - pl.col(prob_col)).alias("p2_win_prob"))
+            log_cols.insert(4, (1 - pl.col(prev_col)).alias("prev_p2_win_prob"))
+        log_entry = mismatched.select(log_cols)
         if log_path.exists():
             existing_log = pl.read_parquet(log_path)
             log_entry = pl.concat([existing_log, log_entry], how="diagonal_relaxed")

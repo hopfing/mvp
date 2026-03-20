@@ -467,6 +467,21 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(args)
 
 
+def _get_target_sections(production_config_path: Path | str = "production.yaml") -> list[str]:
+    """Return available target sections from production.yaml.
+
+    Flat format (legacy): returns ["winner"].
+    Sectioned format: returns all section keys that have an 'active' entry.
+    """
+    import yaml
+
+    with open(production_config_path) as f:
+        raw = yaml.safe_load(f)
+    if "active" in raw:
+        return ["winner"]
+    return [k for k, v in raw.items() if isinstance(v, dict) and "active" in v]
+
+
 def cmd_train(args: argparse.Namespace) -> int:
     """Train the production model from production.yaml."""
     from mvp.atptour.aggregators.matches import MatchesAggregator
@@ -475,12 +490,14 @@ def cmd_train(args: argparse.Namespace) -> int:
     logger.info("Rebuilding matches.parquet")
     MatchesAggregator().run()
 
-    predictor = ProductionPredictor()
-    predictor.train()
-    print("Production model trained and saved.")
-    n_voters = predictor.train_voters()
-    if n_voters > 0:
-        print(f"Trained {n_voters} voter model(s).")
+    for section in _get_target_sections():
+        print(f"\n--- Training {section} models ---")
+        predictor = ProductionPredictor(target_section=section)
+        predictor.train()
+        print(f"{section.capitalize()} model trained and saved.")
+        n_voters = predictor.train_voters()
+        if n_voters > 0:
+            print(f"Trained {n_voters} {section} voter model(s).")
     return 0
 
 
@@ -506,12 +523,37 @@ def cmd_model(args: argparse.Namespace) -> int:
 
 
 def _is_voter_config(config_path: Path) -> bool:
-    """Check if a config file is a voter-system config (has active + voters)."""
+    """Check if a config file is a voter-system config (has active + voters).
+
+    Supports both flat format ({active, voters}) and sectioned format
+    ({winner: {active, voters}, ...}).
+    """
     import yaml
 
     with open(config_path) as f:
         data = yaml.safe_load(f)
-    return isinstance(data, dict) and "active" in data and "voters" in data
+    if not isinstance(data, dict):
+        return False
+    # Flat format
+    if "active" in data and "voters" in data:
+        return True
+    # Sectioned format: check if any section has active + voters
+    for value in data.values():
+        if isinstance(value, dict) and "active" in value and "voters" in value:
+            return True
+    return False
+
+
+def _resolve_voter_section(raw_config: dict[str, Any]) -> dict[str, Any]:
+    """Extract the winner section from a production config.
+
+    Supports flat ({active, voters}) and sectioned ({winner: {active, voters}}).
+    """
+    if "active" in raw_config:
+        return raw_config
+    if "winner" in raw_config:
+        return raw_config["winner"]
+    raise ValueError("No winner section found in config")
 
 
 def _run_voter_confidence(args: argparse.Namespace, config_path: Path) -> int:
@@ -536,8 +578,9 @@ def _run_voter_confidence(args: argparse.Namespace, config_path: Path) -> int:
     from mvp.model.splitters import make_splitter
 
     with open(config_path) as f:
-        voter_config = yaml.safe_load(f)
+        raw_config = yaml.safe_load(f)
 
+    voter_config = _resolve_voter_section(raw_config)
     config_name = config_path.stem
     oof_dir = get_data_root() / "confidence" / config_name
     oof_path = oof_dir / "oof.parquet"
@@ -1077,8 +1120,11 @@ def cmd_live(args: argparse.Namespace) -> int:
                 f"Pipeline finished with {len(failed)} failed tournament(s)"
             )
 
-        # Predict with production model
-        predictor = ProductionPredictor()
+        # Predict with production model(s) — one per target section
+        target_sections = _get_target_sections()
+
+        # Winner predictions (primary — drives odds matching, sheets, analysis)
+        predictor = ProductionPredictor(target_section="winner")
         predictions = predictor.predict(tournament_keys=pairs)
 
         if len(predictions) == 0:
@@ -1092,6 +1138,29 @@ def cmd_live(args: argparse.Namespace) -> int:
             return 0
 
         predictor.save_predictions(predictions)
+
+        # Additional target sections (e.g., deciding_set)
+        for section in target_sections:
+            if section == "winner":
+                continue
+            try:
+                ds_predictions_path = (
+                    get_data_root() / "predictions" / f"{section}_predictions.parquet"
+                )
+                ds_predictor = ProductionPredictor(
+                    target_section=section,
+                    predictions_path=ds_predictions_path,
+                )
+                ds_predictions = ds_predictor.predict(tournament_keys=pairs)
+                if len(ds_predictions) == 0:
+                    print(f"\nNo pending {section} matches to predict.")
+                    continue
+                ds_predictions = ds_predictor.predict_voters(pairs, ds_predictions)
+                ds_predictor.save_predictions(ds_predictions)
+                print(f"Generated {len(ds_predictions)} {section} predictions")
+            except Exception as e:
+                logger.error("%s prediction failed: %s", section, e)
+                print(f"Warning: {section} prediction failed ({e})")
 
         # Collect odds from both books and match to predictions
         odds_map: dict[str, dict[str, float]] | None = None

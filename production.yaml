@@ -1,30 +1,31 @@
-active:
-  artifact: data/models/production.joblib
-  config: models/production/xgb_e00_45_cAll_9f.yaml
-  filters:
-    circuit:
-    - tour
-    - chal
-    draw_type: singles
-  train_date_range:
-    end: '2025-12-31'
-    start: '2020-01-01'
-  trained_at: '2026-03-19T21:00:36.462238+00:00'
-history: []
-voters:
-- artifact: data/models/lr_ability.joblib
-  config: models/voters/lr_ability.yaml
-  name: lr_ability
-  scoped: false
-- artifact: data/models/lr_context_form.joblib
-  config: models/voters/lr_context_form.yaml
-  name: lr_context_form
-  scoped: false
-- artifact: data/models/xgb_e00_45_cAll_6f.joblib
-  config: models/voters/xgb_e00_45_cAll_6f.yaml
-  name: xgb_02
-  scoped: false
-- artifact: data/models/xgb_e00_45_cAll_4f.joblib
-  config: models/voters/xgb_e00_45_cAll_4f.yaml
-  name: xgb_03
-  scoped: false
+winner:
+  active:
+    artifact: data/models/production.joblib
+    config: models/production/xgb_e00_45_cAll_9f.yaml
+    filters:
+      circuit:
+      - tour
+      - chal
+      draw_type: singles
+    train_date_range:
+      end: '2025-12-31'
+      start: '2020-01-01'
+    trained_at: '2026-03-19T21:00:36.462238+00:00'
+  history: []
+  voters:
+  - artifact: data/models/lr_ability.joblib
+    config: models/voters/lr_ability.yaml
+    name: lr_ability
+    scoped: false
+  - artifact: data/models/lr_context_form.joblib
+    config: models/voters/lr_context_form.yaml
+    name: lr_context_form
+    scoped: false
+  - artifact: data/models/xgb_e00_45_cAll_6f.joblib
+    config: models/voters/xgb_e00_45_cAll_6f.yaml
+    name: xgb_02
+    scoped: false
+  - artifact: data/models/xgb_e00_45_cAll_4f.joblib
+    config: models/voters/xgb_e00_45_cAll_4f.yaml
+    name: xgb_03
+    scoped: false
