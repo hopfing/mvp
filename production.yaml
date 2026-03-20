@@ -10,7 +10,7 @@ winner:
     train_date_range:
       end: '2025-12-31'
       start: '2020-01-01'
-    trained_at: '2026-03-19T21:00:36.462238+00:00'
+    trained_at: '2026-03-20T17:56:42.942474+00:00'
   history: []
   voters:
   - artifact: data/models/lr_ability.joblib
