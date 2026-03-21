@@ -564,7 +564,6 @@ class FeatureEngine:
                 expr = feature_def.func(**params)
                 df = df.with_columns(expr.alias(col_name))
                 self._cache_feature(cache_spec, df, [col_name], cache_key)
-                df = df.drop(col_name)
 
         if match_level_specs:
             logger.info("Phase 0: %d match-level cached", len(match_level_specs))
