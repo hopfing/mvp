@@ -105,13 +105,11 @@ def _append_ratings_to_output(
         output[f"opp_{key}"].append(glicko_opp[key])
 
 
-def _count_tiebreaks(row: dict) -> tuple[int, int]:
+def _count_tiebreaks(player_tbs: list, opp_tbs: list) -> tuple[int, int]:
     """Count tiebreaks won and played from set scores."""
     tb_won = 0
     tb_played = 0
-    for i in range(1, 6):
-        player_tb = row.get(f"player_set{i}_tiebreak")
-        opp_tb = row.get(f"opp_set{i}_tiebreak")
+    for player_tb, opp_tb in zip(player_tbs, opp_tbs):
         if player_tb is not None and opp_tb is not None:
             tb_played += 1
             if player_tb > opp_tb:
@@ -134,6 +132,62 @@ def compute_all_ratings(df: pl.DataFrame) -> pl.DataFrame:
     """
     df = df.sort("effective_match_date")
 
+    # Extract columns as Python lists to avoid 3GB .to_dicts() overhead.
+    # Null values become None, matching the old row.get() behavior.
+    n = len(df)
+    df_cols = set(df.columns)
+
+    def _col(name, default=None):
+        if name not in df_cols:
+            return [default] * n
+        if default is not None:
+            return df[name].fill_null(default).to_list()
+        return df[name].to_list()
+
+    col_match_uid = df["match_uid"].to_list()
+    col_player_id = df["player_id"].to_list()
+    col_opp_id = df["opp_id"].to_list()
+    col_surface = _col("surface", "Hard")
+    col_round = _col("round", "R32")
+    col_tournament_level = _col("tournament_level", "250")
+    col_match_date = df["effective_match_date"].to_list()
+    col_won = df["won"].to_list()
+    col_player_rank = _col("player_rank")
+    col_opp_rank = _col("opp_rank")
+
+    # Serve/return stat columns
+    col_pts_service_pts_won = _col("pts_service_pts_won")
+    col_pts_service_pts_played = _col("pts_service_pts_played")
+    col_opp_pts_service_pts_won = _col("opp_pts_service_pts_won")
+    col_opp_pts_service_pts_played = _col("opp_pts_service_pts_played")
+    col_svc_aces = _col("svc_aces")
+    col_svc_first_serve_pts_won = _col("svc_first_serve_pts_won")
+    col_svc_double_faults = _col("svc_double_faults")
+    col_svc_second_serve_pts_played = _col("svc_second_serve_pts_played")
+    col_opp_svc_aces = _col("opp_svc_aces")
+    col_ret_first_serve_pts_played = _col("ret_first_serve_pts_played")
+    col_ret_first_serve_pts_won = _col("ret_first_serve_pts_won")
+    col_svc_bp_saved = _col("svc_bp_saved")
+    col_svc_bp_faced = _col("svc_bp_faced")
+    col_ret_bp_converted = _col("ret_bp_converted")
+    col_ret_bp_opportunities = _col("ret_bp_opportunities")
+    col_indoor = _col("indoor", False)
+
+    # Opponent mirror stat columns
+    col_opp_svc_first_serve_pts_won = _col("opp_svc_first_serve_pts_won")
+    col_opp_svc_double_faults = _col("opp_svc_double_faults")
+    col_opp_svc_second_serve_pts_played = _col("opp_svc_second_serve_pts_played")
+    col_opp_ret_first_serve_pts_played = _col("opp_ret_first_serve_pts_played")
+    col_opp_ret_first_serve_pts_won = _col("opp_ret_first_serve_pts_won")
+    col_opp_svc_bp_saved = _col("opp_svc_bp_saved")
+    col_opp_svc_bp_faced = _col("opp_svc_bp_faced")
+    col_opp_ret_bp_converted = _col("opp_ret_bp_converted")
+    col_opp_ret_bp_opportunities = _col("opp_ret_bp_opportunities")
+
+    # Tiebreak columns
+    col_player_set_tb = [_col(f"player_set{s}_tiebreak") for s in range(1, 6)]
+    col_opp_set_tb = [_col(f"opp_set{s}_tiebreak") for s in range(1, 6)]
+
     elo_ratings: dict[str, PlayerRating] = {}
     glicko_ratings: dict[str, GlickoRating] = {}
     output: dict[str, list[float | None]] = {col: [] for col in ALL_RATING_COLUMNS}
@@ -141,32 +195,31 @@ def compute_all_ratings(df: pl.DataFrame) -> pl.DataFrame:
     # Cache pre-match ratings for each match_uid to handle both rows consistently
     match_ratings_cache: dict[str, dict[str, dict[str, float]]] = {}
 
-    rows = df.to_dicts()
-    for row in rows:
-        match_uid = row["match_uid"]
+    for i in range(n):
+        match_uid = col_match_uid[i]
 
         # Guard against None match_uid — would cause cache collisions
         if match_uid is None:
-            logger.warning("Skipping row with None match_uid: %s", row.get("player_id"))
+            logger.warning("Skipping row with None match_uid: %s", col_player_id[i])
             for col in ALL_RATING_COLUMNS:
                 output[col].append(None)
             continue
 
-        player_id = row["player_id"]
-        opp_id = row["opp_id"]
-        surface = row.get("surface") or "Hard"
-        round_name = row.get("round") or "R32"
-        tournament_level = row.get("tournament_level") or "250"
-        match_date = row["effective_match_date"]
-        won = row["won"]
+        player_id = col_player_id[i]
+        opp_id = col_opp_id[i]
+        surface = col_surface[i]
+        round_name = col_round[i]
+        tournament_level = col_tournament_level[i]
+        match_date = col_match_date[i]
+        won = col_won[i]
 
         # Initialize players if new
         if player_id not in elo_ratings:
-            ranking = row.get("player_rank")
+            ranking = col_player_rank[i]
             elo_ratings[player_id] = initialize_player(ranking)
             glicko_ratings[player_id] = GlickoRating()
         if opp_id not in elo_ratings:
-            opp_ranking = row.get("opp_rank")
+            opp_ranking = col_opp_rank[i]
             elo_ratings[opp_id] = initialize_player(opp_ranking)
             glicko_ratings[opp_id] = GlickoRating()
 
@@ -289,8 +342,8 @@ def compute_all_ratings(df: pl.DataFrame) -> pl.DataFrame:
         k_serve = (k_player + k_opp) / 2 * SERVE_RETURN_K_MULT
 
         # Sub-game 1: player serves, opponent returns
-        serve_won = row.get("pts_service_pts_won")
-        serve_played = row.get("pts_service_pts_played")
+        serve_won = col_pts_service_pts_won[i]
+        serve_played = col_pts_service_pts_played[i]
         player_serve_pct = None
         if serve_won is not None and serve_played and serve_played > 0:
             player_serve_pct = serve_won / serve_played
@@ -301,8 +354,8 @@ def compute_all_ratings(df: pl.DataFrame) -> pl.DataFrame:
         )
 
         # Sub-game 2: opponent serves, player returns
-        opp_serve_won = row.get("opp_pts_service_pts_won")
-        opp_serve_played = row.get("opp_pts_service_pts_played")
+        opp_serve_won = col_opp_pts_service_pts_won[i]
+        opp_serve_played = col_opp_pts_service_pts_played[i]
         opp_serve_pct = None
         if opp_serve_won is not None and opp_serve_played and opp_serve_played > 0:
             opp_serve_pct = opp_serve_won / opp_serve_played
@@ -317,8 +370,8 @@ def compute_all_ratings(df: pl.DataFrame) -> pl.DataFrame:
         # --- Player style updates ---
 
         # First serve power: aces / first_serve_pts_won
-        svc_aces = row.get("svc_aces")
-        svc_first_serve_pts_won = row.get("svc_first_serve_pts_won")
+        svc_aces = col_svc_aces[i]
+        svc_first_serve_pts_won = col_svc_first_serve_pts_won[i]
         ace_rate = None
         if (svc_aces is not None
                 and svc_first_serve_pts_won
@@ -329,8 +382,8 @@ def compute_all_ratings(df: pl.DataFrame) -> pl.DataFrame:
         )
 
         # Second serve reliability: 1 - (DFs / second_serve_pts_played)
-        svc_double_faults = row.get("svc_double_faults")
-        svc_second_serve_pts_played = row.get("svc_second_serve_pts_played")
+        svc_double_faults = col_svc_double_faults[i]
+        svc_second_serve_pts_played = col_svc_second_serve_pts_played[i]
         reliability = None
         if (svc_double_faults is not None
                 and svc_second_serve_pts_played
@@ -343,9 +396,9 @@ def compute_all_ratings(df: pl.DataFrame) -> pl.DataFrame:
         )
 
         # Ace resistance: 1 - (opp_svc_aces / ret_first_serve_pts_lost)
-        opp_svc_aces = row.get("opp_svc_aces")
-        ret_first_serve_pts_played = row.get("ret_first_serve_pts_played")
-        ret_first_serve_pts_won = row.get("ret_first_serve_pts_won")
+        opp_svc_aces = col_opp_svc_aces[i]
+        ret_first_serve_pts_played = col_ret_first_serve_pts_played[i]
+        ret_first_serve_pts_won = col_ret_first_serve_pts_won[i]
         ace_resistance_val = None
         if (opp_svc_aces is not None and
             ret_first_serve_pts_played is not None and
@@ -358,8 +411,8 @@ def compute_all_ratings(df: pl.DataFrame) -> pl.DataFrame:
         )
 
         # Serve clutch: bp_saved / bp_faced
-        svc_bp_saved = row.get("svc_bp_saved")
-        svc_bp_faced = row.get("svc_bp_faced")
+        svc_bp_saved = col_svc_bp_saved[i]
+        svc_bp_faced = col_svc_bp_faced[i]
         save_rate = None
         if svc_bp_saved is not None and svc_bp_faced and svc_bp_faced > 0:
             save_rate = svc_bp_saved / svc_bp_faced
@@ -368,8 +421,8 @@ def compute_all_ratings(df: pl.DataFrame) -> pl.DataFrame:
         )
 
         # Return clutch: bp_converted / bp_opportunities
-        ret_bp_converted = row.get("ret_bp_converted")
-        ret_bp_opportunities = row.get("ret_bp_opportunities")
+        ret_bp_converted = col_ret_bp_converted[i]
+        ret_bp_opportunities = col_ret_bp_opportunities[i]
         conversion_rate = None
         if (ret_bp_converted is not None
                 and ret_bp_opportunities
@@ -380,7 +433,10 @@ def compute_all_ratings(df: pl.DataFrame) -> pl.DataFrame:
         )
 
         # TB clutch: count won/played from set scores
-        tb_won, tb_played = _count_tiebreaks(row)
+        tb_won, tb_played = _count_tiebreaks(
+            [col_player_set_tb[s][i] for s in range(5)],
+            [col_opp_set_tb[s][i] for s in range(5)],
+        )
         player_rating.tb_clutch = update_tb_clutch(
             player_rating.tb_clutch, tb_won, tb_played
         )
@@ -393,7 +449,7 @@ def compute_all_ratings(df: pl.DataFrame) -> pl.DataFrame:
         ) / 3
 
         # Indoor adjustment
-        indoor = row.get("indoor", False)
+        indoor = col_indoor[i]
         if indoor:
             player_rating.indoor_adj = update_indoor_adj(
                 player_rating.indoor_adj, won
@@ -401,7 +457,7 @@ def compute_all_ratings(df: pl.DataFrame) -> pl.DataFrame:
 
         # --- Opponent style updates (mirror columns) ---
 
-        opp_svc_first_serve_pts_won = row.get("opp_svc_first_serve_pts_won")
+        opp_svc_first_serve_pts_won = col_opp_svc_first_serve_pts_won[i]
         opp_ace_rate = None
         if (opp_svc_aces is not None
                 and opp_svc_first_serve_pts_won
@@ -411,8 +467,8 @@ def compute_all_ratings(df: pl.DataFrame) -> pl.DataFrame:
             opp_rating.first_serve_power, opp_ace_rate, surface
         )
 
-        opp_svc_double_faults = row.get("opp_svc_double_faults")
-        opp_svc_second_serve_pts_played = row.get("opp_svc_second_serve_pts_played")
+        opp_svc_double_faults = col_opp_svc_double_faults[i]
+        opp_svc_second_serve_pts_played = col_opp_svc_second_serve_pts_played[i]
         opp_reliability = None
         if (opp_svc_double_faults is not None
                 and opp_svc_second_serve_pts_played
@@ -424,8 +480,8 @@ def compute_all_ratings(df: pl.DataFrame) -> pl.DataFrame:
             opp_rating.second_serve_reliability, opp_reliability, surface
         )
 
-        opp_ret_first_serve_pts_played = row.get("opp_ret_first_serve_pts_played")
-        opp_ret_first_serve_pts_won = row.get("opp_ret_first_serve_pts_won")
+        opp_ret_first_serve_pts_played = col_opp_ret_first_serve_pts_played[i]
+        opp_ret_first_serve_pts_won = col_opp_ret_first_serve_pts_won[i]
         opp_ace_resistance_val = None
         if (svc_aces is not None and
             opp_ret_first_serve_pts_played is not None and
@@ -437,8 +493,8 @@ def compute_all_ratings(df: pl.DataFrame) -> pl.DataFrame:
             opp_rating.ace_resistance, opp_ace_resistance_val, surface
         )
 
-        opp_svc_bp_saved = row.get("opp_svc_bp_saved")
-        opp_svc_bp_faced = row.get("opp_svc_bp_faced")
+        opp_svc_bp_saved = col_opp_svc_bp_saved[i]
+        opp_svc_bp_faced = col_opp_svc_bp_faced[i]
         opp_save_rate = None
         if opp_svc_bp_saved is not None and opp_svc_bp_faced and opp_svc_bp_faced > 0:
             opp_save_rate = opp_svc_bp_saved / opp_svc_bp_faced
@@ -446,8 +502,8 @@ def compute_all_ratings(df: pl.DataFrame) -> pl.DataFrame:
             opp_rating.serve_clutch, opp_save_rate, surface
         )
 
-        opp_ret_bp_converted = row.get("opp_ret_bp_converted")
-        opp_ret_bp_opportunities = row.get("opp_ret_bp_opportunities")
+        opp_ret_bp_converted = col_opp_ret_bp_converted[i]
+        opp_ret_bp_opportunities = col_opp_ret_bp_opportunities[i]
         opp_conversion_rate = None
         if (opp_ret_bp_converted is not None
                 and opp_ret_bp_opportunities
