@@ -97,7 +97,7 @@ class BaseOddsMatcher(BaseJob):
             return df
 
         if "event_status" in df.columns:
-            df = df.filter(pl.col("event_status") != "STARTED")
+            df = df.filter(pl.col("event_status") == "NOT_STARTED")
 
         return (
             df.sort("fetched_at")
