@@ -59,7 +59,7 @@ class DiscoveryOptions(BaseModel):
     importance_method: Literal["gain", "permutation", "shap"] = "permutation"
     selection_method: Literal["forward", "recursive", "threshold"] = "forward"
     sweep_params: bool = True
-    segment_analysis: bool = True
+    segment_analysis: bool = False
     metric: str = "calibration_error"
     direction: Literal["minimize", "maximize"] = "minimize"
     importance_threshold: float = 0.05
