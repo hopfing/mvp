@@ -517,7 +517,7 @@ class ResultsParser:
         notes_upper = match_notes.upper()
         if "W/O" in notes_upper:
             return "walkover"
-        if "RET" in notes_upper:
+        if "RET." in notes_upper or " RET" in notes_upper:
             return "retirement"
         # Fall back to score-based heuristic for pages without match-notes
         if not player_scores and not opp_scores:
