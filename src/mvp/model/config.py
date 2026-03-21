@@ -106,6 +106,7 @@ class EnsembleParams(BaseModel):
     strategy: Literal["average", "weighted_average", "stacking"] = "average"
     base_models: list[EnsembleBaseModelRef]
     meta_features: list[str] = []
+    meta_model_params: dict[str, Any] = {}
 
     @model_validator(mode="after")
     def validate_stacking_no_weights(self) -> "EnsembleParams":
@@ -119,6 +120,10 @@ class EnsembleParams(BaseModel):
         if self.meta_features and self.strategy != "stacking":
             raise ValueError(
                 "meta_features is only allowed with strategy='stacking'"
+            )
+        if self.meta_model_params and self.strategy != "stacking":
+            raise ValueError(
+                "meta_model_params is only allowed with strategy='stacking'"
             )
         return self
 
@@ -152,6 +157,13 @@ class MetricsConfig(BaseModel):
     secondary: list[str] = ["accuracy", "brier_score", "roc_auc"]
 
 
+class SampleWeightConfig(BaseModel):
+    """Sample weighting configuration."""
+
+    type: Literal["recency"] = "recency"
+    half_life_days: int
+
+
 class ExperimentConfig(BaseModel):
     """Complete experiment configuration."""
 
@@ -162,6 +174,7 @@ class ExperimentConfig(BaseModel):
     model: ModelConfig
     validation: ValidationConfig = ValidationConfig()
     metrics: MetricsConfig = MetricsConfig()
+    sample_weight: SampleWeightConfig | None = None
 
     @model_validator(mode="after")
     def validate_features_required(self) -> "ExperimentConfig":

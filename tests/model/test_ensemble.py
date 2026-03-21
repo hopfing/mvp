@@ -108,6 +108,32 @@ model:
         config = ExperimentConfig.from_yaml(yaml_str)
         assert config.features is None
 
+    def test_meta_model_params_valid_with_stacking(self):
+        params = EnsembleParams(
+            strategy="stacking",
+            base_models=[EnsembleBaseModelRef(config="a.yaml")],
+            meta_model_params={"C": 0.1, "l1_ratio": 1.0},
+        )
+        assert params.meta_model_params == {"C": 0.1, "l1_ratio": 1.0}
+
+    def test_meta_model_params_rejected_without_stacking(self):
+        with pytest.raises(ValueError, match="meta_model_params is only allowed"):
+            EnsembleParams(
+                strategy="weighted_average",
+                base_models=[
+                    EnsembleBaseModelRef(config="a.yaml", weight=0.6),
+                    EnsembleBaseModelRef(config="b.yaml", weight=0.4),
+                ],
+                meta_model_params={"C": 0.1},
+            )
+
+    def test_meta_model_params_default_empty(self):
+        params = EnsembleParams(
+            strategy="stacking",
+            base_models=[EnsembleBaseModelRef(config="a.yaml")],
+        )
+        assert params.meta_model_params == {}
+
     def test_non_ensemble_config_requires_features(self):
         yaml_str = """
 data:
@@ -240,6 +266,59 @@ class TestEnsembleModel:
         np.testing.assert_allclose(
             result[:, 0] + result[:, 1], 1.0
         )
+
+    def test_sample_weight_forwarded_to_sub_models(self, sample_data):
+        """Verify sample_weight changes predictions (proves it's forwarded)."""
+        X, y = sample_data
+        # Uniform weights — should match unweighted
+        model_uniform = EnsembleModel({"strategy": "average"})
+        model_uniform.configure([_spec("logistic", [0, 1, 2])])
+        model_uniform.fit(X, y, sample_weight=np.ones(len(y)))
+
+        model_none = EnsembleModel({"strategy": "average"})
+        model_none.configure([_spec("logistic", [0, 1, 2])])
+        model_none.fit(X, y)
+
+        np.testing.assert_allclose(
+            model_uniform.predict_proba(X),
+            model_none.predict_proba(X),
+            atol=1e-10,
+        )
+
+        # Skewed weights — should produce different predictions
+        skewed_weights = np.ones(len(y))
+        skewed_weights[:50] = 10.0  # heavily upweight first 50 samples
+        model_skewed = EnsembleModel({"strategy": "average"})
+        model_skewed.configure([_spec("logistic", [0, 1, 2])])
+        model_skewed.fit(X, y, sample_weight=skewed_weights)
+
+        # Predictions should differ
+        assert not np.allclose(
+            model_skewed.predict_proba(X),
+            model_none.predict_proba(X),
+            atol=1e-6,
+        )
+
+    def test_per_model_data_with_weights(self, sample_data):
+        """Verify per_model_data 3-tuples forward weights correctly."""
+        X, y = sample_data
+        weights = np.ones(len(y))
+        weights[:50] = 10.0
+
+        model = EnsembleModel({"strategy": "average"})
+        model.configure([
+            _spec("logistic", [0, 1, 2]),
+            _spec("logistic", [0, 3, 4]),
+        ])
+        # First model gets custom weights via per_model_data, second uses default
+        per_model_data = [
+            (X, y, weights),
+            None,
+        ]
+        model.fit(X, y, per_model_data=per_model_data)
+        probs = model.predict_proba(X)
+        assert probs.shape == (200,)
+        assert np.all((probs >= 0) & (probs <= 1))
 
 
 class TestEnsembleDiagnostics:
@@ -1018,6 +1097,43 @@ class TestStacking:
         model = EnsembleModel({"strategy": "stacking"})
         with pytest.raises(RuntimeError, match="Meta-model not fitted"):
             model.get_meta_coefficients()
+
+    def test_stacking_meta_model_params_flow_through(self, sample_data):
+        X, y = sample_data
+        model = EnsembleModel({
+            "strategy": "stacking",
+            "meta_model_params": {"C": 0.01},
+        })
+        model.configure([
+            _spec("logistic", [0, 1, 2]),
+            _spec("logistic", [0, 3, 4]),
+        ])
+        model.fit(X, y)
+
+        per_model = model.predict_proba_per_model(X)
+        X_meta = np.column_stack(per_model)
+        model.set_meta_feature_names(["model_a", "model_b"])
+        model.fit_meta(X_meta, y)
+
+        assert model._meta_model is not None
+        assert model._meta_model.C == 0.01
+
+    def test_stacking_default_meta_model_params(self, sample_data):
+        X, y = sample_data
+        model = EnsembleModel({"strategy": "stacking"})
+        model.configure([
+            _spec("logistic", [0, 1, 2]),
+            _spec("logistic", [0, 3, 4]),
+        ])
+        model.fit(X, y)
+
+        per_model = model.predict_proba_per_model(X)
+        X_meta = np.column_stack(per_model)
+        model.set_meta_feature_names(["model_a", "model_b"])
+        model.fit_meta(X_meta, y)
+
+        # Default LR: C=1.0
+        assert model._meta_model.C == 1.0
 
     def test_stacking_fit_meta_too_few_samples(self, sample_data):
         X, y = sample_data

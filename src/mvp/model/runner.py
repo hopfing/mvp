@@ -24,6 +24,7 @@ from mvp.model.mlflow_logger import ExperimentLogger
 from mvp.model.models import EnsembleModel, get_model
 from mvp.model.registry import get_registry
 from mvp.model.splitters import BaseSplitter, make_splitter
+from mvp.model.weighting import compute_sample_weights
 
 
 class ExperimentRunner:
@@ -391,6 +392,14 @@ class ExperimentRunner:
                 X_train = (X_train - train_mean) / train_std
                 X_test = (X_test - train_mean) / train_std
 
+                # Compute sample weights if configured
+                train_weights = None
+                if self.config.sample_weight is not None:
+                    train_dates = train_df["effective_match_date"].to_numpy()
+                    train_weights = compute_sample_weights(
+                        train_dates, self.config.sample_weight
+                    )
+
                 # Build per-model training data for ensemble date/filter differences
                 per_model_data = None
                 if is_ensemble and needs_per_model and model_date_ranges and model_filters:
@@ -417,7 +426,13 @@ class ExperimentRunner:
                             X_m = apply_imputation(X_m, circuit_m, impute_state)
                             X_m = X_m[:, :n_model]
                             X_m = (X_m - train_mean) / train_std
-                            per_model_data.append((X_m, y_m))
+                            w_m = None
+                            if self.config.sample_weight is not None:
+                                model_dates = model_train_df["effective_match_date"].to_numpy()
+                                w_m = compute_sample_weights(
+                                    model_dates, self.config.sample_weight
+                                )
+                            per_model_data.append((X_m, y_m, w_m))
                         else:
                             per_model_data.append(None)
 
@@ -429,9 +444,13 @@ class ExperimentRunner:
                 if is_ensemble and base_model_specs is not None:
                     assert isinstance(model, EnsembleModel)
                     model.configure(base_model_specs)
-                    model.fit(X_train, y_train, per_model_data=per_model_data)
+                    model.fit(
+                        X_train, y_train,
+                        sample_weight=train_weights,
+                        per_model_data=per_model_data,
+                    )
                 else:
-                    model.fit(X_train, y_train)
+                    model.fit(X_train, y_train, sample_weight=train_weights)
 
                 # Predict and evaluate on test
                 is_stacking = (

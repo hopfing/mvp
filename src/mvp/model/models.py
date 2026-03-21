@@ -144,6 +144,7 @@ class EnsembleModel(BaseModel):
         self._strategy = strategy
         self._fitted = False
         self._meta_model = None
+        self._meta_model_params: dict[str, Any] = params.get("meta_model_params", {})
         self._meta_feature_names: list[str] = []
         self._meta_feature_indices: list[int] = []
         self._meta_scaler: tuple[np.ndarray, np.ndarray] | None = None
@@ -169,16 +170,20 @@ class EnsembleModel(BaseModel):
         X: np.ndarray,
         y: np.ndarray,
         sample_weight: np.ndarray | None = None,
-        per_model_data: list[tuple[np.ndarray, np.ndarray] | None] | None = None,
+        per_model_data: (
+            list[tuple[np.ndarray, np.ndarray, np.ndarray | None] | None] | None
+        ) = None,
     ) -> None:
         if not self._sub_models:
             raise RuntimeError("EnsembleModel not configured. Call configure() first.")
         for i, (sub, indices) in enumerate(zip(self._sub_models, self._feature_indices)):
             if per_model_data and per_model_data[i] is not None:
-                X_sub, y_sub = per_model_data[i]
-                sub.fit(X_sub[:, indices], y_sub)
+                entry = per_model_data[i]
+                X_sub, y_sub = entry[0], entry[1]
+                w_sub = entry[2] if len(entry) > 2 else None
+                sub.fit(X_sub[:, indices], y_sub, sample_weight=w_sub)
             else:
-                sub.fit(X[:, indices], y)
+                sub.fit(X[:, indices], y, sample_weight=sample_weight)
         self._fitted = True
 
     def set_meta_feature_indices(self, indices: list[int]) -> None:
@@ -195,7 +200,9 @@ class EnsembleModel(BaseModel):
             raise ValueError("Need at least 2 OOF samples to fit meta-model")
         from sklearn.linear_model import LogisticRegression
 
-        self._meta_model = LogisticRegression(max_iter=1000, random_state=42)
+        self._meta_model = LogisticRegression(
+            max_iter=1000, random_state=42, **self._meta_model_params
+        )
         self._meta_model.fit(X_meta, y_meta)
 
     def get_meta_coefficients(self) -> tuple[float, dict[str, float]]:

@@ -26,6 +26,7 @@ from mvp.model.features.elo import surface_elo_expr
 from mvp.model.imputation import apply_imputation, build_imputation, fit_imputation
 from mvp.model.models import EnsembleModel, get_model
 from mvp.model.registry import get_registry
+from mvp.model.weighting import compute_sample_weights
 
 logger = logging.getLogger(__name__)
 
@@ -250,12 +251,20 @@ class ProductionPredictor:
         X = X[:, :n_model]
         X = (X - scaler_mean) / scaler_std
 
+        # Compute sample weights if configured
+        sample_weights = None
+        if config.sample_weight is not None:
+            train_dates = df["effective_match_date"].to_numpy()
+            sample_weights = compute_sample_weights(
+                train_dates, config.sample_weight
+            )
+
         # Train
         model = get_model(config.model.type, config.model.params or {})
         if is_ensemble and base_model_specs is not None:
             assert isinstance(model, EnsembleModel)
             model.configure(base_model_specs)
-        model.fit(X, y)
+        model.fit(X, y, sample_weight=sample_weights)
 
         # Fit Platt calibrator via 5-fold CV on OOF predictions
         from sklearn.model_selection import StratifiedKFold
@@ -267,7 +276,8 @@ class ProductionPredictor:
             if is_ensemble and base_model_specs is not None:
                 assert isinstance(fold_model, EnsembleModel)
                 fold_model.configure(base_model_specs)
-            fold_model.fit(X[train_idx], y[train_idx])
+            fold_weights = sample_weights[train_idx] if sample_weights is not None else None
+            fold_model.fit(X[train_idx], y[train_idx], sample_weight=fold_weights)
             oof_probs[val_idx] = fold_model.predict_proba(X[val_idx])
         calibrator = PlattCalibrator()
         calibrator.fit(oof_probs, y)
