@@ -109,7 +109,7 @@ class TestWinPctDiffFeature:
 
     def test_win_pct_diff_computes_difference(self):
         """win_pct_diff computes player_win_pct - opp_win_pct."""
-        from mvp.model.features.win_rate import win_pct_diff
+        win_pct_diff = get_registry().get("win_pct_diff").func
 
         df = pl.DataFrame(
             {

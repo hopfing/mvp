@@ -4,14 +4,6 @@
 class TestPublicAPI:
     """Tests for model module public API."""
 
-    def test_feature_context_exported(self):
-        """FeatureContext is exported from model module."""
-        from mvp.model import FeatureContext
-
-        # Should be able to instantiate
-        ctx = FeatureContext()
-        assert ctx.group_by == "player_id"
-
     def test_feature_engine_exported(self):
         """FeatureEngine is exported from model module."""
         from mvp.model import FeatureEngine
@@ -64,7 +56,6 @@ class TestPublicAPI:
             "ExperimentLogger",
             "ExperimentRunner",
             "feature",
-            "FeatureContext",
             "FeatureEngine",
             "get_model",
             "get_registry",

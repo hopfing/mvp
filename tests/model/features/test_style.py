@@ -371,7 +371,7 @@ class TestStyleDiffFeatures:
             assert name in feat.depends_on, f"{diff_name} should depend on {name}"
 
     def test_winner_rate_diff_computes(self):
-        from mvp.model.features.style import style_winner_rate_diff
+        style_winner_rate_diff = get_registry().get("style_winner_rate_diff").func
 
         df = pl.DataFrame({
             "player_style_winner_rate": [0.20, 0.25, 0.18],
@@ -413,7 +413,7 @@ class TestStyleMatchupFeatures:
             assert len(feat.depends_on) == 2
 
     def test_fh_winner_rate_matchup_computes(self):
-        from mvp.model.features.style import style_fh_winner_rate_matchup
+        style_fh_winner_rate_matchup = get_registry().get("style_fh_winner_rate_matchup").func
         df = pl.DataFrame({
             "player_style_fh_winner_rate": [0.55, 0.60],
             "opp_style_bh_winner_rate": [0.30, 0.45],

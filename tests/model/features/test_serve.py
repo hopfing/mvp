@@ -214,7 +214,7 @@ class TestSvcDiffFeatures:
 
     def test_diff_computes_player_minus_opp(self):
         """Diff feature computes player stat minus opponent stat."""
-        from mvp.model.features.serve import svc_first_serve_win_pct_diff
+        svc_first_serve_win_pct_diff = get_registry().get("svc_first_serve_win_pct_diff").func
 
         df = pl.DataFrame(
             {

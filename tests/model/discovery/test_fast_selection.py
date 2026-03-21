@@ -244,7 +244,7 @@ class TestFastForwardSelector:
             matches_path=sample_matches,
             cache_dir=cache_dir,
         )
-        df = engine.compute(features)
+        df = engine.compute(features, extra_columns=["won"])
         dr = config.data.date_range
         df = df.filter(
             (pl.col("effective_match_date") >= dr.start)

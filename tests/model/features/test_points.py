@@ -93,7 +93,7 @@ class TestPtsMatchupFeatures:
 
     def test_svc_matchup_computes_serve_vs_return(self):
         """svc_pts_won_pct_matchup computes player serve - opp return."""
-        from mvp.model.features.points import svc_pts_won_pct_matchup
+        svc_pts_won_pct_matchup = get_registry().get("svc_pts_won_pct_matchup").func
 
         df = pl.DataFrame(
             {
@@ -112,7 +112,7 @@ class TestPtsMatchupFeatures:
 
     def test_ret_matchup_computes_return_vs_serve(self):
         """ret_pts_won_pct_matchup computes player return - opp serve."""
-        from mvp.model.features.points import ret_pts_won_pct_matchup
+        ret_pts_won_pct_matchup = get_registry().get("ret_pts_won_pct_matchup").func
 
         df = pl.DataFrame(
             {

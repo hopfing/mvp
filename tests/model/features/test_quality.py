@@ -137,7 +137,7 @@ class TestQualityDiffFeatures:
             assert len(feat.depends_on) == 1
 
     def test_quality_win_rate_diff_computation(self):
-        from mvp.model.features.quality import quality_win_rate_diff
+        quality_win_rate_diff = get_registry().get("quality_win_rate_diff").func
 
         df = pl.DataFrame({
             "player_quality_win_rate_365d": [0.6, 0.4],
@@ -148,7 +148,7 @@ class TestQualityDiffFeatures:
         assert result["diff"][1] == pytest.approx(-0.1)
 
     def test_opp_elo_faced_avg_diff_alltime(self):
-        from mvp.model.features.quality import opp_elo_faced_avg_diff
+        opp_elo_faced_avg_diff = get_registry().get("opp_elo_faced_avg_diff").func
 
         df = pl.DataFrame({
             "player_opp_elo_faced_avg": [1600.0, 1500.0],

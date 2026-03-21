@@ -167,7 +167,7 @@ class TestFitnessDiffFeatures:
             assert len(feat.depends_on) == 1
 
     def test_retirement_rate_diff_computation(self):
-        from mvp.model.features.fitness import retirement_rate_diff
+        retirement_rate_diff = get_registry().get("retirement_rate_diff").func
 
         df = pl.DataFrame({
             "player_retirement_rate_365d": [0.1, 0.3],
@@ -178,7 +178,7 @@ class TestFitnessDiffFeatures:
         assert result["diff"][1] == pytest.approx(-0.1)
 
     def test_last_match_retirement_diff_computation(self):
-        from mvp.model.features.fitness import last_match_retirement_diff
+        last_match_retirement_diff = get_registry().get("last_match_retirement_diff").func
 
         df = pl.DataFrame({
             "player_last_match_retirement": [1.0, 0.0],

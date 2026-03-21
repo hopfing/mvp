@@ -159,7 +159,7 @@ class TestTourMatchPctDiffFeature:
         assert feat.mirror is False
 
     def test_diff_computation(self):
-        from mvp.model.features.context import tour_match_pct_diff
+        tour_match_pct_diff = get_registry().get("tour_match_pct_diff").func
 
         df = pl.DataFrame({
             "player_tour_match_pct_365d": [0.8, 0.3],

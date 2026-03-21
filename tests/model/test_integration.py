@@ -198,7 +198,8 @@ class TestAllFeaturesIntegration:
 
     def test_win_pct_diff_requires_dependencies(self, sample_matches_df: pl.DataFrame):
         """win_pct_diff requires win_pct columns to be computed first."""
-        from mvp.model.features.win_rate import win_pct, win_pct_diff
+        from mvp.model.features.win_rate import win_pct
+        win_pct_diff = get_registry().get("win_pct_diff").func
 
         # First compute win_pct for player and opponent
         df_with_wr = sample_matches_df.with_columns(

@@ -194,7 +194,7 @@ class TestTournamentDiffFeatures:
             assert len(feat.depends_on) == 1
 
     def test_sets_won_diff_computation(self):
-        from mvp.model.features.tournament import tourn_sets_won_diff
+        tourn_sets_won_diff = get_registry().get("tourn_sets_won_diff").func
 
         df = pl.DataFrame({
             "player_tourn_sets_won": [4, 2, 0],
@@ -206,7 +206,7 @@ class TestTournamentDiffFeatures:
         assert result["diff"][2] == -3
 
     def test_matches_won_diff_computation(self):
-        from mvp.model.features.tournament import tourn_matches_won_diff
+        tourn_matches_won_diff = get_registry().get("tourn_matches_won_diff").func
 
         df = pl.DataFrame({
             "player_tourn_matches_won": [2, 0],

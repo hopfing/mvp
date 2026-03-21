@@ -146,7 +146,7 @@ class TestTransitionDiffFeatures:
             assert len(feat.depends_on) == 1
 
     def test_days_since_surface_diff_computation(self):
-        from mvp.model.features.transition import days_since_surface_diff
+        days_since_surface_diff = get_registry().get("days_since_surface_diff").func
 
         df = pl.DataFrame({
             "player_days_since_surface": [14.0, 45.0],
@@ -157,7 +157,7 @@ class TestTransitionDiffFeatures:
         assert result["diff"][1] == pytest.approx(15.0)
 
     def test_pct_matches_on_surface_diff_rolling(self):
-        from mvp.model.features.transition import pct_matches_on_surface_diff
+        pct_matches_on_surface_diff = get_registry().get("pct_matches_on_surface_diff").func
 
         df = pl.DataFrame({
             "player_pct_matches_on_surface_365d": [0.5, 0.8],
@@ -168,7 +168,7 @@ class TestTransitionDiffFeatures:
         assert result["diff"][1] == pytest.approx(-0.1)
 
     def test_pct_matches_on_surface_diff_alltime(self):
-        from mvp.model.features.transition import pct_matches_on_surface_diff
+        pct_matches_on_surface_diff = get_registry().get("pct_matches_on_surface_diff").func
 
         df = pl.DataFrame({
             "player_pct_matches_on_surface": [0.6, 0.4],

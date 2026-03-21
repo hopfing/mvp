@@ -161,7 +161,7 @@ class TestScoreDepthDiffFeatures:
             assert len(feat.depends_on) == 1
 
     def test_games_won_per_set_diff_computation(self):
-        from mvp.model.features.score_depth import games_won_per_set_diff
+        games_won_per_set_diff = get_registry().get("games_won_per_set_diff").func
 
         df = pl.DataFrame({
             "player_games_won_per_set_365d": [6.0, 5.0],
@@ -172,7 +172,7 @@ class TestScoreDepthDiffFeatures:
         assert result["diff"][1] == pytest.approx(-0.5)
 
     def test_straight_sets_diff_alltime(self):
-        from mvp.model.features.score_depth import straight_sets_win_pct_diff
+        straight_sets_win_pct_diff = get_registry().get("straight_sets_win_pct_diff").func
 
         df = pl.DataFrame({
             "player_straight_sets_win_pct": [0.6, 0.4],

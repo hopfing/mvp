@@ -214,7 +214,7 @@ class TestFormDiffFeatures:
             assert len(feat.depends_on) == 1
 
     def test_days_since_last_match_diff(self):
-        from mvp.model.features.form import days_since_last_match_diff
+        days_since_last_match_diff = get_registry().get("days_since_last_match_diff").func
 
         df = pl.DataFrame({
             "player_days_since_last_match": [7.0, 14.0],
@@ -225,7 +225,7 @@ class TestFormDiffFeatures:
         assert result["diff"][1] == pytest.approx(-7.0)
 
     def test_prev_tourn_round_reached_diff(self):
-        from mvp.model.features.form import prev_tourn_round_reached_diff
+        prev_tourn_round_reached_diff = get_registry().get("prev_tourn_round_reached_diff").func
 
         df = pl.DataFrame({
             "player_prev_tourn_round_reached": [6.0, 4.0],
