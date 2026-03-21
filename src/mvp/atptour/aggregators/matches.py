@@ -558,6 +558,14 @@ def validate_tournament_scheduling(df: pl.DataFrame) -> list[dict]:
     return warnings
 
 
+def _downcast_int64(df: pl.DataFrame) -> pl.DataFrame:
+    """Downcast Int64 columns to Int32 to reduce memory footprint."""
+    i64_cols = [c for c in df.columns if df[c].dtype == pl.Int64]
+    if not i64_cols:
+        return df
+    return df.with_columns(pl.col(c).cast(pl.Int32) for c in i64_cols)
+
+
 class MatchesAggregator(BaseJob):
     """Cross-tournament aggregation into a single enriched matches dataset."""
 
@@ -566,30 +574,33 @@ class MatchesAggregator(BaseJob):
 
     def aggregate(self) -> pl.DataFrame:
         """Run the full aggregation pipeline."""
-        tournament_matches = self._stack_tournament_matches()
+        tournament_matches = _downcast_int64(self._stack_tournament_matches())
         logger.info("Tournament matches stacked: %d rows", len(tournament_matches))
 
-        activity = self._load_activity()
+        activity = _downcast_int64(self._load_activity())
         logger.info("Activity loaded: %d rows", len(activity))
 
         tournament_matches = self._enrich_from_activity(tournament_matches, activity)
 
-        gap_fill = self._activity_gap_fill(tournament_matches, activity)
+        gap_fill = _downcast_int64(self._activity_gap_fill(tournament_matches, activity))
         logger.info("Activity gap-fill: %d rows", len(gap_fill))
 
         combined = pl.concat([tournament_matches, gap_fill], how="diagonal_relaxed")
+        del tournament_matches, gap_fill, activity
         logger.info("Combined: %d rows", len(combined))
 
         # Step 6: Rankings enrichment
         rankings = self._load_rankings()
         if rankings is not None:
             combined = join_rankings(combined, rankings)
+            del rankings
             logger.info("Rankings joined")
 
         # Step 7: Bio enrichment
         bio = self._load_bio()
         if bio is not None:
             combined = join_player_bio(combined, bio)
+            del bio
             logger.info("Bio joined")
 
         # Coalesce rank columns: rankings (weekly snapshot) preferred, activity as fallback
