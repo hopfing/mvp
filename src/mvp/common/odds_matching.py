@@ -105,8 +105,26 @@ class BaseOddsMatcher(BaseJob):
             .last()
         )
 
+    def _load_event_map(self) -> dict[str, str]:
+        """Load event_id -> match_uid map for this book from the event map."""
+        from mvp.analysis.event_map import load_event_map
+
+        df = load_event_map()
+        if len(df) == 0:
+            return {}
+        # Book labels in event map are lowercase: "dk", "br", "mgm"
+        book_key = self.book_label.lower()
+        df = df.filter(pl.col("book") == book_key)
+        return dict(zip(
+            df["event_id"].to_list(),
+            df["match_uid"].to_list(),
+        ))
+
     def match(self, predictions: pl.DataFrame) -> OddsMatchResult:
         """Match book odds to predictions by player pair.
+
+        Uses the persisted event map for previously matched events (fast path),
+        falling back to name resolution for new events.
 
         Args:
             predictions: DataFrame with p1_id, p2_id, p1_name, p2_name, match_uid.
@@ -123,11 +141,17 @@ class BaseOddsMatcher(BaseJob):
         for row in odds_df.iter_rows(named=True):
             book_events.setdefault(row[self.event_id_column], []).append(row)
 
-        # Build prediction lookup: frozenset({p1_id, p2_id}) -> prediction row
-        # Also build name -> id scoped to today's predictions only
+        # Load persisted event map: event_id -> match_uid
+        event_map = self._load_event_map()
+
+        # Build prediction lookup by match_uid and by player pair
+        pred_by_uid: dict[str, dict] = {}
         pred_by_pair: dict[frozenset, dict] = {}
         pred_names: dict[str, str] = {}
         for row in predictions.iter_rows(named=True):
+            uid = row.get("match_uid") or ""
+            if uid:
+                pred_by_uid[uid] = row
             p1_id = row.get("p1_id") or ""
             p2_id = row.get("p2_id") or ""
             if p1_id and p2_id:
@@ -154,6 +178,26 @@ class BaseOddsMatcher(BaseJob):
             if len(book_rows) < 2:
                 continue
 
+            # Fast path: event already in event map
+            mapped_uid = event_map.get(eid)
+            if mapped_uid is not None:
+                pred = pred_by_uid.get(mapped_uid)
+                if pred is not None:
+                    p1_id = pred["p1_id"]
+                    p2_id = pred["p2_id"]
+                    # Match book rows to player IDs by name resolution
+                    odds_by_pid: dict[str, float] = {}
+                    for book_row in book_rows[:2]:
+                        pid = self._resolve_id(book_row["player_name"], pred_names)
+                        if pid is not None:
+                            odds_by_pid[pid] = book_row["odds"]
+                    if p1_id in odds_by_pid and p2_id in odds_by_pid:
+                        result[mapped_uid] = odds_by_pid
+                        matched += 1
+                # Either way, this event is known — skip name resolution fallback
+                continue
+
+            # Slow path: name resolution for new events
             ids_and_odds: list[tuple[str, float]] = []
             for book_row in book_rows[:2]:
                 pid = self._resolve_id(book_row["player_name"], pred_names)
