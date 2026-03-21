@@ -59,6 +59,7 @@ COLUMN_SCHEMA = [
     {"name": "tournament_day", "owner": "pipeline"},
     {"name": "model_version", "owner": "pipeline"},
     {"name": "predicted_at", "owner": "pipeline"},
+    {"name": "bet_placed_at", "owner": "pipeline"},
 ]
 
 COLUMN_NAMES = [c["name"] for c in COLUMN_SCHEMA]
@@ -217,6 +218,7 @@ def prepare_predictions(predictions: pl.DataFrame) -> pl.DataFrame:
             "tournament_day": _format_date(row.get("match_date")) or match_date,
             "model_version": row["model_version"],
             "predicted_at": predicted_at_str,
+            "bet_placed_at": "",
         })
 
     if not rows:
@@ -424,6 +426,19 @@ def merge_predictions(
             pl.Series("p2_odds", new_p2_odds),
             pl.Series("book", new_books),
         )
+
+    # 3d. Stamp bet_placed_at when we first see a stake
+    if len(merged) > 0:
+        now_str = datetime.now(UTC).strftime("%Y-%m-%d %H:%M")
+        new_bet_placed = []
+        for row in merged.iter_rows(named=True):
+            current = (row.get("bet_placed_at") or "").strip()
+            stake = (row.get("stake") or "").strip()
+            if stake and not current:
+                new_bet_placed.append(now_str)
+            else:
+                new_bet_placed.append(current)
+        merged = merged.with_columns(pl.Series("bet_placed_at", new_bet_placed))
 
     # 4. Re-pad time column (Google Sheets strips leading zeros)
     merged = merged.with_columns(

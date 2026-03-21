@@ -21,7 +21,7 @@ from mvp.gsheets.base import (
 
 class TestColumnSchema:
     def test_column_schema_has_36_columns(self):
-        assert len(COLUMN_SCHEMA) == 36
+        assert len(COLUMN_SCHEMA) == 38
 
     def test_match_uid_is_in_schema(self):
         assert "match_uid" in COLUMN_NAMES
@@ -332,7 +332,7 @@ class TestMergePredictions:
         })
         result = merge_predictions(existing, new, matches)
         assert list(result.columns) == COLUMN_NAMES
-        assert len(result.columns) == 36
+        assert len(result.columns) == 38
 
     def test_empty_existing_empty_new(self):
         existing = _sheet_df([])
@@ -365,7 +365,7 @@ class TestMergePredictions:
         })
         result = merge_predictions(existing, new, matches)
         assert len(result) == 0
-        assert len(result.columns) == 36
+        assert len(result.columns) == 38
         assert list(result.columns) == COLUMN_NAMES
 
     def test_duplicate_match_uid_not_added(self):
