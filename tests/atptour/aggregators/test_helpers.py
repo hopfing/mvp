@@ -188,7 +188,7 @@ class TestExplodeResults:
         row_b = result.filter(pl.col("player_id") == "BBBB")
         assert row_b["won"].item() is False
 
-    def test_drops_name_and_country_columns(self):
+    def test_drops_country_and_partner_columns(self):
         result = explode_results(_make_results_df())
         for col in [
             "p1_name", "p2_name", "p1_country", "p2_country",
@@ -196,6 +196,14 @@ class TestExplodeResults:
             "p2_partner_name", "p2_partner_country",
         ]:
             assert col not in result.columns
+
+    def test_carries_display_name(self):
+        result = explode_results(_make_results_df())
+        assert "player_display_name" in result.columns
+        assert "opp_display_name" in result.columns
+        row_a = result.filter(pl.col("player_id") == "AAAA")
+        assert row_a["player_display_name"].item() == "Player A"
+        assert row_a["opp_display_name"].item() == "Player B"
 
     def test_drops_traceability_columns(self):
         result = explode_results(_make_results_df())
@@ -544,10 +552,15 @@ class TestExplodeSchedule:
         assert row_b["player_seed"].item() is None
         assert row_b["opp_seed"].item() == 1
 
-    def test_drops_name_and_country_columns(self):
+    def test_drops_country_columns(self):
         result = explode_schedule(_make_schedule_df())
         for col in ["p1_name", "p2_name", "p1_country", "p2_country"]:
             assert col not in result.columns
+
+    def test_carries_display_name(self):
+        result = explode_schedule(_make_schedule_df())
+        assert "player_display_name" in result.columns
+        assert "opp_display_name" in result.columns
 
     def test_drops_traceability_columns(self):
         result = explode_schedule(_make_schedule_df())

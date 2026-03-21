@@ -42,6 +42,7 @@ _PREDICTOR_EXTRA_COLS = [
     "tournament_id", "tournament_name",
     "player_first_name", "player_last_name",
     "opp_first_name", "opp_last_name",
+    "player_display_name", "opp_display_name",
     "draw_p1_id", "scheduled_datetime", "match_date",
     "player_elo", "opp_elo",
     "player_hard_adj", "player_clay_adj", "player_grass_adj",
@@ -717,13 +718,23 @@ class ProductionPredictor:
         model_version = Path(self.config["active"]["config"]).stem
         now = datetime.now(timezone.utc)
 
+        # Bio name (first + last) preferred; schedule/results display_name as fallback
+        _p1_name_expr = pl.coalesce(
+            pl.col("player_first_name") + pl.lit(" ") + pl.col("player_last_name"),
+            pl.col("player_display_name"),
+        ).alias("p1_name")
+        _p2_name_expr = pl.coalesce(
+            pl.col("opp_first_name") + pl.lit(" ") + pl.col("opp_last_name"),
+            pl.col("opp_display_name"),
+        ).alias("p2_name")
+
         if is_deciding_set:
             select_exprs = [
                 pl.col("match_uid"),
                 pl.col("player_id").alias("p1_id"),
                 pl.col("opp_id").alias("p2_id"),
-                (pl.col("player_first_name") + pl.lit(" ") + pl.col("player_last_name")).alias("p1_name"),
-                (pl.col("opp_first_name") + pl.lit(" ") + pl.col("opp_last_name")).alias("p2_name"),
+                _p1_name_expr,
+                _p2_name_expr,
                 pl.col("_prob").alias("deciding_set_prob"),
                 pl.col("tournament_id"),
                 pl.col("tournament_name"),
@@ -739,8 +750,8 @@ class ProductionPredictor:
                 pl.col("match_uid"),
                 pl.col("player_id").alias("p1_id"),
                 pl.col("opp_id").alias("p2_id"),
-                (pl.col("player_first_name") + pl.lit(" ") + pl.col("player_last_name")).alias("p1_name"),
-                (pl.col("opp_first_name") + pl.lit(" ") + pl.col("opp_last_name")).alias("p2_name"),
+                _p1_name_expr,
+                _p2_name_expr,
                 pl.col("_prob").alias("p1_win_prob"),
                 (1.0 - pl.col("_prob")).alias("p2_win_prob"),
                 pl.col("_player_surface_elo").alias("p1_elo"),

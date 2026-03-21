@@ -57,7 +57,6 @@ def explode_to_player_match(
 
 # Columns dropped from Results before explosion
 _RESULTS_DROP_COLS = [
-    "p1_name", "p2_name",
     "p1_country", "p2_country",
     "p1_partner_name", "p1_partner_country",
     "p2_partner_name", "p2_partner_country",
@@ -84,12 +83,14 @@ def explode_results(df: pl.DataFrame) -> pl.DataFrame:
 
     player_cols: dict[str, str] = {
         "p1_id": "player_id",
+        "p1_name": "player_display_name",
         "p1_seed": "player_seed",
         "p1_entry": "player_entry",
         "p1_partner_id": "player_partner_id",
     }
     opp_cols: dict[str, str] = {
         "p2_id": "opp_id",
+        "p2_name": "opp_display_name",
         "p2_seed": "opp_seed",
         "p2_entry": "opp_entry",
         "p2_partner_id": "opp_partner_id",
@@ -225,7 +226,7 @@ def explode_match_stats(df: pl.DataFrame) -> pl.DataFrame:
 # Columns dropped from Schedule before explosion
 _SCHEDULE_DROP_COLS = [
     "source_file", "parsed_at", "snapshot_timestamp",
-    "p1_name", "p2_name", "p1_country", "p2_country",
+    "p1_country", "p2_country",
 ]
 
 
@@ -240,11 +241,13 @@ def explode_schedule(df: pl.DataFrame) -> pl.DataFrame:
 
     player_cols: dict[str, str] = {
         "p1_id": "player_id",
+        "p1_name": "player_display_name",
         "p1_seed": "player_seed",
         "p1_entry": "player_entry",
     }
     opp_cols: dict[str, str] = {
         "p2_id": "opp_id",
+        "p2_name": "opp_display_name",
         "p2_seed": "opp_seed",
         "p2_entry": "opp_entry",
     }

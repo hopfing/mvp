@@ -142,6 +142,8 @@ MATCHES_SCHEMA: dict[str, pl.DataType] = {
     "match_uid": pl.String,
     "player_id": pl.String,
     "opp_id": pl.String,
+    "player_display_name": pl.String,
+    "opp_display_name": pl.String,
     "draw_p1_id": pl.String,
     "tournament_id": pl.String,
     "year": pl.Int64,
@@ -854,6 +856,14 @@ class TournamentMatchesAggregator(BaseJob):
             self._waterfall_expr(df, "opp_partner_id", ["", "_stats"])
         )
 
+        # display names: coalesce(results, schedule)
+        coalesce_exprs.extend(
+            self._waterfall_expr(df, "player_display_name", ["", "_schedule"])
+        )
+        coalesce_exprs.extend(
+            self._waterfall_expr(df, "opp_display_name", ["", "_schedule"])
+        )
+
         # tournament dates: coalesce(results, stats)
         coalesce_exprs.extend(
             self._waterfall_expr(df, "tournament_start_date", ["", "_stats"])
@@ -956,6 +966,8 @@ class TournamentMatchesAggregator(BaseJob):
             "match_uid",
             "player_id",
             "opp_id",
+            "player_display_name",
+            "opp_display_name",
             "draw_p1_id",
             "tournament_id",
             "year",
