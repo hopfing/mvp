@@ -4,7 +4,7 @@ import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 from mvp.atptour.aggregators.tournament_matches import TournamentMatchesAggregator
@@ -18,8 +18,6 @@ from mvp.atptour.extractors.results import ResultsExtractor
 from mvp.atptour.extractors.schedule import ScheduleExtractor
 from mvp.atptour.pipeline_utils import get_active_players, get_players_with_results
 from mvp.atptour.transformers.match_beats import MatchBeatsTransformer
-from mvp.atptour.transformers.rally_analysis import RallyAnalysisTransformer
-from mvp.atptour.transformers.stroke_analysis import StrokeAnalysisTransformer
 from mvp.atptour.transformers.match_stats import MatchStatsTransformer
 from mvp.atptour.transformers.overview import OverviewTransformer
 from mvp.atptour.transformers.player_activity import (
@@ -30,9 +28,11 @@ from mvp.atptour.transformers.player_bio import (
     PlayerBioStager,
     PlayerBioTransformer,
 )
+from mvp.atptour.transformers.rally_analysis import RallyAnalysisTransformer
 from mvp.atptour.transformers.rankings import RankingsTransformer
 from mvp.atptour.transformers.results import ResultsTransformer
 from mvp.atptour.transformers.schedule import ScheduleTransformer
+from mvp.atptour.transformers.stroke_analysis import StrokeAnalysisTransformer
 from mvp.common.enums import Circuit
 
 logger = logging.getLogger(__name__)
@@ -281,6 +281,32 @@ def run_rankings(*, start_year: int, data_root: Path | None = None) -> None:
     tx.consolidate()
 
 
+def _should_auto_refresh_activity(data_root: Path, interval_hours: int = 8) -> bool:
+    """Check if activity should be auto-refreshed (Fri-Sun, every N hours)."""
+    now = datetime.now(UTC)
+    # Friday=4, Saturday=5, Sunday=6
+    if now.weekday() not in (4, 5, 6):
+        return False
+
+    marker = data_root / "stage" / "atptour" / ".activity_refresh_marker"
+    if marker.exists():
+        last_refresh = datetime.fromtimestamp(
+            marker.stat().st_mtime, tz=UTC
+        )
+        hours_since = (now - last_refresh).total_seconds() / 3600
+        if hours_since < interval_hours:
+            return False
+
+    return True
+
+
+def _touch_activity_marker(data_root: Path) -> None:
+    """Update the activity refresh marker timestamp."""
+    marker = data_root / "stage" / "atptour" / ".activity_refresh_marker"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.touch()
+
+
 def run_player_data(
     *,
     run_tids: set[tuple[str, int]],
@@ -322,6 +348,12 @@ def run_player_data(
         else:
             logger.info("Player bios: no new fetches, skipping stager/transformer")
 
+    # Auto-refresh activity on Fri-Sun every 8 hours
+    if not refresh_players and player_tournaments:
+        if _should_auto_refresh_activity(default_root):
+            logger.info("Activity: auto-refresh triggered (Fri-Sun schedule)")
+            refresh_players = True
+
     if player_tournaments and refresh_players:
         players_with_results = get_players_with_results(
             tournaments_stage_dir, run_tids
@@ -344,6 +376,7 @@ def run_player_data(
             data_root=data_root
         ).run(player_ids=set(activity_tournaments))
         PlayerActivityTransformer(data_root=data_root).run()
+        _touch_activity_marker(default_root)
     elif player_tournaments:
         logger.info(
             "Activity: skipped (use --refresh-players to run)"
