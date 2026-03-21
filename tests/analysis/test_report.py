@@ -43,6 +43,7 @@ class TestAnalysisReport:
             "status": ["resolved", "resolved"],
             "model_correct": [True, False],
             "bet_side": ["P1", "P2"],
+            "stake": ["10", "15"],
             "net": ["11.00", "-15.00"],
         })
 
