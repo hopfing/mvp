@@ -125,18 +125,20 @@ class ExperimentRunner:
 
     def _resolve_ensemble(
         self,
-    ) -> tuple[list[str], list[dict[str, Any]], list["DateRange"], list[int], list[dict[str, Any] | None]]:
+    ) -> tuple[list[str], list[dict[str, Any]], list["DateRange"], list[int], list[dict[str, Any] | None], list[Any]]:
         """Resolve ensemble config into union features and base model specs.
 
         Returns:
             (union_feature_specs, base_model_specs, model_date_ranges,
-             meta_feature_indices, model_filters) where each spec has type,
-             params, weight, feature_indices, model_date_ranges[i] is the
-             DateRange from base config i, meta_feature_indices maps
-             meta-features into the union column list, and model_filters[i]
-             is the filter dict from base config i (or None if matching ensemble).
+             meta_feature_indices, model_filters, model_sample_weights)
+             where each spec has type, params, weight, feature_indices,
+             model_date_ranges[i] is the DateRange from base config i,
+             meta_feature_indices maps meta-features into the union column
+             list, model_filters[i] is the filter dict from base config i
+             (or None if matching ensemble), and model_sample_weights[i]
+             is the SampleWeightConfig from base config i (or None).
         """
-        from mvp.model.config import DateRange
+        from mvp.model.config import DateRange, SampleWeightConfig
 
         ensemble_params = EnsembleParams.model_validate(self.config.model.params)
 
@@ -144,6 +146,7 @@ class ExperimentRunner:
         base_model_specs: list[dict[str, Any]] = []
         model_date_ranges: list[DateRange] = []
         model_filters: list[dict[str, Any] | None] = []
+        model_sample_weights: list[SampleWeightConfig | None] = []
 
         for ref in ensemble_params.base_models:
             base_config = ExperimentConfig.from_file(ref.config)
@@ -163,6 +166,7 @@ class ExperimentRunner:
                 model_filters.append(base_config.data.filters)
             else:
                 model_filters.append(None)
+            model_sample_weights.append(base_config.sample_weight)
 
         for spec in ensemble_params.meta_features:
             if spec not in all_feature_specs:
@@ -177,7 +181,7 @@ class ExperimentRunner:
         meta_feature_cols = get_feature_columns(ensemble_params.meta_features)
         meta_feature_indices = [union_cols.index(c) for c in meta_feature_cols]
 
-        return all_feature_specs, base_model_specs, model_date_ranges, meta_feature_indices, model_filters
+        return all_feature_specs, base_model_specs, model_date_ranges, meta_feature_indices, model_filters, model_sample_weights
 
     def run(self) -> dict[str, Any]:
         """Execute the experiment.
@@ -200,9 +204,10 @@ class ExperimentRunner:
         base_model_specs: list[dict[str, Any]] | None = None
         model_date_ranges: list | None = None
         model_filters: list[dict[str, Any] | None] | None = None
+        model_sample_weights: list | None = None
         meta_feature_indices: list[int] = []
         if is_ensemble:
-            feature_specs, base_model_specs, model_date_ranges, meta_feature_indices, model_filters = (
+            feature_specs, base_model_specs, model_date_ranges, meta_feature_indices, model_filters, model_sample_weights = (
                 self._resolve_ensemble()
             )
         else:
@@ -260,6 +265,9 @@ class ExperimentRunner:
                     needs_per_model = True
                 if filt is not None:
                     needs_per_model = True
+        if is_ensemble and model_sample_weights:
+            if any(sw is not None for sw in model_sample_weights):
+                needs_per_model = True
 
         # Resolve target column (adds derived column if needed, filters incomplete matches)
         df, target_col = self._resolve_target(df)
@@ -400,15 +408,17 @@ class ExperimentRunner:
                         train_dates, self.config.sample_weight
                     )
 
-                # Build per-model training data for ensemble date/filter differences
+                # Build per-model training data for ensemble date/filter/weight differences
                 per_model_data = None
                 if is_ensemble and needs_per_model and model_date_ranges and model_filters:
+                    _sw_list = model_sample_weights or [None] * len(model_date_ranges)
                     test_start_date = test_df["effective_match_date"].min()
                     per_model_data = []
-                    for dr, filt in zip(model_date_ranges, model_filters):
+                    for dr, filt, sw_cfg in zip(model_date_ranges, model_filters, _sw_list):
                         has_wider_dates = dr.start < self.config.data.date_range.start
                         has_custom_filters = filt is not None
-                        if has_wider_dates or has_custom_filters:
+                        has_custom_weights = sw_cfg is not None
+                        if has_wider_dates or has_custom_filters or has_custom_weights:
                             if has_wider_dates and df_wide is not None:
                                 model_train_df = df_wide.filter(
                                     (pl.col("effective_match_date") >= dr.start)
@@ -426,12 +436,12 @@ class ExperimentRunner:
                             X_m = apply_imputation(X_m, circuit_m, impute_state)
                             X_m = X_m[:, :n_model]
                             X_m = (X_m - train_mean) / train_std
+                            # Use base model's sample_weight config, fall back to ensemble's
+                            w_cfg = sw_cfg or self.config.sample_weight
                             w_m = None
-                            if self.config.sample_weight is not None:
+                            if w_cfg is not None:
                                 model_dates = model_train_df["effective_match_date"].to_numpy()
-                                w_m = compute_sample_weights(
-                                    model_dates, self.config.sample_weight
-                                )
+                                w_m = compute_sample_weights(model_dates, w_cfg)
                             per_model_data.append((X_m, y_m, w_m))
                         else:
                             per_model_data.append(None)

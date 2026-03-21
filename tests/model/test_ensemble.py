@@ -656,7 +656,7 @@ class TestEnsembleRunnerIntegration:
             str(ensemble_path)
         )
 
-        specs, base_specs, date_ranges, meta_indices, _ = runner._resolve_ensemble()
+        specs, base_specs, date_ranges, meta_indices, _, _ = runner._resolve_ensemble()
 
         assert specs == ["elo", "serve"]
         assert len(base_specs) == 2
@@ -710,7 +710,7 @@ class TestEnsembleRunnerIntegration:
         runner.config_path = ensemble_path
         runner.config = ExperimentConfig.from_file(str(ensemble_path))
 
-        _, _, date_ranges, _, _ = runner._resolve_ensemble()
+        _, _, date_ranges, _, _, _ = runner._resolve_ensemble()
 
         assert len(date_ranges) == 2
         assert date_ranges[0].start == date(2010, 1, 1)
@@ -767,7 +767,7 @@ class TestEnsembleRunnerIntegration:
         runner.config_path = ensemble_path
         runner.config = ExperimentConfig.from_file(str(ensemble_path))
 
-        _, _, _, _, model_filters = runner._resolve_ensemble()
+        _, _, _, _, model_filters, _ = runner._resolve_ensemble()
 
         assert len(model_filters) == 2
         assert model_filters[0] == {"elo_surface_diff": {"min": -75, "max": 75}}
@@ -855,7 +855,7 @@ class TestEnsembleRunnerIntegration:
         runner.config_path = ensemble_path
         runner.config = ExperimentConfig.from_file(str(ensemble_path))
 
-        _, _, _, _, model_filters = runner._resolve_ensemble()
+        _, _, _, _, model_filters, _ = runner._resolve_ensemble()
         assert model_filters == [None]
 
 
