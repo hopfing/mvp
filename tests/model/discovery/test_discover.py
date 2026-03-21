@@ -150,8 +150,8 @@ class TestDiscoveryOptions:
 
         assert options.importance_method == "permutation"
         assert options.selection_method == "forward"
-        assert options.sweep_params is True
-        assert options.segment_analysis is True
+        assert options.sweep_params is False
+        assert options.segment_analysis is False
         assert options.metric == "calibration_error"
         assert options.direction == "minimize"
 
