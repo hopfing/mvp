@@ -226,6 +226,11 @@ class FastForwardSelector:
             if sample_weights is not None:
                 sample_weights = sample_weights[row_mask]
             df = df.filter(pl.Series(row_mask))
+        # Compute recency weights from config if no explicit weights were provided
+        if sample_weights is None and getattr(self.config, "sample_weight", None) is not None:
+            from mvp.model.weighting import compute_sample_weights
+            dates = df["effective_match_date"].to_numpy()
+            sample_weights = compute_sample_weights(dates, self.config.sample_weight)
         self.sample_weights = sample_weights
 
         val = self.config.validation

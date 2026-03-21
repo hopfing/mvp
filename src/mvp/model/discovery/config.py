@@ -8,6 +8,8 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, field_validator
 
+from mvp.model.config import SampleWeightConfig
+
 
 class DateRange(BaseModel):
     """Date range for data selection."""
@@ -93,6 +95,7 @@ class DiscoveryConfig(BaseModel):
     discovery: DiscoveryOptions = DiscoveryOptions()
     model: ModelConfig = ModelConfig()
     validation: ValidationConfig = ValidationConfig()
+    sample_weight: SampleWeightConfig | None = None
 
     @classmethod
     def from_yaml(cls, yaml_str: str) -> "DiscoveryConfig":
@@ -144,4 +147,6 @@ class DiscoveryConfig(BaseModel):
         }
         if self.target != "won":
             result["target"] = self.target
+        if self.sample_weight is not None:
+            result["sample_weight"] = self.sample_weight.model_dump()
         return result
