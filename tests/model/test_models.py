@@ -156,3 +156,64 @@ class TestModelTraining:
         probs_after = loaded.predict_proba(X)
 
         np.testing.assert_array_almost_equal(probs_before, probs_after)
+
+    def test_neural_net_with_embeddings(self, sample_data):
+        """Neural net with player embeddings can fit and predict."""
+        X, y = sample_data  # X is (100, 5)
+        player_ids = np.random.randint(0, 20, size=(100, 1))
+        X_with_ids = np.hstack([X, player_ids])
+
+        model = get_model("neural_net", {
+            "hidden_layers": [32, 16],
+            "epochs": 20,
+            "patience": 5,
+            "embedding_dim": 8,
+            "embedding_col_idx": 5,
+            "n_players": 20,
+        })
+        model.fit(X_with_ids, y)
+        probs = model.predict_proba(X_with_ids)
+
+        assert probs.shape == (100,)
+        assert all(0 <= p <= 1 for p in probs)
+        # Verify embedding layer exists in the module
+        assert model.embedding_dim == 8
+        assert hasattr(model._module, "embedding")
+
+    def test_neural_net_embedding_serialization(self, sample_data, tmp_path):
+        """Neural net with embeddings survives joblib round-trip."""
+        import joblib
+
+        X, y = sample_data
+        player_ids = np.random.randint(0, 20, size=(100, 1))
+        X_with_ids = np.hstack([X, player_ids])
+
+        model = get_model("neural_net", {
+            "hidden_layers": [16],
+            "epochs": 10,
+            "patience": 5,
+            "embedding_dim": 8,
+            "embedding_col_idx": 5,
+            "n_players": 20,
+        })
+        model.fit(X_with_ids, y)
+        probs_before = model.predict_proba(X_with_ids)
+
+        path = tmp_path / "emb_model.pkl"
+        joblib.dump(model, path)
+        loaded = joblib.load(path)
+        probs_after = loaded.predict_proba(X_with_ids)
+
+        np.testing.assert_array_almost_equal(probs_before, probs_after)
+
+    def test_neural_net_no_embedding_unchanged(self, sample_data):
+        """Neural net without embedding params still works as plain MLP."""
+        X, y = sample_data
+        model = get_model("neural_net", {
+            "hidden_layers": [16],
+            "epochs": 10,
+            "patience": 5,
+        })
+        model.fit(X, y)
+        probs = model.predict_proba(X)
+        assert probs.shape == (100,)
