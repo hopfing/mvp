@@ -1,4 +1,4 @@
-"""Shared snapshot resolution logic for odds provider transformers."""
+"""Map book odds entries to internal match identifiers."""
 
 import logging
 

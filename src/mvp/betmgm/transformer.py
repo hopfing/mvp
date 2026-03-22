@@ -2,7 +2,7 @@
 
 import polars as pl
 
-from mvp.common.snapshot_resolver import (
+from mvp.common.odds_match_mapper import (
     resolve_snapshots as _resolve,
     transform as _transform,
     save as _save,
