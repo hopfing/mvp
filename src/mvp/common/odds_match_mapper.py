@@ -46,11 +46,7 @@ def resolve_snapshots(
     if len(book_map) == 0:
         return empty()
 
-    # Select available columns — p1_id/p2_id may not exist in old event maps
-    map_cols = ["event_id", "match_uid", "p1_book_name", "p2_book_name"]
-    has_ids = "p1_id" in book_map.columns and "p2_id" in book_map.columns
-    if has_ids:
-        map_cols += ["p1_id", "p2_id"]
+    map_cols = ["event_id", "match_uid", "p1_book_name", "p2_book_name", "p1_id", "p2_id"]
 
     joined = staged.join(
         book_map.select(map_cols),
@@ -62,28 +58,15 @@ def resolve_snapshots(
     if len(joined) == 0:
         return empty()
 
-    if has_ids:
-        # Resolve to actual player_id
-        resolved = joined.with_columns(
-            pl.when(pl.col("player_name") == pl.col("p1_book_name"))
-            .then(pl.col("p1_id"))
-            .when(pl.col("player_name") == pl.col("p2_book_name"))
-            .then(pl.col("p2_id"))
-            .otherwise(pl.lit(None))
-            .alias("player_id"),
-            pl.lit(book).alias("book"),
-        ).filter(pl.col("player_id").is_not_null())
-    else:
-        # Fallback for old event maps without player IDs — use side labels
-        resolved = joined.with_columns(
-            pl.when(pl.col("player_name") == pl.col("p1_book_name"))
-            .then(pl.lit("p1"))
-            .when(pl.col("player_name") == pl.col("p2_book_name"))
-            .then(pl.lit("p2"))
-            .otherwise(pl.lit(None))
-            .alias("player_id"),
-            pl.lit(book).alias("book"),
-        ).filter(pl.col("player_id").is_not_null())
+    resolved = joined.with_columns(
+        pl.when(pl.col("player_name") == pl.col("p1_book_name"))
+        .then(pl.col("p1_id"))
+        .when(pl.col("player_name") == pl.col("p2_book_name"))
+        .then(pl.col("p2_id"))
+        .otherwise(pl.lit(None))
+        .alias("player_id"),
+        pl.lit(book).alias("book"),
+    ).filter(pl.col("player_id").is_not_null())
 
     cols = ["match_uid", "book", "player_id", "odds", "fetched_at", "event_status"]
     return resolved.select(cols)
