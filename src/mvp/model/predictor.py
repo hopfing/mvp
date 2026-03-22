@@ -252,6 +252,26 @@ class ProductionPredictor:
         X = X[:, :n_model]
         X = (X - scaler_mean) / scaler_std
 
+        # Append embedding column (integer-encoded, not scaled)
+        embedding_col = None
+        embedding_vocab = None
+        model_params = config.model.params or {}
+        if model_params.get("embedding_col"):
+            embedding_col = model_params["embedding_col"]
+            min_matches = model_params.get("min_player_matches", 10)
+            player_counts = df[embedding_col].value_counts()
+            eligible = player_counts.filter(pl.col("count") >= min_matches)
+            embedding_vocab = {
+                pid: idx + 1
+                for idx, pid in enumerate(eligible[embedding_col].to_list())
+            }
+            emb_ids = np.array(
+                [embedding_vocab.get(p, 0) for p in df[embedding_col].to_list()]
+            ).reshape(-1, 1)
+            X = np.hstack([X, emb_ids.astype(np.float64)])
+            model_params["embedding_col_idx"] = X.shape[1] - 1
+            model_params["n_players"] = len(embedding_vocab)
+
         # Compute sample weights if configured
         sample_weights = None
         if config.sample_weight is not None:
@@ -291,20 +311,21 @@ class ProductionPredictor:
         # Save artifact
         artifact_path = Path(entry["artifact"])
         artifact_path.parent.mkdir(parents=True, exist_ok=True)
-        joblib.dump(
-            {
-                "model": model,
-                "impute_state": impute_state,
-                "scaler": {"mean": scaler_mean, "std": scaler_std},
-                "feature_cols": feature_cols,
-                "calibrator": calibrator,
-                "aux_base_col_names": build_result.aux_base_col_names,
-                "target": self.target,
-                # Backward compat: keep medians for old code paths
-                "medians": impute_state.global_medians[:n_model],
-            },
-            artifact_path,
-        )
+        artifact_data = {
+            "model": model,
+            "impute_state": impute_state,
+            "scaler": {"mean": scaler_mean, "std": scaler_std},
+            "feature_cols": feature_cols,
+            "calibrator": calibrator,
+            "aux_base_col_names": build_result.aux_base_col_names,
+            "target": self.target,
+            # Backward compat: keep medians for old code paths
+            "medians": impute_state.global_medians[:n_model],
+        }
+        if embedding_vocab is not None:
+            artifact_data["embedding_vocab"] = embedding_vocab
+            artifact_data["embedding_col"] = embedding_col
+        joblib.dump(artifact_data, artifact_path)
 
         # Update trained_at in config
         entry["trained_at"] = datetime.now(timezone.utc).isoformat()
@@ -444,6 +465,16 @@ class ProductionPredictor:
             # Backward compat: old artifact without impute_state
             medians = artifact["medians"]
             X = np.where(np.isnan(X), medians, X)
+
+        # Append embedding column if model uses embeddings
+        emb_vocab = artifact.get("embedding_vocab")
+        if emb_vocab is not None:
+            emb_col_name = artifact.get("embedding_col", "player_id")
+            emb_ids = np.array(
+                [emb_vocab.get(p, 0) for p in canonical[emb_col_name].to_list()]
+            ).reshape(-1, 1)
+            X = np.hstack([X, emb_ids.astype(np.float64)])
+
         probs = model.predict_proba(X)
         if calibrator is not None:
             probs = calibrator.transform(probs)
@@ -622,6 +653,16 @@ class ProductionPredictor:
             # Backward compat: old artifact without impute_state
             medians = artifact["medians"]
             X = np.where(np.isnan(X), medians, X)
+
+        # Append embedding column if model uses embeddings
+        emb_vocab = artifact.get("embedding_vocab")
+        if emb_vocab is not None:
+            emb_col_name = artifact.get("embedding_col", "player_id")
+            emb_ids = np.array(
+                [emb_vocab.get(p, 0) for p in pending[emb_col_name].to_list()]
+            ).reshape(-1, 1)
+            X = np.hstack([X, emb_ids.astype(np.float64)])
+
         probs = model.predict_proba(X)
         if calibrator is not None:
             probs = calibrator.transform(probs)
