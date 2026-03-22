@@ -404,12 +404,21 @@ def _compute_market_alignment(
     for uid in set(bet_uids):
         snap_index[uid] = relevant.filter(pl.col("match_uid") == uid)
 
+    # Determine snapshot ID column (player_id or legacy side)
+    snap_id_col = "player_id" if "player_id" in all_snapshots.columns else "side"
+
     rows: list[dict] = []
     for row in ds.filter(bet_mask).iter_rows(named=True):
         uid = row["match_uid"]
-        bet_side = str(row["bet_side"]).lower()
+        bet_side = str(row["bet_side"])
         placed_str = str(row.get("bet_placed_at") or "").strip()
         bet_odds_val = _safe_float(row.get("bet_odds"))
+
+        # Resolve bet_side ("P1"/"P2") to the actual player_id for snapshot filtering
+        if snap_id_col == "player_id":
+            bet_player = row.get("p1_id") if bet_side == "P1" else row.get("p2_id")
+        else:
+            bet_player = bet_side.lower()
 
         bet_time = _parse_bet_time(placed_str)
         if bet_time is None:
@@ -426,7 +435,7 @@ def _compute_market_alignment(
 
         for book in books:
             book_snaps = snaps.filter(
-                (pl.col("book") == book) & (pl.col("side") == bet_side)
+                (pl.col("book") == book) & (pl.col(snap_id_col) == bet_player)
             )
             if len(book_snaps) == 0:
                 continue
