@@ -1562,6 +1562,13 @@ def cmd_live(args: argparse.Namespace) -> int:
                             .alias("result")
                         ).select("match_uid", "result")
 
+        # Join draw_p1_id for odds alignment in analysis dataset
+        if matches_path.exists():
+            draw_p1 = pl.read_parquet(
+                matches_path, columns=["match_uid", "draw_p1_id"]
+            ).unique(subset=["match_uid"])
+            all_predictions = all_predictions.join(draw_p1, on="match_uid", how="left")
+
         ds = build_analysis_dataset(
             predictions=all_predictions,
             results=results_df,
@@ -1696,6 +1703,14 @@ def cmd_analysis(parsed: argparse.Namespace) -> int:
     # Load sheet data
     sheets_path = data_root / "sheets" / "bets.parquet"
     sheet_data = pl.read_parquet(sheets_path) if sheets_path.exists() else None
+
+    # Join draw_p1_id for odds alignment
+    matches_path = data_root / "aggregate" / "atptour" / "matches.parquet"
+    if matches_path.exists():
+        draw_p1 = pl.read_parquet(
+            matches_path, columns=["match_uid", "draw_p1_id"]
+        ).unique(subset=["match_uid"])
+        predictions = predictions.join(draw_p1, on="match_uid", how="left")
 
     # Layer 4: Build analysis dataset
     print("Building analysis dataset...")

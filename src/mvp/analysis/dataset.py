@@ -247,7 +247,19 @@ def _compute_pred_side_metrics(ds: pl.DataFrame) -> pl.DataFrame:
         pl.max_horizontal("p1_win_prob", "p2_win_prob").alias("pred_prob"),
     )
 
-    pred_p1 = pl.col("p1_win_prob") > 0.5
+    # The predicted winner is p1 when p1_win_prob > 0.5.
+    # Odds columns use draw_p1_id convention, which may differ from
+    # prediction p1_id. Use draw_p1_id to map correctly.
+    if "draw_p1_id" in ds.columns:
+        # p1_id matches draw_p1_id → prediction and odds agree on p1
+        p1_aligned = pl.col("p1_id") == pl.col("draw_p1_id")
+        # predicted winner is odds p1 when:
+        #   (pred says p1 wins AND p1 is aligned) OR (pred says p2 wins AND p1 is NOT aligned)
+        pred_winner_is_odds_p1 = (
+            (pl.col("p1_win_prob") > 0.5) == p1_aligned
+        )
+    else:
+        pred_winner_is_odds_p1 = pl.col("p1_win_prob") > 0.5
 
     odds_mappings = [
         ("best_closing_odds", "pred_odds_best_close"),
@@ -263,7 +275,7 @@ def _compute_pred_side_metrics(ds: pl.DataFrame) -> pl.DataFrame:
         p2_col = f"{src_prefix}_p2"
         if p1_col in ds.columns and p2_col in ds.columns:
             ds = ds.with_columns(
-                pl.when(pred_p1)
+                pl.when(pred_winner_is_odds_p1)
                 .then(pl.col(p1_col))
                 .otherwise(pl.col(p2_col))
                 .alias(dst_col)
