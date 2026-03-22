@@ -362,6 +362,9 @@ def _compute_clv(ds: pl.DataFrame) -> pl.DataFrame:
     return ds
 
 
+_BET_PLACED_AT_RELIABLE_AFTER = "2026-03-21 09:15"
+
+
 def _compute_market_alignment(
     ds: pl.DataFrame,
     all_snapshots: pl.DataFrame,
@@ -378,6 +381,7 @@ def _compute_market_alignment(
         pl.col("bet_side").is_in(["P1", "P2"])
         & pl.col("bet_placed_at").is_not_null()
         & (pl.col("bet_placed_at").cast(pl.Utf8) != "")
+        & (pl.col("bet_placed_at").cast(pl.Utf8) > _BET_PLACED_AT_RELIABLE_AFTER)
     )
     bet_uids = ds.filter(bet_mask)["match_uid"].to_list()
 
@@ -385,7 +389,13 @@ def _compute_market_alignment(
         return ds
 
     snap_index: dict[str, pl.DataFrame] = {}
-    relevant = all_snapshots.filter(pl.col("match_uid").is_in(bet_uids))
+    # Only use pre-match snapshots — live odds are unreliable for alignment
+    prematch_filter = pl.col("event_status") == "NOT_STARTED"
+    if "event_status" not in all_snapshots.columns:
+        prematch_filter = pl.lit(True)
+    relevant = all_snapshots.filter(
+        pl.col("match_uid").is_in(bet_uids) & prematch_filter
+    )
     for uid in set(bet_uids):
         snap_index[uid] = relevant.filter(pl.col("match_uid") == uid)
 
@@ -425,11 +435,14 @@ def _compute_market_alignment(
                 continue
 
             bet_us = int(bet_time.timestamp() * 1_000_000)
+            max_distance_us = 24 * 3_600_000_000  # 24 hours
             diffs = book_snaps.with_columns(
                 (pl.col("fetched_at").cast(pl.Int64) - bet_us)
                 .abs()
                 .alias("_diff")
-            )
+            ).filter(pl.col("_diff") <= max_distance_us)
+            if len(diffs) == 0:
+                continue
             nearest = diffs.sort("_diff").head(1)
             odds_val = nearest["odds"][0]
             entry[f"market_odds_at_bet_{book}"] = odds_val
