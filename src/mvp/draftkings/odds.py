@@ -235,6 +235,7 @@ class DraftKingsOddsScraper(BaseExtractor):
 
     def fetch_and_save(self, market: str = "moneyline") -> int:
         """Full flow: discover leagues, fetch odds, save raw + stage parquet."""
+        run_at = datetime.now(timezone.utc)
         entries, raw_responses = self.fetch_all_odds(market=market)
 
         if not entries:
@@ -261,6 +262,7 @@ class DraftKingsOddsScraper(BaseExtractor):
                 "opponent_name": e.opponent_name,
                 "event_status": e.event_status,
                 "fetched_at": e.fetched_at,
+                "run_at": run_at,
             }
             for e in entries
         ])

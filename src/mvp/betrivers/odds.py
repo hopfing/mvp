@@ -130,6 +130,7 @@ class BetRiversOddsScraper(BaseExtractor):
 
     def fetch_and_save(self) -> int:
         """Fetch odds, save raw JSON + stage parquet."""
+        run_at = datetime.now(UTC)
         entries, raw = self.fetch_all_odds()
 
         if not entries:
@@ -156,6 +157,7 @@ class BetRiversOddsScraper(BaseExtractor):
                 "opponent_name": e.opponent_name,
                 "event_status": e.event_status,
                 "fetched_at": e.fetched_at,
+                "run_at": run_at,
             }
             for e in entries
         ])

@@ -58,11 +58,11 @@ class BaseOddsMatcher(BaseJob):
         self._logger = logging.getLogger(f"mvp.{domain}.matcher")
 
     def get_latest_odds(self) -> pl.DataFrame:
-        """Read odds from the most recent fetch only.
+        """Read odds from the most recent run only.
 
-        Filters to the latest fetched_at timestamp so only events the book
-        returned in its most recent API call are included. Stale events
-        that the book stopped returning are excluded.
+        Filters to run_at == max(run_at) so only events from the latest
+        pipeline run are included. Falls back to fetched_at if run_at
+        column doesn't exist yet (old data).
         """
         odds_path = self.build_path("stage", "moneyline.parquet")
         if not odds_path.exists():
@@ -72,9 +72,10 @@ class BaseOddsMatcher(BaseJob):
         if len(df) == 0:
             return df
 
-        # Only include events from the most recent fetch
-        max_fetched = df["fetched_at"].max()
-        df = df.filter(pl.col("fetched_at") == max_fetched)
+        # Filter to most recent run
+        ts_col = "run_at" if "run_at" in df.columns else "fetched_at"
+        max_run = df[ts_col].max()
+        df = df.filter(pl.col(ts_col) == max_run)
 
         if "event_status" in df.columns:
             df = df.filter(pl.col("event_status") == "NOT_STARTED")
