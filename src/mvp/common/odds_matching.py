@@ -58,7 +58,12 @@ class BaseOddsMatcher(BaseJob):
         self._logger = logging.getLogger(f"mvp.{domain}.matcher")
 
     def get_latest_odds(self) -> pl.DataFrame:
-        """Read odds parquet, deduplicated to latest per event+player."""
+        """Read odds from the most recent fetch only.
+
+        Filters to the latest fetched_at timestamp so only events the book
+        returned in its most recent API call are included. Stale events
+        that the book stopped returning are excluded.
+        """
         odds_path = self.build_path("stage", "moneyline.parquet")
         if not odds_path.exists():
             return pl.DataFrame()
@@ -67,14 +72,14 @@ class BaseOddsMatcher(BaseJob):
         if len(df) == 0:
             return df
 
+        # Only include events from the most recent fetch
+        max_fetched = df["fetched_at"].max()
+        df = df.filter(pl.col("fetched_at") == max_fetched)
+
         if "event_status" in df.columns:
             df = df.filter(pl.col("event_status") == "NOT_STARTED")
 
-        return (
-            df.sort("fetched_at")
-            .group_by([self.event_id_column, "player_name"])
-            .last()
-        )
+        return df
 
     def match(self, predictions: pl.DataFrame) -> OddsMatchResult:
         """Look up odds for predictions using the event map.
