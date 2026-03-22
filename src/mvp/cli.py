@@ -1340,7 +1340,7 @@ def cmd_live(args: argparse.Namespace) -> int:
             logger.error("MGM odds fetch failed: %s", e)
             print(f"Warning: MGM odds fetch failed ({e})")
 
-        # Map book events to matches using full player database
+        # Map new book events to matches using full player database
         import polars as pl
 
         from mvp.analysis.event_map import load_event_map, save_event_mappings
@@ -1350,49 +1350,78 @@ def cmd_live(args: argparse.Namespace) -> int:
             map_book_events,
         )
 
-        matches_path = get_data_root() / "aggregate" / "atptour" / "matches.parquet"
-        if matches_path.exists():
-            catalog_df = pl.read_parquet(
-                matches_path,
-                columns=["match_uid", "player_id", "opp_id", "tournament_id",
-                         "year", "tournament_name", "draw_type", "draw_p1_id"],
-            )
-            match_catalog = build_match_catalog(catalog_df)
-        else:
-            match_catalog = {}
-
-        existing_map = load_event_map()
-
         _BOOK_CONFIG = [
             ("dk", "dk_event_id", "stage/draftkings/moneyline.parquet",
-             "src/mvp/draftkings/player_aliases.yaml"),
+             Path(__file__).resolve().parents[1] / "src/mvp/draftkings/player_aliases.yaml"),
             ("br", "br_event_id", "stage/betrivers/moneyline.parquet",
-             "src/mvp/betrivers/player_aliases.yaml"),
+             Path(__file__).resolve().parents[1] / "src/mvp/betrivers/player_aliases.yaml"),
             ("mgm", "mgm_event_id", "stage/betmgm/moneyline.parquet",
-             "src/mvp/betmgm/player_aliases.yaml"),
+             Path(__file__).resolve().parents[1] / "src/mvp/betmgm/player_aliases.yaml"),
         ]
 
-        for book, eid_col, odds_rel_path, aliases_rel in _BOOK_CONFIG:
-            try:
-                aliases_path = Path(__file__).resolve().parents[1] / aliases_rel
-                player_lookup = build_player_lookup(aliases_path=aliases_path)
-                odds_path = get_data_root() / odds_rel_path
-                if not odds_path.exists():
-                    continue
-                staged = pl.read_parquet(odds_path)
-                # Deduplicate to latest per event+player
-                staged_latest = staged.sort("fetched_at").group_by([eid_col, "player_name"]).last()
-                existing_eids = set(
-                    existing_map.filter(pl.col("book") == book)["event_id"].to_list()
-                )
-                map_result = map_book_events(
-                    staged_latest, eid_col, book, player_lookup, match_catalog, existing_eids,
-                )
-                if map_result.event_matches:
-                    save_event_mappings(map_result.event_matches, book=book)
-                    print(f"Event mapper: {len(map_result.event_matches)} new {book.upper()} mappings")
-            except Exception as e:
-                logger.error("Event mapping failed for %s: %s", book.upper(), e)
+        existing_map = load_event_map()
+        data_root = get_data_root()
+
+        # Collect unmapped events across all books to determine year range
+        unmapped_odds: list[tuple[str, str, Path, pl.DataFrame]] = []
+        for book, eid_col, odds_rel, aliases_path in _BOOK_CONFIG:
+            odds_path = data_root / odds_rel
+            if not odds_path.exists():
+                continue
+            staged = pl.read_parquet(odds_path)
+            staged_latest = staged.sort("fetched_at").group_by([eid_col, "player_name"]).last()
+            existing_eids = set(
+                existing_map.filter(pl.col("book") == book)["event_id"].to_list()
+            )
+            # Filter to only unmapped events
+            unmapped = staged_latest.filter(~pl.col(eid_col).is_in(existing_eids))
+            if len(unmapped) > 0:
+                unmapped_odds.append((book, eid_col, aliases_path, unmapped))
+
+        if unmapped_odds:
+            # Derive year range from unmapped events
+            min_year = min(
+                df["fetched_at"].min().year for _, _, _, df in unmapped_odds
+            )
+
+            # Build catalog filtered to relevant years only
+            matches_path = data_root / "aggregate" / "atptour" / "matches.parquet"
+            if matches_path.exists():
+                catalog_df = pl.read_parquet(
+                    matches_path,
+                    columns=["match_uid", "player_id", "opp_id", "tournament_id",
+                             "year", "tournament_name", "draw_type", "draw_p1_id"],
+                ).filter(pl.col("year") >= min_year)
+                match_catalog = build_match_catalog(catalog_df)
+            else:
+                match_catalog = {}
+
+            # Build player lookup once (shared across books)
+            base_lookup = build_player_lookup()
+
+            for book, eid_col, aliases_path, unmapped_df in unmapped_odds:
+                try:
+                    # Merge per-book aliases into lookup
+                    if aliases_path.exists():
+                        import yaml
+                        from mvp.common.odds_matching import normalize_name
+
+                        with open(aliases_path) as f:
+                            raw = yaml.safe_load(f) or {}
+                        book_lookup = {**base_lookup}
+                        for name, pid in raw.items():
+                            book_lookup[normalize_name(name)] = pid.upper().strip()
+                    else:
+                        book_lookup = base_lookup
+
+                    map_result = map_book_events(
+                        unmapped_df, eid_col, book, book_lookup, match_catalog,
+                    )
+                    if map_result.event_matches:
+                        save_event_mappings(map_result.event_matches, book=book)
+                        print(f"Event mapper: {len(map_result.event_matches)} new {book.upper()} mappings")
+                except Exception as e:
+                    logger.error("Event mapping failed for %s: %s", book.upper(), e)
 
         # Look up odds for predictions using event map
         odds_map: dict[str, dict[str, float]] | None = None
