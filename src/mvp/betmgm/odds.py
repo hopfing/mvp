@@ -125,7 +125,7 @@ def _parse_fixtures(
             continue
 
         event_id = str(fixture.get("id", ""))
-        tournament = fixture.get("tournament", {}).get("name", {}).get("value", "")
+        tournament = competition.get("name", {}).get("value", "") or fixture.get("tournament", {}).get("name", {}).get("value", "")
         tournament_id = str(fixture.get("tournament", {}).get("id", ""))
         stage = fixture.get("stage", "")
         event_status = _STAGE_MAP.get(stage, "NOT_STARTED")
