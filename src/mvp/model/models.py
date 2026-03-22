@@ -252,6 +252,46 @@ class EnsembleModel(BaseModel):
         return _SklearnWrapper(self)
 
 
+def _make_embedding_mlp():
+    """Lazy factory to avoid top-level torch import."""
+    import torch
+    import torch.nn as nn
+
+    class EmbeddingMLP(nn.Module):
+        def __init__(
+            self,
+            n_features: int,
+            n_players: int,
+            embedding_dim: int,
+            hidden_layers: list[int],
+            dropout: float,
+            batch_norm: bool,
+        ):
+            super().__init__()
+            self.embedding = nn.Embedding(n_players + 1, embedding_dim, padding_idx=0)
+            mlp_input_dim = n_features + embedding_dim
+            layers: list[nn.Module] = []
+            in_dim = mlp_input_dim
+            for hidden_dim in hidden_layers:
+                layers.append(nn.Linear(in_dim, hidden_dim))
+                if batch_norm:
+                    layers.append(nn.BatchNorm1d(hidden_dim))
+                layers.append(nn.ReLU())
+                if dropout > 0:
+                    layers.append(nn.Dropout(dropout))
+                in_dim = hidden_dim
+            layers.append(nn.Linear(in_dim, 1))
+            layers.append(nn.Sigmoid())
+            self.mlp = nn.Sequential(*layers)
+
+        def forward(self, x: torch.Tensor, player_idx: torch.Tensor) -> torch.Tensor:
+            emb = self.embedding(player_idx)
+            combined = torch.cat([x, emb], dim=1)
+            return self.mlp(combined)
+
+    return EmbeddingMLP
+
+
 class NeuralNetModel(BaseModel):
     """PyTorch MLP wrapper for tabular classification."""
 
@@ -263,12 +303,30 @@ class NeuralNetModel(BaseModel):
         self.epochs: int = params.get("epochs", 200)
         self.patience: int = params.get("patience", 15)
         self.batch_norm: bool = params.get("batch_norm", False)
+        self.embedding_dim: int = params.get("embedding_dim", 0)
+        self.embedding_col_idx: int | None = params.get("embedding_col_idx", None)
+        self.n_players: int = params.get("n_players", 0)
         self._module = None
         self._device = None
         self._n_features = None
 
+    @property
+    def _has_embeddings(self) -> bool:
+        return self.embedding_dim > 0 and self.n_players > 0 and self.embedding_col_idx is not None
+
     def _build_module(self, n_features: int):
         import torch.nn as nn
+
+        if self._has_embeddings:
+            EmbeddingMLP = _make_embedding_mlp()
+            return EmbeddingMLP(
+                n_features=n_features,
+                n_players=self.n_players,
+                embedding_dim=self.embedding_dim,
+                hidden_layers=self.hidden_layers,
+                dropout=self.dropout,
+                batch_norm=self.batch_norm,
+            )
 
         layers: list[nn.Module] = []
         in_dim = n_features
@@ -291,6 +349,20 @@ class NeuralNetModel(BaseModel):
             return torch.device("cuda")
         return torch.device("cpu")
 
+    def _split_embedding_col(self, X: np.ndarray) -> tuple[np.ndarray, np.ndarray | None]:
+        """Separate embedding ID column from feature columns."""
+        if not self._has_embeddings:
+            return X, None
+        emb_ids = X[:, self.embedding_col_idx].astype(int)
+        X_features = np.delete(X, self.embedding_col_idx, axis=1)
+        return X_features, emb_ids
+
+    def _forward(self, X_t, emb_t=None):
+        """Forward pass handling both plain MLP and embedding MLP."""
+        if emb_t is not None:
+            return self._module(X_t, emb_t)
+        return self._module(X_t)
+
     def fit(
         self,
         X: np.ndarray,
@@ -301,12 +373,15 @@ class NeuralNetModel(BaseModel):
         from torch.utils.data import DataLoader, TensorDataset
 
         self._device = self._get_device()
-        self._n_features = X.shape[1]
+
+        # Separate embedding column before counting features
+        X_features, emb_ids = self._split_embedding_col(X)
+        self._n_features = X_features.shape[1]
         self._module = self._build_module(self._n_features).to(self._device)
 
         # Temporal train/val split (last 15%)
-        val_size = max(1, int(len(X) * 0.15))
-        X_train, X_val = X[:-val_size], X[-val_size:]
+        val_size = max(1, int(len(X_features) * 0.15))
+        X_train, X_val = X_features[:-val_size], X_features[-val_size:]
         y_train, y_val = y[:-val_size], y[-val_size:]
         w_train = sample_weight[:-val_size] if sample_weight is not None else None
 
@@ -314,6 +389,14 @@ class NeuralNetModel(BaseModel):
         y_t = torch.tensor(y_train, dtype=torch.float32, device=self._device).unsqueeze(1)
         X_v = torch.tensor(X_val, dtype=torch.float32, device=self._device)
         y_v = torch.tensor(y_val, dtype=torch.float32, device=self._device).unsqueeze(1)
+
+        # Embedding index tensors
+        if emb_ids is not None:
+            emb_t = torch.tensor(emb_ids[:-val_size], dtype=torch.long, device=self._device)
+            emb_v = torch.tensor(emb_ids[-val_size:], dtype=torch.long, device=self._device)
+        else:
+            emb_t = None
+            emb_v = None
 
         if w_train is not None:
             w_t = torch.tensor(w_train, dtype=torch.float32, device=self._device).unsqueeze(1)
@@ -323,24 +406,34 @@ class NeuralNetModel(BaseModel):
         optimizer = torch.optim.Adam(self._module.parameters(), lr=self.learning_rate)
         loss_fn = torch.nn.BCELoss(reduction="none")
 
-        dataset = TensorDataset(X_t, y_t) if w_t is None else TensorDataset(X_t, y_t, w_t)
+        # Build dataset with optional embedding and weight tensors
+        tensors = [X_t, y_t]
+        if emb_t is not None:
+            tensors.append(emb_t)
+        if w_t is not None:
+            tensors.append(w_t)
+        dataset = TensorDataset(*tensors)
         loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True)
 
         best_val_loss = float("inf")
         best_state = None
         wait = 0
+        has_emb = emb_t is not None
+        has_w = w_t is not None
 
         for _epoch in range(self.epochs):
             self._module.train()
             for batch in loader:
-                if w_t is not None:
-                    xb, yb, wb = batch
-                else:
-                    xb, yb = batch
-                    wb = None
+                idx = 0
+                xb = batch[idx]; idx += 1
+                yb = batch[idx]; idx += 1
+                eb = batch[idx] if has_emb else None
+                if has_emb:
+                    idx += 1
+                wb = batch[idx] if has_w else None
 
                 optimizer.zero_grad()
-                pred = self._module(xb)
+                pred = self._forward(xb, eb)
                 loss = loss_fn(pred, yb)
                 if wb is not None:
                     loss = (loss * wb).mean()
@@ -352,7 +445,7 @@ class NeuralNetModel(BaseModel):
             # Validation
             self._module.eval()
             with torch.no_grad():
-                val_pred = self._module(X_v)
+                val_pred = self._forward(X_v, emb_v)
                 val_loss = loss_fn(val_pred, y_v).mean().item()
 
             if val_loss < best_val_loss:
@@ -377,8 +470,12 @@ class NeuralNetModel(BaseModel):
             raise RuntimeError("Model not fitted")
         self._module.eval()
         with torch.no_grad():
-            X_t = torch.tensor(X, dtype=torch.float32, device=self._device)
-            preds = self._module(X_t).squeeze(1).cpu().numpy()
+            X_features, emb_ids = self._split_embedding_col(X)
+            X_t = torch.tensor(X_features, dtype=torch.float32, device=self._device)
+            emb_t = None
+            if emb_ids is not None:
+                emb_t = torch.tensor(emb_ids, dtype=torch.long, device=self._device)
+            preds = self._forward(X_t, emb_t).squeeze(1).cpu().numpy()
         return preds
 
     def __getstate__(self):
