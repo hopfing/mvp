@@ -192,7 +192,7 @@ class TestUniquenessAssertion:
             "player_id": ["N409", "N409"],
         })
         with pytest.raises(ValueError, match="Duplicate primary keys"):
-            PlayerBioTransformer._assert_unique(df, ["player_id"])
+            PlayerBioTransformer.assert_unique(df, ["player_id"], "player_bio")
 
 
 class TestPlayerBioTransformer:

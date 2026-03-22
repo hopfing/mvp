@@ -573,13 +573,13 @@ class TestUniquenessAssertion:
         import pytest
 
         with pytest.raises(ValueError, match="Duplicate primary keys"):
-            MatchStatsTransformer._assert_unique(df, ["match_uid"])
+            MatchStatsTransformer.assert_unique(df, ["match_uid"], "match_stats")
 
     def test_assertion_skips_null_uids(self):
         df = pl.DataFrame({
             "match_uid": [None, None, "uid1"],
         })
-        MatchStatsTransformer._assert_unique(df, ["match_uid"])
+        MatchStatsTransformer.assert_unique(df, ["match_uid"], "match_stats")
 
 
 class TestSkipConditions:

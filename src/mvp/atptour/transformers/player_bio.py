@@ -128,7 +128,7 @@ class PlayerBioTransformer(BaseJob):
         dfs = [pl.read_parquet(p) for p in parquet_files]
         combined = pl.concat(dfs, how="vertical_relaxed")
 
-        self._assert_unique(combined, ["player_id"])
+        self.assert_unique(combined, ["player_id"], "player_bio")
 
         target = self.build_path("stage", "players.parquet")
         result = self.save_parquet(combined, target)
@@ -140,12 +140,3 @@ class PlayerBioTransformer(BaseJob):
         )
         return result
 
-    @staticmethod
-    def _assert_unique(df: pl.DataFrame, key_cols: list[str]) -> None:
-        """Assert primary key uniqueness."""
-        dupes = df.group_by(key_cols).len().filter(pl.col("len") > 1)
-        if len(dupes) > 0:
-            samples = dupes.head(5)[key_cols].to_dicts()
-            raise ValueError(
-                f"Duplicate primary keys in player_bio: {samples}"
-            )

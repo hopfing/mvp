@@ -78,7 +78,7 @@ class MatchStatsTransformer(BaseJob):
         overrides = polars_schema(MatchStatsRecord)
         df = pl.DataFrame(rows, schema_overrides=overrides)
 
-        self._assert_unique(df, ["match_uid"])
+        self.assert_unique(df, ["match_uid"], "match_stats")
 
         out_path = self.build_path(
             "stage", self.tournament.path, "match_stats.parquet"
@@ -234,13 +234,3 @@ class MatchStatsTransformer(BaseJob):
         except (ValueError, TypeError):
             return None
 
-    @staticmethod
-    def _assert_unique(df: pl.DataFrame, key_cols: list[str]) -> None:
-        """Assert primary key uniqueness, excluding null-uid rows."""
-        check = df.filter(pl.col(key_cols[0]).is_not_null())
-        dupes = check.group_by(key_cols).len().filter(pl.col("len") > 1)
-        if len(dupes) > 0:
-            samples = dupes.head(5)[key_cols].to_dicts()
-            raise ValueError(
-                f"Duplicate primary keys in match_stats: {samples}"
-            )

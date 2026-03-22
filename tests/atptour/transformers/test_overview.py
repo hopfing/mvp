@@ -153,14 +153,14 @@ class TestUniquenessAssertion:
             "year": [2025, 2025],
         })
         with pytest.raises(ValueError, match="Duplicate primary keys"):
-            OverviewTransformer._assert_unique(df, ["tournament_id", "year"])
+            OverviewTransformer.assert_unique(df, ["tournament_id", "year"], "overview")
 
     def test_assertion_passes_unique(self):
         df = pl.DataFrame({
             "tournament_id": ["404", "404"],
             "year": [2025, 2024],
         })
-        OverviewTransformer._assert_unique(df, ["tournament_id", "year"])
+        OverviewTransformer.assert_unique(df, ["tournament_id", "year"], "overview")
 
 
 class TestEdgeCases:

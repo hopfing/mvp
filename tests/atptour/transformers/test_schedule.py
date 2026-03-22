@@ -809,13 +809,13 @@ class TestUniquenessAssertion:
             "match_uid": ["uid1", "uid1", "uid2"],
         })
         with pytest.raises(ValueError, match="Duplicate primary keys"):
-            ScheduleTransformer._assert_unique(df, ["match_uid"])
+            ScheduleTransformer.assert_unique(df, ["match_uid"], "schedule")
 
     def test_assertion_skips_null_uids(self):
         df = pl.DataFrame({
             "match_uid": [None, None, "uid1"],
         })
-        ScheduleTransformer._assert_unique(df, ["match_uid"])
+        ScheduleTransformer.assert_unique(df, ["match_uid"], "schedule")
 
 
 class TestUndeterminedOpponent:

@@ -338,7 +338,7 @@ class TestUniquenessAssertion:
             "player_id": ["A0E2", "A0E2"],
         })
         with pytest.raises(ValueError, match="Duplicate primary keys"):
-            RankingsTransformer._assert_unique(df, ["player_id"])
+            RankingsTransformer.assert_unique(df, ["player_id"], "rankings")
 
     def test_consolidated_assertion_fires(self):
         import pytest
@@ -348,8 +348,8 @@ class TestUniquenessAssertion:
             "player_id": ["A0E2", "A0E2"],
         })
         with pytest.raises(ValueError, match="Duplicate primary keys"):
-            RankingsTransformer._assert_unique(
-                df, ["ranking_date", "player_id"]
+            RankingsTransformer.assert_unique(
+                df, ["ranking_date", "player_id"], "rankings"
             )
 
 

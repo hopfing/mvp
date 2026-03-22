@@ -710,21 +710,21 @@ class TestFlattenScores:
 
 class TestUniquenessAssertion:
     def test_assertion_fires_on_duplicate_match_uid(self):
-        """_assert_unique raises ValueError on duplicate keys."""
+        """assert_unique raises ValueError on duplicate keys."""
         df = pl.DataFrame({
             "match_uid": ["uid1", "uid1", "uid2"],
         })
         import pytest
 
         with pytest.raises(ValueError, match="Duplicate primary keys"):
-            ResultsTransformer._assert_unique(df, ["match_uid"])
+            ResultsTransformer.assert_unique(df, ["match_uid"], "results")
 
     def test_assertion_skips_null_uids(self):
         """Null match_uids are excluded from uniqueness check."""
         df = pl.DataFrame({
             "match_uid": [None, None, "uid1"],
         })
-        ResultsTransformer._assert_unique(df, ["match_uid"])
+        ResultsTransformer.assert_unique(df, ["match_uid"], "results")
 
 
 class TestMatchId:

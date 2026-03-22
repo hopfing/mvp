@@ -192,3 +192,22 @@ class BaseJob:
         if not directory.is_dir():
             return []
         return sorted(directory.glob(pattern))
+
+    @staticmethod
+    def assert_unique(
+        df: pl.DataFrame, key_cols: list[str], entity: str
+    ) -> None:
+        """Assert primary key uniqueness, excluding null-key rows.
+
+        Args:
+            df: DataFrame to check.
+            key_cols: Columns forming the primary key.
+            entity: Name for error messages (e.g. "results", "overview").
+        """
+        check = df.filter(pl.col(key_cols[0]).is_not_null())
+        dupes = check.group_by(key_cols).len().filter(pl.col("len") > 1)
+        if len(dupes) > 0:
+            samples = dupes.head(5)[key_cols].to_dicts()
+            raise ValueError(
+                f"Duplicate primary keys in {entity}: {samples}"
+            )

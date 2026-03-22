@@ -59,7 +59,7 @@ class ResultsTransformer(BaseJob):
         df = pl.DataFrame(rows, schema_overrides=overrides)
 
         df = self._dedup(df)
-        self._assert_unique(df, ["match_uid"])
+        self.assert_unique(df, ["match_uid"], "results")
 
         out_path = self.build_path("stage", self.tournament.path, "results.parquet")
         result = self.save_parquet(df, out_path)
@@ -231,13 +231,3 @@ class ResultsTransformer(BaseJob):
             )
         return df
 
-    @staticmethod
-    def _assert_unique(df: pl.DataFrame, key_cols: list[str]) -> None:
-        """Assert primary key uniqueness, excluding null-uid rows."""
-        check = df.filter(pl.col(key_cols[0]).is_not_null())
-        dupes = check.group_by(key_cols).len().filter(pl.col("len") > 1)
-        if len(dupes) > 0:
-            samples = dupes.head(5)[key_cols].to_dicts()
-            raise ValueError(
-                f"Duplicate primary keys in results: {samples}"
-            )
