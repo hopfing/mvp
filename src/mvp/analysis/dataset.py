@@ -295,7 +295,7 @@ def _compute_pred_side_metrics(ds: pl.DataFrame) -> pl.DataFrame:
         p2_col = f"{src_prefix}_p2"
         if p1_col in ds.columns and p2_col in ds.columns:
             ds = ds.with_columns(
-                pl.when(pred_winner_is_odds_p1)
+                pl.when(pred_p1)
                 .then(pl.col(p1_col))
                 .otherwise(pl.col(p2_col))
                 .alias(dst_col)
