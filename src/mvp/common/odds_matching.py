@@ -30,6 +30,8 @@ class EventMatch:
     event_id: str
     p1_book_name: str
     p2_book_name: str
+    p1_id: str = ""
+    p2_id: str = ""
 
 
 @dataclass

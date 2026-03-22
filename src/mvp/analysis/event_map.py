@@ -18,6 +18,8 @@ EVENT_MAP_SCHEMA = {
     "event_id": pl.Utf8,
     "p1_book_name": pl.Utf8,
     "p2_book_name": pl.Utf8,
+    "p1_id": pl.Utf8,
+    "p2_id": pl.Utf8,
     "matched_at": pl.Datetime("us", "UTC"),
     "source": pl.Utf8,
 }
@@ -50,6 +52,8 @@ def save_event_mappings(
             "event_id": m.event_id,
             "p1_book_name": m.p1_book_name,
             "p2_book_name": m.p2_book_name,
+            "p1_id": m.p1_id,
+            "p2_id": m.p2_id,
             "matched_at": now,
             "source": "auto",
         }

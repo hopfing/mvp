@@ -60,6 +60,7 @@ def build_analysis_dataset(
     if cross_book_odds is not None:
         ds = ds.join(cross_book_odds, on="match_uid", how="left")
 
+    ds = _align_odds_to_predictions(ds)
     ds = _compute_pred_side_metrics(ds)
     ds = _compute_clv(ds)
 
@@ -113,6 +114,52 @@ def _join_sheet_data(ds: pl.DataFrame, sheet_data: pl.DataFrame | None) -> pl.Da
     sheet_subset = sheet_data.select(available)
 
     ds = ds.join(sheet_subset, on="match_uid", how="left")
+
+    return ds
+
+
+def _align_odds_to_predictions(ds: pl.DataFrame) -> pl.DataFrame:
+    """Swap _p1/_p2 odds columns where odds p1 differs from prediction p1.
+
+    The odds pipeline assigns p1/p2 based on draw_p1_id, but predictions
+    may use a different p1 assignment (e.g., from older runs before
+    draw_p1_id was set). This function detects the mismatch via
+    odds_p1_id/odds_p2_id and swaps all _p1/_p2 suffixed columns.
+    """
+    if "odds_p1_id" not in ds.columns or "p1_id" not in ds.columns:
+        return ds
+
+    needs_swap = (
+        pl.col("odds_p1_id").is_not_null()
+        & (pl.col("odds_p1_id") != pl.col("p1_id"))
+    )
+
+    # Find all column pairs with _p1/_p2 suffixes (from odds, not predictions)
+    p1_cols = [c for c in ds.columns if c.endswith("_p1") and c != "p1_id"
+               and c.replace("_p1", "_p2") in ds.columns]
+
+    swap_exprs = []
+    for p1_col in p1_cols:
+        p2_col = p1_col.replace("_p1", "_p2")
+        # When needs_swap: p1 gets p2's value and vice versa
+        swap_exprs.append(
+            pl.when(needs_swap)
+            .then(pl.col(p2_col))
+            .otherwise(pl.col(p1_col))
+            .alias(p1_col)
+        )
+        swap_exprs.append(
+            pl.when(needs_swap)
+            .then(pl.col(p1_col))
+            .otherwise(pl.col(p2_col))
+            .alias(p2_col)
+        )
+
+    if swap_exprs:
+        n_swapped = ds.filter(needs_swap).shape[0]
+        if n_swapped > 0:
+            logger.info("Odds alignment: swapped p1/p2 for %d/%d matches", n_swapped, len(ds))
+        ds = ds.with_columns(swap_exprs)
 
     return ds
 

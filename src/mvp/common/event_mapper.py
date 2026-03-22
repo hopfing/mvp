@@ -334,17 +334,21 @@ def map_book_events(
                 skipped_ambiguous += 1
                 continue
 
-        # Assign p1/p2 book names to match our internal p1/p2 ordering
+        # Assign p1/p2 book names and player IDs
         match_p1_id = match.get("p1_id")
         if match_p1_id == pid_a:
             p1_book_name, p2_book_name = name_a, name_b
+            p1_id, p2_id = pid_a, pid_b
         else:
             p1_book_name, p2_book_name = name_b, name_a
+            p1_id, p2_id = pid_b, pid_a
         result.event_matches.append(EventMatch(
             match_uid=match["match_uid"],
             event_id=eid,
             p1_book_name=p1_book_name,
             p2_book_name=p2_book_name,
+            p1_id=p1_id,
+            p2_id=p2_id,
         ))
         mapped += 1
 
