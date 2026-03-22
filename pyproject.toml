@@ -20,7 +20,8 @@ dependencies = [
     "cryptography (>=46.0.5,<47.0.0)",
     "gspread (>=6.0.0,<7.0.0)",
     "python-dotenv (>=1.0.0,<2.0.0)",
-    "cloudscraper (>=1.2,<2.0.0)"
+    "cloudscraper (>=1.2,<2.0.0)",
+    "torch (>=2.2,<3.0.0)"
 ]
 
 
