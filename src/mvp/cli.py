@@ -1350,13 +1350,14 @@ def cmd_live(args: argparse.Namespace) -> int:
             map_book_events,
         )
 
+        _cli_dir = Path(__file__).resolve().parent
         _BOOK_CONFIG = [
             ("dk", "dk_event_id", "stage/draftkings/moneyline.parquet",
-             Path(__file__).resolve().parents[1] / "src/mvp/draftkings/player_aliases.yaml"),
+             _cli_dir / "draftkings" / "player_aliases.yaml"),
             ("br", "br_event_id", "stage/betrivers/moneyline.parquet",
-             Path(__file__).resolve().parents[1] / "src/mvp/betrivers/player_aliases.yaml"),
+             _cli_dir / "betrivers" / "player_aliases.yaml"),
             ("mgm", "mgm_event_id", "stage/betmgm/moneyline.parquet",
-             Path(__file__).resolve().parents[1] / "src/mvp/betmgm/player_aliases.yaml"),
+             _cli_dir / "betmgm" / "player_aliases.yaml"),
         ]
 
         existing_map = load_event_map()
