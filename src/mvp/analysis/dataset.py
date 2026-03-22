@@ -55,10 +55,11 @@ def build_analysis_dataset(
 
     ds = _join_results(ds, results)
     ds = _join_sheet_data(ds, sheet_data)
-    ds = _join_odds(ds, odds_by_book, skip_cross_book=(cross_book_odds is not None))
 
-    if cross_book_odds is not None:
-        ds = ds.join(cross_book_odds, on="match_uid", how="left")
+    if cross_book_odds is not None and len(cross_book_odds) > 0:
+        ds = _join_cross_book_odds(ds, cross_book_odds)
+    else:
+        ds = _join_odds(ds, odds_by_book, skip_cross_book=False)
 
     ds = _compute_pred_side_metrics(ds)
     ds = _compute_clv(ds)
@@ -113,6 +114,35 @@ def _join_sheet_data(ds: pl.DataFrame, sheet_data: pl.DataFrame | None) -> pl.Da
     sheet_subset = sheet_data.select(available)
 
     ds = ds.join(sheet_subset, on="match_uid", how="left")
+
+    return ds
+
+
+def _join_cross_book_odds(ds: pl.DataFrame, cross_book: pl.DataFrame) -> pl.DataFrame:
+    """Join per-player cross-book odds to predictions.
+
+    Cross-book odds are long format: one row per (match_uid, player_id).
+    Join twice: once for p1's odds, once for p2's odds.
+    """
+    odds_cols = [c for c in cross_book.columns if c not in ("match_uid", "player_id")]
+
+    # Join p1's odds
+    p1_odds = cross_book.rename({c: f"{c}_p1" for c in odds_cols})
+    ds = ds.join(
+        p1_odds,
+        left_on=["match_uid", "p1_id"],
+        right_on=["match_uid", "player_id"],
+        how="left",
+    )
+
+    # Join p2's odds
+    p2_odds = cross_book.rename({c: f"{c}_p2" for c in odds_cols})
+    ds = ds.join(
+        p2_odds,
+        left_on=["match_uid", "p2_id"],
+        right_on=["match_uid", "player_id"],
+        how="left",
+    )
 
     return ds
 
@@ -247,19 +277,9 @@ def _compute_pred_side_metrics(ds: pl.DataFrame) -> pl.DataFrame:
         pl.max_horizontal("p1_win_prob", "p2_win_prob").alias("pred_prob"),
     )
 
-    # The predicted winner is p1 when p1_win_prob > 0.5.
-    # Odds columns use draw_p1_id convention, which may differ from
-    # prediction p1_id. Use draw_p1_id to map correctly.
-    if "draw_p1_id" in ds.columns:
-        # p1_id matches draw_p1_id → prediction and odds agree on p1
-        p1_aligned = pl.col("p1_id") == pl.col("draw_p1_id")
-        # predicted winner is odds p1 when:
-        #   (pred says p1 wins AND p1 is aligned) OR (pred says p2 wins AND p1 is NOT aligned)
-        pred_winner_is_odds_p1 = (
-            (pl.col("p1_win_prob") > 0.5) == p1_aligned
-        )
-    else:
-        pred_winner_is_odds_p1 = pl.col("p1_win_prob") > 0.5
+    # Odds _p1/_p2 columns are joined by player_id, so they always
+    # correspond to prediction p1/p2. No alignment needed.
+    pred_p1 = pl.col("p1_win_prob") > 0.5
 
     odds_mappings = [
         ("best_closing_odds", "pred_odds_best_close"),
@@ -369,12 +389,20 @@ def _compute_market_alignment(
     for uid in set(bet_uids):
         snap_index[uid] = relevant.filter(pl.col("match_uid") == uid)
 
+    snap_id_col = "player_id" if "player_id" in all_snapshots.columns else "side"
+
     rows: list[dict] = []
     for row in ds.filter(bet_mask).iter_rows(named=True):
         uid = row["match_uid"]
-        bet_side = str(row["bet_side"]).lower()
+        bet_side = str(row["bet_side"])
         placed_str = str(row.get("bet_placed_at") or "").strip()
         bet_odds_val = _safe_float(row.get("bet_odds"))
+
+        # Resolve bet_side to player_id or side label
+        if snap_id_col == "player_id":
+            bet_player = row.get("p1_id") if bet_side == "P1" else row.get("p2_id")
+        else:
+            bet_player = bet_side.lower()
 
         bet_time = _parse_bet_time(placed_str)
         if bet_time is None:
@@ -391,7 +419,7 @@ def _compute_market_alignment(
 
         for book in books:
             book_snaps = snaps.filter(
-                (pl.col("book") == book) & (pl.col("side") == bet_side)
+                (pl.col("book") == book) & (pl.col(snap_id_col) == bet_player)
             )
             if len(book_snaps) == 0:
                 continue
