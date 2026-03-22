@@ -11,7 +11,6 @@ logger = logging.getLogger(__name__)
 SNAPSHOT_SCHEMA = {
     "match_uid": pl.Utf8,
     "book": pl.Utf8,
-    "player_id": pl.Utf8,
     "side": pl.Utf8,
     "odds": pl.Float64,
     "fetched_at": pl.Datetime("us", "UTC"),
@@ -30,27 +29,25 @@ def resolve_snapshots(
     book: str,
     event_id_col: str,
 ) -> pl.DataFrame:
-    """Resolve staged odds into match_uid + player_id format.
+    """Resolve staged odds into match_uid + side format.
 
     Args:
         staged: Raw staged moneyline odds with player_name and event ID column.
         event_map: Event mapping table with match_uid, book, event_id,
-                   p1_book_name, p2_book_name, p1_id, p2_id.
+                   p1_book_name, p2_book_name.
         book: Book identifier (e.g. "dk", "br", "mgm").
         event_id_col: Name of the event ID column in staged (e.g. "dk_event_id").
 
     Returns:
-        DataFrame with columns: match_uid, book, player_id, odds, fetched_at,
-        event_status. One row per snapshot per player.
+        DataFrame with columns: match_uid, book, side, odds, fetched_at,
+        event_status. One row per snapshot per side.
     """
     book_map = event_map.filter(pl.col("book") == book)
     if len(book_map) == 0:
         return empty()
 
-    map_cols = ["event_id", "match_uid", "p1_book_name", "p2_book_name", "p1_id", "p2_id"]
-
     joined = staged.join(
-        book_map.select(map_cols),
+        book_map.select("event_id", "match_uid", "p1_book_name", "p2_book_name"),
         left_on=event_id_col,
         right_on="event_id",
         how="inner",
@@ -61,21 +58,15 @@ def resolve_snapshots(
 
     resolved = joined.with_columns(
         pl.when(pl.col("player_name") == pl.col("p1_book_name"))
-        .then(pl.col("p1_id"))
-        .when(pl.col("player_name") == pl.col("p2_book_name"))
-        .then(pl.col("p2_id"))
-        .otherwise(pl.lit(None))
-        .alias("player_id"),
-        pl.when(pl.col("player_name") == pl.col("p1_book_name"))
         .then(pl.lit("p1"))
         .when(pl.col("player_name") == pl.col("p2_book_name"))
         .then(pl.lit("p2"))
         .otherwise(pl.lit(None))
         .alias("side"),
         pl.lit(book).alias("book"),
-    ).filter(pl.col("player_id").is_not_null())
+    ).filter(pl.col("side").is_not_null())
 
-    cols = ["match_uid", "book", "player_id", "side", "odds", "fetched_at", "event_status"]
+    cols = ["match_uid", "book", "side", "odds", "fetched_at", "event_status"]
     return resolved.select(cols)
 
 

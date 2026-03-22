@@ -247,22 +247,7 @@ def _compute_pred_side_metrics(ds: pl.DataFrame) -> pl.DataFrame:
         pl.max_horizontal("p1_win_prob", "p2_win_prob").alias("pred_prob"),
     )
 
-    # Determine which odds column belongs to the predicted winner.
-    # The predicted player is p1_id when p1_win_prob > 0.5, else p2_id.
-    # The odds columns use the event_map's p1/p2 (via odds_p1_id).
-    # These may differ, so we match by player_id.
-    if "odds_p1_id" in ds.columns:
-        # predicted player's ID
-        pred_player = (
-            pl.when(pl.col("p1_win_prob") > 0.5)
-            .then(pl.col("p1_id"))
-            .otherwise(pl.col("p2_id"))
-        )
-        # Does the predicted player match the odds p1?
-        pred_is_odds_p1 = pred_player == pl.col("odds_p1_id")
-    else:
-        # No player IDs in odds — fall back to assuming alignment
-        pred_is_odds_p1 = pl.col("p1_win_prob") > 0.5
+    pred_p1 = pl.col("p1_win_prob") > 0.5
 
     odds_mappings = [
         ("best_closing_odds", "pred_odds_best_close"),
@@ -278,7 +263,7 @@ def _compute_pred_side_metrics(ds: pl.DataFrame) -> pl.DataFrame:
         p2_col = f"{src_prefix}_p2"
         if p1_col in ds.columns and p2_col in ds.columns:
             ds = ds.with_columns(
-                pl.when(pred_is_odds_p1)
+                pl.when(pred_p1)
                 .then(pl.col(p1_col))
                 .otherwise(pl.col(p2_col))
                 .alias(dst_col)
@@ -372,21 +357,12 @@ def _compute_market_alignment(
     for uid in set(bet_uids):
         snap_index[uid] = relevant.filter(pl.col("match_uid") == uid)
 
-    # Determine snapshot ID column (player_id or legacy side)
-    snap_id_col = "player_id" if "player_id" in all_snapshots.columns else "side"
-
     rows: list[dict] = []
     for row in ds.filter(bet_mask).iter_rows(named=True):
         uid = row["match_uid"]
-        bet_side = str(row["bet_side"])
+        bet_side = str(row["bet_side"]).lower()
         placed_str = str(row.get("bet_placed_at") or "").strip()
         bet_odds_val = _safe_float(row.get("bet_odds"))
-
-        # Resolve bet_side ("P1"/"P2") to the actual player_id for snapshot filtering
-        if snap_id_col == "player_id":
-            bet_player = row.get("p1_id") if bet_side == "P1" else row.get("p2_id")
-        else:
-            bet_player = bet_side.lower()
 
         bet_time = _parse_bet_time(placed_str)
         if bet_time is None:
@@ -403,7 +379,7 @@ def _compute_market_alignment(
 
         for book in books:
             book_snaps = snaps.filter(
-                (pl.col("book") == book) & (pl.col(snap_id_col) == bet_player)
+                (pl.col("book") == book) & (pl.col("side") == bet_side)
             )
             if len(book_snaps) == 0:
                 continue

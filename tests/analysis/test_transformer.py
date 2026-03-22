@@ -13,8 +13,6 @@ class TestDKTransformer:
             "event_id": ["e1", "e2"],
             "p1_book_name": ["Player A1", "Player B1"],
             "p2_book_name": ["Player A2", "Player B2"],
-            "p1_id": ["PA1", "PB1"],
-            "p2_id": ["PA2", "PB2"],
             "source": ["auto", "auto"],
         })
 
@@ -33,10 +31,10 @@ class TestDKTransformer:
 
         result = resolve_snapshots(self._make_staged(), self._make_event_map())
 
-        assert set(result.columns) == {"match_uid", "book", "player_id", "side", "odds", "fetched_at", "event_status"}
+        assert set(result.columns) == {"match_uid", "book", "side", "odds", "fetched_at", "event_status"}
         assert len(result) == 4
         assert set(result["match_uid"].to_list()) == {"m1", "m2"}
-        assert set(result["player_id"].to_list()) == {"PA1", "PA2", "PB1", "PB2"}
+        assert set(result["side"].to_list()) == {"p1", "p2"}
         assert result["book"].unique().to_list() == ["dk"]
 
     def test_unmatched_names_excluded(self):
@@ -54,7 +52,7 @@ class TestDKTransformer:
         result = resolve_snapshots(staged, self._make_event_map())
         # Only the matched name passes through
         assert len(result) == 1
-        assert result["player_id"][0] == "PA2"
+        assert result["side"][0] == "p2"
 
     def test_empty_event_map_returns_empty(self):
         from mvp.draftkings.transformer import resolve_snapshots
@@ -83,7 +81,6 @@ class TestBRTransformer:
         event_map = pl.DataFrame({
             "match_uid": ["m1"], "book": ["br"], "event_id": ["e1"],
             "p1_book_name": ["Player A1"], "p2_book_name": ["Player A2"],
-            "p1_id": ["PA1"], "p2_id": ["PA2"],
             "source": ["auto"],
         })
 
@@ -107,7 +104,6 @@ class TestMGMTransformer:
         event_map = pl.DataFrame({
             "match_uid": ["m1"], "book": ["mgm"], "event_id": ["e1"],
             "p1_book_name": ["Player A1"], "p2_book_name": ["Player A2"],
-            "p1_id": ["PA1"], "p2_id": ["PA2"],
             "source": ["auto"],
         })
 

@@ -51,7 +51,6 @@ def _compute_match_odds(match_uid: str, book: str, match_odds: pl.DataFrame) -> 
 
     if not has_prematch:
         for col in [
-            "odds_p1_id", "odds_p2_id",
             "opening_odds_p1", "opening_odds_p2",
             "closing_odds_p1", "closing_odds_p2",
             "closing_implied_p1", "closing_implied_p2",
@@ -68,46 +67,36 @@ def _compute_match_odds(match_uid: str, book: str, match_odds: pl.DataFrame) -> 
     n_snapshots = prematch["fetched_at"].unique().len()
     row["n_snapshots"] = n_snapshots
 
-    # Carry player IDs if available (for downstream alignment)
-    if "player_id" in prematch.columns:
-        p1_rows = prematch.filter(pl.col("side") == "p1")
-        p2_rows = prematch.filter(pl.col("side") == "p2")
-        row["odds_p1_id"] = p1_rows["player_id"][0] if len(p1_rows) > 0 else None
-        row["odds_p2_id"] = p2_rows["player_id"][0] if len(p2_rows) > 0 else None
-    else:
-        row["odds_p1_id"] = None
-        row["odds_p2_id"] = None
-
-    for side_label in ("p1", "p2"):
-        side_odds = prematch.filter(pl.col("side") == side_label).sort("fetched_at")
+    for side in ("p1", "p2"):
+        side_odds = prematch.filter(pl.col("side") == side).sort("fetched_at")
         if len(side_odds) == 0:
             for prefix in [
                 "opening_odds_", "closing_odds_", "closing_implied_",
                 "min_odds_", "max_odds_", "direction_", "movement_pct_",
             ]:
-                row[f"{prefix}{side_label}"] = None
+                row[f"{prefix}{side}"] = None
             continue
 
         opening = side_odds["odds"][0]
         closing = side_odds["odds"][-1]
-        row[f"opening_odds_{side_label}"] = opening
-        row[f"closing_odds_{side_label}"] = closing
-        row[f"closing_implied_{side_label}"] = 1.0 / closing if closing > 0 else None
-        row[f"min_odds_{side_label}"] = side_odds["odds"].min()
-        row[f"max_odds_{side_label}"] = side_odds["odds"].max()
+        row[f"opening_odds_{side}"] = opening
+        row[f"closing_odds_{side}"] = closing
+        row[f"closing_implied_{side}"] = 1.0 / closing if closing > 0 else None
+        row[f"min_odds_{side}"] = side_odds["odds"].min()
+        row[f"max_odds_{side}"] = side_odds["odds"].max()
 
         if opening > 0:
             movement = (closing - opening) / opening
-            row[f"movement_pct_{side_label}"] = movement
+            row[f"movement_pct_{side}"] = movement
             if abs(movement) < 0.005:
-                row[f"direction_{side_label}"] = "STABLE"
+                row[f"direction_{side}"] = "STABLE"
             elif movement < 0:
-                row[f"direction_{side_label}"] = "SHORTENED"
+                row[f"direction_{side}"] = "SHORTENED"
             else:
-                row[f"direction_{side_label}"] = "DRIFTED"
+                row[f"direction_{side}"] = "DRIFTED"
         else:
-            row[f"movement_pct_{side_label}"] = None
-            row[f"direction_{side_label}"] = None
+            row[f"movement_pct_{side}"] = None
+            row[f"direction_{side}"] = None
 
     row["closing_fetched_at"] = prematch["fetched_at"].max()
 
@@ -141,13 +130,6 @@ def compute_cross_book_odds(book_odds_list: list[pl.DataFrame]) -> pl.DataFrame:
         row = {"match_uid": uid}
 
         row["n_books"] = len(match_data)
-
-        # Carry player IDs from the first book that has them
-        if "odds_p1_id" in match_data.columns:
-            ids = match_data.select("odds_p1_id", "odds_p2_id").drop_nulls()
-            if len(ids) > 0:
-                row["odds_p1_id"] = ids["odds_p1_id"][0]
-                row["odds_p2_id"] = ids["odds_p2_id"][0]
 
         for side in ("p1", "p2"):
             closing_col = f"closing_odds_{side}"
