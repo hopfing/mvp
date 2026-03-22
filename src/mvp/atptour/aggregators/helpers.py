@@ -3,6 +3,33 @@
 import polars as pl
 
 
+def pivot_to_player_match(df: pl.DataFrame) -> pl.DataFrame:
+    """Pivot match-level p1_/p2_ data to player-match level player_/opp_.
+
+    Auto-detects all p1_* and p2_* columns (except p1_id/p2_id which become
+    player_id/opp_id). Produces two rows per match — one per perspective.
+    """
+    p1_cols = [c for c in df.columns if c.startswith("p1_") and c not in ("p1_id", "p2_id")]
+    p2_cols = [c for c in df.columns if c.startswith("p2_") and c not in ("p1_id", "p2_id")]
+
+    # P1 perspective: p1_* -> player_*, p2_* -> opp_*
+    p1_renames = {c: "player_" + c[3:] for c in p1_cols}
+    p1_renames.update({c: "opp_" + c[3:] for c in p2_cols})
+    p1_renames["p1_id"] = "player_id"
+    p1_renames["p2_id"] = "opp_id"
+
+    # P2 perspective: p2_* -> player_*, p1_* -> opp_*
+    p2_renames = {c: "player_" + c[3:] for c in p2_cols}
+    p2_renames.update({c: "opp_" + c[3:] for c in p1_cols})
+    p2_renames["p2_id"] = "player_id"
+    p2_renames["p1_id"] = "opp_id"
+
+    p1_perspective = df.rename(p1_renames)
+    p2_perspective = df.rename(p2_renames).select(p1_perspective.columns)
+
+    return pl.concat([p1_perspective, p2_perspective])
+
+
 def explode_to_player_match(
     df: pl.DataFrame,
     player_cols: dict[str, str],

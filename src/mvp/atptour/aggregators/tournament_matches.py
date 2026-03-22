@@ -9,6 +9,7 @@ from mvp.atptour.aggregators.helpers import (
     explode_match_stats,
     explode_results,
     explode_schedule,
+    pivot_to_player_match,
 )
 from mvp.atptour.aggregators.match_beats import MatchBeatsAggregator
 from mvp.atptour.aggregators.rally_analysis import RallyAnalysisAggregator
@@ -617,7 +618,7 @@ class TournamentMatchesAggregator(BaseJob):
         # Reuse MatchBeatsAggregator logic to aggregate and pivot
         mb_agg = MatchBeatsAggregator(data_root=self.data_root)
         match_level = mb_agg._aggregate_match_level(raw)
-        player_match = mb_agg._pivot_to_player_match(match_level)
+        player_match = pivot_to_player_match(match_level)
 
         # Drop opp_id (already in main table)
         if "opp_id" in player_match.columns:
@@ -663,7 +664,7 @@ class TournamentMatchesAggregator(BaseJob):
 
         raw = raw.with_columns(pl.col("match_id").str.to_uppercase())
         sa_agg = StrokeAnalysisAggregator(data_root=self.data_root)
-        player_match = sa_agg._pivot_to_player_match(raw)
+        player_match = pivot_to_player_match(raw)
 
         if "opp_id" in player_match.columns:
             player_match = player_match.drop("opp_id")
@@ -701,7 +702,7 @@ class TournamentMatchesAggregator(BaseJob):
 
         raw = raw.with_columns(pl.col("match_id").str.to_uppercase())
         ra_agg = RallyAnalysisAggregator(data_root=self.data_root)
-        player_match = ra_agg._pivot_to_player_match(raw)
+        player_match = pivot_to_player_match(raw)
 
         if "opp_id" in player_match.columns:
             player_match = player_match.drop("opp_id")

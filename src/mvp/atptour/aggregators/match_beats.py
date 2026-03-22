@@ -6,6 +6,7 @@ from pathlib import Path
 import polars as pl
 
 from mvp.common.base_job import BaseJob
+from mvp.atptour.aggregators.helpers import pivot_to_player_match
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +55,7 @@ class MatchBeatsAggregator(BaseJob):
 
         combined = pl.concat(all_dfs)
         result = self._aggregate_match_level(combined)
-        result = self._pivot_to_player_match(result)
+        result = pivot_to_player_match(result)
 
         output = self.build_path("aggregate", "match_beats.parquet")
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -214,24 +215,3 @@ class MatchBeatsAggregator(BaseJob):
 
         return result
 
-    def _pivot_to_player_match(self, df: pl.DataFrame) -> pl.DataFrame:
-        """Pivot match-level p1_/p2_ data to player-match level player_/opp_."""
-        p1_cols = [c for c in df.columns if c.startswith("p1_") and c not in ("p1_id", "p2_id")]
-        p2_cols = [c for c in df.columns if c.startswith("p2_") and c not in ("p1_id", "p2_id")]
-
-        # P1 perspective: p1_* -> player_*, p2_* -> opp_*
-        p1_renames = {c: "player_" + c[3:] for c in p1_cols}
-        p1_renames.update({c: "opp_" + c[3:] for c in p2_cols})
-        p1_renames["p1_id"] = "player_id"
-        p1_renames["p2_id"] = "opp_id"
-
-        # P2 perspective: p2_* -> player_*, p1_* -> opp_*
-        p2_renames = {c: "player_" + c[3:] for c in p2_cols}
-        p2_renames.update({c: "opp_" + c[3:] for c in p1_cols})
-        p2_renames["p2_id"] = "player_id"
-        p2_renames["p1_id"] = "opp_id"
-
-        p1_perspective = df.rename(p1_renames)
-        p2_perspective = df.rename(p2_renames).select(p1_perspective.columns)
-
-        return pl.concat([p1_perspective, p2_perspective])
