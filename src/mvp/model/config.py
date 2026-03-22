@@ -131,7 +131,7 @@ class EnsembleParams(BaseModel):
 class ModelConfig(BaseModel):
     """Model configuration."""
 
-    type: Literal["xgboost", "logistic", "random_forest", "ensemble"]
+    type: Literal["xgboost", "logistic", "random_forest", "ensemble", "neural_net"]
     params: dict[str, Any] | None = None
 
 
