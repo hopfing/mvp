@@ -252,6 +252,159 @@ class EnsembleModel(BaseModel):
         return _SklearnWrapper(self)
 
 
+class NeuralNetModel(BaseModel):
+    """PyTorch MLP wrapper for tabular classification."""
+
+    def __init__(self, params: dict[str, Any]) -> None:
+        self.hidden_layers: list[int] = params.get("hidden_layers", [64, 32])
+        self.dropout: float = params.get("dropout", 0.3)
+        self.learning_rate: float = params.get("learning_rate", 0.001)
+        self.batch_size: int = params.get("batch_size", 512)
+        self.epochs: int = params.get("epochs", 200)
+        self.patience: int = params.get("patience", 15)
+        self.batch_norm: bool = params.get("batch_norm", False)
+        self._module = None
+        self._device = None
+        self._n_features = None
+
+    def _build_module(self, n_features: int):
+        import torch.nn as nn
+
+        layers: list[nn.Module] = []
+        in_dim = n_features
+        for hidden_dim in self.hidden_layers:
+            layers.append(nn.Linear(in_dim, hidden_dim))
+            if self.batch_norm:
+                layers.append(nn.BatchNorm1d(hidden_dim))
+            layers.append(nn.ReLU())
+            if self.dropout > 0:
+                layers.append(nn.Dropout(self.dropout))
+            in_dim = hidden_dim
+        layers.append(nn.Linear(in_dim, 1))
+        layers.append(nn.Sigmoid())
+        return nn.Sequential(*layers)
+
+    def _get_device(self):
+        import torch
+
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        return torch.device("cpu")
+
+    def fit(
+        self,
+        X: np.ndarray,
+        y: np.ndarray,
+        sample_weight: np.ndarray | None = None,
+    ) -> None:
+        import torch
+        from torch.utils.data import DataLoader, TensorDataset
+
+        self._device = self._get_device()
+        self._n_features = X.shape[1]
+        self._module = self._build_module(self._n_features).to(self._device)
+
+        # Temporal train/val split (last 15%)
+        val_size = max(1, int(len(X) * 0.15))
+        X_train, X_val = X[:-val_size], X[-val_size:]
+        y_train, y_val = y[:-val_size], y[-val_size:]
+        w_train = sample_weight[:-val_size] if sample_weight is not None else None
+
+        X_t = torch.tensor(X_train, dtype=torch.float32, device=self._device)
+        y_t = torch.tensor(y_train, dtype=torch.float32, device=self._device).unsqueeze(1)
+        X_v = torch.tensor(X_val, dtype=torch.float32, device=self._device)
+        y_v = torch.tensor(y_val, dtype=torch.float32, device=self._device).unsqueeze(1)
+
+        if w_train is not None:
+            w_t = torch.tensor(w_train, dtype=torch.float32, device=self._device).unsqueeze(1)
+        else:
+            w_t = None
+
+        optimizer = torch.optim.Adam(self._module.parameters(), lr=self.learning_rate)
+        loss_fn = torch.nn.BCELoss(reduction="none")
+
+        dataset = TensorDataset(X_t, y_t) if w_t is None else TensorDataset(X_t, y_t, w_t)
+        loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True)
+
+        best_val_loss = float("inf")
+        best_state = None
+        wait = 0
+
+        for _epoch in range(self.epochs):
+            self._module.train()
+            for batch in loader:
+                if w_t is not None:
+                    xb, yb, wb = batch
+                else:
+                    xb, yb = batch
+                    wb = None
+
+                optimizer.zero_grad()
+                pred = self._module(xb)
+                loss = loss_fn(pred, yb)
+                if wb is not None:
+                    loss = (loss * wb).mean()
+                else:
+                    loss = loss.mean()
+                loss.backward()
+                optimizer.step()
+
+            # Validation
+            self._module.eval()
+            with torch.no_grad():
+                val_pred = self._module(X_v)
+                val_loss = loss_fn(val_pred, y_v).mean().item()
+
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                best_state = {
+                    k: v.cpu().clone() for k, v in self._module.state_dict().items()
+                }
+                wait = 0
+            else:
+                wait += 1
+                if wait >= self.patience:
+                    break
+
+        if best_state is not None:
+            self._module.load_state_dict(best_state)
+        self._module.eval()
+
+    def predict_proba(self, X: np.ndarray) -> np.ndarray:
+        import torch
+
+        if self._module is None:
+            raise RuntimeError("Model not fitted")
+        self._module.eval()
+        with torch.no_grad():
+            X_t = torch.tensor(X, dtype=torch.float32, device=self._device)
+            preds = self._module(X_t).squeeze(1).cpu().numpy()
+        return preds
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        if self._module is not None:
+            state["_module_state_dict"] = {
+                k: v.cpu() for k, v in self._module.state_dict().items()
+            }
+        else:
+            state["_module_state_dict"] = None
+        state["_module"] = None
+        state["_device"] = None
+        return state
+
+    def __setstate__(self, state):
+        module_state = state.pop("_module_state_dict", None)
+        self.__dict__.update(state)
+        self._device = self._get_device()
+        if module_state is not None and self._n_features is not None:
+            self._module = self._build_module(self._n_features).to(self._device)
+            self._module.load_state_dict(
+                {k: v.to(self._device) for k, v in module_state.items()}
+            )
+            self._module.eval()
+
+
 def get_model(model_type: str, params: dict[str, Any]) -> BaseModel:
     """Factory function to get model wrapper.
 
@@ -273,5 +426,7 @@ def get_model(model_type: str, params: dict[str, Any]) -> BaseModel:
         return RandomForestModel(params)
     elif model_type == "ensemble":
         return EnsembleModel(params)
+    elif model_type == "neural_net":
+        return NeuralNetModel(params)
     else:
         raise ValueError(f"Unknown model type: {model_type}")
