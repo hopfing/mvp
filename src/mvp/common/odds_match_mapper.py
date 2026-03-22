@@ -12,6 +12,7 @@ SNAPSHOT_SCHEMA = {
     "match_uid": pl.Utf8,
     "book": pl.Utf8,
     "player_id": pl.Utf8,
+    "side": pl.Utf8,
     "odds": pl.Float64,
     "fetched_at": pl.Datetime("us", "UTC"),
     "event_status": pl.Utf8,
@@ -65,10 +66,16 @@ def resolve_snapshots(
         .then(pl.col("p2_id"))
         .otherwise(pl.lit(None))
         .alias("player_id"),
+        pl.when(pl.col("player_name") == pl.col("p1_book_name"))
+        .then(pl.lit("p1"))
+        .when(pl.col("player_name") == pl.col("p2_book_name"))
+        .then(pl.lit("p2"))
+        .otherwise(pl.lit(None))
+        .alias("side"),
         pl.lit(book).alias("book"),
     ).filter(pl.col("player_id").is_not_null())
 
-    cols = ["match_uid", "book", "player_id", "odds", "fetched_at", "event_status"]
+    cols = ["match_uid", "book", "player_id", "side", "odds", "fetched_at", "event_status"]
     return resolved.select(cols)
 
 

@@ -33,7 +33,7 @@ class TestDKTransformer:
 
         result = resolve_snapshots(self._make_staged(), self._make_event_map())
 
-        assert set(result.columns) == {"match_uid", "book", "player_id", "odds", "fetched_at", "event_status"}
+        assert set(result.columns) == {"match_uid", "book", "player_id", "side", "odds", "fetched_at", "event_status"}
         assert len(result) == 4
         assert set(result["match_uid"].to_list()) == {"m1", "m2"}
         assert set(result["player_id"].to_list()) == {"PA1", "PA2", "PB1", "PB2"}

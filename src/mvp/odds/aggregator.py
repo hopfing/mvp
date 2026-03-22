@@ -40,9 +40,6 @@ def compute_book_odds(snapshots: pl.DataFrame, book: str) -> pl.DataFrame:
 
 def _compute_match_odds(match_uid: str, book: str, match_odds: pl.DataFrame) -> dict:
     """Compute odds summary for one match from one book."""
-    # Determine player_id column (new format) vs side column (legacy)
-    id_col = "player_id" if "player_id" in match_odds.columns else "side"
-
     prematch = match_odds.filter(pl.col("event_status") == "NOT_STARTED")
     has_prematch = len(prematch) > 0
 
@@ -52,20 +49,18 @@ def _compute_match_odds(match_uid: str, book: str, match_odds: pl.DataFrame) -> 
         "has_prematch": has_prematch,
     }
 
-    null_cols = [
-        "odds_p1_id", "odds_p2_id",
-        "opening_odds_p1", "opening_odds_p2",
-        "closing_odds_p1", "closing_odds_p2",
-        "closing_implied_p1", "closing_implied_p2",
-        "min_odds_p1", "max_odds_p1",
-        "min_odds_p2", "max_odds_p2",
-        "direction_p1", "direction_p2",
-        "movement_pct_p1", "movement_pct_p2",
-        "closing_fetched_at",
-    ]
-
     if not has_prematch:
-        for col in null_cols:
+        for col in [
+            "odds_p1_id", "odds_p2_id",
+            "opening_odds_p1", "opening_odds_p2",
+            "closing_odds_p1", "closing_odds_p2",
+            "closing_implied_p1", "closing_implied_p2",
+            "min_odds_p1", "max_odds_p1",
+            "min_odds_p2", "max_odds_p2",
+            "direction_p1", "direction_p2",
+            "movement_pct_p1", "movement_pct_p2",
+            "closing_fetched_at",
+        ]:
             row[col] = None
         row["n_snapshots"] = 0
         return row
@@ -73,19 +68,18 @@ def _compute_match_odds(match_uid: str, book: str, match_odds: pl.DataFrame) -> 
     n_snapshots = prematch["fetched_at"].unique().len()
     row["n_snapshots"] = n_snapshots
 
-    # Get the two player identifiers for this match
-    players = sorted(prematch[id_col].unique().to_list())
-    if len(players) < 2:
-        for col in null_cols:
-            row[col] = None
-        return row
+    # Carry player IDs if available (for downstream alignment)
+    if "player_id" in prematch.columns:
+        p1_rows = prematch.filter(pl.col("side") == "p1")
+        p2_rows = prematch.filter(pl.col("side") == "p2")
+        row["odds_p1_id"] = p1_rows["player_id"][0] if len(p1_rows) > 0 else None
+        row["odds_p2_id"] = p2_rows["player_id"][0] if len(p2_rows) > 0 else None
+    else:
+        row["odds_p1_id"] = None
+        row["odds_p2_id"] = None
 
-    row["odds_p1_id"] = players[0]
-    row["odds_p2_id"] = players[1]
-
-    for i, side_label in enumerate(("p1", "p2")):
-        player = players[i]
-        side_odds = prematch.filter(pl.col(id_col) == player).sort("fetched_at")
+    for side_label in ("p1", "p2"):
+        side_odds = prematch.filter(pl.col("side") == side_label).sort("fetched_at")
         if len(side_odds) == 0:
             for prefix in [
                 "opening_odds_", "closing_odds_", "closing_implied_",
