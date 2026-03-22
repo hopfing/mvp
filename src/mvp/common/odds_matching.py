@@ -6,7 +6,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import polars as pl
-import yaml
 
 from mvp.common.base_job import BaseJob
 
@@ -38,53 +37,25 @@ class OddsMatchResult:
     """Result of matching book odds to predictions."""
 
     odds: dict[str, dict[str, float]] = field(default_factory=dict)
-    unmatched_names: set[str] = field(default_factory=set)
-    event_matches: list[EventMatch] = field(default_factory=list)
 
 
 class BaseOddsMatcher(BaseJob):
-    """Base class for book-specific odds matchers.
+    """Looks up odds for predictions using the persisted event map.
+
+    The event_mapper module handles mapping book events to match_uids.
+    This class simply reads the event map and extracts odds for predictions.
 
     Subclasses must set:
         event_id_column: column name for the book's event ID
         book_label: short label for log messages (e.g. "DK", "BR", "MGM")
-        ALIASES_PATH: path to the per-book player_aliases.yaml
     """
 
     event_id_column: str
     book_label: str
-    ALIASES_PATH: Path
 
     def __init__(self, domain: str, data_root: Path | None = None):
         super().__init__(domain=domain, data_root=data_root)
-        self._aliases: dict[str, str] | None = None
         self._logger = logging.getLogger(f"mvp.{domain}.matcher")
-
-    def _load_aliases(self) -> dict[str, str]:
-        """Load alias YAML (normalized book name -> player_id)."""
-        if self._aliases is not None:
-            return self._aliases
-
-        raw: dict[str, str] = {}
-        if self.ALIASES_PATH.exists():
-            with open(self.ALIASES_PATH) as f:
-                data = yaml.safe_load(f)
-            if isinstance(data, dict):
-                raw = data
-
-        self._aliases = {
-            normalize_name(name): our_id.upper().strip()
-            for name, our_id in raw.items()
-        }
-        return self._aliases
-
-    def _resolve_id(self, name: str, pred_names: dict[str, str]) -> str | None:
-        """Resolve a book player name to our player_id."""
-        normed = normalize_name(name)
-        aliases = self._load_aliases()
-        if normed in aliases:
-            return aliases[normed]
-        return pred_names.get(normed)
 
     def get_latest_odds(self) -> pl.DataFrame:
         """Read odds parquet, deduplicated to latest per event+player."""
@@ -105,147 +76,82 @@ class BaseOddsMatcher(BaseJob):
             .last()
         )
 
-    def _load_event_map(self) -> dict[str, str]:
-        """Load event_id -> match_uid map for this book from the event map."""
-        from mvp.analysis.event_map import load_event_map
-
-        df = load_event_map()
-        if len(df) == 0:
-            return {}
-        # Book labels in event map are lowercase: "dk", "br", "mgm"
-        book_key = self.book_label.lower()
-        df = df.filter(pl.col("book") == book_key)
-        return dict(zip(
-            df["event_id"].to_list(),
-            df["match_uid"].to_list(),
-        ))
-
     def match(self, predictions: pl.DataFrame) -> OddsMatchResult:
-        """Match book odds to predictions by player pair.
+        """Look up odds for predictions using the event map.
 
-        Uses the persisted event map for previously matched events (fast path),
-        falling back to name resolution for new events.
+        Reads the persisted event map to resolve event_ids to match_uids,
+        then uses p1_book_name/p2_book_name to assign odds to the correct side.
 
         Args:
-            predictions: DataFrame with p1_id, p2_id, p1_name, p2_name, match_uid.
+            predictions: DataFrame with p1_id, p2_id, match_uid.
 
         Returns:
-            OddsMatchResult with odds map and unmatched book names.
+            OddsMatchResult with odds map keyed by match_uid.
         """
         odds_df = self.get_latest_odds()
         if len(odds_df) == 0 or len(predictions) == 0:
             return OddsMatchResult()
 
-        # Group odds by event (two rows per event = one match)
-        book_events: dict[str, list[dict]] = {}
-        for row in odds_df.iter_rows(named=True):
-            book_events.setdefault(row[self.event_id_column], []).append(row)
+        # Load event map for this book: event_id -> {match_uid, p1_book_name, p2_book_name}
+        from mvp.analysis.event_map import load_event_map_with_overrides
 
-        # Load persisted event map: event_id -> match_uid
-        event_map = self._load_event_map()
+        event_map_df = load_event_map_with_overrides()
+        book_key = self.book_label.lower()
+        book_map = event_map_df.filter(pl.col("book") == book_key)
 
-        # Build prediction lookup by match_uid and by player pair
+        emap: dict[str, dict] = {}
+        for row in book_map.iter_rows(named=True):
+            emap[row["event_id"]] = {
+                "match_uid": row["match_uid"],
+                "p1_book_name": row["p1_book_name"],
+                "p2_book_name": row["p2_book_name"],
+            }
+
+        # Build prediction lookup by match_uid
         pred_by_uid: dict[str, dict] = {}
-        pred_by_pair: dict[frozenset, dict] = {}
-        pred_names: dict[str, str] = {}
         for row in predictions.iter_rows(named=True):
             uid = row.get("match_uid") or ""
             if uid:
                 pred_by_uid[uid] = row
-            p1_id = row.get("p1_id") or ""
-            p2_id = row.get("p2_id") or ""
-            if p1_id and p2_id:
-                pred_by_pair[frozenset({p1_id, p2_id})] = row
-            for name_col, id_col in [("p1_name", "p1_id"), ("p2_name", "p2_id")]:
-                name = row.get(name_col) or ""
-                pid = row.get(id_col) or ""
-                if name and pid:
-                    normed = normalize_name(name)
-                    existing = pred_names.get(normed)
-                    if existing is not None and existing != pid:
-                        self._logger.warning(
-                            "Player name collision: '%s' -> %s and %s (keeping %s)",
-                            normed, existing, pid, pid,
-                        )
-                    pred_names[normed] = pid
+
+        # Group odds by event
+        book_events: dict[str, list[dict]] = {}
+        for row in odds_df.iter_rows(named=True):
+            book_events.setdefault(row[self.event_id_column], []).append(row)
 
         result: dict[str, dict[str, float]] = {}
-        unmatched_names: set[str] = set()
-        event_matches: list[EventMatch] = []
         matched = 0
 
         for eid, book_rows in book_events.items():
             if len(book_rows) < 2:
                 continue
 
-            # Fast path: event already in event map
-            mapped_uid = event_map.get(eid)
-            if mapped_uid is not None:
-                pred = pred_by_uid.get(mapped_uid)
-                if pred is not None:
-                    p1_id = pred["p1_id"]
-                    p2_id = pred["p2_id"]
-                    # Match book rows to player IDs by name resolution
-                    odds_by_pid: dict[str, float] = {}
-                    for book_row in book_rows[:2]:
-                        pid = self._resolve_id(book_row["player_name"], pred_names)
-                        if pid is not None:
-                            odds_by_pid[pid] = book_row["odds"]
-                    if p1_id in odds_by_pid and p2_id in odds_by_pid:
-                        result[mapped_uid] = odds_by_pid
-                        matched += 1
-                # Either way, this event is known — skip name resolution fallback
+            mapping = emap.get(eid)
+            if mapping is None:
                 continue
 
-            # Slow path: name resolution for new events
-            ids_and_odds: list[tuple[str, float]] = []
-            for book_row in book_rows[:2]:
-                pid = self._resolve_id(book_row["player_name"], pred_names)
-                if pid is None:
-                    unmatched_names.add(book_row["player_name"])
-                else:
-                    ids_and_odds.append((pid, book_row["odds"]))
-
-            if len(ids_and_odds) != 2:
-                continue
-
-            pair = frozenset({ids_and_odds[0][0], ids_and_odds[1][0]})
-            pred = pred_by_pair.get(pair)
+            pred = pred_by_uid.get(mapping["match_uid"])
             if pred is None:
                 continue
 
-            result[pred["match_uid"]] = {
-                ids_and_odds[0][0]: ids_and_odds[0][1],
-                ids_and_odds[1][0]: ids_and_odds[1][1],
-            }
-            matched += 1
-
             p1_id = pred["p1_id"]
-            book_names = {
-                pid: book_rows[i]["player_name"]
-                for i, (pid, _) in enumerate(ids_and_odds)
-            }
-            event_matches.append(EventMatch(
-                match_uid=pred["match_uid"],
-                event_id=eid,
-                p1_book_name=book_names.get(p1_id, ""),
-                p2_book_name=book_names.get(pred["p2_id"], ""),
-            ))
+            p2_id = pred["p2_id"]
 
-        total_events = len(book_events)
-        total_preds = len(predictions)
+            odds_by_pid: dict[str, float] = {}
+            for book_row in book_rows[:2]:
+                name = book_row["player_name"]
+                if name == mapping["p1_book_name"]:
+                    odds_by_pid[p1_id] = book_row["odds"]
+                elif name == mapping["p2_book_name"]:
+                    odds_by_pid[p2_id] = book_row["odds"]
+
+            if p1_id in odds_by_pid and p2_id in odds_by_pid:
+                result[mapping["match_uid"]] = odds_by_pid
+                matched += 1
+
         self._logger.info(
-            "Odds matching: %d/%d %s events matched to %d predictions",
-            matched, total_events, self.book_label, total_preds,
+            "Odds lookup: %d %s events matched to %d predictions",
+            matched, self.book_label, len(predictions),
         )
-        if unmatched_names:
-            self._logger.info(
-                "Unmatched %s names (%d): %s",
-                self.book_label,
-                len(unmatched_names),
-                ", ".join(sorted(unmatched_names)),
-            )
 
-        return OddsMatchResult(
-            odds=result, unmatched_names=unmatched_names, event_matches=event_matches,
-        )
+        return OddsMatchResult(odds=result)

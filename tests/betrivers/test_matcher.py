@@ -1,29 +1,15 @@
-"""Tests for BetRivers odds matcher."""
+"""Tests for BetRivers odds matcher (event-map-based lookup)."""
 
 from datetime import UTC, datetime
+from unittest.mock import patch
 
 import polars as pl
 
 from mvp.betrivers.matcher import BetRiversOddsMatcher
 
 
-def _make_players(tmp_path):
-    """Write a players.parquet with test data."""
-    players = pl.DataFrame({
-        "player_id": ["PLAYER_A", "PLAYER_B", "PLAYER_C"],
-        "first_name": ["Alice", "Bob", "Carlos"],
-        "last_name": ["Smith", "Jones", "López"],
-    })
-    players_dir = tmp_path / "stage" / "atptour"
-    players_dir.mkdir(parents=True)
-    players.write_parquet(players_dir / "players.parquet")
-
-
 def _make_odds(tmp_path, events):
-    """Write a moneyline.parquet with test data.
-
-    events: list of (br_event_id, player_name, opponent_name, odds) tuples.
-    """
+    """Write a moneyline.parquet with test data."""
     rows = []
     for i, (eid, pname, oname, odds) in enumerate(events):
         rows.append({
@@ -40,10 +26,30 @@ def _make_odds(tmp_path, events):
             "circuit": "atp",
             "side": "OT_ONE" if i % 2 == 0 else "OT_TWO",
             "points": None,
+            "event_status": "NOT_STARTED",
         })
     odds_dir = tmp_path / "stage" / "betrivers"
     odds_dir.mkdir(parents=True)
     pl.DataFrame(rows).write_parquet(odds_dir / "moneyline.parquet")
+
+
+def _make_event_map(events):
+    """Build an event map DataFrame."""
+    if not events:
+        from mvp.analysis.event_map import EVENT_MAP_SCHEMA
+        return pl.DataFrame(schema=EVENT_MAP_SCHEMA)
+    return pl.DataFrame([
+        {
+            "match_uid": uid,
+            "book": "br",
+            "event_id": eid,
+            "p1_book_name": p1,
+            "p2_book_name": p2,
+            "matched_at": datetime(2026, 3, 9, tzinfo=UTC),
+            "source": "auto",
+        }
+        for eid, uid, p1, p2 in events
+    ])
 
 
 def _make_predictions():
@@ -51,66 +57,26 @@ def _make_predictions():
         "match_uid": ["m1"],
         "p1_id": ["PLAYER_A"],
         "p2_id": ["PLAYER_B"],
-        "p1_name": ["Alice Smith"],
-        "p2_name": ["Bob Jones"],
-        "tournament_id": ["t1"],
-        "tournament_name": ["Indian Wells"],
     })
 
 
 class TestBetRiversOddsMatcher:
-    def test_matches_by_player_pair(self, tmp_path):
-        _make_players(tmp_path)
+    def test_looks_up_odds_from_event_map(self, tmp_path):
         _make_odds(tmp_path, [
             ("e1", "Alice Smith", "Bob Jones", 1.5),
             ("e1", "Bob Jones", "Alice Smith", 2.5),
         ])
+        event_map = _make_event_map([("e1", "m1", "Alice Smith", "Bob Jones")])
+
         matcher = BetRiversOddsMatcher(data_root=tmp_path)
-        result = matcher.match(_make_predictions())
+        with patch("mvp.analysis.event_map.load_event_map_with_overrides", return_value=event_map):
+            result = matcher.match(_make_predictions())
 
         assert "m1" in result.odds
         assert result.odds["m1"]["PLAYER_A"] == 1.5
         assert result.odds["m1"]["PLAYER_B"] == 2.5
 
-    def test_accent_matching(self, tmp_path):
-        _make_players(tmp_path)
-        _make_odds(tmp_path, [
-            ("e1", "Carlos Lopez", "Alice Smith", 1.8),
-            ("e1", "Alice Smith", "Carlos Lopez", 2.0),
-        ])
-        preds = pl.DataFrame({
-            "match_uid": ["m1"],
-            "p1_id": ["PLAYER_C"],
-            "p2_id": ["PLAYER_A"],
-            "p1_name": ["Carlos López"],
-            "p2_name": ["Alice Smith"],
-            "tournament_id": ["t1"],
-            "tournament_name": ["Test"],
-        })
-        matcher = BetRiversOddsMatcher(data_root=tmp_path)
-        result = matcher.match(preds)
-
-        assert "m1" in result.odds
-        assert result.odds["m1"]["PLAYER_C"] == 1.8
-
-    def test_alias_override(self, tmp_path):
-        _make_players(tmp_path)
-        _make_odds(tmp_path, [
-            ("e1", "A. Smithy", "B. Jonesy", 1.5),
-            ("e1", "B. Jonesy", "A. Smithy", 2.5),
-        ])
-        aliases_path = tmp_path / "aliases.yaml"
-        aliases_path.write_text('"A. Smithy": "PLAYER_A"\n"B. Jonesy": "PLAYER_B"\n')
-
-        matcher = BetRiversOddsMatcher(data_root=tmp_path)
-        matcher.ALIASES_PATH = aliases_path
-        result = matcher.match(_make_predictions())
-
-        assert "m1" in result.odds
-        assert result.odds["m1"]["PLAYER_A"] == 1.5
-
     def test_deduplicates_to_latest_odds(self, tmp_path):
-        _make_players(tmp_path)
         odds_dir = tmp_path / "stage" / "betrivers"
         odds_dir.mkdir(parents=True)
         df = pl.DataFrame({
@@ -124,6 +90,7 @@ class TestBetRiversOddsMatcher:
                 datetime(2026, 3, 9, 11, tzinfo=UTC),
                 datetime(2026, 3, 9, 11, tzinfo=UTC),
             ],
+            "event_status": ["NOT_STARTED"] * 4,
             "br_tournament_id": ["t1"] * 4,
             "tournament": ["Test"] * 4,
             "br_selection_id": ["s1", "s2", "s3", "s4"],
@@ -134,52 +101,29 @@ class TestBetRiversOddsMatcher:
             "points": [None] * 4,
         })
         df.write_parquet(odds_dir / "moneyline.parquet")
+        event_map = _make_event_map([("e1", "m1", "Alice Smith", "Bob Jones")])
 
         matcher = BetRiversOddsMatcher(data_root=tmp_path)
-        result = matcher.match(_make_predictions())
+        with patch("mvp.analysis.event_map.load_event_map_with_overrides", return_value=event_map):
+            result = matcher.match(_make_predictions())
         assert result.odds["m1"]["PLAYER_A"] == 2.1
         assert result.odds["m1"]["PLAYER_B"] == 1.75
 
+    def test_unmapped_event_skipped(self, tmp_path):
+        _make_odds(tmp_path, [
+            ("e99", "Unknown", "Another", 1.5),
+            ("e99", "Another", "Unknown", 2.5),
+        ])
+        event_map = _make_event_map([])
+
+        matcher = BetRiversOddsMatcher(data_root=tmp_path)
+        with patch("mvp.analysis.event_map.load_event_map_with_overrides", return_value=event_map):
+            result = matcher.match(_make_predictions())
+        assert result.odds == {}
+
     def test_empty_odds(self, tmp_path):
-        _make_players(tmp_path)
         matcher = BetRiversOddsMatcher(data_root=tmp_path)
-        result = matcher.match(_make_predictions())
+        event_map = _make_event_map([])
+        with patch("mvp.analysis.event_map.load_event_map_with_overrides", return_value=event_map):
+            result = matcher.match(_make_predictions())
         assert result.odds == {}
-
-    def test_unmatched_names_reported(self, tmp_path):
-        _make_players(tmp_path)
-        _make_odds(tmp_path, [
-            ("e1", "Unknown Player", "Another Unknown", 1.5),
-            ("e1", "Another Unknown", "Unknown Player", 2.5),
-        ])
-        matcher = BetRiversOddsMatcher(data_root=tmp_path)
-        result = matcher.match(_make_predictions())
-        assert result.odds == {}
-        assert result.unmatched_names == {"Unknown Player", "Another Unknown"}
-
-    def test_missing_aliases_file(self, tmp_path):
-        _make_players(tmp_path)
-        _make_odds(tmp_path, [
-            ("e1", "Alice Smith", "Bob Jones", 1.5),
-            ("e1", "Bob Jones", "Alice Smith", 2.5),
-        ])
-        matcher = BetRiversOddsMatcher(data_root=tmp_path)
-        matcher.ALIASES_PATH = tmp_path / "nonexistent.yaml"
-        result = matcher.match(_make_predictions())
-        assert "m1" in result.odds
-
-    def test_event_matches_populated(self, tmp_path):
-        """Successful matches should populate event_matches."""
-        _make_players(tmp_path)
-        _make_odds(tmp_path, [
-            ("e1", "Alice Smith", "Bob Jones", 1.5),
-            ("e1", "Bob Jones", "Alice Smith", 2.5),
-        ])
-        matcher = BetRiversOddsMatcher(data_root=tmp_path)
-        result = matcher.match(_make_predictions())
-        assert len(result.event_matches) == 1
-        em = result.event_matches[0]
-        assert em.match_uid == "m1"
-        assert em.event_id == "e1"
-        assert em.p1_book_name == "Alice Smith"
-        assert em.p2_book_name == "Bob Jones"

@@ -1319,66 +1319,109 @@ def cmd_live(args: argparse.Namespace) -> int:
                 logger.error("%s prediction failed: %s", section, e)
                 print(f"Warning: {section} prediction failed ({e})")
 
-        # Collect odds from both books and match to predictions
+        # Wait for odds fetches
+        dk_n, br_n, mgm_n = 0, 0, 0
+        try:
+            dk_n = dk_future.result(timeout=30)
+            print(f"Fetched {dk_n} DK moneyline odds entries")
+        except Exception as e:
+            logger.error("DK odds fetch failed: %s", e)
+            print(f"Warning: DK odds fetch failed ({e})")
+        try:
+            br_n = br_future.result(timeout=30)
+            print(f"Fetched {br_n} BR moneyline odds entries")
+        except Exception as e:
+            logger.error("BR odds fetch failed: %s", e)
+            print(f"Warning: BR odds fetch failed ({e})")
+        try:
+            mgm_n = mgm_future.result(timeout=30)
+            print(f"Fetched {mgm_n} MGM moneyline odds entries")
+        except Exception as e:
+            logger.error("MGM odds fetch failed: %s", e)
+            print(f"Warning: MGM odds fetch failed ({e})")
+
+        # Map book events to matches using full player database
+        import polars as pl
+
+        from mvp.analysis.event_map import load_event_map, save_event_mappings
+        from mvp.common.event_mapper import (
+            build_match_catalog,
+            build_player_lookup,
+            map_book_events,
+        )
+
+        matches_path = get_data_root() / "aggregate" / "atptour" / "matches.parquet"
+        if matches_path.exists():
+            catalog_df = pl.read_parquet(
+                matches_path,
+                columns=["match_uid", "player_id", "opp_id", "tournament_id",
+                         "year", "tournament_name", "draw_type", "draw_p1_id"],
+            )
+            match_catalog = build_match_catalog(catalog_df)
+        else:
+            match_catalog = {}
+
+        existing_map = load_event_map()
+
+        _BOOK_CONFIG = [
+            ("dk", "dk_event_id", "stage/draftkings/moneyline.parquet",
+             "src/mvp/draftkings/player_aliases.yaml"),
+            ("br", "br_event_id", "stage/betrivers/moneyline.parquet",
+             "src/mvp/betrivers/player_aliases.yaml"),
+            ("mgm", "mgm_event_id", "stage/betmgm/moneyline.parquet",
+             "src/mvp/betmgm/player_aliases.yaml"),
+        ]
+
+        for book, eid_col, odds_rel_path, aliases_rel in _BOOK_CONFIG:
+            try:
+                aliases_path = Path(__file__).resolve().parents[1] / aliases_rel
+                player_lookup = build_player_lookup(aliases_path=aliases_path)
+                odds_path = get_data_root() / odds_rel_path
+                if not odds_path.exists():
+                    continue
+                staged = pl.read_parquet(odds_path)
+                # Deduplicate to latest per event+player
+                staged_latest = staged.sort("fetched_at").group_by([eid_col, "player_name"]).last()
+                existing_eids = set(
+                    existing_map.filter(pl.col("book") == book)["event_id"].to_list()
+                )
+                map_result = map_book_events(
+                    staged_latest, eid_col, book, player_lookup, match_catalog, existing_eids,
+                )
+                if map_result.event_matches:
+                    save_event_mappings(map_result.event_matches, book=book)
+                    print(f"Event mapper: {len(map_result.event_matches)} new {book.upper()} mappings")
+            except Exception as e:
+                logger.error("Event mapping failed for %s: %s", book.upper(), e)
+
+        # Look up odds for predictions using event map
         odds_map: dict[str, dict[str, float]] | None = None
         br_odds_map: dict[str, dict[str, float]] | None = None
         mgm_odds_map: dict[str, dict[str, float]] | None = None
-        match_result = None
-        br_match_result = None
-        mgm_match_result = None
+
         try:
-            n = dk_future.result(timeout=30)
-            print(f"Fetched {n} DK moneyline odds entries")
             from mvp.draftkings.matcher import DraftKingsOddsMatcher
-            matcher = DraftKingsOddsMatcher()
-            match_result = matcher.match(predictions)
-            odds_map = match_result.odds or None
+            odds_map = DraftKingsOddsMatcher().match(predictions).odds or None
             if odds_map:
                 print(f"Matched DK odds for {len(odds_map)}/{len(predictions)} predictions")
-            if match_result.unmatched_names:
-                print(f"Unmatched DK names ({len(match_result.unmatched_names)}):")
-                for name in sorted(match_result.unmatched_names):
-                    print(f"  {name}")
-                print(f"Add aliases to: {matcher.ALIASES_PATH}")
         except Exception as e:
-            logger.error("DK odds matching failed: %s", e)
-            print(f"Warning: DK odds fetch/match failed ({e})")
+            logger.error("DK odds lookup failed: %s", e)
 
         try:
-            n = br_future.result(timeout=30)
-            print(f"Fetched {n} BR moneyline odds entries")
             from mvp.betrivers.matcher import BetRiversOddsMatcher
-            br_matcher = BetRiversOddsMatcher()
-            br_match_result = br_matcher.match(predictions)
-            br_odds_map = br_match_result.odds or None
+            br_odds_map = BetRiversOddsMatcher().match(predictions).odds or None
             if br_odds_map:
                 print(f"Matched BR odds for {len(br_odds_map)}/{len(predictions)} predictions")
-            if br_match_result.unmatched_names:
-                print(f"Unmatched BR names ({len(br_match_result.unmatched_names)}):")
-                for name in sorted(br_match_result.unmatched_names):
-                    print(f"  {name}")
-                print(f"Add aliases to: {br_matcher.ALIASES_PATH}")
         except Exception as e:
-            logger.error("BR odds matching failed: %s", e)
-            print(f"Warning: BR odds fetch/match failed ({e})")
+            logger.error("BR odds lookup failed: %s", e)
 
         try:
-            n = mgm_future.result(timeout=30)
-            print(f"Fetched {n} MGM moneyline odds entries")
             from mvp.betmgm.matcher import BetMGMOddsMatcher
-            mgm_matcher = BetMGMOddsMatcher()
-            mgm_match_result = mgm_matcher.match(predictions)
-            mgm_odds_map = mgm_match_result.odds or None
+            mgm_odds_map = BetMGMOddsMatcher().match(predictions).odds or None
             if mgm_odds_map:
                 print(f"Matched MGM odds for {len(mgm_odds_map)}/{len(predictions)} predictions")
-            if mgm_match_result.unmatched_names:
-                print(f"Unmatched MGM names ({len(mgm_match_result.unmatched_names)}):")
-                for name in sorted(mgm_match_result.unmatched_names):
-                    print(f"  {name}")
-                print(f"Add aliases to: {mgm_matcher.ALIASES_PATH}")
         except Exception as e:
-            logger.error("MGM odds matching failed: %s", e)
-            print(f"Warning: MGM odds fetch/match failed ({e})")
+            logger.error("MGM odds lookup failed: %s", e)
 
         odds_pool.shutdown(wait=False)
 
@@ -1427,17 +1470,11 @@ def cmd_live(args: argparse.Namespace) -> int:
         import polars as pl
 
         from mvp.analysis.dataset import build_analysis_dataset
-        from mvp.analysis.event_map import load_event_map_with_overrides, save_event_mappings
+        from mvp.analysis.event_map import load_event_map_with_overrides
         from mvp.analysis.odds import compute_odds_by_book
         from mvp.analysis.report import format_summary
 
-        # Save event mappings from matchers
-        if match_result and match_result.event_matches:
-            save_event_mappings(match_result.event_matches, book="dk")
-        if br_match_result and br_match_result.event_matches:
-            save_event_mappings(br_match_result.event_matches, book="br")
-        if mgm_match_result and mgm_match_result.event_matches:
-            save_event_mappings(mgm_match_result.event_matches, book="mgm")
+        # Event mappings already saved by event mapper above
 
         # Load event map and compute per-book odds
         event_map = load_event_map_with_overrides()
