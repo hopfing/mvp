@@ -158,6 +158,12 @@ def build_match_catalog(
     if missing:
         raise ValueError(f"matches_df missing required columns: {missing}")
 
+    # Filter to singles if draw_type column is available
+    if "draw_type" in matches_df.columns:
+        before = len(matches_df)
+        matches_df = matches_df.filter(pl.col("draw_type") == "singles")
+        logger.info("Match catalog: filtered to singles (%d -> %d)", before, len(matches_df))
+
     has_name = "tournament_name" in matches_df.columns
     cols = list(required) + (["tournament_name"] if has_name else [])
 
@@ -293,6 +299,14 @@ def map_book_events(
             result.no_match_found.append((eid, name_a, name_b))
             skipped_no_match += 1
             continue
+
+        # Filter candidates to the year the odds were fetched
+        fetched_at = rows[0].get("fetched_at")
+        if fetched_at is not None and len(candidates) > 1:
+            odds_year = fetched_at.year
+            year_filtered = [c for c in candidates if c["year"] == odds_year]
+            if year_filtered:
+                candidates = year_filtered
 
         if len(candidates) == 1:
             match = candidates[0]
