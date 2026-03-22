@@ -390,13 +390,46 @@ class ScheduleTransformer(BaseJob):
         has_uid = df.filter(pl.col("match_uid").is_not_null())
         no_uid = df.filter(pl.col("match_uid").is_null())
 
-        # First, keep latest data per match_uid
+        # Preserve original p1/p2 ordering from the earliest snapshot
+        earliest_p1p2 = (
+            has_uid.sort("snapshot_timestamp")
+            .group_by("match_uid")
+            .first()
+            .select("match_uid", pl.col("p1_id").alias("_orig_p1_id"))
+        )
+
+        # Keep latest data per match_uid
         has_uid = (
             has_uid.sort("snapshot_timestamp")
             .group_by("match_uid")
             .last()
             .select(df.columns)
         )
+
+        # Swap p1/p2 back to original ordering where the latest flipped them
+        has_uid = has_uid.join(earliest_p1p2, on="match_uid", how="left")
+        needs_swap = (
+            has_uid["_orig_p1_id"].is_not_null()
+            & (has_uid["p1_id"] != has_uid["_orig_p1_id"])
+        )
+        if needs_swap.any():
+            p1_cols = [c for c in has_uid.columns if c.startswith("p1_")]
+            p2_cols = [c for c in has_uid.columns if c.startswith("p2_")]
+            swap_exprs = []
+            for p1c in p1_cols:
+                p2c = p1c.replace("p1_", "p2_", 1)
+                if p2c in p2_cols:
+                    swap_exprs.append(
+                        pl.when(needs_swap).then(pl.col(p2c)).otherwise(pl.col(p1c)).alias(p1c)
+                    )
+                    swap_exprs.append(
+                        pl.when(needs_swap).then(pl.col(p1c)).otherwise(pl.col(p2c)).alias(p2c)
+                    )
+            if swap_exprs:
+                n_swapped = needs_swap.sum()
+                logger.info("Schedule dedup: restored original p1/p2 for %d matches", n_swapped)
+                has_uid = has_uid.with_columns(swap_exprs)
+        has_uid = has_uid.drop("_orig_p1_id")
 
         # Drop replaced draw entries: same player+draw_type+round, different opponent
         replaced_uids: set[str] = set()
