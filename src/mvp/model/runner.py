@@ -303,6 +303,15 @@ class ExperimentRunner:
         augmented_cols = feature_cols + build_result.aux_base_col_names
         n_model = build_result.n_model_features
 
+        # Embedding configuration
+        embedding_col = None
+        min_player_matches = 10
+        if self.config.model.params:
+            embedding_col = self.config.model.params.get("embedding_col")
+            min_player_matches = self.config.model.params.get(
+                "min_player_matches", 10
+            )
+
         # Get splitter
         splitter = self._get_splitter()
         run_logger.info(
@@ -399,6 +408,29 @@ class ExperimentRunner:
                 X_test = X_test[:, :n_model]
                 X_train = (X_train - train_mean) / train_std
                 X_test = (X_test - train_mean) / train_std
+
+                # Append embedding column (integer-encoded, not scaled)
+                if embedding_col and embedding_col in train_df.columns:
+                    player_counts = train_df[embedding_col].value_counts()
+                    eligible = player_counts.filter(
+                        pl.col("count") >= min_player_matches
+                    )
+                    vocab = {
+                        pid: idx + 1
+                        for idx, pid in enumerate(
+                            eligible[embedding_col].to_list()
+                        )
+                    }
+                    emb_train = np.array(
+                        [vocab.get(p, 0) for p in train_df[embedding_col].to_list()]
+                    ).reshape(-1, 1)
+                    emb_test = np.array(
+                        [vocab.get(p, 0) for p in test_df[embedding_col].to_list()]
+                    ).reshape(-1, 1)
+                    X_train = np.hstack([X_train, emb_train.astype(np.float64)])
+                    X_test = np.hstack([X_test, emb_test.astype(np.float64)])
+                    self.config.model.params["embedding_col_idx"] = X_train.shape[1] - 1
+                    self.config.model.params["n_players"] = len(vocab)
 
                 # Compute sample weights if configured
                 train_weights = None
