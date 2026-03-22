@@ -145,11 +145,12 @@ def build_match_catalog(
 
     Args:
         matches_df: DataFrame with at minimum: match_uid, player_id, opp_id,
-                    tournament_id, year. May also have tournament_name.
+                    tournament_id, year. Should also have draw_p1_id for correct
+                    p1/p2 assignment. May also have tournament_name and draw_type.
 
     Returns:
         Dict mapping frozenset({player_id, opp_id}) to list of
-        {match_uid, tournament_id, year, tournament_name?} dicts.
+        {match_uid, tournament_id, year, p1_id, tournament_name?} dicts.
     """
     catalog: dict[frozenset, list[dict]] = {}
 
@@ -165,17 +166,26 @@ def build_match_catalog(
         logger.info("Match catalog: filtered to singles (%d -> %d)", before, len(matches_df))
 
     has_name = "tournament_name" in matches_df.columns
-    cols = list(required) + (["tournament_name"] if has_name else [])
+    has_p1 = "draw_p1_id" in matches_df.columns
+    optional = []
+    if has_name:
+        optional.append("tournament_name")
+    if has_p1:
+        optional.append("draw_p1_id")
+    cols = list(required) + optional
 
     # Deduplicate: same match_uid can appear twice (player + opp perspective)
     deduped = matches_df.select(cols).unique(subset=["match_uid"])
 
     for row in deduped.iter_rows(named=True):
         pair = frozenset({row["player_id"], row["opp_id"]})
+        # Determine p1_id: prefer draw_p1_id, fall back to player_id
+        p1_id = row.get("draw_p1_id") or row["player_id"]
         entry = {
             "match_uid": row["match_uid"],
             "tournament_id": row["tournament_id"],
             "year": row["year"],
+            "p1_id": p1_id,
         }
         if has_name:
             entry["tournament_name"] = row.get("tournament_name")
@@ -324,13 +334,17 @@ def map_book_events(
                 skipped_ambiguous += 1
                 continue
 
-        # Determine p1/p2 book names (p1 = first player in our match data)
-        # We don't know p1/p2 order here — store both and let the consumer resolve
+        # Assign p1/p2 book names to match our internal p1/p2 ordering
+        match_p1_id = match.get("p1_id")
+        if match_p1_id == pid_a:
+            p1_book_name, p2_book_name = name_a, name_b
+        else:
+            p1_book_name, p2_book_name = name_b, name_a
         result.event_matches.append(EventMatch(
             match_uid=match["match_uid"],
             event_id=eid,
-            p1_book_name=name_a,
-            p2_book_name=name_b,
+            p1_book_name=p1_book_name,
+            p2_book_name=p2_book_name,
         ))
         mapped += 1
 
