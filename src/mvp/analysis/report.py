@@ -223,15 +223,16 @@ def _edge_band_table(
     if not any(m for _, m in basis_maps):
         return
 
-    # Fixed-width group: " NNNN  Acc.%  +ROI.%" = 20 chars
     def _grp(row: dict | None) -> str:
         if row:
+            pnl = row["net_pnl"]
             return (
                 f" {row['n_bets']:>4}"
                 f" {row['accuracy']:>6.1%}"
                 f" {row['roi']:>+7.1%}"
+                f" {pnl:>+7.1f}"
             )
-        return f" {'—':>4} {'—':>6} {'—':>7}"
+        return f" {'—':>4} {'—':>6} {'—':>7} {'—':>7}"
 
     labels = {
         "open": "open",
@@ -239,13 +240,15 @@ def _edge_band_table(
         "close": "close",
     }
     sep = " | "
-    grp_width = 20  # " NNNN Acc..% +ROI..%"
+    grp_width = 27  # " NNNN Acc..% +ROI..% +PnL.."
 
     # Header: basis label on top, column names below
     lines.append("")
     lbl_parts = [f"{labels.get(n, n):^{grp_width}}" for n, _ in basis_maps]
     lines.append(f"{'':12}" + sep.join(lbl_parts))
-    col_parts = [f" {'N':>4} {'Acc':>6} {'ROI':>7}" for _ in basis_maps]
+    col_parts = [
+        f" {'N':>4} {'Acc':>6} {'ROI':>7} {'P&L':>7}" for _ in basis_maps
+    ]
     lines.append(f"{'Edge Band':<12}" + sep.join(col_parts))
     row_width = 12 + len(sep.join(col_parts))
     lines.append("-" * row_width)
