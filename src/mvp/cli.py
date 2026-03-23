@@ -1599,6 +1599,7 @@ def cmd_analysis(parsed: argparse.Namespace) -> int:
     from mvp.odds.aggregator import (
         compute_book_odds,
         compute_cross_book_odds,
+        compute_opening_odds,
         save_book_odds,
         save_cross_book_odds,
     )
@@ -1651,6 +1652,12 @@ def cmd_analysis(parsed: argparse.Namespace) -> int:
     if len(cross_book) > 0:
         save_cross_book_odds(cross_book)
     print(f"Cross-book odds: {len(cross_book)} matches")
+
+    # Opening odds from raw snapshots
+    opening_odds = (
+        compute_opening_odds(all_snapshots)
+        if len(all_snapshots) > 0 else None
+    )
 
     # Concat per-book odds for the per-book wide columns
     odds_by_book = (
@@ -1706,6 +1713,7 @@ def cmd_analysis(parsed: argparse.Namespace) -> int:
         odds_by_book=odds_by_book,
         cross_book_odds=cross_book if len(cross_book) > 0 else None,
         all_snapshots=all_snapshots if len(all_snapshots) > 0 else None,
+        opening_odds=opening_odds,
     )
 
     analysis_path = data_root / "analysis" / "analysis.parquet"

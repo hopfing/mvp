@@ -126,9 +126,10 @@ def format_analysis_summary(
                 )
 
     if len(sims) > 0:
-        from mvp.analysis.simulations import SCENARIOS
+        from mvp.analysis.simulations import EDGE_BANDS, SCENARIOS
 
         scenario_order = [s["name"] for s in SCENARIOS]
+        edge_band_names = [b["name"] for b in EDGE_BANDS]
 
         # Show only the current (most recent) model version
         versions = (
@@ -144,13 +145,23 @@ def format_analysis_summary(
                 pl.col("model_version") == version
             )
             label = version if version != "all" else "ALL VERSIONS"
-            lines.append(f"\n{'SIMULATIONS — ' + label:^70}")
-            _sim_header(lines)
 
             overall = v_sims.filter(
                 pl.col("segment") == "overall"
             )
-            _sim_rows(lines, overall, scenario_order)
+
+            # Non-edge scenarios (consensus + flat)
+            non_edge = [
+                s for s in scenario_order
+                if s not in edge_band_names
+                and not s.endswith("_first_avail")
+            ]
+            lines.append(f"\n{'SIMULATIONS — ' + label:^70}")
+            _sim_header(lines)
+            _sim_rows(lines, overall, non_edge)
+
+            # Edge bands: close vs open side by side
+            _edge_band_table(lines, overall, edge_band_names)
 
             # Consensus cross-cut
             consensus = v_sims.filter(
@@ -170,7 +181,8 @@ def format_analysis_summary(
                     subset = consensus.filter(
                         pl.col("segment_value") == cv
                     )
-                    _sim_rows(lines, subset, scenario_order)
+                    _sim_rows(lines, subset, non_edge)
+                    _edge_band_table(lines, subset, edge_band_names)
 
     lines.append("=" * 70)
     return "\n".join(lines)
@@ -183,6 +195,54 @@ def _sim_header(lines: list[str]) -> None:
         f" {'ROI':>8} {'P&L':>10}"
     )
     lines.append("-" * 70)
+
+
+def _edge_band_table(
+    lines: list[str],
+    sims_overall: pl.DataFrame,
+    band_names: list[str],
+) -> None:
+    """Render edge bands with close and first-available columns side by side."""
+    close_map = {
+        r["scenario"]: r for r in sims_overall.iter_rows(named=True)
+        if r["scenario"] in band_names
+    }
+    fa_suffix = "_first_avail"
+    fa_map = {
+        r["scenario"].removesuffix(fa_suffix): r
+        for r in sims_overall.iter_rows(named=True)
+        if r["scenario"].endswith(fa_suffix)
+    }
+    if not close_map and not fa_map:
+        return
+
+    lines.append("")
+    lines.append(
+        f"{'Edge Band':<14}"
+        f" {'N':>5} {'Acc':>6} {'ROI':>7}"
+        f"  |"
+        f" {'N':>5} {'Acc':>6} {'ROI':>7}"
+    )
+    lines.append(
+        f"{'':<14}"
+        f" {'':>5} {'close':>6} {'':>7}"
+        f"  |"
+        f" {'':>5} {'1st avl':>6} {'':>7}"
+    )
+    lines.append("-" * 58)
+
+    for name in band_names:
+        c = close_map.get(name)
+        o = fa_map.get(name)
+        c_str = (
+            f" {c['n_bets']:>5} {c['accuracy']:>5.1%} {c['roi']:>+6.1%}"
+            if c else f" {'—':>5} {'—':>6} {'—':>7}"
+        )
+        o_str = (
+            f" {o['n_bets']:>5} {o['accuracy']:>5.1%} {o['roi']:>+6.1%}"
+            if o else f" {'—':>5} {'—':>6} {'—':>7}"
+        )
+        lines.append(f"{name:<14}{c_str}  |{o_str}")
 
 
 def _sim_rows(

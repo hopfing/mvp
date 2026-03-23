@@ -9,31 +9,51 @@ import polars as pl
 logger = logging.getLogger(__name__)
 
 _BEST_CLOSE = "pred_odds_best_close"
-_EDGE_COL = "model_edge_best_close"
 
-SCENARIOS = [
+EDGE_BANDS = [
+    {"name": "edge_5pct", "conditions": [(">=", 0.05)]},
+    {"name": "edge_3pct", "conditions": [(">=", 0.03), ("<", 0.05)]},
+    {"name": "edge_1pct", "conditions": [(">=", 0.01), ("<", 0.03)]},
+    {"name": "edge_0pct", "conditions": [(">", 0), ("<", 0.01)]},
+    {"name": "neg_0pct", "conditions": [("<=", 0), (">", -0.01)]},
+    {"name": "neg_1pct", "conditions": [("<=", -0.01), (">", -0.03)]},
+    {"name": "neg_3pct", "conditions": [("<=", -0.03), (">", -0.05)]},
+    {"name": "neg_5pct", "conditions": [("<=", -0.05)]},
+]
+
+EDGE_BASES = {
+    "close": {
+        "odds_col": "pred_odds_best_close",
+        "edge_col": "model_edge_best_close",
+    },
+    "first_avail": {
+        "odds_col": "pred_odds_first_avail",
+        "edge_col": "model_edge_first_avail",
+    },
+}
+
+SCENARIOS: list[dict] = [
     {"name": "consensus_100", "odds_col": _BEST_CLOSE,
      "filter": ("consensus", "==", 1.0)},
     {"name": "consensus_80", "odds_col": _BEST_CLOSE,
      "filter": ("consensus", "==", 0.8)},
     {"name": "consensus_60", "odds_col": _BEST_CLOSE,
      "filter": ("consensus", "==", 0.6)},
-    {"name": "edge_5pct", "odds_col": _BEST_CLOSE,
-     "filter": [(_EDGE_COL, ">=", 0.05)]},
-    {"name": "edge_3pct", "odds_col": _BEST_CLOSE,
-     "filter": [(_EDGE_COL, ">=", 0.03), (_EDGE_COL, "<", 0.05)]},
-    {"name": "edge_1pct", "odds_col": _BEST_CLOSE,
-     "filter": [(_EDGE_COL, ">=", 0.01), (_EDGE_COL, "<", 0.03)]},
-    {"name": "edge_0pct", "odds_col": _BEST_CLOSE,
-     "filter": [(_EDGE_COL, ">", 0), (_EDGE_COL, "<", 0.01)]},
-    {"name": "neg_0pct", "odds_col": _BEST_CLOSE,
-     "filter": [(_EDGE_COL, "<=", 0), (_EDGE_COL, ">", -0.01)]},
-    {"name": "neg_1pct", "odds_col": _BEST_CLOSE,
-     "filter": [(_EDGE_COL, "<=", -0.01), (_EDGE_COL, ">", -0.03)]},
-    {"name": "neg_3pct", "odds_col": _BEST_CLOSE,
-     "filter": [(_EDGE_COL, "<=", -0.03), (_EDGE_COL, ">", -0.05)]},
-    {"name": "neg_5pct", "odds_col": _BEST_CLOSE,
-     "filter": [(_EDGE_COL, "<=", -0.05)]},
+]
+
+for _basis_name, _basis in EDGE_BASES.items():
+    _suffix = "" if _basis_name == "close" else f"_{_basis_name}"
+    for _band in EDGE_BANDS:
+        SCENARIOS.append({
+            "name": f"{_band['name']}{_suffix}",
+            "odds_col": _basis["odds_col"],
+            "filter": [
+                (_basis["edge_col"], op, val)
+                for op, val in _band["conditions"]
+            ],
+        })
+
+SCENARIOS.extend([
     {"name": "flat_best_open", "odds_col": "pred_odds_best_open",
      "filter": None},
     {"name": "flat_best_close", "odds_col": _BEST_CLOSE, "filter": None},
@@ -41,7 +61,7 @@ SCENARIOS = [
      "filter": None},
     {"name": "flat_worst_intraday", "odds_col": "pred_odds_worst_intraday",
      "filter": None},
-]
+])
 
 SEGMENTS = [
     {"name": "overall", "column": None},

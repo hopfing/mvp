@@ -118,3 +118,100 @@ class TestCrossBookOdds:
 
         result = compute_cross_book_odds([])
         assert len(result) == 0
+
+
+def _make_opening_snapshots():
+    """Snapshots with staggered book timing for opening odds tests.
+
+    DK opens at 08:00, BR opens at 10:00.
+    Both have snapshots at 10:00 and 12:00 (close).
+    """
+    return pl.DataFrame({
+        "match_uid": ["m1"] * 8,
+        "book": [
+            "dk", "dk",      # 08:00
+            "dk", "dk",      # 10:00
+            "br", "br",      # 10:00
+            "dk", "dk",      # 12:00 (not needed for opening but present)
+        ],
+        "player_id": [
+            "A", "B",
+            "A", "B",
+            "A", "B",
+            "A", "B",
+        ],
+        "odds": [
+            2.20, 1.70,      # DK @ 08:00
+            2.15, 1.73,      # DK @ 10:00
+            2.25, 1.68,      # BR @ 10:00
+            2.10, 1.75,      # DK @ 12:00
+        ],
+        "fetched_at": [
+            datetime(2026, 3, 10, 8, 2, tzinfo=timezone.utc),
+            datetime(2026, 3, 10, 8, 2, tzinfo=timezone.utc),
+            datetime(2026, 3, 10, 10, 3, tzinfo=timezone.utc),
+            datetime(2026, 3, 10, 10, 3, tzinfo=timezone.utc),
+            datetime(2026, 3, 10, 10, 5, tzinfo=timezone.utc),
+            datetime(2026, 3, 10, 10, 5, tzinfo=timezone.utc),
+            datetime(2026, 3, 10, 12, 1, tzinfo=timezone.utc),
+            datetime(2026, 3, 10, 12, 1, tzinfo=timezone.utc),
+        ],
+        "event_status": ["NOT_STARTED"] * 8,
+    })
+
+
+class TestOpeningOdds:
+    def test_first_avail_is_earliest_book(self):
+        from mvp.odds.aggregator import compute_opening_odds
+
+        result = compute_opening_odds(_make_opening_snapshots())
+
+        a = result.filter(pl.col("player_id") == "A")
+        # DK posted first at 08:00 with odds 2.20 — only book in that round
+        assert a["first_avail_odds"][0] == pytest.approx(2.20)
+
+    def test_market_formed_averages_books(self):
+        from mvp.odds.aggregator import compute_opening_odds
+
+        result = compute_opening_odds(_make_opening_snapshots())
+
+        a = result.filter(pl.col("player_id") == "A")
+        # Market forms at 10:00 (DK + BR). DK=2.15, BR=2.25 → avg=2.20
+        assert a["market_formed_odds"][0] == pytest.approx(2.20)
+
+        b = result.filter(pl.col("player_id") == "B")
+        # DK=1.73, BR=1.68 → avg=1.705
+        assert b["market_formed_odds"][0] == pytest.approx(1.705)
+
+    def test_single_book_match_has_null_market_formed(self):
+        from mvp.odds.aggregator import compute_opening_odds
+
+        # Only DK snapshots
+        snaps = pl.DataFrame({
+            "match_uid": ["m2", "m2"],
+            "book": ["dk", "dk"],
+            "player_id": ["X", "Y"],
+            "odds": [1.50, 2.60],
+            "fetched_at": [
+                datetime(2026, 3, 10, 8, 0, tzinfo=timezone.utc),
+                datetime(2026, 3, 10, 8, 0, tzinfo=timezone.utc),
+            ],
+            "event_status": ["NOT_STARTED", "NOT_STARTED"],
+        })
+        result = compute_opening_odds(snaps)
+        x = result.filter(pl.col("player_id") == "X")
+        assert x["first_avail_odds"][0] == pytest.approx(1.50)
+        assert x["market_formed_odds"][0] is None
+
+    def test_empty_snapshots_returns_empty(self):
+        from mvp.odds.aggregator import compute_opening_odds
+
+        result = compute_opening_odds(pl.DataFrame(schema={
+            "match_uid": pl.Utf8,
+            "book": pl.Utf8,
+            "player_id": pl.Utf8,
+            "odds": pl.Float64,
+            "fetched_at": pl.Datetime("us", "UTC"),
+            "event_status": pl.Utf8,
+        }))
+        assert len(result) == 0

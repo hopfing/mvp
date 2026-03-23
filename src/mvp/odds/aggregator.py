@@ -129,6 +129,93 @@ def compute_cross_book_odds(book_odds_list: list[pl.DataFrame]) -> pl.DataFrame:
     return pl.DataFrame(results)
 
 
+def compute_opening_odds(snapshots: pl.DataFrame) -> pl.DataFrame:
+    """Compute first-available and market-formed opening odds from raw snapshots.
+
+    Uses 15-minute floor buckets to align cross-book fetch times.
+
+    - first_avail_odds: earliest bucket with any book, avg if multiple.
+    - market_formed_odds: earliest bucket where 2+ books cover the match,
+      avg odds for each player at that bucket.
+
+    Args:
+        snapshots: Resolved snapshots with match_uid, book, player_id, odds,
+                   fetched_at, event_status.
+
+    Returns:
+        One row per (match_uid, player_id) with first_avail_odds and
+        market_formed_odds columns.
+    """
+    if len(snapshots) == 0:
+        return _empty_openings()
+
+    id_col = "player_id" if "player_id" in snapshots.columns else "side"
+
+    prematch = snapshots.filter(pl.col("event_status") == "NOT_STARTED")
+    if len(prematch) == 0:
+        return _empty_openings()
+
+    pm = prematch.with_columns(
+        pl.col("fetched_at").dt.truncate("15m").alias("fetch_round")
+    )
+
+    # --- First available ---
+    # Per match+player+round: average odds across books
+    per_round = pm.group_by(["match_uid", id_col, "fetch_round"]).agg(
+        pl.col("odds").mean().alias("avg_odds"),
+    )
+
+    # Per match+player: earliest round via min join
+    min_rounds = per_round.group_by(["match_uid", id_col]).agg(
+        pl.col("fetch_round").min().alias("min_round"),
+    )
+    first_avail = (
+        per_round.join(min_rounds, on=["match_uid", id_col])
+        .filter(pl.col("fetch_round") == pl.col("min_round"))
+        .select("match_uid",
+                pl.col(id_col).alias("player_id"),
+                pl.col("avg_odds").alias("first_avail_odds"))
+    )
+
+    # --- Market formed ---
+    # Per match+round: count distinct books
+    books_per_round = pm.group_by(["match_uid", "fetch_round"]).agg(
+        pl.col("book").n_unique().alias("n_books"),
+    )
+
+    # Per match: earliest round with 2+ books
+    market_min = (
+        books_per_round.filter(pl.col("n_books") >= 2)
+        .group_by("match_uid")
+        .agg(pl.col("fetch_round").min().alias("market_round"))
+    )
+
+    # Odds at market_round per player (avg across books present)
+    market_formed = (
+        pm.join(market_min, on="match_uid")
+        .filter(pl.col("fetch_round") == pl.col("market_round"))
+        .group_by(["match_uid", id_col])
+        .agg(pl.col("odds").mean().alias("market_formed_odds"))
+        .rename({id_col: "player_id"})
+    )
+
+    # Combine
+    result = first_avail.join(
+        market_formed, on=["match_uid", "player_id"], how="left"
+    )
+
+    return result
+
+
+def _empty_openings() -> pl.DataFrame:
+    return pl.DataFrame(schema={
+        "match_uid": pl.Utf8,
+        "player_id": pl.Utf8,
+        "first_avail_odds": pl.Float64,
+        "market_formed_odds": pl.Float64,
+    })
+
+
 def save_book_odds(df: pl.DataFrame, book: str) -> None:
     """Save per-book odds summary."""
     path = get_data_root() / "aggregate" / book / "odds.parquet"

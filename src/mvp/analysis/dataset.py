@@ -35,6 +35,7 @@ def build_analysis_dataset(
     odds_by_book: pl.DataFrame | None = None,
     cross_book_odds: pl.DataFrame | None = None,
     all_snapshots: pl.DataFrame | None = None,
+    opening_odds: pl.DataFrame | None = None,
 ) -> pl.DataFrame:
     """Build a single wide DataFrame for analysis.
 
@@ -47,6 +48,7 @@ def build_analysis_dataset(
         odds_by_book: Long-format per-book odds summaries.
         cross_book_odds: Pre-computed cross-book odds summary from aggregator.
         all_snapshots: Resolved snapshots for market alignment at bet time.
+        opening_odds: First-available and market-formed opening odds per player.
 
     Returns:
         Wide DataFrame with all joined data and derived metrics.
@@ -60,6 +62,9 @@ def build_analysis_dataset(
         ds = _join_cross_book_odds(ds, cross_book_odds)
     else:
         ds = _join_odds(ds, odds_by_book, skip_cross_book=False)
+
+    if opening_odds is not None and len(opening_odds) > 0:
+        ds = _join_cross_book_odds(ds, opening_odds)
 
     ds = _compute_pred_side_metrics(ds)
     ds = _compute_clv(ds)
@@ -288,6 +293,8 @@ def _compute_pred_side_metrics(ds: pl.DataFrame) -> pl.DataFrame:
         ("best_opening_odds", "pred_odds_best_open"),
         ("best_intraday_odds", "pred_odds_best_intraday"),
         ("worst_intraday_odds", "pred_odds_worst_intraday"),
+        ("first_avail_odds", "pred_odds_first_avail"),
+        ("market_formed_odds", "pred_odds_market_formed"),
     ]
 
     for src_prefix, dst_col in odds_mappings:
@@ -301,16 +308,17 @@ def _compute_pred_side_metrics(ds: pl.DataFrame) -> pl.DataFrame:
                 .alias(dst_col)
             )
 
-    if "pred_odds_best_close" in ds.columns:
-        ds = ds.with_columns(
-            (pl.col("pred_prob") - 1.0 / pl.col("pred_odds_best_close"))
-            .alias("model_edge_best_close")
-        )
-    if "pred_odds_avg_close" in ds.columns:
-        ds = ds.with_columns(
-            (pl.col("pred_prob") - 1.0 / pl.col("pred_odds_avg_close"))
-            .alias("model_edge_avg_close")
-        )
+    for odds_col, edge_col in [
+        ("pred_odds_best_close", "model_edge_best_close"),
+        ("pred_odds_avg_close", "model_edge_avg_close"),
+        ("pred_odds_first_avail", "model_edge_first_avail"),
+        ("pred_odds_market_formed", "model_edge_market_formed"),
+    ]:
+        if odds_col in ds.columns:
+            ds = ds.with_columns(
+                (pl.col("pred_prob") - 1.0 / pl.col(odds_col))
+                .alias(edge_col)
+            )
 
     return ds
 
