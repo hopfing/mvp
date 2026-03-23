@@ -2,6 +2,7 @@
 
 import glob
 import logging
+import re
 from pathlib import Path
 
 import polars as pl
@@ -179,7 +180,8 @@ def fill_tournament_fields(df: pl.DataFrame) -> pl.DataFrame:
     propagate it to all rows. Only tournaments with ALL nulls remain null.
     """
     group_keys = ["tournament_id", "year"]
-    fill_cols = ["surface", "indoor", "event_type", "tournament_name", "country"]
+    fill_cols = ["surface", "indoor", "event_type", "tournament_name", "country",
+                  "sponsor_title"]
     return df.with_columns([
         pl.col(c)
         .fill_null(pl.col(c).drop_nulls().first().over(group_keys))
@@ -187,6 +189,69 @@ def fill_tournament_fields(df: pl.DataFrame) -> pl.DataFrame:
         for c in fill_cols
         if c in df.columns
     ])
+
+
+def disambiguate_tournament_names(df: pl.DataFrame) -> pl.DataFrame:
+    """Append trailing number from sponsor_title to tournament_name for same-name collisions.
+
+    When multiple tournament_ids share the same tournament_name in a year,
+    check sponsor_title for a trailing integer (e.g. "Rwanda Challenger 2" -> 2)
+    and append it to tournament_name (e.g. "Kigali" -> "Kigali 2").
+    Only modifies rows where a trailing number is found — no guessing.
+    """
+    if "sponsor_title" not in df.columns or "tournament_name" not in df.columns:
+        return df
+
+    # Find (tournament_name, year) pairs with multiple tournament_ids
+    collision_keys = (
+        df.select("tournament_id", "year", "tournament_name")
+        .drop_nulls()
+        .unique()
+        .group_by("tournament_name", "year")
+        .agg(pl.col("tournament_id").n_unique().alias("n_ids"))
+        .filter(pl.col("n_ids") > 1)
+        .select("tournament_name", "year")
+    )
+
+    if collision_keys.is_empty():
+        return df
+
+    # For colliding tournaments, build a tid -> suffix mapping from sponsor_title
+    colliding = (
+        df.join(collision_keys, on=["tournament_name", "year"], how="semi")
+        .select("tournament_id", "year", "sponsor_title")
+        .drop_nulls()
+        .unique(subset=["tournament_id", "year"])
+    )
+
+    suffix_map: dict[tuple[str, int], str] = {}
+    for row in colliding.iter_rows(named=True):
+        title = row["sponsor_title"]
+        m = re.search(r"\s+(\d+)\s*$", title)
+        if m:
+            key = (row["tournament_id"], row["year"])
+            suffix_map[key] = m.group(1)
+
+    if not suffix_map:
+        return df
+
+    # Build a small lookup frame and join
+    suffix_df = pl.DataFrame([
+        {"tournament_id": tid, "year": yr, "_name_suffix": f" {suffix}"}
+        for (tid, yr), suffix in suffix_map.items()
+    ])
+
+    df = df.join(suffix_df, on=["tournament_id", "year"], how="left")
+    df = df.with_columns(
+        pl.when(pl.col("_name_suffix").is_not_null())
+        .then(pl.col("tournament_name") + pl.col("_name_suffix"))
+        .otherwise(pl.col("tournament_name"))
+        .alias("tournament_name")
+    ).drop("_name_suffix")
+
+    renamed = len(suffix_map)
+    logger.info("Tournament name disambiguation: %d tournament-years renamed", renamed)
+    return df
 
 
 def add_round_order(df: pl.DataFrame) -> pl.DataFrame:
@@ -615,6 +680,7 @@ class MatchesAggregator(BaseJob):
         # effective match date. Any row in a tournament can provide the values.
         combined = fill_tournament_dates(combined)
         combined = fill_tournament_fields(combined)
+        combined = disambiguate_tournament_names(combined)
         combined = add_round_order(combined)
         combined = add_effective_match_date(combined)
         combined = add_tournament_level(combined)

@@ -828,3 +828,71 @@ class TestAddTournamentLevel:
         df = pl.DataFrame({"event_type": ["GS", "CH", "250"]})
         result = add_tournament_level(df)
         assert result["tournament_level"].to_list() == ["GS", "CH75", "250"]
+
+
+class TestDisambiguateTournamentNames:
+    def test_trailing_number_appended(self):
+        from mvp.atptour.aggregators.matches import disambiguate_tournament_names
+
+        df = pl.DataFrame({
+            "tournament_id": ["2913", "2913", "2915", "2915"],
+            "year": [2026, 2026, 2026, 2026],
+            "tournament_name": ["Kigali", "Kigali", "Kigali", "Kigali"],
+            "sponsor_title": ["Rwanda Challenger", "Rwanda Challenger",
+                              "Rwanda Challenger 2", "Rwanda Challenger 2"],
+        })
+        result = disambiguate_tournament_names(df)
+        assert result.filter(pl.col("tournament_id") == "2913")["tournament_name"].to_list() == [
+            "Kigali", "Kigali",
+        ]
+        assert result.filter(pl.col("tournament_id") == "2915")["tournament_name"].to_list() == [
+            "Kigali 2", "Kigali 2",
+        ]
+
+    def test_no_collision_unchanged(self):
+        from mvp.atptour.aggregators.matches import disambiguate_tournament_names
+
+        df = pl.DataFrame({
+            "tournament_id": ["100", "200"],
+            "year": [2026, 2026],
+            "tournament_name": ["Paris", "London"],
+            "sponsor_title": ["Rolex Paris Masters", "Queen's Club"],
+        })
+        result = disambiguate_tournament_names(df)
+        assert result["tournament_name"].to_list() == ["Paris", "London"]
+
+    def test_no_trailing_number_unchanged(self):
+        """Same city, different tournaments, but no trailing number — leave alone."""
+        from mvp.atptour.aggregators.matches import disambiguate_tournament_names
+
+        df = pl.DataFrame({
+            "tournament_id": ["404", "2903"],
+            "year": [2024, 2024],
+            "tournament_name": ["Indian Wells", "Indian Wells"],
+            "sponsor_title": ["BNP Paribas Open", "Indian Wells"],
+        })
+        result = disambiguate_tournament_names(df)
+        assert result["tournament_name"].to_list() == ["Indian Wells", "Indian Wells"]
+
+    def test_missing_columns_noop(self):
+        from mvp.atptour.aggregators.matches import disambiguate_tournament_names
+
+        df = pl.DataFrame({
+            "tournament_id": ["100"],
+            "year": [2026],
+            "tournament_name": ["Paris"],
+        })
+        result = disambiguate_tournament_names(df)
+        assert result["tournament_name"].to_list() == ["Paris"]
+
+    def test_null_sponsor_title_unchanged(self):
+        from mvp.atptour.aggregators.matches import disambiguate_tournament_names
+
+        df = pl.DataFrame({
+            "tournament_id": ["2913", "2915"],
+            "year": [2026, 2026],
+            "tournament_name": ["Kigali", "Kigali"],
+            "sponsor_title": [None, None],
+        })
+        result = disambiguate_tournament_names(df)
+        assert result["tournament_name"].to_list() == ["Kigali", "Kigali"]
