@@ -18,16 +18,22 @@ SCENARIOS = [
      "filter": ("consensus", "==", 0.8)},
     {"name": "consensus_60", "odds_col": _BEST_CLOSE,
      "filter": ("consensus", "==", 0.6)},
-    {"name": "yes_edge", "odds_col": _BEST_CLOSE,
-     "filter": (_EDGE_COL, ">", 0)},
-    {"name": "edge_1pct", "odds_col": _BEST_CLOSE,
-     "filter": (_EDGE_COL, ">", 0.01)},
-    {"name": "edge_3pct", "odds_col": _BEST_CLOSE,
-     "filter": (_EDGE_COL, ">", 0.03)},
     {"name": "edge_5pct", "odds_col": _BEST_CLOSE,
-     "filter": (_EDGE_COL, ">", 0.05)},
-    {"name": "no_edge", "odds_col": _BEST_CLOSE,
-     "filter": (_EDGE_COL, "<", 0)},
+     "filter": [(_EDGE_COL, ">=", 0.05)]},
+    {"name": "edge_3pct", "odds_col": _BEST_CLOSE,
+     "filter": [(_EDGE_COL, ">=", 0.03), (_EDGE_COL, "<", 0.05)]},
+    {"name": "edge_1pct", "odds_col": _BEST_CLOSE,
+     "filter": [(_EDGE_COL, ">=", 0.01), (_EDGE_COL, "<", 0.03)]},
+    {"name": "edge_0pct", "odds_col": _BEST_CLOSE,
+     "filter": [(_EDGE_COL, ">", 0), (_EDGE_COL, "<", 0.01)]},
+    {"name": "neg_0pct", "odds_col": _BEST_CLOSE,
+     "filter": [(_EDGE_COL, "<=", 0), (_EDGE_COL, ">", -0.01)]},
+    {"name": "neg_1pct", "odds_col": _BEST_CLOSE,
+     "filter": [(_EDGE_COL, "<=", -0.01), (_EDGE_COL, ">", -0.03)]},
+    {"name": "neg_3pct", "odds_col": _BEST_CLOSE,
+     "filter": [(_EDGE_COL, "<=", -0.03), (_EDGE_COL, ">", -0.05)]},
+    {"name": "neg_5pct", "odds_col": _BEST_CLOSE,
+     "filter": [(_EDGE_COL, "<=", -0.05)]},
     {"name": "flat_best_open", "odds_col": "pred_odds_best_open",
      "filter": None},
     {"name": "flat_best_close", "odds_col": _BEST_CLOSE, "filter": None},
@@ -123,25 +129,25 @@ def _run_scenarios(
 
 def _apply_filter(
     df: pl.DataFrame,
-    filt: tuple[str, str, float] | None,
+    filt: tuple[str, str, float] | list[tuple[str, str, float]] | None,
 ) -> pl.DataFrame | None:
-    """Apply scenario filter to DataFrame."""
+    """Apply scenario filter to DataFrame.
+
+    Accepts a single (col, op, val) tuple or a list of tuples (ANDed).
+    """
     if filt is None:
         return df
 
-    col, op, val = filt
-    if col not in df.columns:
-        return None
+    conditions = filt if isinstance(filt, list) else [filt]
+    _ops = {">": "gt", ">=": "ge", "<": "lt", "<=": "le", "==": "eq"}
 
-    if op == ">":
-        return df.filter(pl.col(col) > val)
-    elif op == ">=":
-        return df.filter(pl.col(col) >= val)
-    elif op == "<":
-        return df.filter(pl.col(col) < val)
-    elif op == "==":
-        return df.filter(pl.col(col) == val)
-    return df
+    result = df
+    for col, op, val in conditions:
+        if col not in result.columns:
+            return None
+        expr = getattr(pl.col(col), _ops[op])(val)
+        result = result.filter(expr)
+    return result
 
 
 def _run_segment(
@@ -198,8 +204,10 @@ def _simulate(
     filter_desc = scenario
     for s in SCENARIOS:
         if s["name"] == scenario and s.get("filter"):
-            col, op, val = s["filter"]
-            filter_desc = f"{col} {op} {val}"
+            filt = s["filter"]
+            conditions = filt if isinstance(filt, list) else [filt]
+            parts = [f"{col} {op} {val}" for col, op, val in conditions]
+            filter_desc = " & ".join(parts)
             break
 
     return {
