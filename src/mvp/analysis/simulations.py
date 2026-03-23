@@ -21,16 +21,20 @@ EDGE_BANDS = [
     {"name": "neg_5pct", "conditions": [("<=", -0.05)]},
 ]
 
-EDGE_BASES = {
-    "close": {
+EDGE_BASES = [
+    ("open", {
+        "odds_col": "pred_odds_open",
+        "edge_col": "model_edge_open",
+    }),
+    ("mkt_formed", {
+        "odds_col": "pred_odds_market_formed",
+        "edge_col": "model_edge_market_formed",
+    }),
+    ("close", {
         "odds_col": "pred_odds_best_close",
         "edge_col": "model_edge_best_close",
-    },
-    "first_avail": {
-        "odds_col": "pred_odds_first_avail",
-        "edge_col": "model_edge_first_avail",
-    },
-}
+    }),
+]
 
 SCENARIOS: list[dict] = [
     {"name": "consensus_100", "odds_col": _BEST_CLOSE,
@@ -41,7 +45,7 @@ SCENARIOS: list[dict] = [
      "filter": ("consensus", "==", 0.6)},
 ]
 
-for _basis_name, _basis in EDGE_BASES.items():
+for _basis_name, _basis in EDGE_BASES:
     _suffix = "" if _basis_name == "close" else f"_{_basis_name}"
     for _band in EDGE_BANDS:
         SCENARIOS.append({

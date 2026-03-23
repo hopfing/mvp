@@ -293,7 +293,7 @@ def _compute_pred_side_metrics(ds: pl.DataFrame) -> pl.DataFrame:
         ("best_opening_odds", "pred_odds_best_open"),
         ("best_intraday_odds", "pred_odds_best_intraday"),
         ("worst_intraday_odds", "pred_odds_worst_intraday"),
-        ("first_avail_odds", "pred_odds_first_avail"),
+        ("open_odds", "pred_odds_open"),
         ("market_formed_odds", "pred_odds_market_formed"),
     ]
 
@@ -311,7 +311,7 @@ def _compute_pred_side_metrics(ds: pl.DataFrame) -> pl.DataFrame:
     for odds_col, edge_col in [
         ("pred_odds_best_close", "model_edge_best_close"),
         ("pred_odds_avg_close", "model_edge_avg_close"),
-        ("pred_odds_first_avail", "model_edge_first_avail"),
+        ("pred_odds_open", "model_edge_open"),
         ("pred_odds_market_formed", "model_edge_market_formed"),
     ]:
         if odds_col in ds.columns:

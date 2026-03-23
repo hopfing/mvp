@@ -134,7 +134,7 @@ def compute_opening_odds(snapshots: pl.DataFrame) -> pl.DataFrame:
 
     Uses 15-minute floor buckets to align cross-book fetch times.
 
-    - first_avail_odds: earliest bucket with any book, avg if multiple.
+    - open_odds: earliest bucket with any book, avg if multiple.
     - market_formed_odds: earliest bucket where 2+ books cover the match,
       avg odds for each player at that bucket.
 
@@ -143,7 +143,7 @@ def compute_opening_odds(snapshots: pl.DataFrame) -> pl.DataFrame:
                    fetched_at, event_status.
 
     Returns:
-        One row per (match_uid, player_id) with first_avail_odds and
+        One row per (match_uid, player_id) with open_odds and
         market_formed_odds columns.
     """
     if len(snapshots) == 0:
@@ -169,12 +169,12 @@ def compute_opening_odds(snapshots: pl.DataFrame) -> pl.DataFrame:
     min_rounds = per_round.group_by(["match_uid", id_col]).agg(
         pl.col("fetch_round").min().alias("min_round"),
     )
-    first_avail = (
+    open_line = (
         per_round.join(min_rounds, on=["match_uid", id_col])
         .filter(pl.col("fetch_round") == pl.col("min_round"))
         .select("match_uid",
                 pl.col(id_col).alias("player_id"),
-                pl.col("avg_odds").alias("first_avail_odds"))
+                pl.col("avg_odds").alias("open_odds"))
     )
 
     # --- Market formed ---
@@ -200,7 +200,7 @@ def compute_opening_odds(snapshots: pl.DataFrame) -> pl.DataFrame:
     )
 
     # Combine
-    result = first_avail.join(
+    result = open_line.join(
         market_formed, on=["match_uid", "player_id"], how="left"
     )
 
@@ -211,7 +211,7 @@ def _empty_openings() -> pl.DataFrame:
     return pl.DataFrame(schema={
         "match_uid": pl.Utf8,
         "player_id": pl.Utf8,
-        "first_avail_odds": pl.Float64,
+        "open_odds": pl.Float64,
         "market_formed_odds": pl.Float64,
     })
 

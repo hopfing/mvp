@@ -151,17 +151,19 @@ def format_analysis_summary(
             )
 
             # Non-edge scenarios (consensus + flat)
+            edge_suffixes = ("_open", "_mkt_formed")
             non_edge = [
                 s for s in scenario_order
                 if s not in edge_band_names
-                and not s.endswith("_first_avail")
+                and not any(s.endswith(sx) for sx in edge_suffixes)
             ]
             lines.append(f"\n{'SIMULATIONS — ' + label:^70}")
+
+            # Edge bands: open / formed / close side by side
+            _edge_band_table(lines, overall, edge_band_names)
+
             _sim_header(lines)
             _sim_rows(lines, overall, non_edge)
-
-            # Edge bands: close vs open side by side
-            _edge_band_table(lines, overall, edge_band_names)
 
             # Consensus cross-cut
             consensus = v_sims.filter(
@@ -176,13 +178,13 @@ def format_analysis_summary(
                     .unique().sort(descending=True).to_list()
                 )
                 for cv in vals:
-                    lines.append(f"\n  consensus = {cv}")
-                    _sim_header(lines)
                     subset = consensus.filter(
                         pl.col("segment_value") == cv
                     )
-                    _sim_rows(lines, subset, non_edge)
+                    lines.append(f"\n  consensus = {cv}")
                     _edge_band_table(lines, subset, edge_band_names)
+                    _sim_header(lines)
+                    _sim_rows(lines, subset, non_edge)
 
     lines.append("=" * 70)
     return "\n".join(lines)
@@ -202,47 +204,55 @@ def _edge_band_table(
     sims_overall: pl.DataFrame,
     band_names: list[str],
 ) -> None:
-    """Render edge bands with close and first-available columns side by side."""
-    close_map = {
-        r["scenario"]: r for r in sims_overall.iter_rows(named=True)
-        if r["scenario"] in band_names
-    }
-    fa_suffix = "_first_avail"
-    fa_map = {
-        r["scenario"].removesuffix(fa_suffix): r
-        for r in sims_overall.iter_rows(named=True)
-        if r["scenario"].endswith(fa_suffix)
-    }
-    if not close_map and not fa_map:
+    """Render edge bands with 1st avail / formed / close side by side."""
+    from mvp.analysis.simulations import EDGE_BASES
+
+    # Build {band_name: row} for each basis
+    basis_maps: list[tuple[str, dict]] = []
+    for basis_name, _ in EDGE_BASES:
+        suffix = "" if basis_name == "close" else f"_{basis_name}"
+        mapping = {}
+        for r in sims_overall.iter_rows(named=True):
+            scenario = r["scenario"]
+            if suffix and scenario.endswith(suffix):
+                mapping[scenario.removesuffix(suffix)] = r
+            elif not suffix and scenario in band_names:
+                mapping[scenario] = r
+        basis_maps.append((basis_name, mapping))
+
+    if not any(m for _, m in basis_maps):
         return
 
+    # Fixed-width group: " NNNN  Acc.%  +ROI.%" = 20 chars
+    def _grp(row: dict | None) -> str:
+        if row:
+            return (
+                f" {row['n_bets']:>4}"
+                f" {row['accuracy']:>6.1%}"
+                f" {row['roi']:>+7.1%}"
+            )
+        return f" {'—':>4} {'—':>6} {'—':>7}"
+
+    labels = {
+        "open": "open",
+        "mkt_formed": "formed",
+        "close": "close",
+    }
+    sep = " | "
+    grp_width = 20  # " NNNN Acc..% +ROI..%"
+
+    # Header: basis label on top, column names below
     lines.append("")
-    lines.append(
-        f"{'Edge Band':<14}"
-        f" {'N':>5} {'Acc':>6} {'ROI':>7}"
-        f"  |"
-        f" {'N':>5} {'Acc':>6} {'ROI':>7}"
-    )
-    lines.append(
-        f"{'':<14}"
-        f" {'':>5} {'close':>6} {'':>7}"
-        f"  |"
-        f" {'':>5} {'1st avl':>6} {'':>7}"
-    )
-    lines.append("-" * 58)
+    lbl_parts = [f"{labels.get(n, n):^{grp_width}}" for n, _ in basis_maps]
+    lines.append(f"{'':12}" + sep.join(lbl_parts))
+    col_parts = [f" {'N':>4} {'Acc':>6} {'ROI':>7}" for _ in basis_maps]
+    lines.append(f"{'Edge Band':<12}" + sep.join(col_parts))
+    row_width = 12 + len(sep.join(col_parts))
+    lines.append("-" * row_width)
 
     for name in band_names:
-        c = close_map.get(name)
-        o = fa_map.get(name)
-        c_str = (
-            f" {c['n_bets']:>5} {c['accuracy']:>5.1%} {c['roi']:>+6.1%}"
-            if c else f" {'—':>5} {'—':>6} {'—':>7}"
-        )
-        o_str = (
-            f" {o['n_bets']:>5} {o['accuracy']:>5.1%} {o['roi']:>+6.1%}"
-            if o else f" {'—':>5} {'—':>6} {'—':>7}"
-        )
-        lines.append(f"{name:<14}{c_str}  |{o_str}")
+        parts = [_grp(m.get(name)) for _, m in basis_maps]
+        lines.append(f"{name:<12}" + sep.join(parts))
 
 
 def _sim_rows(

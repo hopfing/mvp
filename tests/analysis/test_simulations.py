@@ -20,8 +20,10 @@ def _make_analysis_ds():
         "pred_odds_best_intraday": [2.15, 1.90, 1.60, 2.30, 1.70, 1.50],
         "pred_odds_worst_intraday": [1.90, 1.75, 1.45, 2.10, 1.55, 1.35],
         "model_edge_best_close": [0.15, 0.0, 0.03, 0.15, -0.02, -0.06],
-        "model_edge_first_avail": [0.17, 0.01, 0.06, 0.16, -0.01, -0.04],
-        "pred_odds_first_avail": [1.92, 1.85, 1.56, 2.27, 1.96, 2.04],
+        "model_edge_open": [0.17, 0.01, 0.06, 0.16, -0.01, -0.04],
+        "pred_odds_open": [1.92, 1.85, 1.56, 2.27, 1.96, 2.04],
+        "model_edge_market_formed": [0.16, 0.005, 0.04, 0.14, -0.015, -0.05],
+        "pred_odds_market_formed": [1.95, 1.83, 1.54, 2.22, 1.94, 2.00],
         "circuit": ["chal", "tour", "chal", "tour", "chal", "tour"],
         "surface": ["Hard", "Clay", "Hard", "Clay", "Hard", "Clay"],
         "consensus": [1.0, 0.8, 0.6, 1.0, 0.8, 0.6],
@@ -149,7 +151,7 @@ class TestSimulations:
         )
         assert total == 6
 
-    def test_first_avail_edge_bands(self):
+    def test_open_edge_bands(self):
         from mvp.analysis.simulations import run_simulations
 
         ds = _make_analysis_ds()
@@ -162,14 +164,14 @@ class TestSimulations:
             )
             return rows["n_bets"][0] if len(rows) > 0 else 0
 
-        # first_avail edges: 0.17, 0.01, 0.06, 0.16, -0.01, -0.04
-        assert _n("edge_5pct_first_avail") == 3   # 0.17, 0.06, 0.16
-        assert _n("edge_1pct_first_avail") == 1   # 0.01
-        assert _n("neg_1pct_first_avail") == 1     # -0.01
-        assert _n("neg_3pct_first_avail") == 1     # -0.04
+        # open edges: 0.17, 0.01, 0.06, 0.16, -0.01, -0.04
+        assert _n("edge_5pct_open") == 3   # 0.17, 0.06, 0.16
+        assert _n("edge_1pct_open") == 1   # 0.01
+        assert _n("neg_1pct_open") == 1     # -0.01
+        assert _n("neg_3pct_open") == 1     # -0.04
 
         total = sum(
-            _n(f"{b}_first_avail") for b in [
+            _n(f"{b}_open") for b in [
                 "edge_5pct", "edge_3pct", "edge_1pct", "edge_0pct",
                 "neg_0pct", "neg_1pct", "neg_3pct", "neg_5pct",
             ]

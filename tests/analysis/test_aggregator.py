@@ -161,14 +161,14 @@ def _make_opening_snapshots():
 
 
 class TestOpeningOdds:
-    def test_first_avail_is_earliest_book(self):
+    def test_open_is_earliest_book(self):
         from mvp.odds.aggregator import compute_opening_odds
 
         result = compute_opening_odds(_make_opening_snapshots())
 
         a = result.filter(pl.col("player_id") == "A")
         # DK posted first at 08:00 with odds 2.20 — only book in that round
-        assert a["first_avail_odds"][0] == pytest.approx(2.20)
+        assert a["open_odds"][0] == pytest.approx(2.20)
 
     def test_market_formed_averages_books(self):
         from mvp.odds.aggregator import compute_opening_odds
@@ -200,7 +200,7 @@ class TestOpeningOdds:
         })
         result = compute_opening_odds(snaps)
         x = result.filter(pl.col("player_id") == "X")
-        assert x["first_avail_odds"][0] == pytest.approx(1.50)
+        assert x["open_odds"][0] == pytest.approx(1.50)
         assert x["market_formed_odds"][0] is None
 
     def test_empty_snapshots_returns_empty(self):
