@@ -111,19 +111,10 @@ class DiscoveryConfig(BaseModel):
             return cls.from_yaml(f.read())
 
     def _ordered_validation_dump(self) -> dict[str, Any]:
-        """Dump validation config with explicitly-set fields first."""
+        """Dump only explicitly-set validation fields."""
         all_fields = self.validation.model_dump()
         set_fields = self.validation.model_fields_set
-        ordered: dict[str, Any] = {}
-        # Explicitly-set fields first (preserving their relative order)
-        for key in all_fields:
-            if key in set_fields:
-                ordered[key] = all_fields[key]
-        # Then defaults
-        for key in all_fields:
-            if key not in set_fields:
-                ordered[key] = all_fields[key]
-        return ordered
+        return {k: all_fields[k] for k in all_fields if k in set_fields}
 
     def to_experiment_config_dict(self, features: list[str]) -> dict[str, Any]:
         """Convert to experiment config dict with given features.
@@ -137,14 +128,16 @@ class DiscoveryConfig(BaseModel):
         features_dict: dict[str, Any] = {"include": features}
         if self.discovery.features.compute_only:
             features_dict["compute_only"] = self.discovery.features.compute_only
+        model_dump = self.model.model_dump(exclude_none=True)
         result: dict[str, Any] = {
-            "description": self.description,
             "data": self.data.model_dump(),
             "features": features_dict,
-            "model": self.model.model_dump(),
+            "model": model_dump,
             "validation": self._ordered_validation_dump(),
             "metrics": {"primary": self.discovery.metric},
         }
+        if self.description:
+            result = {"description": self.description, **result}
         if self.target != "won":
             result["target"] = self.target
         if self.sample_weight is not None:

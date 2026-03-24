@@ -643,6 +643,26 @@ class FeatureDiscovery:
         result = self._last_result
         config_dict = self.config.to_experiment_config_dict(result.selected_features)
 
+        # Add selection history for post-hoc analysis
+        if result.selection_result and result.selection_result.history:
+            history_entries = []
+            prev_metric = None
+            for step in result.selection_result.history:
+                if step.get("action") not in ("add", "base"):
+                    continue
+                metric = step["metric"]
+                delta = round(metric - prev_metric, 6) if prev_metric is not None else None
+                entry: dict[str, Any] = {
+                    "step": step["step"],
+                    "feature": step.get("feature", "(base)"),
+                    "metric": round(metric, 6),
+                }
+                if delta is not None:
+                    entry["delta"] = delta
+                history_entries.append(entry)
+                prev_metric = metric
+            config_dict["selection_history"] = history_entries
+
         with open(output_path, "w") as f:
             yaml.dump(config_dict, f, default_flow_style=False)
 
