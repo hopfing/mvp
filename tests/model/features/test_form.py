@@ -202,6 +202,59 @@ class TestPrevTournRoundReached:
         assert result["val"][3] == pytest.approx(4.0)
 
 
+class TestMatchCountMinMax:
+    """Tests for match_count_min and match_count_max features."""
+
+    def test_registered(self):
+        registry = get_registry()
+        for name in ["match_count_min", "match_count_max"]:
+            feat = registry.get(name)
+            assert feat.mirror is False
+            assert feat.match_level is True
+            assert feat.params == ["days"]
+            assert feat.depends_on == ["match_count"]
+
+    def test_min_alltime(self):
+        from mvp.model.features.form import match_count_min
+
+        df = pl.DataFrame({
+            "player_match_count": [10, 50, 5],
+            "opp_match_count": [20, 30, 5],
+        })
+        result = df.select(match_count_min().alias("val"))
+        assert result["val"].to_list() == [10, 30, 5]
+
+    def test_max_alltime(self):
+        from mvp.model.features.form import match_count_max
+
+        df = pl.DataFrame({
+            "player_match_count": [10, 50, 5],
+            "opp_match_count": [20, 30, 5],
+        })
+        result = df.select(match_count_max().alias("val"))
+        assert result["val"].to_list() == [20, 50, 5]
+
+    def test_min_with_days(self):
+        from mvp.model.features.form import match_count_min
+
+        df = pl.DataFrame({
+            "player_match_count_30d": [3, 8],
+            "opp_match_count_30d": [5, 2],
+        })
+        result = df.select(match_count_min(days=30).alias("val"))
+        assert result["val"].to_list() == [3, 2]
+
+    def test_max_with_days(self):
+        from mvp.model.features.form import match_count_max
+
+        df = pl.DataFrame({
+            "player_match_count_30d": [3, 8],
+            "opp_match_count_30d": [5, 2],
+        })
+        result = df.select(match_count_max(days=30).alias("val"))
+        assert result["val"].to_list() == [5, 8]
+
+
 class TestFormDiffFeatures:
     """Tests for form diff features."""
 
@@ -243,9 +296,10 @@ class TestFormFeatureCount:
         registry = get_registry()
         names = [
             "match_count", "match_count_diff",
+            "match_count_min", "match_count_max",
             "days_since_last_match", "days_since_last_match_diff",
             "prev_tourn_round_reached", "prev_tourn_round_reached_diff",
         ]
         for name in names:
             registry.get(name)
-        assert len(names) == 6
+        assert len(names) == 8
