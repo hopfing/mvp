@@ -137,21 +137,17 @@ class TestUnifiedDataset:
     def test_pred_side_metrics_with_cross_book(self, sample_predictions):
         from mvp.analysis.dataset import build_analysis_dataset
 
+        # Long format: one row per (match_uid, player_id)
         cross_book = pl.DataFrame({
-            "match_uid": ["m1", "m2"],
-            "best_closing_odds_p1": [2.10, 1.85],
-            "best_closing_odds_p2": [1.75, 1.95],
-            "worst_closing_odds_p1": [2.00, 1.85],
-            "worst_closing_odds_p2": [1.72, 1.95],
-            "avg_closing_odds_p1": [2.05, 1.85],
-            "avg_closing_odds_p2": [1.735, 1.95],
-            "best_opening_odds_p1": [2.20, 1.90],
-            "best_opening_odds_p2": [1.80, 2.00],
-            "best_intraday_odds_p1": [2.25, 1.95],
-            "best_intraday_odds_p2": [1.82, 2.05],
-            "worst_intraday_odds_p1": [1.95, 1.80],
-            "worst_intraday_odds_p2": [1.68, 1.90],
-            "n_books": [2, 1],
+            "match_uid": ["m1", "m1", "m2", "m2"],
+            "player_id": ["A001", "A002", "B001", "B002"],
+            "best_closing_odds": [2.10, 1.75, 1.85, 1.95],
+            "worst_closing_odds": [2.00, 1.72, 1.85, 1.95],
+            "avg_closing_odds": [2.05, 1.735, 1.85, 1.95],
+            "best_opening_odds": [2.20, 1.80, 1.90, 2.00],
+            "best_intraday_odds": [2.25, 1.82, 1.95, 2.05],
+            "worst_intraday_odds": [1.95, 1.68, 1.80, 1.90],
+            "n_books": [2, 2, 1, 1],
         })
 
         ds = build_analysis_dataset(
@@ -178,20 +174,15 @@ class TestUnifiedDataset:
         from mvp.analysis.dataset import build_analysis_dataset
 
         cross_book = pl.DataFrame({
-            "match_uid": ["m1", "m2"],
-            "best_closing_odds_p1": [2.10, 1.85],
-            "best_closing_odds_p2": [1.75, 1.95],
-            "worst_closing_odds_p1": [2.00, 1.85],
-            "worst_closing_odds_p2": [1.72, 1.95],
-            "avg_closing_odds_p1": [2.05, 1.85],
-            "avg_closing_odds_p2": [1.735, 1.95],
-            "best_opening_odds_p1": [2.20, 1.90],
-            "best_opening_odds_p2": [1.80, 2.00],
-            "best_intraday_odds_p1": [2.25, 1.95],
-            "best_intraday_odds_p2": [1.82, 2.05],
-            "worst_intraday_odds_p1": [1.95, 1.80],
-            "worst_intraday_odds_p2": [1.68, 1.90],
-            "n_books": [2, 1],
+            "match_uid": ["m1", "m1", "m2", "m2"],
+            "player_id": ["A001", "A002", "B001", "B002"],
+            "best_closing_odds": [2.10, 1.75, 1.85, 1.95],
+            "worst_closing_odds": [2.00, 1.72, 1.85, 1.95],
+            "avg_closing_odds": [2.05, 1.735, 1.85, 1.95],
+            "best_opening_odds": [2.20, 1.80, 1.90, 2.00],
+            "best_intraday_odds": [2.25, 1.82, 1.95, 2.05],
+            "worst_intraday_odds": [1.95, 1.68, 1.80, 1.90],
+            "n_books": [2, 2, 1, 1],
         })
 
         sheet = pl.DataFrame({

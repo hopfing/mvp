@@ -46,27 +46,36 @@ class TestComputeBookOdds:
         snaps = _make_snapshots()
         result = compute_book_odds(snaps, "dk")
 
-        assert len(result) == 1
-        m1 = result.filter(pl.col("match_uid") == "m1")
-        assert m1["closing_odds_p1"][0] == pytest.approx(2.10)
-        assert m1["closing_odds_p2"][0] == pytest.approx(1.75)
+        # Long format: one row per (match_uid, player_id)
+        p1 = result.filter(
+            (pl.col("match_uid") == "m1") & (pl.col("player_id") == "p1")
+        )
+        p2 = result.filter(
+            (pl.col("match_uid") == "m1") & (pl.col("player_id") == "p2")
+        )
+        assert p1["closing_odds"][0] == pytest.approx(2.10)
+        assert p2["closing_odds"][0] == pytest.approx(1.75)
 
     def test_opening_odds(self):
         from mvp.odds.aggregator import compute_book_odds
 
         result = compute_book_odds(_make_snapshots(), "dk")
 
-        m1 = result.filter(pl.col("match_uid") == "m1")
-        assert m1["opening_odds_p1"][0] == pytest.approx(2.20)
+        p1 = result.filter(
+            (pl.col("match_uid") == "m1") & (pl.col("player_id") == "p1")
+        )
+        assert p1["opening_odds"][0] == pytest.approx(2.20)
 
     def test_movement_direction(self):
         from mvp.odds.aggregator import compute_book_odds
 
         result = compute_book_odds(_make_snapshots(), "dk")
 
-        m1 = result.filter(pl.col("match_uid") == "m1")
+        p1 = result.filter(
+            (pl.col("match_uid") == "m1") & (pl.col("player_id") == "p1")
+        )
         # 2.20 -> 2.10 = shortened
-        assert m1["direction_p1"][0] == "SHORTENED"
+        assert p1["direction"][0] == "SHORTENED"
 
     def test_empty_book_returns_empty(self):
         from mvp.odds.aggregator import compute_book_odds
@@ -84,11 +93,12 @@ class TestCrossBookOdds:
         br = compute_book_odds(snaps, "br")
 
         cross = compute_cross_book_odds([dk, br])
-        assert len(cross) == 1
-
-        m1 = cross.filter(pl.col("match_uid") == "m1")
+        # Long format: one row per (match_uid, player_id)
+        p1 = cross.filter(
+            (pl.col("match_uid") == "m1") & (pl.col("player_id") == "p1")
+        )
         # DK closing p1 = 2.10, BR closing p1 = 2.15 → best = 2.15
-        assert m1["best_closing_odds_p1"][0] == pytest.approx(2.15)
+        assert p1["best_closing_odds"][0] == pytest.approx(2.15)
 
     def test_worst_closing_is_min_across_books(self):
         from mvp.odds.aggregator import compute_book_odds, compute_cross_book_odds
@@ -98,9 +108,11 @@ class TestCrossBookOdds:
         br = compute_book_odds(snaps, "br")
 
         cross = compute_cross_book_odds([dk, br])
-        m1 = cross.filter(pl.col("match_uid") == "m1")
+        p1 = cross.filter(
+            (pl.col("match_uid") == "m1") & (pl.col("player_id") == "p1")
+        )
         # DK closing p1 = 2.10, BR = 2.15 → worst = 2.10
-        assert m1["worst_closing_odds_p1"][0] == pytest.approx(2.10)
+        assert p1["worst_closing_odds"][0] == pytest.approx(2.10)
 
     def test_n_books(self):
         from mvp.odds.aggregator import compute_book_odds, compute_cross_book_odds
@@ -110,8 +122,10 @@ class TestCrossBookOdds:
         br = compute_book_odds(snaps, "br")
 
         cross = compute_cross_book_odds([dk, br])
-        m1 = cross.filter(pl.col("match_uid") == "m1")
-        assert m1["n_books"][0] == 2
+        p1 = cross.filter(
+            (pl.col("match_uid") == "m1") & (pl.col("player_id") == "p1")
+        )
+        assert p1["n_books"][0] == 2
 
     def test_empty_list_returns_empty(self):
         from mvp.odds.aggregator import compute_cross_book_odds

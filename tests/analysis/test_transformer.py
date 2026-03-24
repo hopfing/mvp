@@ -31,10 +31,10 @@ class TestDKTransformer:
 
         result = resolve_snapshots(self._make_staged(), self._make_event_map())
 
-        assert set(result.columns) == {"match_uid", "book", "side", "odds", "fetched_at", "event_status"}
+        assert set(result.columns) == {"match_uid", "book", "player_id", "odds", "fetched_at", "event_status"}
         assert len(result) == 4
         assert set(result["match_uid"].to_list()) == {"m1", "m2"}
-        assert set(result["side"].to_list()) == {"p1", "p2"}
+        assert set(result["player_id"].to_list()) == {"p1", "p2"}
         assert result["book"].unique().to_list() == ["dk"]
 
     def test_unmatched_names_excluded(self):
@@ -52,7 +52,7 @@ class TestDKTransformer:
         result = resolve_snapshots(staged, self._make_event_map())
         # Only the matched name passes through
         assert len(result) == 1
-        assert result["side"][0] == "p2"
+        assert result["player_id"][0] == "p2"
 
     def test_empty_event_map_returns_empty(self):
         from mvp.draftkings.transformer import resolve_snapshots

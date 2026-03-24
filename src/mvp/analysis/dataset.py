@@ -60,6 +60,9 @@ def build_analysis_dataset(
 
     if cross_book_odds is not None and len(cross_book_odds) > 0:
         ds = _join_cross_book_odds(ds, cross_book_odds)
+        # Also join per-book wide columns alongside cross-book aggregates
+        if odds_by_book is not None and len(odds_by_book) > 0:
+            ds = _join_per_book_odds(ds, odds_by_book)
     else:
         ds = _join_odds(ds, odds_by_book, skip_cross_book=False)
 
@@ -148,6 +151,46 @@ def _join_cross_book_odds(ds: pl.DataFrame, cross_book: pl.DataFrame) -> pl.Data
         right_on=["match_uid", "player_id"],
         how="left",
     )
+
+    return ds
+
+
+def _join_per_book_odds(ds: pl.DataFrame, odds_by_book: pl.DataFrame) -> pl.DataFrame:
+    """Join per-book odds as wide columns alongside existing cross-book aggregates.
+
+    odds_by_book is long format: one row per (match_uid, player_id, book).
+    Pivots to {book}_{col}_p1 / {book}_{col}_p2 wide columns.
+    """
+    if "book" not in odds_by_book.columns:
+        return ds
+
+    value_cols = [
+        c for c in odds_by_book.columns
+        if c not in ("match_uid", "player_id", "book")
+    ]
+
+    for book in odds_by_book["book"].unique().sort().to_list():
+        book_df = odds_by_book.filter(pl.col("book") == book)
+
+        # Join p1's per-book odds
+        p1 = book_df.select(
+            "match_uid", "player_id",
+            *[pl.col(c).alias(f"{book}_{c}_p1") for c in value_cols],
+        )
+        ds = ds.join(
+            p1, left_on=["match_uid", "p1_id"],
+            right_on=["match_uid", "player_id"], how="left",
+        )
+
+        # Join p2's per-book odds
+        p2 = book_df.select(
+            "match_uid", "player_id",
+            *[pl.col(c).alias(f"{book}_{c}_p2") for c in value_cols],
+        )
+        ds = ds.join(
+            p2, left_on=["match_uid", "p2_id"],
+            right_on=["match_uid", "player_id"], how="left",
+        )
 
     return ds
 
