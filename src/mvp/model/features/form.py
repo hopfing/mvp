@@ -32,21 +32,6 @@ register_diff("match_count")
 
 
 @feature(
-    name="match_count_min",
-    params=["days"],
-    description="Min of player and opp match count (floor activity)",
-    depends_on=["match_count"],
-    mirror=False,
-    match_level=True,
-    impute=0,
-)
-def match_count_min(days: int | None = None) -> pl.Expr:
-    if days is None:
-        return pl.min_horizontal("player_match_count", "opp_match_count")
-    return pl.min_horizontal(f"player_match_count_{days}d", f"opp_match_count_{days}d")
-
-
-@feature(
     name="match_count_max",
     params=["days"],
     description="Max of player and opp match count (ceiling activity)",
