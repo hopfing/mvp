@@ -302,11 +302,13 @@ class FastForwardSelector:
                 X_test = np.where(np.isnan(X_test), medians, X_test)
 
                 if scale:
-                    mean = X_train.mean(axis=0)
-                    std = X_train.std(axis=0)
-                    std[std == 0] = 1.0
-                    X_train = (X_train - mean) / std
-                    X_test = (X_test - mean) / std
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore", RuntimeWarning)
+                        mean = X_train.mean(axis=0)
+                        std = X_train.std(axis=0)
+                        std[std == 0] = 1.0
+                        X_train = (X_train - mean) / std
+                        X_test = (X_test - mean) / std
 
                 if use_fast_logistic:
                     model = LogisticRegression(**lr_params)
