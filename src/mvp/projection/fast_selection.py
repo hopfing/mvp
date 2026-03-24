@@ -12,13 +12,7 @@ import polars as pl
 from mvp.model.config import apply_filters
 from mvp.model.engine import FeatureEngine, check_memory, get_feature_columns
 from mvp.model.features._score_helpers import total_games_won
-from mvp.model.imputation import (
-    apply_imputation,
-    augmented_col_indices,
-    build_imputation,
-    fit_imputation,
-    subset_impute_state,
-)
+from mvp.model.imputation import build_imputation
 from mvp.model.registry import get_registry
 from mvp.model.splitters import make_splitter
 from mvp.projection.config import ProjectionDiscoveryConfig
@@ -89,7 +83,7 @@ class FastProjectionSelector:
         self.col_to_idx: dict[str, int] = {}
         self.folds: list[tuple[np.ndarray, np.ndarray]] = []
         self.circuit: np.ndarray | None = None
-        self.fold_impute_states: list = []
+        self.fold_medians: list[np.ndarray] = []
 
     def precompute(self) -> None:
         """Run the expensive one-time computation."""
@@ -195,18 +189,14 @@ class FastProjectionSelector:
             for train_idx, test_idx in splitter.split(df)
         ]
 
-        logger.info("Fitting imputation states for %d folds", len(self.folds))
+        logger.info("Precomputing per-fold medians for %d folds", len(self.folds))
         t0 = time.perf_counter()
-        self.impute_specs = self._build_result.specs
-        self.fold_impute_states = []
+        self.fold_medians = []
         for train_idx, _test_idx in self.folds:
-            state = fit_imputation(
-                self.X_wide[train_idx],
-                self.circuit[train_idx],
-                self.impute_specs,
-            )
-            self.fold_impute_states.append(state)
-        logger.info("Imputation states fitted in %.1fs", time.perf_counter() - t0)
+            medians = np.nanmedian(self.X_wide[train_idx], axis=0)
+            medians = np.where(np.isnan(medians), 0.0, medians)
+            self.fold_medians.append(medians)
+        logger.info("Per-fold medians computed in %.1fs", time.perf_counter() - t0)
 
     def create_scorer(self, metric: str) -> Callable[[list[str]], float]:
         """Return a fast scorer function that evaluates feature subsets."""
@@ -214,11 +204,9 @@ class FastProjectionSelector:
         y = self.y
         col_to_idx = self.col_to_idx
         folds = self.folds
-        fold_impute_states = self.fold_impute_states
-        circuit = self.circuit
+        fold_medians = self.fold_medians
         model_type = self.config.model.type
         model_params = self.config.model.params or {}
-        impute_specs = self.impute_specs
 
         metric_fn = _make_regression_metric_fn(metric)
 
@@ -232,31 +220,18 @@ class FastProjectionSelector:
             except KeyError:
                 return float("inf")
 
-            aug_indices, n_model = augmented_col_indices(col_indices, impute_specs)
-
             fold_metrics = []
             for fold_idx, (train_idx, test_idx) in enumerate(folds):
+                X_train = X_wide[np.ix_(train_idx, col_indices)].copy()
+                X_test = X_wide[np.ix_(test_idx, col_indices)].copy()
                 y_train, y_test = y[train_idx], y[test_idx]
 
-                X_train = X_wide[np.ix_(train_idx, aug_indices)].copy()
-                X_test = X_wide[np.ix_(test_idx, aug_indices)].copy()
-                sub_state = subset_impute_state(
-                    fold_impute_states[fold_idx], aug_indices
-                )
-                X_train = apply_imputation(X_train, circuit[train_idx], sub_state)
-                X_test = apply_imputation(X_test, circuit[test_idx], sub_state)
+                medians = fold_medians[fold_idx][col_indices]
+                X_train = np.where(np.isnan(X_train), medians, X_train)
+                X_test = np.where(np.isnan(X_test), medians, X_test)
 
-                X_train = X_train[:, :n_model]
-                X_test = X_test[:, :n_model]
-
-                # Scale
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore", RuntimeWarning)
-                    X_train_raw = X_wide[np.ix_(train_idx, col_indices)]
-                    mean = np.nanmean(X_train_raw, axis=0)
-                    std = np.nanstd(X_train_raw, axis=0)
-                mean = np.where(np.isnan(mean), 0.0, mean)
-                std = np.where(np.isnan(std), 1.0, std)
+                mean = X_train.mean(axis=0)
+                std = X_train.std(axis=0)
                 std[std == 0] = 1.0
                 X_train = (X_train - mean) / std
                 X_test = (X_test - mean) / std

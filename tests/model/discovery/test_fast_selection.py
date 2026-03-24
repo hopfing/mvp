@@ -103,7 +103,7 @@ class TestFastForwardSelector:
         assert fast.X_wide.shape[0] == fast.y.shape[0]
         assert fast.X_wide.shape[1] == 1  # one feature
         assert len(fast.folds) == 2  # n_splits=2
-        assert len(fast.fold_impute_states) == 2
+        assert len(fast.fold_medians) == 2
 
     def test_precompute_multiple_features(
         self, discovery_config: Path, sample_matches: Path, tmp_path: Path
