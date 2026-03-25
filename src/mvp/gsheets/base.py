@@ -215,7 +215,8 @@ def prepare_predictions(predictions: pl.DataFrame) -> pl.DataFrame:
             "p1_id": row["p1_id"],
             "p2_id": row["p2_id"],
             "_tournament_id": row["tournament_id"],
-            "tournament_day": _format_date(row.get("match_date")) or match_date,
+            "_raw_match_date": _format_date(row.get("match_date")) or match_date,
+            "tournament_day": "",  # filled below after grouping
             "model_version": row["model_version"],
             "predicted_at": predicted_at_str,
             "bet_placed_at": "",
@@ -236,7 +237,15 @@ def prepare_predictions(predictions: pl.DataFrame) -> pl.DataFrame:
             f"{len(uids)} predictions have null tournament_name: {uids}"
         )
 
-    result = result.drop("_tournament_id")
+    # tournament_day = earliest CT date among matches sharing the same
+    # (tournament_id, venue-local match_date) group.
+    result = result.with_columns(
+        pl.col("date")
+        .min()
+        .over("_tournament_id", "_raw_match_date")
+        .alias("tournament_day"),
+    )
+    result = result.drop("_tournament_id", "_raw_match_date")
 
     # Ensure correct types: elo as int, probs as float, everything else string
     result = result.with_columns(

@@ -102,7 +102,8 @@ class TestPreparePredictions:
         assert df["time"][0] == ""
         assert df["date"][0] == "2024-03-10"
 
-    def test_tournament_day_uses_match_date(self):
+    def test_tournament_day_uses_min_ct_date(self):
+        """Same tournament + venue date -> tournament_day = min CT date."""
         row1 = {
             "match_uid": "2024-0001-MS001",
             "p1_id": "A", "p2_id": "B",
@@ -126,9 +127,42 @@ class TestPreparePredictions:
             "scheduled_datetime": datetime(2024, 1, 16, 10, 0, 0),
         }
         df = prepare_predictions(pl.DataFrame([row1, row2]))
-        # Each match gets its own match_date as tournament_day (UTC schedule date)
+        # Different venue dates -> different tournament_days
         assert df["tournament_day"][0] == "2024-01-15"
         assert df["tournament_day"][1] == "2024-01-16"
+
+    def test_tournament_day_cross_midnight_uses_earliest_ct(self):
+        """Matches on the same venue date but spanning CT midnight get the earlier CT date."""
+        base = {
+            "p1_id": "A", "p2_id": "B",
+            "p1_name": "A Player", "p2_name": "B Player",
+            "p1_win_prob": 0.6, "p2_win_prob": 0.4,
+            "p1_elo": 1500.0, "p2_elo": 1400.0,
+            "tournament_id": "9999",
+            "tournament_name": "Yokkaichi",
+            "circuit": "chal", "surface": "Hard", "round": "R32",
+            "match_date": date(2024, 3, 26),  # venue-local date
+            "model_version": "v1",
+            "predicted_at": datetime(2024, 3, 25, 12, 0, 0),
+        }
+        # Early match: 2am UTC Mar 26 = 9pm CT Mar 25
+        row1 = {
+            **base,
+            "match_uid": "MS001",
+            "effective_match_date": date(2024, 3, 26),
+            "scheduled_datetime": datetime(2024, 3, 26, 2, 0, 0),
+        }
+        # Late match: 10am UTC Mar 26 = 5am CT Mar 26
+        row2 = {
+            **base,
+            "match_uid": "MS002",
+            "effective_match_date": date(2024, 3, 26),
+            "scheduled_datetime": datetime(2024, 3, 26, 10, 0, 0),
+        }
+        df = prepare_predictions(pl.DataFrame([row1, row2]))
+        # Both should get tournament_day = 2024-03-25 (the earliest CT date)
+        assert df["tournament_day"][0] == "2024-03-25"
+        assert df["tournament_day"][1] == "2024-03-25"
 
     def test_tournament_day_falls_back_to_ct_date(self):
         df = prepare_predictions(
