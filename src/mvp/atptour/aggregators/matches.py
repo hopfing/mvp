@@ -225,15 +225,23 @@ def disambiguate_tournament_names(df: pl.DataFrame) -> pl.DataFrame:
     )
 
     suffix_map: dict[tuple[str, int], str] = {}
+    all_colliding_keys: set[tuple[str, int]] = set()
     for row in colliding.iter_rows(named=True):
+        key = (row["tournament_id"], row["year"])
+        all_colliding_keys.add(key)
         title = row["sponsor_title"]
         m = re.search(r"\s+(\d+)\s*$", title)
         if m:
-            key = (row["tournament_id"], row["year"])
             suffix_map[key] = m.group(1)
 
     if not suffix_map:
         return df
+
+    # Colliding tournaments without a trailing number get " 1"
+    # (e.g. "Rwanda Challenger" alongside "Rwanda Challenger 2")
+    for key in all_colliding_keys:
+        if key not in suffix_map:
+            suffix_map[key] = "1"
 
     # Build a small lookup frame and join
     suffix_df = pl.DataFrame([

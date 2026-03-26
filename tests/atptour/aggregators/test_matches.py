@@ -843,7 +843,7 @@ class TestDisambiguateTournamentNames:
         })
         result = disambiguate_tournament_names(df)
         assert result.filter(pl.col("tournament_id") == "2913")["tournament_name"].to_list() == [
-            "Kigali", "Kigali",
+            "Kigali 1", "Kigali 1",
         ]
         assert result.filter(pl.col("tournament_id") == "2915")["tournament_name"].to_list() == [
             "Kigali 2", "Kigali 2",
