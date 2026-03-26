@@ -253,6 +253,16 @@ def _match_tournament(
         if stripped in our_name or our_name in stripped:
             matched.append(c)
 
+    # If multiple substring matches, try treating bare name as the " 1" variant
+    # (books often omit the "1" suffix for the first of back-to-back tournaments)
+    if len(matched) > 1:
+        exact_or_first = [
+            c for c in matched
+            if normalize_tournament(c.get("tournament_name") or "") in (stripped, f"{stripped} 1")
+        ]
+        if exact_or_first:
+            matched = exact_or_first
+
     return matched if matched else candidates
 
 

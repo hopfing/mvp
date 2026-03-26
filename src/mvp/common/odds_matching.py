@@ -30,9 +30,10 @@ def normalize_name(name: str) -> str:
 def normalize_tournament(name: str) -> str:
     """Normalize a tournament name for matching.
 
-    Strips accents and lowercases, but preserves hyphens and spacing.
+    Strips accents, replaces hyphens with spaces, collapses whitespace, lowercases.
     """
-    return _strip_accents(name).lower().strip()
+    result = _strip_accents(name).replace("-", " ")
+    return " ".join(result.lower().split())
 
 
 @dataclass
