@@ -1343,7 +1343,7 @@ def cmd_live(args: argparse.Namespace) -> int:
         # Map new book events to matches using full player database
         import polars as pl
 
-        from mvp.analysis.event_map import load_event_map, save_event_mappings
+        from mvp.analysis.event_map import load_event_map_with_overrides, save_event_mappings
         from mvp.common.event_mapper import (
             build_match_catalog,
             build_player_lookup,
@@ -1360,7 +1360,7 @@ def cmd_live(args: argparse.Namespace) -> int:
              _cli_dir / "betmgm" / "player_aliases.yaml"),
         ]
 
-        existing_map = load_event_map()
+        existing_map = load_event_map_with_overrides()
         data_root = get_data_root()
 
         # Collect unmapped events across all books to determine year range
