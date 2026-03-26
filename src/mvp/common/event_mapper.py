@@ -5,6 +5,7 @@ data using player bio names, display name variants, and per-book aliases.
 """
 
 import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -12,18 +13,27 @@ import polars as pl
 import yaml
 
 from mvp.common.base_job import get_data_root
-from mvp.common.odds_matching import EventMatch, normalize_name
+from mvp.common.odds_matching import EventMatch, normalize_name, normalize_tournament
 
 logger = logging.getLogger(__name__)
 
-# Book tournament name prefixes to strip for matching
+# Book tournament name prefixes to strip for matching (order matters — longest first)
 _CIRCUIT_PREFIXES = [
+    "atp challenger ",
     "challenger quals. - ",
     "challenger quals - ",
     "challenger - ",
     "atp - ",
     "wta - ",
 ]
+
+# Suffixes like "(ESP)", "- Qualification", "- Clay", "- Hard", "- Grass"
+_SUFFIX_PATTERNS = re.compile(
+    r"\s*\([A-Z]{2,3}\)"  # (ESP), (FR), etc.
+    r"|\s*-\s*(?:qualification|qualifying|qual\.?|clay|hard|grass|carpet|indoor hard)"
+    r"|\s*-\s*(?:q[12]|main draw)",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -212,12 +222,15 @@ def build_match_catalog(
 
 
 def _strip_circuit_prefix(book_tournament: str) -> str:
-    """Strip circuit prefixes from book tournament names."""
+    """Strip circuit prefixes and suffixes from book tournament names."""
     lower = book_tournament.strip().lower()
     for prefix in _CIRCUIT_PREFIXES:
         if lower.startswith(prefix):
-            return book_tournament[len(prefix):].strip()
-    return book_tournament.strip()
+            book_tournament = book_tournament[len(prefix):]
+            break
+    # Strip suffixes (country codes, surface, qualification)
+    result = _SUFFIX_PATTERNS.sub("", book_tournament)
+    return result.strip()
 
 
 def _match_tournament(
@@ -226,16 +239,16 @@ def _match_tournament(
 ) -> list[dict]:
     """Narrow candidates by matching book tournament name to our tournament data.
 
-    Uses simple substring matching of the stripped book tournament name
-    against our tournament_name field.
+    Uses substring matching with accent normalization of the stripped book
+    tournament name against our tournament_name field.
     """
-    stripped = _strip_circuit_prefix(book_tournament).lower()
+    stripped = normalize_tournament(_strip_circuit_prefix(book_tournament))
     if not stripped:
         return candidates
 
     matched = []
     for c in candidates:
-        our_name = (c.get("tournament_name") or "").lower()
+        our_name = normalize_tournament(c.get("tournament_name") or "")
         # Check if the book's stripped name appears in our tournament name or vice versa
         if stripped in our_name or our_name in stripped:
             matched.append(c)

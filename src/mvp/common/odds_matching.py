@@ -10,16 +10,29 @@ import polars as pl
 from mvp.common.base_job import BaseJob
 
 
+def _strip_accents(text: str) -> str:
+    """Strip accents via NFKD decomposition."""
+    decomposed = unicodedata.normalize("NFKD", text)
+    return "".join(c for c in decomposed if not unicodedata.combining(c))
+
+
 def normalize_name(name: str) -> str:
     """Normalize a player name for fuzzy matching.
 
     Strips accents (NFKD decomposition), removes hyphens,
     collapses whitespace, lowercases.
     """
-    decomposed = unicodedata.normalize("NFKD", name)
-    stripped = "".join(c for c in decomposed if not unicodedata.combining(c))
+    stripped = _strip_accents(name)
     stripped = stripped.replace("-", " ")
     return " ".join(stripped.lower().split())
+
+
+def normalize_tournament(name: str) -> str:
+    """Normalize a tournament name for matching.
+
+    Strips accents and lowercases, but preserves hyphens and spacing.
+    """
+    return _strip_accents(name).lower().strip()
 
 
 @dataclass
