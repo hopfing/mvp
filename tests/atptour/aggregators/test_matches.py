@@ -861,8 +861,8 @@ class TestDisambiguateTournamentNames:
         result = disambiguate_tournament_names(df)
         assert result["tournament_name"].to_list() == ["Paris", "London"]
 
-    def test_no_trailing_number_unchanged(self):
-        """Same city, different tournaments, but no trailing number — leave alone."""
+    def test_no_trailing_number_assigns_sequential(self):
+        """Same city, different tournaments, no trailing number — assign by tid order."""
         from mvp.atptour.aggregators.matches import disambiguate_tournament_names
 
         df = pl.DataFrame({
@@ -872,7 +872,13 @@ class TestDisambiguateTournamentNames:
             "sponsor_title": ["BNP Paribas Open", "Indian Wells"],
         })
         result = disambiguate_tournament_names(df)
-        assert result["tournament_name"].to_list() == ["Indian Wells", "Indian Wells"]
+        names = dict(zip(
+            result["tournament_id"].to_list(),
+            result["tournament_name"].to_list(),
+        ))
+        # String-sorted: "2903" < "404"
+        assert names["2903"] == "Indian Wells 1"
+        assert names["404"] == "Indian Wells 2"
 
     def test_missing_columns_noop(self):
         from mvp.atptour.aggregators.matches import disambiguate_tournament_names
@@ -885,7 +891,8 @@ class TestDisambiguateTournamentNames:
         result = disambiguate_tournament_names(df)
         assert result["tournament_name"].to_list() == ["Paris"]
 
-    def test_null_sponsor_title_unchanged(self):
+    def test_null_sponsor_title_assigns_sequential(self):
+        """Null sponsor titles still get sequential numbers by tid order."""
         from mvp.atptour.aggregators.matches import disambiguate_tournament_names
 
         df = pl.DataFrame({
@@ -895,4 +902,27 @@ class TestDisambiguateTournamentNames:
             "sponsor_title": [None, None],
         })
         result = disambiguate_tournament_names(df)
-        assert result["tournament_name"].to_list() == ["Kigali", "Kigali"]
+        names = dict(zip(
+            result["tournament_id"].to_list(),
+            result["tournament_name"].to_list(),
+        ))
+        assert names["2913"] == "Kigali 1"
+        assert names["2915"] == "Kigali 2"
+
+    def test_no_double_suffix(self):
+        """Already-suffixed names don't get double-suffixed."""
+        from mvp.atptour.aggregators.matches import disambiguate_tournament_names
+
+        df = pl.DataFrame({
+            "tournament_id": ["2983", "2985"],
+            "year": [2025, 2025],
+            "tournament_name": ["Hersonissos 1", "Hersonissos 2"],
+            "sponsor_title": ["Crete Challenger 1", "Crete Challenger 2"],
+        })
+        result = disambiguate_tournament_names(df)
+        names = dict(zip(
+            result["tournament_id"].to_list(),
+            result["tournament_name"].to_list(),
+        ))
+        assert names["2983"] == "Hersonissos 1"
+        assert names["2985"] == "Hersonissos 2"

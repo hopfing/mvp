@@ -191,16 +191,30 @@ def fill_tournament_fields(df: pl.DataFrame) -> pl.DataFrame:
     ])
 
 
+def _strip_trailing_number(name: str) -> str:
+    """Strip trailing ' N' suffix from a tournament name."""
+    return re.sub(r"\s+\d+$", "", name)
+
+
 def disambiguate_tournament_names(df: pl.DataFrame) -> pl.DataFrame:
     """Append trailing number from sponsor_title to tournament_name for same-name collisions.
 
     When multiple tournament_ids share the same tournament_name in a year,
     check sponsor_title for a trailing integer (e.g. "Rwanda Challenger 2" -> 2)
     and append it to tournament_name (e.g. "Kigali" -> "Kigali 2").
-    Only modifies rows where a trailing number is found — no guessing.
+    When no sponsor_title has a trailing number, assigns sequential numbers
+    by sorted tournament_id.
     """
     if "sponsor_title" not in df.columns or "tournament_name" not in df.columns:
         return df
+
+    # Strip any existing trailing number suffixes to get base names,
+    # preventing double-suffixing (e.g. "Hersonissos 1" -> "Hersonissos 1 1")
+    df = df.with_columns(
+        pl.col("tournament_name")
+        .map_elements(_strip_trailing_number, return_dtype=pl.Utf8)
+        .alias("tournament_name")
+    )
 
     # Find (tournament_name, year) pairs with multiple tournament_ids
     collision_keys = (
@@ -225,23 +239,42 @@ def disambiguate_tournament_names(df: pl.DataFrame) -> pl.DataFrame:
     )
 
     suffix_map: dict[tuple[str, int], str] = {}
-    all_colliding_keys: set[tuple[str, int]] = set()
     for row in colliding.iter_rows(named=True):
-        key = (row["tournament_id"], row["year"])
-        all_colliding_keys.add(key)
         title = row["sponsor_title"]
         m = re.search(r"\s+(\d+)\s*$", title)
         if m:
-            suffix_map[key] = m.group(1)
+            suffix_map[(row["tournament_id"], row["year"])] = m.group(1)
+
+    # Build collision groups: (tournament_name, year) -> sorted list of tids
+    collision_tids = (
+        df.join(collision_keys, on=["tournament_name", "year"], how="semi")
+        .select("tournament_id", "year", "tournament_name")
+        .drop_nulls()
+        .unique()
+        .sort("tournament_id")
+    )
+    groups: dict[tuple[str, int], list[str]] = {}
+    for row in collision_tids.iter_rows(named=True):
+        groups.setdefault((row["tournament_name"], row["year"]), []).append(
+            row["tournament_id"]
+        )
+
+    # Assign numbers to unsuffixed tournaments
+    for (_tname, yr), tids in groups.items():
+        unsuffixed = [tid for tid in tids if (tid, yr) not in suffix_map]
+        if not unsuffixed:
+            continue
+        if any((tid, yr) in suffix_map for tid in tids):
+            # Some have sponsor_title numbers — unsuffixed ones get "1"
+            for tid in unsuffixed:
+                suffix_map[(tid, yr)] = "1"
+        else:
+            # No sponsor_title numbers at all — assign by sorted tournament_id
+            for i, tid in enumerate(tids, start=1):
+                suffix_map[(tid, yr)] = str(i)
 
     if not suffix_map:
         return df
-
-    # Colliding tournaments without a trailing number get " 1"
-    # (e.g. "Rwanda Challenger" alongside "Rwanda Challenger 2")
-    for key in all_colliding_keys:
-        if key not in suffix_map:
-            suffix_map[key] = "1"
 
     # Build a small lookup frame and join
     suffix_df = pl.DataFrame([
