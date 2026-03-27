@@ -230,9 +230,9 @@ def _edge_band_table(
                 f" {row['n_bets']:>4}"
                 f" {row['accuracy']:>6.1%}"
                 f" {row['roi']:>+7.1%}"
-                f" {pnl:>+7.1f}"
+                f" {pnl:>+8.2f}"
             )
-        return f" {'—':>4} {'—':>6} {'—':>7} {'—':>7}"
+        return f" {'—':>4} {'—':>6} {'—':>7} {'—':>8}"
 
     labels = {
         "open": "open",
@@ -247,7 +247,7 @@ def _edge_band_table(
     lbl_parts = [f"{labels.get(n, n):^{grp_width}}" for n, _ in basis_maps]
     lines.append(f"{'':12}" + sep.join(lbl_parts))
     col_parts = [
-        f" {'N':>4} {'Acc':>6} {'ROI':>7} {'P&L':>7}" for _ in basis_maps
+        f" {'N':>4} {'Acc':>6} {'ROI':>7} {'P&L':>8}" for _ in basis_maps
     ]
     lines.append(f"{'Edge Band':<12}" + sep.join(col_parts))
     row_width = 12 + len(sep.join(col_parts))
@@ -274,10 +274,9 @@ def _sim_rows(
         acc = row["accuracy"]
         roi = row["roi"]
         pnl = row["net_pnl"]
-        sign = "+" if pnl >= 0 else ""
         lines.append(
             f"{name:<25} {n:>6} {acc:>6.1%}"
-            f" {roi:>7.1%} {sign}{pnl:>9.1f}"
+            f" {roi:>+7.1%} {pnl:>+9.2f}"
         )
 
 
