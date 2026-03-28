@@ -187,15 +187,17 @@ def _parse_pipe_response(
 def _extract_api_responses(driver, circuit_key: str) -> str | None:
     """Extract matchmarketscontentapi response for a circuit from perf logs."""
     logs = driver.get_log("performance")
-    # The circuit's pd param distinguishes ATP (J10) vs Challenger (J12)
     circuit_markers = {"atp": "J10", "challenger": "J12"}
     marker = circuit_markers.get(circuit_key, "")
 
+    api_urls = []
     for entry in logs:
         msg = json.loads(entry["message"])["message"]
         if msg["method"] != "Network.responseReceived":
             continue
         url = msg["params"]["response"]["url"]
+        if "contentapi" in url:
+            api_urls.append(url[:100])
         if "matchmarketscontentapi" not in url:
             continue
         if marker and marker not in url:
@@ -207,9 +209,12 @@ def _extract_api_responses(driver, circuit_key: str) -> str | None:
             )
             data = body.get("body", "")
             if data:
+                print(f"[B365] {circuit_key}: captured {len(data)} chars")
                 return data
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[B365] {circuit_key}: body error: {e}")
+
+    print(f"[B365] {circuit_key}: perf log had {len(logs)} entries, contentapi URLs: {api_urls}")
     return None
 
 
@@ -250,19 +255,26 @@ class Bet365OddsScraper(BaseJob):
             time.sleep(5)
             print(f"[B365] Homepage: {driver.current_url}")
 
-            # Dismiss cookie consent via JS click (bypasses overlay interception)
-            dismissed = driver.execute_script("""
-                var btns = document.querySelectorAll('button, [role="button"], a');
-                for (var i = 0; i < btns.length; i++) {
-                    if (btns[i].textContent.trim() === 'Accept All') {
-                        btns[i].click();
-                        return 'clicked';
+            # Dismiss cookie consent — may have multiple dialogs
+            for _ in range(3):
+                clicked = driver.execute_script("""
+                    var targets = ['Accept All Cookies', 'Accept All', 'Accept all'];
+                    var btns = document.querySelectorAll('button, [role="button"], a');
+                    for (var t = 0; t < targets.length; t++) {
+                        for (var i = 0; i < btns.length; i++) {
+                            if (btns[i].textContent.trim() === targets[t]) {
+                                btns[i].click();
+                                return targets[t];
+                            }
+                        }
                     }
-                }
-                return 'not found';
-            """)
-            print(f"[B365] Cookie consent: {dismissed}")
-            time.sleep(2)
+                    return null;
+                """)
+                if clicked:
+                    print(f"[B365] Cookie: clicked '{clicked}'")
+                    time.sleep(2)
+                else:
+                    break
 
             # Navigate to each circuit and capture responses
             for circuit, url in _CIRCUIT_URLS.items():
