@@ -121,6 +121,7 @@ class ExperimentRunner:
             initial_train_size=val.initial_train_size,
             step_size=val.step_size,
             train_size=val.train_size,
+            test_start=val.test_start,
         )
 
     def _resolve_ensemble(

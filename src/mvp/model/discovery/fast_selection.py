@@ -236,6 +236,7 @@ class FastForwardSelector:
             initial_train_size=val.initial_train_size,
             step_size=val.step_size,
             train_size=val.train_size,
+            test_start=getattr(val, "test_start", None),
         )
         self.folds = [
             (np.array(train_idx), np.array(test_idx))

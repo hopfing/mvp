@@ -1,8 +1,11 @@
 """Data splitting strategies for experiments."""
 
 
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
+from datetime import date
 
 import polars as pl
 
@@ -170,6 +173,40 @@ class SlidingWindowSplitter(BaseSplitter):
             train_start += self.step_size
 
 
+class DateWindowSplitter(BaseSplitter):
+    """Single train/test split based on a date boundary.
+
+    Everything before test_start is training, everything from test_start
+    onward is test. Useful for precise temporal evaluation.
+    """
+
+    def __init__(
+        self,
+        test_start: "date",
+        date_col: str = "effective_match_date",
+    ) -> None:
+        self.test_start = test_start
+        self.date_col = date_col
+
+    def split(self, df: pl.DataFrame) -> Iterator[tuple[list[int], list[int]]]:
+        """Generate a single train/test split at the date boundary."""
+        sorted_df = df.with_row_index("_idx").sort(self.date_col)
+        dates = sorted_df[self.date_col]
+
+        train_mask = dates < self.test_start
+        test_mask = dates >= self.test_start
+
+        train_idx = sorted_df.filter(train_mask)["_idx"].to_list()
+        test_idx = sorted_df.filter(test_mask)["_idx"].to_list()
+
+        if not train_idx:
+            raise ValueError(f"No training data before {self.test_start}")
+        if not test_idx:
+            raise ValueError(f"No test data from {self.test_start} onward")
+
+        yield train_idx, test_idx
+
+
 def make_splitter(
     val_type: str,
     n_splits: int = 5,
@@ -178,6 +215,7 @@ def make_splitter(
     initial_train_size: int | None = None,
     step_size: int | None = None,
     train_size: int | None = None,
+    test_start: "date | None" = None,
 ) -> BaseSplitter:
     """Create a splitter from validation parameters.
 
@@ -216,6 +254,10 @@ def make_splitter(
             test_size=test_size,
             step_size=step_size,
         )
+    elif val_type == "date_window":
+        if test_start is None:
+            raise ValueError("date_window requires test_start")
+        return DateWindowSplitter(test_start=test_start)
     else:
         raise ValueError(f"Unknown validation type: {val_type}")
 

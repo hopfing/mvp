@@ -651,6 +651,7 @@ def _run_voter_confidence(args: argparse.Namespace, config_path: Path) -> int:
             initial_train_size=primary_val.initial_train_size,
             step_size=primary_val.step_size,
             train_size=primary_val.train_size,
+            test_start=primary_val.test_start,
         )
 
         # Get primary's full filtered DataFrame for fold replay
