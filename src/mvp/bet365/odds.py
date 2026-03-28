@@ -6,6 +6,8 @@ then captures the pipe-delimited API responses from the performance log.
 
 import json
 import logging
+import subprocess
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from fractions import Fraction
@@ -190,33 +192,26 @@ def _extract_api_responses(driver, circuit_key: str) -> str | None:
     circuit_markers = {"atp": "J10", "challenger": "J12"}
     marker = circuit_markers.get(circuit_key, "")
 
-    api_urls = []
     for entry in logs:
         msg = json.loads(entry["message"])["message"]
         if msg["method"] != "Network.responseReceived":
             continue
         url = msg["params"]["response"]["url"]
-        if "contentapi" in url:
-            api_urls.append(url[:100])
         if "matchmarketscontentapi" not in url:
             continue
         if marker and marker not in url:
             continue
-        rid = msg["params"]["requestId"]
-        status = msg["params"]["response"]["status"]
-        print(f"[B365] {circuit_key}: found matchmarketscontentapi (status={status}, rid={rid})")
         try:
             body = driver.execute_cdp_cmd(
-                "Network.getResponseBody", {"requestId": rid},
+                "Network.getResponseBody",
+                {"requestId": msg["params"]["requestId"]},
             )
             data = body.get("body", "")
-            print(f"[B365] {circuit_key}: body={len(data)} chars")
             if data:
                 return data
-        except Exception as e:
-            print(f"[B365] {circuit_key}: getResponseBody failed: {e}")
+        except Exception:
+            pass
 
-    print(f"[B365] {circuit_key}: perf log had {len(logs)} entries, contentapi URLs: {api_urls}")
     return None
 
 
@@ -239,7 +234,7 @@ class Bet365OddsScraper(BaseJob):
         driver = None
         try:
             # Detect installed Chrome major version
-            import subprocess as _sp
+            _sp = subprocess
             try:
                 _ver = _sp.check_output(
                     ["google-chrome", "--version"], text=True,
@@ -247,32 +242,26 @@ class Bet365OddsScraper(BaseJob):
                 chrome_major = int(_ver.split(".")[0])
             except Exception:
                 chrome_major = None
-            print(f"[B365] Chrome version: {chrome_major}")
             driver = uc.Chrome(options=options, version_main=chrome_major)
-            print(f"[B365] Chrome launched")
 
-            # Load homepage and dismiss cookie consent
+            # Load homepage to initialize SPA
             driver.get(SITE_URL)
-            import time
             time.sleep(5)
-            print(f"[B365] Homepage: {driver.current_url}")
 
-            # Load each circuit via full page navigation
-            # Navigate to about:blank between circuits to force a fresh SPA load
+            # Load each circuit — navigate to about:blank between them
+            # to force a fresh SPA load (hash-only changes don't re-fetch)
             for circuit, url in _CIRCUIT_URLS.items():
                 try:
                     driver.get("about:blank")
                     time.sleep(1)
                     driver.get(url)
                     time.sleep(12)
-                    print(f"[B365] {circuit}: {driver.current_url}")
 
                     raw = _extract_api_responses(driver, circuit)
                     if raw:
                         raw_responses.append(raw)
                         entries = _parse_pipe_response(raw, circuit, now)
                         all_entries.extend(entries)
-                        print(f"[B365] {circuit}: {len(entries)} entries")
                         logger.info("B365 %s: %d entries", circuit, len(entries))
                     else:
                         logger.warning("B365 %s: no API response captured", circuit)
