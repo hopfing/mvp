@@ -250,6 +250,7 @@ class Bet365OddsScraper(BaseExtractor):
                 for circuit, pd_param in _CIRCUITS:
                     try:
                         frag = pd_param.strip("#").replace("#", "/")
+                        frag = frag.replace("^", "%5E")
                         url = SITE_URL + "#/" + frag + "/"
                         page.goto(url, timeout=60000)
                         page.wait_for_timeout(10000)
