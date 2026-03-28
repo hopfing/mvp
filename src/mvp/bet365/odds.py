@@ -231,7 +231,7 @@ class Bet365OddsScraper(BaseJob):
 
         driver = None
         try:
-            driver = uc.Chrome(options=options, version_main=146)
+            driver = uc.Chrome(options=options)
 
             # Load homepage and dismiss cookie consent
             driver.get(SITE_URL)
