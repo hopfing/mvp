@@ -257,23 +257,36 @@ class Bet365OddsScraper(BaseJob):
             time.sleep(5)
             print(f"[B365] Homepage: {driver.current_url}")
 
-            # Skip cookie consent — clicking it resets the SPA on some systems.
-            # The SPA loads content behind the overlay regardless.
+            # Navigate to the first circuit URL to load the tennis page
+            first_url = list(_CIRCUIT_URLS.values())[0]
+            driver.get(first_url)
+            time.sleep(12)
+            print(f"[B365] Tennis loaded: {driver.current_url}")
 
-            # Navigate to each circuit and capture responses
-            for circuit, url in _CIRCUIT_URLS.items():
+            # Capture data for each circuit by clicking the circuit tabs
+            circuit_labels = {"atp": "ATP Tour", "challenger": "Challenger Tour"}
+            for circuit in _CIRCUIT_URLS:
                 try:
-                    driver.get(url)
-                    time.sleep(12)
-                    print(f"[B365] {circuit}: {driver.current_url}")
+                    label = circuit_labels[circuit]
+                    # Click the circuit tab within the SPA
+                    driver.execute_script(f"""
+                        var links = document.querySelectorAll('*');
+                        for (var i = 0; i < links.length; i++) {{
+                            if (links[i].textContent.trim() === '{label}') {{
+                                links[i].click();
+                                break;
+                            }}
+                        }}
+                    """)
+                    time.sleep(10)
+                    print(f"[B365] {circuit}: clicked '{label}', URL: {driver.current_url}")
 
                     raw = _extract_api_responses(driver, circuit)
                     if raw:
                         raw_responses.append(raw)
-                        print(f"[B365] {circuit}: raw preview: {raw[:300]}")
                         entries = _parse_pipe_response(raw, circuit, now)
                         all_entries.extend(entries)
-                        print(f"[B365] {circuit}: parsed {len(entries)} entries")
+                        print(f"[B365] {circuit}: {len(entries)} entries")
                         logger.info("B365 %s: %d entries", circuit, len(entries))
                     else:
                         logger.warning("B365 %s: no API response captured", circuit)
