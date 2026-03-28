@@ -258,8 +258,11 @@ class Bet365OddsScraper(BaseJob):
             print(f"[B365] Homepage: {driver.current_url}")
 
             # Load each circuit via full page navigation
+            # Navigate to about:blank between circuits to force a fresh SPA load
             for circuit, url in _CIRCUIT_URLS.items():
                 try:
+                    driver.get("about:blank")
+                    time.sleep(1)
                     driver.get(url)
                     time.sleep(12)
                     print(f"[B365] {circuit}: {driver.current_url}")
