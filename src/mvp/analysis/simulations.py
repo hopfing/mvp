@@ -86,16 +86,28 @@ STAKE = 1.0
 
 
 def _build_book_scenarios(columns: list[str]) -> list[dict]:
-    """Build per-book edge band scenarios from available columns."""
+    """Build per-book edge band scenarios from available columns.
+
+    Each book gets four cuts: open, close, best_intra, worst_intra.
+    """
+    _CUTS = ["open", "close", "best_intra", "worst_intra"]
+    _CROSS_BOOK = {"model_edge_best_close", "model_edge_avg_close",
+                   "model_edge_open", "model_edge_market_formed"}
+
     book_scenarios: list[dict] = []
     for col in sorted(columns):
-        if col.startswith("model_edge_") and col.endswith("_close") and col != "model_edge_best_close" and col != "model_edge_avg_close":
-            book = col.removeprefix("model_edge_").removesuffix("_close")
-            odds_col = f"pred_odds_{book}_close"
-            if odds_col in columns:
+        if not col.startswith("model_edge_") or col in _CROSS_BOOK:
+            continue
+        for cut in _CUTS:
+            if col.endswith(f"_{cut}"):
+                book = col.removeprefix("model_edge_").removesuffix(f"_{cut}")
+                odds_col = f"pred_odds_{book}_{cut}"
+                if odds_col not in columns:
+                    break
+                suffix = f"_{book}_{cut}"
                 for band in EDGE_BANDS:
                     book_scenarios.append({
-                        "name": f"{band['name']}_{book}",
+                        "name": f"{band['name']}{suffix}",
                         "odds_col": odds_col,
                         "filter": [
                             (col, op, val)
@@ -103,10 +115,11 @@ def _build_book_scenarios(columns: list[str]) -> list[dict]:
                         ],
                     })
                 book_scenarios.append({
-                    "name": f"flat_{book}_close",
+                    "name": f"flat{suffix}",
                     "odds_col": odds_col,
                     "filter": None,
                 })
+                break
     return book_scenarios
 
 

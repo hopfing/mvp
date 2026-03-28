@@ -363,35 +363,46 @@ def _compute_pred_side_metrics(ds: pl.DataFrame) -> pl.DataFrame:
                 .alias(edge_col)
             )
 
-    # Per-book pred-side odds and edge
+    # Per-book pred-side odds and edge (open, close, best intraday, worst intraday)
+    book_cuts = [
+        ("opening_odds", "open"),
+        ("closing_odds", "close"),
+        ("max_odds", "best_intra"),
+        ("min_odds", "worst_intra"),
+    ]
+    seen_books: set[str] = set()
     for col in ds.columns:
         if col.endswith("_closing_odds_p1") and not col.startswith(("best_", "worst_", "avg_")):
-            book = col.removesuffix("_closing_odds_p1")
-            p1_col = f"{book}_closing_odds_p1"
-            p2_col = f"{book}_closing_odds_p2"
-            pm_col = f"{book}_has_prematch"
-            if p2_col in ds.columns:
-                pred_odds_col = f"pred_odds_{book}_close"
-                edge_col = f"model_edge_{book}_close"
+            seen_books.add(col.removesuffix("_closing_odds_p1"))
+
+    for book in sorted(seen_books):
+        pm_col = f"{book}_has_prematch_p1"
+        has_pm = pm_col in ds.columns
+        for src_suffix, dst_suffix in book_cuts:
+            p1_col = f"{book}_{src_suffix}_p1"
+            p2_col = f"{book}_{src_suffix}_p2"
+            if p1_col not in ds.columns or p2_col not in ds.columns:
+                continue
+            pred_odds_col = f"pred_odds_{book}_{dst_suffix}"
+            edge_col = f"model_edge_{book}_{dst_suffix}"
+            ds = ds.with_columns(
+                pl.when(pred_p1)
+                .then(pl.col(p1_col))
+                .otherwise(pl.col(p2_col))
+                .alias(pred_odds_col)
+            )
+            if has_pm:
                 ds = ds.with_columns(
-                    pl.when(pred_p1)
-                    .then(pl.col(p1_col))
-                    .otherwise(pl.col(p2_col))
-                    .alias(pred_odds_col)
+                    pl.when(pl.col(pm_col).fill_null(False))
+                    .then(pl.col("pred_prob") - 1.0 / pl.col(pred_odds_col))
+                    .otherwise(pl.lit(None).cast(pl.Float64))
+                    .alias(edge_col)
                 )
-                # Only compute edge for prematch odds
-                if pm_col in ds.columns:
-                    ds = ds.with_columns(
-                        pl.when(pl.col(pm_col).fill_null(False))
-                        .then(pl.col("pred_prob") - 1.0 / pl.col(pred_odds_col))
-                        .otherwise(pl.lit(None).cast(pl.Float64))
-                        .alias(edge_col)
-                    )
-                else:
-                    ds = ds.with_columns(
-                        (pl.col("pred_prob") - 1.0 / pl.col(pred_odds_col))
-                        .alias(edge_col)
-                    )
+            else:
+                ds = ds.with_columns(
+                    (pl.col("pred_prob") - 1.0 / pl.col(pred_odds_col))
+                    .alias(edge_col)
+                )
 
     return ds
 

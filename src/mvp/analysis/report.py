@@ -198,20 +198,25 @@ def _book_section(
     v_sims: pl.DataFrame,
     edge_band_names: list[str],
 ) -> None:
-    """Render per-book edge band tables."""
+    """Render per-book edge band tables with open/close/best_intra/worst_intra."""
     overall = v_sims.filter(pl.col("segment") == "overall")
     if len(overall) == 0:
         return
 
-    # Detect book names from scenario names like "edge_7pct_dk"
+    _CUTS = ["open", "close", "best_intra", "worst_intra"]
+    _CUT_LABELS = {"open": "open", "close": "close", "best_intra": "best intra", "worst_intra": "worst intra"}
+
+    # Detect books from flat scenario names
     all_scenarios = overall["scenario"].unique().to_list()
     books: set[str] = set()
     for s in all_scenarios:
-        if s.startswith("flat_") and s.endswith("_close") and s not in (
-            "flat_best_close", "flat_worst_close", "flat_avg_close",
-        ):
-            book = s.removeprefix("flat_").removesuffix("_close")
-            books.add(book)
+        for cut in _CUTS:
+            prefix = "flat_"
+            suffix = f"_{cut}"
+            if s.startswith(prefix) and s.endswith(suffix):
+                candidate = s.removeprefix(prefix).removesuffix(suffix)
+                if candidate not in ("best", "worst", "avg"):
+                    books.add(candidate)
 
     if not books:
         return
@@ -221,58 +226,64 @@ def _book_section(
     for book in sorted(books):
         lines.append(f"\n  book = {book}")
 
-        # Build a mapping from base band name -> row for this book
-        book_map: dict[str, dict] = {}
-        for r in overall.iter_rows(named=True):
-            scenario = r["scenario"]
-            for band_name in edge_band_names:
-                if scenario == f"{band_name}_{book}":
-                    book_map[band_name] = r
-                    break
+        # Build {cut: {band_name: row}} for this book
+        cut_maps: list[tuple[str, dict[str, dict]]] = []
+        for cut in _CUTS:
+            mapping: dict[str, dict] = {}
+            suffix = f"_{book}_{cut}"
+            for r in overall.iter_rows(named=True):
+                scenario = r["scenario"]
+                for band_name in edge_band_names:
+                    if scenario == f"{band_name}{suffix}":
+                        mapping[band_name] = r
+                        break
+            cut_maps.append((cut, mapping))
 
-        if not book_map:
+        # Skip if no data for any cut
+        if not any(m for _, m in cut_maps):
             continue
 
-        # Single-column table (no open/formed split, just this book's close)
-        lines.append("")
-        lines.append(
-            f"{'Edge Band':<12}"
-            f" {'N':>4} {'Acc':>6} {'ROI':>7} {'P&L':>8}"
-        )
-        lines.append("-" * 40)
-
-        for name in edge_band_names:
-            row = book_map.get(name)
+        # Side-by-side table like the main edge band table
+        def _grp(row: dict | None) -> str:
             if row:
                 pnl = row["net_pnl"]
-                lines.append(
-                    f"{name:<12}"
+                return (
                     f" {row['n_bets']:>4}"
                     f" {row['accuracy']:>6.1%}"
                     f" {row['roi']:>+7.1%}"
                     f" {pnl:>+8.2f}"
                 )
-            else:
-                lines.append(
-                    f"{name:<12}"
-                    f" {'—':>4} {'—':>6} {'—':>7} {'—':>8}"
-                )
+            return f" {'—':>4} {'—':>6} {'—':>7} {'—':>8}"
 
-        # Flat scenario for this book
-        flat_name = f"flat_{book}_close"
-        flat_row = None
-        for r in overall.iter_rows(named=True):
-            if r["scenario"] == flat_name:
-                flat_row = r
-                break
+        sep = " | "
+        grp_width = 27
 
-        if flat_row:
-            lines.append("-" * 40)
-            pnl = flat_row["net_pnl"]
-            lines.append(
-                f"{'flat':25s} {flat_row['n_bets']:>6} {flat_row['accuracy']:>6.1%}"
-                f" {flat_row['roi']:>+7.1%} {pnl:>+9.2f}"
-            )
+        lines.append("")
+        lbl_parts = [f"{_CUT_LABELS[c]:^{grp_width}}" for c, _ in cut_maps]
+        lines.append(f"{'':12}" + sep.join(lbl_parts))
+        col_parts = [
+            f" {'N':>4} {'Acc':>6} {'ROI':>7} {'P&L':>8}" for _ in cut_maps
+        ]
+        lines.append(f"{'Edge Band':<12}" + sep.join(col_parts))
+        row_width = 12 + len(sep.join(col_parts))
+        lines.append("-" * row_width)
+
+        for name in edge_band_names:
+            parts = [_grp(m.get(name)) for _, m in cut_maps]
+            lines.append(f"{name:<12}" + sep.join(parts))
+
+        # Flat row per cut
+        lines.append("-" * row_width)
+        flat_parts = []
+        for cut, _ in cut_maps:
+            flat_name = f"flat_{book}_{cut}"
+            flat_row = None
+            for r in overall.iter_rows(named=True):
+                if r["scenario"] == flat_name:
+                    flat_row = r
+                    break
+            flat_parts.append(_grp(flat_row))
+        lines.append(f"{'flat':<12}" + sep.join(flat_parts))
 
 
 def _sim_header(lines: list[str]) -> None:
