@@ -85,6 +85,31 @@ SEGMENTS = [
 STAKE = 1.0
 
 
+def _build_book_scenarios(columns: list[str]) -> list[dict]:
+    """Build per-book edge band scenarios from available columns."""
+    book_scenarios: list[dict] = []
+    for col in sorted(columns):
+        if col.startswith("model_edge_") and col.endswith("_close") and col != "model_edge_best_close" and col != "model_edge_avg_close":
+            book = col.removeprefix("model_edge_").removesuffix("_close")
+            odds_col = f"pred_odds_{book}_close"
+            if odds_col in columns:
+                for band in EDGE_BANDS:
+                    book_scenarios.append({
+                        "name": f"{band['name']}_{book}",
+                        "odds_col": odds_col,
+                        "filter": [
+                            (col, op, val)
+                            for op, val in band["conditions"]
+                        ],
+                    })
+                book_scenarios.append({
+                    "name": f"flat_{book}_close",
+                    "odds_col": odds_col,
+                    "filter": None,
+                })
+    return book_scenarios
+
+
 def run_simulations(ds: pl.DataFrame) -> pl.DataFrame:
     """Run all flat-bet simulation scenarios on the analysis dataset.
 
@@ -121,9 +146,12 @@ def run_simulations(ds: pl.DataFrame) -> pl.DataFrame:
 
     groups.append(("all", resolved))
 
+    book_scenarios = _build_book_scenarios(resolved.columns)
+    all_scenarios = SCENARIOS + book_scenarios
+
     results = []
     for version, group_df in groups:
-        results.extend(_run_scenarios(group_df, version))
+        results.extend(_run_scenarios(group_df, version, all_scenarios))
 
     if not results:
         return _empty_simulations()
@@ -132,11 +160,12 @@ def run_simulations(ds: pl.DataFrame) -> pl.DataFrame:
 
 
 def _run_scenarios(
-    resolved: pl.DataFrame, model_version: str
+    resolved: pl.DataFrame, model_version: str,
+    scenarios: list[dict] | None = None,
 ) -> list[dict]:
     """Run all scenarios × segments for one model version slice."""
     results = []
-    for scenario in SCENARIOS:
+    for scenario in (scenarios or SCENARIOS):
         odds_col = scenario["odds_col"]
         if odds_col not in resolved.columns:
             continue

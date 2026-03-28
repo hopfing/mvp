@@ -363,6 +363,36 @@ def _compute_pred_side_metrics(ds: pl.DataFrame) -> pl.DataFrame:
                 .alias(edge_col)
             )
 
+    # Per-book pred-side odds and edge
+    for col in ds.columns:
+        if col.endswith("_closing_odds_p1") and not col.startswith(("best_", "worst_", "avg_")):
+            book = col.removesuffix("_closing_odds_p1")
+            p1_col = f"{book}_closing_odds_p1"
+            p2_col = f"{book}_closing_odds_p2"
+            pm_col = f"{book}_has_prematch"
+            if p2_col in ds.columns:
+                pred_odds_col = f"pred_odds_{book}_close"
+                edge_col = f"model_edge_{book}_close"
+                ds = ds.with_columns(
+                    pl.when(pred_p1)
+                    .then(pl.col(p1_col))
+                    .otherwise(pl.col(p2_col))
+                    .alias(pred_odds_col)
+                )
+                # Only compute edge for prematch odds
+                if pm_col in ds.columns:
+                    ds = ds.with_columns(
+                        pl.when(pl.col(pm_col).fill_null(False))
+                        .then(pl.col("pred_prob") - 1.0 / pl.col(pred_odds_col))
+                        .otherwise(pl.lit(None).cast(pl.Float64))
+                        .alias(edge_col)
+                    )
+                else:
+                    ds = ds.with_columns(
+                        (pl.col("pred_prob") - 1.0 / pl.col(pred_odds_col))
+                        .alias(edge_col)
+                    )
+
     return ds
 
 
