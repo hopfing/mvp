@@ -242,6 +242,7 @@ class Bet365OddsScraper(BaseExtractor):
                 page = context.new_page()
                 Stealth().apply_stealth_sync(page)
                 page.on("response", on_response)
+                page.on("console", lambda msg: print(f"[B365 CONSOLE] {msg.type}: {msg.text}") if msg.type == "error" else None)
 
                 # Load the base page and let SPA initialize
                 page.goto(SITE_URL, timeout=60000)
