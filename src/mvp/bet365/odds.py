@@ -211,7 +211,10 @@ class Bet365OddsScraper(BaseExtractor):
         now = datetime.now(UTC)
         captured: dict[str, str] = {}
 
+        all_responses: list[str] = []
+
         def on_response(response):
+            all_responses.append(response.url)
             if "matchmarketscontentapi/upcomingmatches" in response.url:
                 try:
                     text = response.text()
@@ -242,8 +245,14 @@ class Bet365OddsScraper(BaseExtractor):
                     try:
                         url = SITE_URL + "#" + pd_param
                         page.goto(url, wait_until="networkidle", timeout=30000)
+                        page.screenshot(path=f"/tmp/b365_{circuit}.png")
+                        print(f"[B365] {circuit}: screenshot saved, page URL: {page.url}")
                     except Exception as e:
                         logger.error("B365 %s navigation failed: %s", circuit, e)
+
+                print(f"[B365] Total responses seen: {len(all_responses)}")
+                for u in all_responses[:20]:
+                    print(f"[B365]   {u[:120]}")
 
                 browser.close()
         except Exception as e:
