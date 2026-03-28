@@ -203,8 +203,8 @@ def _book_section(
     if len(overall) == 0:
         return
 
-    _CUTS = ["open", "close", "best_intra", "worst_intra"]
-    _CUT_LABELS = {"open": "open", "close": "close", "best_intra": "best intra", "worst_intra": "worst intra"}
+    _CUTS = ["open", "best_intra", "worst_intra", "close"]
+    _CUT_LABELS = {"open": "open", "best_intra": "best intra", "worst_intra": "worst intra", "close": "close"}
 
     # Detect books from flat scenario names
     all_scenarios = overall["scenario"].unique().to_list()

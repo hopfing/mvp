@@ -366,9 +366,9 @@ def _compute_pred_side_metrics(ds: pl.DataFrame) -> pl.DataFrame:
     # Per-book pred-side odds and edge (open, close, best intraday, worst intraday)
     book_cuts = [
         ("opening_odds", "open"),
-        ("closing_odds", "close"),
         ("max_odds", "best_intra"),
         ("min_odds", "worst_intra"),
+        ("closing_odds", "close"),
     ]
     seen_books: set[str] = set()
     for col in ds.columns:
