@@ -268,7 +268,7 @@ class FastForwardSelector:
         fold_medians = self.fold_medians
         model_type = self.config.model.type
         model_params = self.config.model.params or {}
-        scale = model_type in ("logistic",)
+        scale = model_type in ("logistic", "neural_net")
 
         # For logistic regression, bypass the LogisticModel wrapper to avoid
         # redundant scaling (the scorer already scales) and per-call import

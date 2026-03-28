@@ -240,3 +240,53 @@ def round_ordinal() -> pl.Expr:
 def is_qualifying() -> pl.Expr:
     """Whether match is in qualifying rounds."""
     return pl.col("round").is_in(["Q1", "Q2", "Q3"]).cast(pl.Float64)
+
+
+@feature(
+    name="match_period",
+    params=[],
+    description="Fractional year of match date (e.g. 2024.25 = April 2024)",
+    match_level=True,
+    impute=0,
+)
+def match_period() -> pl.Expr:
+    """Match date as fractional year at monthly resolution."""
+    dt = pl.col("effective_match_date")
+    return dt.dt.year().cast(pl.Float64) + (dt.dt.month().cast(pl.Float64) - 1) / 12
+
+
+@feature(
+    name="match_season",
+    params=[],
+    description="Month of year as fraction (0.0 = Jan, 0.917 = Dec) — seasonal cycle",
+    match_level=True,
+    impute=0,
+)
+def match_season() -> pl.Expr:
+    """Month of year as fraction, capturing seasonal patterns."""
+    return (pl.col("effective_match_date").dt.month().cast(pl.Float64) - 1) / 12
+
+
+@feature(
+    name="match_period_qtr",
+    params=[],
+    description="Fractional year at quarterly resolution (e.g. 2024.0, 2024.25)",
+    match_level=True,
+    impute=0,
+)
+def match_period_qtr() -> pl.Expr:
+    """Match date as fractional year at quarterly resolution."""
+    dt = pl.col("effective_match_date")
+    return dt.dt.year().cast(pl.Float64) + ((dt.dt.month() - 1) // 3).cast(pl.Float64) / 4
+
+
+@feature(
+    name="match_season_qtr",
+    params=[],
+    description="Quarter of year as fraction (0.0, 0.25, 0.5, 0.75) — seasonal cycle",
+    match_level=True,
+    impute=0,
+)
+def match_season_qtr() -> pl.Expr:
+    """Quarter of year as fraction, capturing seasonal patterns."""
+    return ((pl.col("effective_match_date").dt.month() - 1) // 3).cast(pl.Float64) / 4

@@ -306,6 +306,12 @@ class NeuralNetModel(BaseModel):
         self.embedding_dim: int = params.get("embedding_dim", 0)
         self.embedding_col_idx: int | None = params.get("embedding_col_idx", None)
         self.n_players: int = params.get("n_players", 0)
+        self.shuffle: bool = params.get("shuffle", True)
+        self.finetune_frac: float = params.get("finetune_frac", 0.0)
+        self.finetune_lr: float = params.get("finetune_lr", 0.0001)
+        self.finetune_epochs: int = params.get("finetune_epochs", 100)
+        self.finetune_patience: int = params.get("finetune_patience", 10)
+        self.device: str | None = params.get("device", None)
         self._module = None
         self._device = None
         self._n_features = None
@@ -345,6 +351,8 @@ class NeuralNetModel(BaseModel):
     def _get_device(self):
         import torch
 
+        if self.device is not None:
+            return torch.device(self.device)
         if torch.cuda.is_available():
             return torch.device("cuda")
         return torch.device("cpu")
@@ -413,7 +421,7 @@ class NeuralNetModel(BaseModel):
         if w_t is not None:
             tensors.append(w_t)
         dataset = TensorDataset(*tensors)
-        loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True)
+        loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=self.shuffle)
 
         best_val_loss = float("inf")
         best_state = None
@@ -461,6 +469,69 @@ class NeuralNetModel(BaseModel):
 
         if best_state is not None:
             self._module.load_state_dict(best_state)
+
+        # Phase 2: fine-tune on recent data only
+        if self.finetune_frac > 0:
+            n_total = len(X_train)
+            n_recent = max(1, int(n_total * self.finetune_frac))
+            ft_X = X_t[-n_recent:]
+            ft_y = y_t[-n_recent:]
+            ft_emb = emb_t[-n_recent:] if emb_t is not None else None
+            ft_w = w_t[-n_recent:] if w_t is not None else None
+
+            ft_tensors = [ft_X, ft_y]
+            if ft_emb is not None:
+                ft_tensors.append(ft_emb)
+            if ft_w is not None:
+                ft_tensors.append(ft_w)
+            ft_dataset = TensorDataset(*ft_tensors)
+            ft_loader = DataLoader(ft_dataset, batch_size=self.batch_size, shuffle=True)
+
+            ft_optimizer = torch.optim.Adam(self._module.parameters(), lr=self.finetune_lr)
+            best_val_loss = float("inf")
+            best_state = None
+            wait = 0
+
+            for _epoch in range(self.finetune_epochs):
+                self._module.train()
+                for batch in ft_loader:
+                    idx = 0
+                    xb = batch[idx]; idx += 1
+                    yb = batch[idx]; idx += 1
+                    eb = batch[idx] if has_emb else None
+                    if has_emb:
+                        idx += 1
+                    wb = batch[idx] if has_w else None
+
+                    ft_optimizer.zero_grad()
+                    pred = self._forward(xb, eb)
+                    loss = loss_fn(pred, yb)
+                    if wb is not None:
+                        loss = (loss * wb).mean()
+                    else:
+                        loss = loss.mean()
+                    loss.backward()
+                    ft_optimizer.step()
+
+                self._module.eval()
+                with torch.no_grad():
+                    val_pred = self._forward(X_v, emb_v)
+                    val_loss = loss_fn(val_pred, y_v).mean().item()
+
+                if val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    best_state = {
+                        k: v.cpu().clone() for k, v in self._module.state_dict().items()
+                    }
+                    wait = 0
+                else:
+                    wait += 1
+                    if wait >= self.finetune_patience:
+                        break
+
+            if best_state is not None:
+                self._module.load_state_dict(best_state)
+
         self._module.eval()
 
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
