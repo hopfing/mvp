@@ -297,10 +297,7 @@ class Bet365OddsScraper(BaseJob):
         run_at = datetime.now(UTC)
         entries, raw_responses = self.fetch_all_odds()
 
-        if not entries:
-            logger.info("No B365 odds entries found")
-            return 0
-
+        # Always save raw responses for debugging, even if parser finds 0 entries
         circuits = list(_CIRCUIT_URLS.keys())
         for i, raw in enumerate(raw_responses):
             circuit = circuits[i] if i < len(circuits) else "unknown"
@@ -310,6 +307,10 @@ class Bet365OddsScraper(BaseJob):
             raw_path.parent.mkdir(parents=True, exist_ok=True)
             raw_path.write_text(raw, encoding="utf-8")
             logger.info("Saved raw B365 %s response to %s", circuit, raw_path)
+
+        if not entries:
+            logger.info("No B365 odds entries found")
+            return 0
 
         stage_path = self.build_path("stage", "moneyline.parquet")
         new_df = pl.DataFrame([
