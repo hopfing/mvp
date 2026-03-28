@@ -249,9 +249,9 @@ class Bet365OddsScraper(BaseExtractor):
 
                 for circuit, pd_param in _CIRCUITS:
                     try:
-                        # Navigate via hash change after SPA is initialized
                         frag = pd_param.strip("#").replace("#", "/")
-                        page.evaluate(f"window.location.hash = '#/{frag}/'")
+                        url = SITE_URL + "#/" + frag + "/"
+                        page.goto(url, timeout=60000)
                         page.wait_for_timeout(10000)
                         page.screenshot(path=f"/tmp/b365_{circuit}.png")
                         print(f"[B365] {circuit}: screenshot saved, page URL: {page.url}")
