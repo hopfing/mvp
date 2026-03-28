@@ -243,10 +243,8 @@ class Bet365OddsScraper(BaseExtractor):
                     ),
                 )
                 page = context.new_page()
-                page.add_init_script(
-                    "Object.defineProperty(navigator, 'webdriver', "
-                    "{get: () => undefined})"
-                )
+                from playwright_stealth import stealth_sync
+                stealth_sync(page)
                 page.on("response", on_response)
 
                 for circuit, pd_param in _CIRCUITS:
