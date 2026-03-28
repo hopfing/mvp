@@ -11,6 +11,8 @@ from datetime import UTC, datetime
 from fractions import Fraction
 
 import polars as pl
+from playwright.sync_api import sync_playwright
+from playwright_stealth import Stealth
 
 from mvp.common.base_extractor import BaseExtractor
 
@@ -204,8 +206,6 @@ class Bet365OddsScraper(BaseExtractor):
         Launches Chromium, navigates to the tennis section for each circuit,
         and intercepts the pipe-delimited API responses.
         """
-        from playwright.sync_api import sync_playwright
-
         all_entries: list[Bet365OddsEntry] = []
         raw_responses: list[str] = []
         now = datetime.now(UTC)
@@ -243,8 +243,7 @@ class Bet365OddsScraper(BaseExtractor):
                     ),
                 )
                 page = context.new_page()
-                from playwright_stealth import stealth_sync
-                stealth_sync(page)
+                Stealth().apply_stealth_sync(page)
                 page.on("response", on_response)
 
                 for circuit, pd_param in _CIRCUITS:
