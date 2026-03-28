@@ -228,9 +228,9 @@ class Bet365OddsScraper(BaseExtractor):
 
     def _warm_session(self) -> None:
         """Visit the tennis page to establish cookies needed for the API."""
-        print("[B365 DEBUG] warming session...")
         self._fetch(TENNIS_URL)
-        print("[B365 DEBUG] warmup done")
+        cookies = {c.name: c.value[:20] for c in self.session.cookies}
+        print(f"[B365 DEBUG] warmup cookies: {cookies}")
 
     def _fetch_circuit(self, pd_param: str) -> str:
         """Fetch upcoming matches for a given pd parameter. Returns raw text."""
