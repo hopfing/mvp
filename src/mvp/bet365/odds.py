@@ -243,19 +243,20 @@ class Bet365OddsScraper(BaseExtractor):
                 Stealth().apply_stealth_sync(page)
                 page.on("response", on_response)
 
+                # Load the base page first and let the SPA initialize
+                page.goto(SITE_URL, timeout=60000)
+                page.wait_for_timeout(5000)
+
                 for circuit, pd_param in _CIRCUITS:
                     try:
-                        # Convert pd_param to SPA URL format:
-                        # "#AC#B13#..." -> "#/AC/B13/..."
+                        # Navigate via hash change after SPA is initialized
                         frag = pd_param.strip("#").replace("#", "/")
-                        url = SITE_URL + "#/" + frag + "/"
-                        page.goto(url, timeout=60000)
-                        # Give the SPA time to initialize and make API calls
-                        page.wait_for_timeout(15000)
+                        page.evaluate(f"window.location.hash = '#/{frag}/'")
+                        page.wait_for_timeout(10000)
                         page.screenshot(path=f"/tmp/b365_{circuit}.png")
                         print(f"[B365] {circuit}: screenshot saved, page URL: {page.url}")
                         if circuit not in captured:
-                            print(f"[B365] {circuit}: no API response after 15s")
+                            print(f"[B365] {circuit}: no API response after 10s")
                     except Exception as e:
                         logger.error("B365 %s navigation failed: %s", circuit, e)
 
