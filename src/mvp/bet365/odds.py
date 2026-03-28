@@ -202,17 +202,19 @@ def _extract_api_responses(driver, circuit_key: str) -> str | None:
             continue
         if marker and marker not in url:
             continue
+        rid = msg["params"]["requestId"]
+        status = msg["params"]["response"]["status"]
+        print(f"[B365] {circuit_key}: found matchmarketscontentapi (status={status}, rid={rid})")
         try:
             body = driver.execute_cdp_cmd(
-                "Network.getResponseBody",
-                {"requestId": msg["params"]["requestId"]},
+                "Network.getResponseBody", {"requestId": rid},
             )
             data = body.get("body", "")
+            print(f"[B365] {circuit_key}: body={len(data)} chars")
             if data:
-                print(f"[B365] {circuit_key}: captured {len(data)} chars")
                 return data
         except Exception as e:
-            print(f"[B365] {circuit_key}: body error: {e}")
+            print(f"[B365] {circuit_key}: getResponseBody failed: {e}")
 
     print(f"[B365] {circuit_key}: perf log had {len(logs)} entries, contentapi URLs: {api_urls}")
     return None
