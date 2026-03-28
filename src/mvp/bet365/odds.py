@@ -240,10 +240,16 @@ class Bet365OddsScraper(BaseJob):
                 chrome_major = int(_ver.split(".")[0])
             except Exception:
                 chrome_major = None
+            print(f"[B365] Chrome version: {chrome_major}")
             driver = uc.Chrome(options=options, version_main=chrome_major)
+            print(f"[B365] Chrome launched")
 
             # Load homepage and dismiss cookie consent
             driver.get(SITE_URL)
+            import time
+            time.sleep(5)
+            print(f"[B365] Homepage: {driver.current_url}")
+
             for _ in range(5):
                 try:
                     btn = WebDriverWait(driver, 3).until(
@@ -252,7 +258,7 @@ class Bet365OddsScraper(BaseJob):
                         )
                     )
                     btn.click()
-                    import time
+                    print("[B365] Dismissed cookie dialog")
                     time.sleep(1)
                 except Exception:
                     break
@@ -261,8 +267,8 @@ class Bet365OddsScraper(BaseJob):
             for circuit, url in _CIRCUIT_URLS.items():
                 try:
                     driver.get(url)
-                    import time
                     time.sleep(12)
+                    print(f"[B365] {circuit}: {driver.current_url}")
 
                     raw = _extract_api_responses(driver, circuit)
                     if raw:
