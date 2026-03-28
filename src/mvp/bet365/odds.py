@@ -6,6 +6,7 @@ then captures the pipe-delimited API responses from the performance log.
 
 import json
 import logging
+import os
 import subprocess
 import time
 from dataclasses import dataclass
@@ -232,7 +233,24 @@ class Bet365OddsScraper(BaseJob):
         options.set_capability("goog:loggingPrefs", {"performance": "ALL"})
 
         driver = None
+        virtual_display = None
         try:
+            # Start a virtual display if no DISPLAY is set (e.g. SSH session)
+            if os.name != "nt" and not os.environ.get("DISPLAY"):
+                try:
+                    from pyvirtualdisplay import Display
+                    virtual_display = Display(visible=False, size=(1920, 1080))
+                    virtual_display.start()
+                    logger.info("B365: started virtual display")
+                except ImportError:
+                    # Fall back to xvfb-run manually
+                    os.environ["DISPLAY"] = ":99"
+                    subprocess.Popen(
+                        ["Xvfb", ":99", "-screen", "0", "1920x1080x24"],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    )
+                    time.sleep(1)
+
             # Detect installed Chrome major version
             _sp = subprocess
             try:
@@ -274,6 +292,11 @@ class Bet365OddsScraper(BaseJob):
             if driver:
                 try:
                     driver.quit()
+                except Exception:
+                    pass
+            if virtual_display:
+                try:
+                    virtual_display.stop()
                 except Exception:
                     pass
 
