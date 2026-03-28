@@ -1,10 +1,14 @@
-"""Bet365 odds scraper for tennis markets via pipe-delimited API."""
+"""Bet365 odds scraper for tennis markets via pipe-delimited API.
+
+Uses Playwright to run a headless browser, which establishes the JS-generated
+session cookies and headers that Bet365 requires.  API responses are captured
+via response interception so we get exactly what a real browser receives.
+"""
 
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from fractions import Fraction
-from urllib.parse import quote
 
 import polars as pl
 
@@ -12,25 +16,7 @@ from mvp.common.base_extractor import BaseExtractor
 
 logger = logging.getLogger(__name__)
 
-UPCOMING_URL = "https://www.il.bet365.com/matchmarketscontentapi/upcomingmatches"
-TENNIS_URL = "https://www.il.bet365.com/#/AC#B13#C1#D1002#G83#"
-
-_API_HEADERS = {
-    "Accept": "*/*",
-    "Referer": "https://www.il.bet365.com/",
-    "Sec-Fetch-Dest": "empty",
-    "Sec-Fetch-Mode": "cors",
-    "Sec-Fetch-Site": "same-origin",
-}
-
-_BASE_PARAMS = {
-    "lid": "32",
-    "zid": "0",
-    "cid": "198",
-    "cgid": "3",
-    "ctid": "198",
-    "csid": "28",
-}
+SITE_URL = "https://www.il.bet365.com/"
 
 # pd parameter templates — J10 = ATP Tour, J12 = Challenger, F^24 = Next 24 Hours
 _PD_ATP = "#AC#B13#C1#D1002#G83#J10#Q1#F^24#"
@@ -207,64 +193,76 @@ def _parse_pipe_response(
 
 
 class Bet365OddsScraper(BaseExtractor):
-    """Scraper for Bet365 tennis odds via pipe-delimited API."""
+    """Scraper for Bet365 tennis odds via Playwright browser automation."""
 
     def __init__(self, data_root=None):
         super().__init__(domain="bet365", data_root=data_root)
 
-    def _create_session(self):
-        """Override to use cloudscraper for Cloudflare bypass."""
-        import cloudscraper
-
-        session = cloudscraper.create_scraper()
-        session.headers.update({
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/131.0.0.0 Safari/537.36"
-            ),
-        })
-        return session
-
-    def _warm_session(self) -> None:
-        """Visit the tennis page to establish cookies needed for the API."""
-        self._fetch(TENNIS_URL)
-        cookies = {c.name: c.value[:20] for c in self.session.cookies}
-        print(f"[B365 DEBUG] warmup cookies: {cookies}")
-
-    def _fetch_circuit(self, pd_param: str) -> str:
-        """Fetch upcoming matches for a given pd parameter. Returns raw text."""
-        params = {**_BASE_PARAMS, "pd": pd_param}
-        url = UPCOMING_URL + "?" + "&".join(
-            f"{k}={quote(v, safe='')}" for k, v in params.items()
-        )
-        resp = self._fetch(url, headers=_API_HEADERS)
-        print(f"[B365 DEBUG] response: {len(resp.text)} chars, preview: {resp.text[:300]}")
-        return resp.text
-
     def fetch_all_odds(self) -> tuple[list[Bet365OddsEntry], list[str]]:
-        """Fetch ATP + Challenger odds. Returns entries and raw responses."""
+        """Fetch ATP + Challenger odds via headless browser.
+
+        Launches Chromium, navigates to the tennis section for each circuit,
+        and intercepts the pipe-delimited API responses.
+        """
+        from playwright.sync_api import sync_playwright
+
         all_entries: list[Bet365OddsEntry] = []
         raw_responses: list[str] = []
         now = datetime.now(UTC)
+        captured: dict[str, str] = {}
 
-        self._warm_session()
+        def on_response(response):
+            if "matchmarketscontentapi/upcomingmatches" in response.url:
+                try:
+                    text = response.text()
+                    if "J10" in response.url:
+                        captured["atp"] = text
+                    elif "J12" in response.url:
+                        captured["challenger"] = text
+                    print(f"[B365] Captured {len(text)} chars from API")
+                except Exception as e:
+                    logger.warning("B365 response read failed: %s", e)
 
-        for circuit, pd_param in _CIRCUITS:
-            try:
-                raw = self._fetch_circuit(pd_param)
+        try:
+            with sync_playwright() as p:
+                browser = p.chromium.launch(
+                    headless=True, args=["--no-sandbox"],
+                )
+                context = browser.new_context(
+                    user_agent=(
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/131.0.0.0 Safari/537.36"
+                    ),
+                )
+                page = context.new_page()
+                page.on("response", on_response)
+
+                for circuit, pd_param in _CIRCUITS:
+                    try:
+                        url = SITE_URL + "#" + pd_param
+                        page.goto(url, wait_until="networkidle", timeout=30000)
+                    except Exception as e:
+                        logger.error("B365 %s navigation failed: %s", circuit, e)
+
+                browser.close()
+        except Exception as e:
+            logger.error("B365 Playwright failed: %s", e)
+            print(f"[B365] Playwright error: {e}")
+            return [], []
+
+        for circuit, _ in _CIRCUITS:
+            if circuit in captured:
+                raw = captured[circuit]
                 raw_responses.append(raw)
                 entries = _parse_pipe_response(raw, circuit, now)
                 all_entries.extend(entries)
-                logger.info(
-                    "B365 %s: %d entries", circuit, len(entries),
-                )
-            except Exception as e:
-                logger.error("B365 %s fetch failed: %s", circuit, e)
+                logger.info("B365 %s: %d entries", circuit, len(entries))
+            else:
+                logger.warning("B365 %s: no API response captured", circuit)
+                print(f"[B365] No response captured for {circuit}")
 
-        logger.info(
-            "B365 fetch complete: %d total entries", len(all_entries),
-        )
+        logger.info("B365 fetch complete: %d total entries", len(all_entries))
         return all_entries, raw_responses
 
     def fetch_and_save(self) -> int:
