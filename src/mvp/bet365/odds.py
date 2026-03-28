@@ -103,7 +103,7 @@ def _parse_pipe_response(
         if rec_type == "MG" and fields.get("SY") == "fk":
             current_tournament = fields.get("NA", "")
 
-        elif rec_type == "PA" and fields.get("SY") == "ed":
+        elif rec_type == "PA" and "N2" in fields:
             p1 = fields.get("NA", "")
             p2 = fields.get("N2", "")
             if "/" in p1 or "/" in p2:
