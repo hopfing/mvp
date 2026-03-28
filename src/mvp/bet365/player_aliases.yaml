@@ -1,0 +1,4 @@
+# Bet365 player name aliases: maps Bet365 display names to our player IDs.
+# Add entries when live pipeline logs unmatched players.
+# Format:
+#   "Bet365 Display Name": "PLAYER_ID"

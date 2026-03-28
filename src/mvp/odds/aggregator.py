@@ -8,7 +8,7 @@ from mvp.common.base_job import get_data_root
 
 logger = logging.getLogger(__name__)
 
-BOOKS = ["dk", "br", "mgm"]
+BOOKS = ["dk", "br", "mgm", "b365"]
 
 
 def compute_book_odds(snapshots: pl.DataFrame, book: str) -> pl.DataFrame:

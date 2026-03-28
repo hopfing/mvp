@@ -5,6 +5,7 @@ import argparse
 import logging
 import sys
 import warnings
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +13,36 @@ warnings.filterwarnings("ignore", message="All-NaN slice encountered")
 warnings.filterwarnings("ignore", category=UserWarning, module="sklearn.utils.parallel")
 
 from mvp.common.base_job import get_data_root, get_local_data_root
-from mvp.draftkings.odds import fetch_and_save
+
+
+@dataclass
+class BookConfig:
+    """Configuration for a sportsbook integration."""
+
+    code: str           # "dk", "br", "mgm", "b365"
+    label: str          # "DK", "BR", "MGM", "B365"
+    display_name: str   # "DraftKings", "BetRivers", "BetMGM", "Bet365"
+    domain: str         # "draftkings", "betrivers", "betmgm", "bet365"
+    event_id_col: str   # "dk_event_id", etc.
+    stage_rel: str      # "stage/draftkings/moneyline.parquet"
+    aliases_rel: str    # "draftkings/player_aliases.yaml"
+    matcher_class: str  # "DraftKingsOddsMatcher"
+
+
+BOOK_REGISTRY: list[BookConfig] = [
+    BookConfig("dk", "DK", "DraftKings", "draftkings", "dk_event_id",
+               "stage/draftkings/moneyline.parquet", "draftkings/player_aliases.yaml",
+               "DraftKingsOddsMatcher"),
+    BookConfig("br", "BR", "BetRivers", "betrivers", "br_event_id",
+               "stage/betrivers/moneyline.parquet", "betrivers/player_aliases.yaml",
+               "BetRiversOddsMatcher"),
+    BookConfig("mgm", "MGM", "BetMGM", "betmgm", "mgm_event_id",
+               "stage/betmgm/moneyline.parquet", "betmgm/player_aliases.yaml",
+               "BetMGMOddsMatcher"),
+    BookConfig("b365", "B365", "Bet365", "bet365", "b365_event_id",
+               "stage/bet365/moneyline.parquet", "bet365/player_aliases.yaml",
+               "Bet365OddsMatcher"),
+]
 
 logger = logging.getLogger(__name__)
 
@@ -287,13 +317,12 @@ _CIRCUIT_LABELS = {"tour": "ATP", "chal": "Challenger"}
 
 def print_predictions(
     predictions: Any,
-    odds_map: dict[str, dict[str, float]] | None = None,
-    br_odds_map: dict[str, dict[str, float]] | None = None,
+    book_odds: dict[str, dict[str, dict[str, float]]] | None = None,
 ) -> None:
     """Print human-readable prediction summary."""
     import polars as pl
 
-    has_odds = odds_map or br_odds_map
+    has_odds = bool(book_odds)
     width = 105 if has_odds else 78
     print("\n" + "=" * width)
     print(f"{'PREDICTIONS':^{width}}")
@@ -340,20 +369,13 @@ def print_predictions(
             p1_id = row.get("p1_id") or ""
             p2_id = row.get("p2_id") or ""
             odds_parts = []
-            if odds_map:
-                dk_match = odds_map.get(match_uid)
-                if dk_match and p1_id:
-                    o1 = dk_match.get(p1_id)
-                    o2 = dk_match.get(p2_id)
+            for bcode, odds_for_book in book_odds.items():
+                match_odds = odds_for_book.get(match_uid)
+                if match_odds and p1_id:
+                    o1 = match_odds.get(p1_id)
+                    o2 = match_odds.get(p2_id)
                     if o1 is not None and o2 is not None:
-                        odds_parts.append(f"DK:{o1:.2f}/{o2:.2f}")
-            if br_odds_map:
-                br_match = br_odds_map.get(match_uid)
-                if br_match and p1_id:
-                    o1 = br_match.get(p1_id)
-                    o2 = br_match.get(p2_id)
-                    if o1 is not None and o2 is not None:
-                        odds_parts.append(f"BR:{o1:.2f}/{o2:.2f}")
+                        odds_parts.append(f"{bcode.upper()}:{o1:.2f}/{o2:.2f}")
             if odds_parts:
                 line += "  " + " | ".join(odds_parts)
 
@@ -1147,65 +1169,25 @@ def cmd_project(args: argparse.Namespace) -> int:
 
 
 
-def _fetch_dk_quiet() -> int:
-    """Run DK odds fetch with logging suppressed (runs in background thread)."""
+def _fetch_book_quiet(book: BookConfig) -> int:
+    """Run a book's odds fetch with logging suppressed (runs in background thread)."""
+    import importlib
     import logging as _logging
 
-    dk_logger = _logging.getLogger("mvp.draftkings")
-    ext_logger = _logging.getLogger("mvp.common.base_extractor")
-    job_logger = _logging.getLogger("mvp.common.base_job")
-    prev_levels = dk_logger.level, ext_logger.level, job_logger.level
-    dk_logger.setLevel(_logging.WARNING)
-    ext_logger.setLevel(_logging.WARNING)
-    job_logger.setLevel(_logging.WARNING)
+    loggers = [
+        _logging.getLogger(f"mvp.{book.domain}"),
+        _logging.getLogger("mvp.common.base_extractor"),
+        _logging.getLogger("mvp.common.base_job"),
+    ]
+    prev_levels = [lg.level for lg in loggers]
+    for lg in loggers:
+        lg.setLevel(_logging.WARNING)
     try:
-        return fetch_and_save()
+        mod = importlib.import_module(f"mvp.{book.domain}.odds")
+        return mod.fetch_and_save()
     finally:
-        dk_logger.setLevel(prev_levels[0])
-        ext_logger.setLevel(prev_levels[1])
-        job_logger.setLevel(prev_levels[2])
-
-
-def _fetch_br_quiet() -> int:
-    """Run BR odds fetch with logging suppressed (runs in background thread)."""
-    import logging as _logging
-
-    from mvp.betrivers.odds import fetch_and_save as br_fetch_and_save
-
-    br_logger = _logging.getLogger("mvp.betrivers")
-    ext_logger = _logging.getLogger("mvp.common.base_extractor")
-    job_logger = _logging.getLogger("mvp.common.base_job")
-    prev_levels = br_logger.level, ext_logger.level, job_logger.level
-    br_logger.setLevel(_logging.WARNING)
-    ext_logger.setLevel(_logging.WARNING)
-    job_logger.setLevel(_logging.WARNING)
-    try:
-        return br_fetch_and_save()
-    finally:
-        br_logger.setLevel(prev_levels[0])
-        ext_logger.setLevel(prev_levels[1])
-        job_logger.setLevel(prev_levels[2])
-
-
-def _fetch_mgm_quiet() -> int:
-    """Run MGM odds fetch with logging suppressed (runs in background thread)."""
-    import logging as _logging
-
-    from mvp.betmgm.odds import fetch_and_save as mgm_fetch_and_save
-
-    mgm_logger = _logging.getLogger("mvp.betmgm")
-    ext_logger = _logging.getLogger("mvp.common.base_extractor")
-    job_logger = _logging.getLogger("mvp.common.base_job")
-    prev_levels = mgm_logger.level, ext_logger.level, job_logger.level
-    mgm_logger.setLevel(_logging.WARNING)
-    ext_logger.setLevel(_logging.WARNING)
-    job_logger.setLevel(_logging.WARNING)
-    try:
-        return mgm_fetch_and_save()
-    finally:
-        mgm_logger.setLevel(prev_levels[0])
-        ext_logger.setLevel(prev_levels[1])
-        job_logger.setLevel(prev_levels[2])
+        for lg, lv in zip(loggers, prev_levels):
+            lg.setLevel(lv)
 
 
 def cmd_live(args: argparse.Namespace) -> int:
@@ -1226,10 +1208,10 @@ def cmd_live(args: argparse.Namespace) -> int:
 
     # Start DK odds fetch in background (fully independent of pipeline).
     # Suppress its logs — result is reported after collection.
-    odds_pool = ThreadPoolExecutor(max_workers=3)
-    dk_future = odds_pool.submit(_fetch_dk_quiet)
-    br_future = odds_pool.submit(_fetch_br_quiet)
-    mgm_future = odds_pool.submit(_fetch_mgm_quiet)
+    odds_pool = ThreadPoolExecutor(max_workers=len(BOOK_REGISTRY))
+    book_futures = {
+        b.code: odds_pool.submit(_fetch_book_quiet, b) for b in BOOK_REGISTRY
+    }
 
     try:  # ensure odds_pool cleanup on early failure
         # Rankings + discovery in parallel
@@ -1320,25 +1302,13 @@ def cmd_live(args: argparse.Namespace) -> int:
                 print(f"Warning: {section} prediction failed ({e})")
 
         # Wait for odds fetches
-        dk_n, br_n, mgm_n = 0, 0, 0
-        try:
-            dk_n = dk_future.result(timeout=30)
-            print(f"Fetched {dk_n} DK moneyline odds entries")
-        except Exception as e:
-            logger.error("DK odds fetch failed: %s", e)
-            print(f"Warning: DK odds fetch failed ({e})")
-        try:
-            br_n = br_future.result(timeout=30)
-            print(f"Fetched {br_n} BR moneyline odds entries")
-        except Exception as e:
-            logger.error("BR odds fetch failed: %s", e)
-            print(f"Warning: BR odds fetch failed ({e})")
-        try:
-            mgm_n = mgm_future.result(timeout=30)
-            print(f"Fetched {mgm_n} MGM moneyline odds entries")
-        except Exception as e:
-            logger.error("MGM odds fetch failed: %s", e)
-            print(f"Warning: MGM odds fetch failed ({e})")
+        for book in BOOK_REGISTRY:
+            try:
+                n = book_futures[book.code].result(timeout=30)
+                print(f"Fetched {n} {book.label} moneyline odds entries")
+            except Exception as e:
+                logger.error("%s odds fetch failed: %s", book.label, e)
+                print(f"Warning: {book.label} odds fetch failed ({e})")
 
         # Map new book events to matches using full player database
         import polars as pl
@@ -1351,13 +1321,9 @@ def cmd_live(args: argparse.Namespace) -> int:
         )
 
         _cli_dir = Path(__file__).resolve().parent
-        _BOOK_CONFIG = [
-            ("dk", "dk_event_id", "stage/draftkings/moneyline.parquet",
-             _cli_dir / "draftkings" / "player_aliases.yaml"),
-            ("br", "br_event_id", "stage/betrivers/moneyline.parquet",
-             _cli_dir / "betrivers" / "player_aliases.yaml"),
-            ("mgm", "mgm_event_id", "stage/betmgm/moneyline.parquet",
-             _cli_dir / "betmgm" / "player_aliases.yaml"),
+        _book_mapping_config = [
+            (b.code, b.event_id_col, b.stage_rel, _cli_dir / b.aliases_rel)
+            for b in BOOK_REGISTRY
         ]
 
         existing_map = load_event_map_with_overrides()
@@ -1365,7 +1331,7 @@ def cmd_live(args: argparse.Namespace) -> int:
 
         # Collect unmapped events across all books to determine year range
         unmapped_odds: list[tuple[str, str, Path, pl.DataFrame]] = []
-        for book, eid_col, odds_rel, aliases_path in _BOOK_CONFIG:
+        for book, eid_col, odds_rel, aliases_path in _book_mapping_config:
             odds_path = data_root / odds_rel
             if not odds_path.exists():
                 continue
@@ -1425,37 +1391,23 @@ def cmd_live(args: argparse.Namespace) -> int:
                     logger.error("Event mapping failed for %s: %s", book.upper(), e)
 
         # Look up odds for predictions using event map
-        odds_map: dict[str, dict[str, float]] | None = None
-        br_odds_map: dict[str, dict[str, float]] | None = None
-        mgm_odds_map: dict[str, dict[str, float]] | None = None
+        import importlib
 
-        try:
-            from mvp.draftkings.matcher import DraftKingsOddsMatcher
-            odds_map = DraftKingsOddsMatcher().match(predictions).odds or None
-            if odds_map:
-                print(f"Matched DK odds for {len(odds_map)}/{len(predictions)} predictions")
-        except Exception as e:
-            logger.error("DK odds lookup failed: %s", e)
-
-        try:
-            from mvp.betrivers.matcher import BetRiversOddsMatcher
-            br_odds_map = BetRiversOddsMatcher().match(predictions).odds or None
-            if br_odds_map:
-                print(f"Matched BR odds for {len(br_odds_map)}/{len(predictions)} predictions")
-        except Exception as e:
-            logger.error("BR odds lookup failed: %s", e)
-
-        try:
-            from mvp.betmgm.matcher import BetMGMOddsMatcher
-            mgm_odds_map = BetMGMOddsMatcher().match(predictions).odds or None
-            if mgm_odds_map:
-                print(f"Matched MGM odds for {len(mgm_odds_map)}/{len(predictions)} predictions")
-        except Exception as e:
-            logger.error("MGM odds lookup failed: %s", e)
+        all_odds_maps: dict[str, dict[str, dict[str, float]]] = {}
+        for book in BOOK_REGISTRY:
+            try:
+                mod = importlib.import_module(f"mvp.{book.domain}.matcher")
+                matcher = getattr(mod, book.matcher_class)()
+                result = matcher.match(predictions).odds or None
+                if result:
+                    all_odds_maps[book.code] = result
+                    print(f"Matched {book.label} odds for {len(result)}/{len(predictions)} predictions")
+            except Exception as e:
+                logger.error("%s odds lookup failed: %s", book.label, e)
 
         odds_pool.shutdown(wait=False)
 
-        print_predictions(predictions, odds_map=odds_map, br_odds_map=br_odds_map)
+        print_predictions(predictions, book_odds=all_odds_maps or None)
 
     except Exception:
         odds_pool.shutdown(wait=False)
@@ -1475,14 +1427,12 @@ def cmd_live(args: argparse.Namespace) -> int:
         matches_df = pl.read_parquet(matches_path) if matches_path.exists() else pl.DataFrame()
 
         prepared = prepare_predictions(predictions)
-        book_odds = {}
-        if odds_map:
-            book_odds["DraftKings"] = odds_map
-        if br_odds_map:
-            book_odds["BetRivers"] = br_odds_map
-        if mgm_odds_map:
-            book_odds["BetMGM"] = mgm_odds_map
-        merged = merge_predictions(existing, prepared, matches_df, odds_maps=book_odds or None)
+        book_odds_for_sheets = {
+            book.display_name: all_odds_maps[book.code]
+            for book in BOOK_REGISTRY
+            if book.code in all_odds_maps
+        }
+        merged = merge_predictions(existing, prepared, matches_df, odds_maps=book_odds_for_sheets or None)
         sheets.write(merged)
 
         sheets_parquet = get_data_root() / "sheets" / "bets.parquet"
@@ -1510,26 +1460,13 @@ def cmd_live(args: argparse.Namespace) -> int:
         event_map = load_event_map_with_overrides()
         all_odds = []
 
-        dk_odds_path = get_data_root() / "stage" / "draftkings" / "moneyline.parquet"
-        if dk_odds_path.exists():
-            dk_staged = pl.read_parquet(dk_odds_path)
-            dk_book_odds = compute_odds_by_book(dk_staged, event_map, "dk", "dk_event_id")
-            if len(dk_book_odds) > 0:
-                all_odds.append(dk_book_odds)
-
-        br_odds_path = get_data_root() / "stage" / "betrivers" / "moneyline.parquet"
-        if br_odds_path.exists():
-            br_staged = pl.read_parquet(br_odds_path)
-            br_book_odds = compute_odds_by_book(br_staged, event_map, "br", "br_event_id")
-            if len(br_book_odds) > 0:
-                all_odds.append(br_book_odds)
-
-        mgm_odds_path = get_data_root() / "stage" / "betmgm" / "moneyline.parquet"
-        if mgm_odds_path.exists():
-            mgm_staged = pl.read_parquet(mgm_odds_path)
-            mgm_book_odds = compute_odds_by_book(mgm_staged, event_map, "mgm", "mgm_event_id")
-            if len(mgm_book_odds) > 0:
-                all_odds.append(mgm_book_odds)
+        for book in BOOK_REGISTRY:
+            odds_path = get_data_root() / book.stage_rel
+            if odds_path.exists():
+                staged = pl.read_parquet(odds_path)
+                book_odds_df = compute_odds_by_book(staged, event_map, book.code, book.event_id_col)
+                if len(book_odds_df) > 0:
+                    all_odds.append(book_odds_df)
 
         odds_by_book = pl.concat(all_odds, how="diagonal_relaxed") if all_odds else None
 
@@ -1593,9 +1530,8 @@ def cmd_analysis(parsed: argparse.Namespace) -> int:
     from mvp.analysis.event_map import load_event_map_with_overrides
     from mvp.analysis.report import format_analysis_summary
     from mvp.analysis.simulations import run_simulations
-    from mvp.betmgm.transformer import transform as mgm_transform
-    from mvp.betrivers.transformer import transform as br_transform
-    from mvp.draftkings.transformer import transform as dk_transform
+    import importlib
+
     from mvp.odds.aggregator import (
         compute_book_odds,
         compute_cross_book_odds,
@@ -1612,14 +1548,16 @@ def cmd_analysis(parsed: argparse.Namespace) -> int:
     print(f"Event map: {len(event_map)} mappings")
 
     print("Resolving per-book snapshots...")
-    dk_snaps = dk_transform(event_map)
-    br_snaps = br_transform(event_map)
-    mgm_snaps = mgm_transform(event_map)
+    snap_list: list[tuple[str, pl.DataFrame]] = []
+    for book in BOOK_REGISTRY:
+        mod = importlib.import_module(f"mvp.{book.domain}.transformer")
+        snaps = mod.transform(event_map)
+        snap_list.append((book.code, snaps))
 
     all_snapshots = pl.concat(
-        [df for df in [dk_snaps, br_snaps, mgm_snaps] if len(df) > 0],
+        [s for _, s in snap_list if len(s) > 0],
         how="diagonal_relaxed",
-    ) if any(len(df) > 0 for df in [dk_snaps, br_snaps, mgm_snaps]) else pl.DataFrame()
+    ) if any(len(s) > 0 for _, s in snap_list) else pl.DataFrame()
 
     if len(all_snapshots) > 0:
         snap_path = data_root / "stage" / "odds" / "snapshots.parquet"
@@ -1637,14 +1575,14 @@ def cmd_analysis(parsed: argparse.Namespace) -> int:
     book_odds_list = []
     all_book_odds = []
 
-    for book, snaps in [("dk", dk_snaps), ("br", br_snaps), ("mgm", mgm_snaps)]:
+    for book_code, snaps in snap_list:
         if len(snaps) > 0:
-            book_df = compute_book_odds(snaps, book)
+            book_df = compute_book_odds(snaps, book_code)
             if len(book_df) > 0:
-                save_book_odds(book_df, book)
+                save_book_odds(book_df, book_code)
                 book_odds_list.append(book_df)
                 all_book_odds.append(book_df)
-                print(f"  {book.upper()}: {len(book_df)} matches")
+                print(f"  {book_code.upper()}: {len(book_df)} matches")
 
     # Layer 2: Cross-book summary
     print("Computing cross-book odds summary...")

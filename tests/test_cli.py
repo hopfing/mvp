@@ -116,7 +116,7 @@ class TestCmdTrain:
 
 
 class TestCmdLive:
-    @patch("mvp.cli._fetch_dk_quiet", return_value=0)
+    @patch("mvp.cli._fetch_book_quiet", return_value=0)
     @patch("mvp.model.predictor.ProductionPredictor")
     @patch("mvp.atptour.aggregators.matches.MatchesAggregator")
     @patch("mvp.atptour.pipeline.run_player_data")
@@ -153,7 +153,7 @@ class TestCmdLive:
         mock_predictor_cls.return_value.predict.assert_called_once()
         assert result == 0
 
-    @patch("mvp.cli._fetch_dk_quiet", return_value=0)
+    @patch("mvp.cli._fetch_book_quiet", return_value=0)
     @patch("mvp.model.predictor.ProductionPredictor")
     @patch("mvp.atptour.aggregators.matches.MatchesAggregator")
     @patch("mvp.atptour.pipeline.run_player_data")
@@ -188,7 +188,7 @@ class TestCmdLive:
         assert len(call_args) == 1
         assert call_args[0][0] == "580"
 
-    @patch("mvp.cli._fetch_dk_quiet", return_value=0)
+    @patch("mvp.cli._fetch_book_quiet", return_value=0)
     @patch("mvp.atptour.discovery.TournamentDiscovery")
     @patch("mvp.atptour.pipeline.run_rankings")
     def test_live_tid_not_found_raises(self, mock_rankings, mock_discovery, mock_dk):
@@ -202,7 +202,7 @@ class TestCmdLive:
         with pytest.raises(ValueError, match="not currently active"):
             cmd_live(args)
 
-    @patch("mvp.cli._fetch_dk_quiet", return_value=0)
+    @patch("mvp.cli._fetch_book_quiet", return_value=0)
     @patch("mvp.atptour.aggregators.matches.MatchesAggregator")
     @patch("mvp.atptour.pipeline.run_player_data")
     @patch("mvp.atptour.pipeline._process_tournaments")
@@ -233,7 +233,7 @@ class TestCmdLive:
 class TestCmdLiveSheets:
     """Tests for Sheets sync integration in cmd_live."""
 
-    @patch("mvp.cli._fetch_dk_quiet", return_value=0)
+    @patch("mvp.cli._fetch_book_quiet", return_value=0)
     @patch("mvp.gsheets.sheets.SheetsSync")
     @patch("mvp.gsheets.base.merge_predictions")
     @patch("mvp.gsheets.base.prepare_predictions")
@@ -283,6 +283,7 @@ class TestCmdLiveSheets:
             "predicted_at": [datetime(2024, 1, 14)],
         })
         mock_predictor_cls.return_value.predict.return_value = predictions
+        mock_predictor_cls.return_value.predict_voters.return_value = predictions
 
         # Mock Sheets
         mock_sheets = MagicMock()
@@ -299,7 +300,7 @@ class TestCmdLiveSheets:
         assert result == 0
         mock_sheets.write.assert_called_once()
 
-    @patch("mvp.cli._fetch_dk_quiet", return_value=0)
+    @patch("mvp.cli._fetch_book_quiet", return_value=0)
     @patch("mvp.gsheets.sheets.SheetsSync")
     @patch("mvp.model.predictor.ProductionPredictor")
     @patch("mvp.atptour.aggregators.matches.MatchesAggregator")
