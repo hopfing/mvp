@@ -250,30 +250,19 @@ class Bet365OddsScraper(BaseJob):
             time.sleep(5)
             print(f"[B365] Homepage: {driver.current_url}")
 
-            # Dismiss cookie consent — try multiple selectors
-            for selector in [
-                "//*[contains(text(),'Accept All')]",
-                "//*[contains(text(),'Accept all')]",
-                "//*[contains(text(),'ACCEPT ALL')]",
-                "//*[contains(text(),'Accept All Cookies')]",
-                "//*[contains(text(),'Allow All')]",
-                "//button[contains(@class,'ccm')]",
-            ]:
-                try:
-                    btn = WebDriverWait(driver, 5).until(
-                        EC.element_to_be_clickable((By.XPATH, selector))
-                    )
-                    btn.click()
-                    print(f"[B365] Cookie dismissed via: {selector}")
-                    time.sleep(2)
-                    break
-                except Exception:
-                    continue
-            else:
-                # Dump page buttons for debugging
-                buttons = driver.find_elements(By.TAG_NAME, "button")
-                btn_texts = [b.text for b in buttons if b.text.strip()]
-                print(f"[B365] No cookie button found. Buttons on page: {btn_texts[:10]}")
+            # Dismiss cookie consent via JS click (bypasses overlay interception)
+            dismissed = driver.execute_script("""
+                var btns = document.querySelectorAll('button, [role="button"], a');
+                for (var i = 0; i < btns.length; i++) {
+                    if (btns[i].textContent.trim() === 'Accept All') {
+                        btns[i].click();
+                        return 'clicked';
+                    }
+                }
+                return 'not found';
+            """)
+            print(f"[B365] Cookie consent: {dismissed}")
+            time.sleep(2)
 
             # Navigate to each circuit and capture responses
             for circuit, url in _CIRCUIT_URLS.items():
