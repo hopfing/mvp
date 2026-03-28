@@ -1,33 +1,32 @@
 """Bet365 odds scraper for tennis markets via pipe-delimited API.
 
-Uses Playwright to run a headless browser, which establishes the JS-generated
-session cookies and headers that Bet365 requires.  API responses are captured
-via response interception so we get exactly what a real browser receives.
+Uses undetected-chromedriver with system Chrome to load the bet365 SPA,
+then captures the pipe-delimited API responses from the performance log.
 """
 
+import json
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from fractions import Fraction
 
 import polars as pl
-from playwright.sync_api import sync_playwright
-from playwright_stealth import Stealth
+import undetected_chromedriver as uc
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import WebDriverWait
 
-from mvp.common.base_extractor import BaseExtractor
+from mvp.common.base_job import BaseJob
 
 logger = logging.getLogger(__name__)
 
 SITE_URL = "https://www.il.bet365.com/"
 
-# pd parameter templates — J10 = ATP Tour, J12 = Challenger, F^24 = Next 24 Hours
-_PD_ATP = "#AC#B13#C1#D1002#G83#J10#Q1#F^24#"
-_PD_CHALLENGER = "#AC#B13#C1#D1002#G83#J12#Q1#F^24#"
-
-_CIRCUITS = [
-    ("atp", _PD_ATP),
-    ("challenger", _PD_CHALLENGER),
-]
+# SPA URLs — navigate here to trigger the matchmarketscontentapi calls
+_CIRCUIT_URLS = {
+    "atp": "https://www.il.bet365.com/#/AC/B13/C1/D1002/G83/J10/Q1/F%5E24/",
+    "challenger": "https://www.il.bet365.com/#/AC/B13/C1/D1002/G83/J12/Q1/F%5E24/",
+}
 
 
 def _frac_to_decimal(frac_str: str) -> float:
@@ -88,11 +87,8 @@ def _parse_pipe_response(
     records = raw.split("|")
     entries: list[Bet365OddsEntry] = []
 
-    # State tracking
     current_tournament = ""
-    # Match details keyed by PZ index
     matches_by_pz: dict[str, dict] = {}
-    # Odds collection: list of dicts keyed by PZ
     gb_blocks: list[dict[str, str]] = []
     in_gb_block = False
     current_gb: dict[str, str] = {}
@@ -105,11 +101,9 @@ def _parse_pipe_response(
         rec_type, fields = _parse_record(record)
 
         if rec_type == "MG" and fields.get("SY") == "fk":
-            # Tournament header
             current_tournament = fields.get("NA", "")
 
         elif rec_type == "PA" and fields.get("SY") == "ed":
-            # Match detail record — skip doubles
             p1 = fields.get("NA", "")
             p2 = fields.get("N2", "")
             if "/" in p1 or "/" in p2:
@@ -126,24 +120,20 @@ def _parse_pipe_response(
                 }
 
         elif rec_type == "MA" and fields.get("SY") == "gb":
-            # Start of a new gb (gameboard) section — flush previous
             if in_gb_block and current_gb:
                 gb_blocks.append(current_gb)
             in_gb_block = True
             current_gb = {}
 
         elif rec_type == "PA" and in_gb_block and "OD" in fields:
-            # Odds record within a gb block
             pz = fields.get("PZ", "")
             od = fields.get("OD", "")
             if pz and od:
                 current_gb[pz] = od
 
-    # Flush last gb block
     if in_gb_block and current_gb:
         gb_blocks.append(current_gb)
 
-    # Pair gb blocks: first = p1 odds, second = p2 odds
     for i in range(0, len(gb_blocks) - 1, 2):
         p1_odds_block = gb_blocks[i]
         p2_odds_block = gb_blocks[i + 1]
@@ -194,99 +184,96 @@ def _parse_pipe_response(
     return entries
 
 
-class Bet365OddsScraper(BaseExtractor):
-    """Scraper for Bet365 tennis odds via Playwright browser automation."""
+def _extract_api_responses(driver, circuit_key: str) -> str | None:
+    """Extract matchmarketscontentapi response for a circuit from perf logs."""
+    logs = driver.get_log("performance")
+    # The circuit's pd param distinguishes ATP (J10) vs Challenger (J12)
+    circuit_markers = {"atp": "J10", "challenger": "J12"}
+    marker = circuit_markers.get(circuit_key, "")
+
+    for entry in logs:
+        msg = json.loads(entry["message"])["message"]
+        if msg["method"] != "Network.responseReceived":
+            continue
+        url = msg["params"]["response"]["url"]
+        if "matchmarketscontentapi" not in url:
+            continue
+        if marker and marker not in url:
+            continue
+        try:
+            body = driver.execute_cdp_cmd(
+                "Network.getResponseBody",
+                {"requestId": msg["params"]["requestId"]},
+            )
+            data = body.get("body", "")
+            if data:
+                return data
+        except Exception:
+            pass
+    return None
+
+
+class Bet365OddsScraper(BaseJob):
+    """Scraper for Bet365 tennis odds via undetected-chromedriver."""
 
     def __init__(self, data_root=None):
         super().__init__(domain="bet365", data_root=data_root)
 
     def fetch_all_odds(self) -> tuple[list[Bet365OddsEntry], list[str]]:
-        """Fetch ATP + Challenger odds via headless browser.
-
-        Launches Chromium, navigates to the tennis section for each circuit,
-        and intercepts the pipe-delimited API responses.
-        """
+        """Launch Chrome, navigate to tennis pages, capture API responses."""
         all_entries: list[Bet365OddsEntry] = []
         raw_responses: list[str] = []
         now = datetime.now(UTC)
-        captured: dict[str, str] = {}
 
-        all_responses: list[str] = []
+        options = uc.ChromeOptions()
+        options.add_argument("--no-sandbox")
+        options.set_capability("goog:loggingPrefs", {"performance": "ALL"})
 
-        def on_response(response):
-            all_responses.append(response.url)
-            if "matchmarketscontentapi/upcomingmatches" in response.url:
-                try:
-                    text = response.text()
-                    if "J10" in response.url:
-                        captured["atp"] = text
-                    elif "J12" in response.url:
-                        captured["challenger"] = text
-                    print(f"[B365] Captured {len(text)} chars from API")
-                except Exception as e:
-                    logger.warning("B365 response read failed: %s", e)
-
+        driver = None
         try:
-            with sync_playwright() as p:
-                browser = p.chromium.launch(
-                    headless=False,
-                    args=["--no-sandbox"],
-                )
-                context = browser.new_context(
-                    user_agent=(
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/131.0.0.0 Safari/537.36"
-                    ),
-                )
-                page = context.new_page()
-                Stealth().apply_stealth_sync(page)
-                page.on("response", on_response)
-                page.on("console", lambda msg: print(f"[B365 CONSOLE] {msg.type}: {msg.text}") if msg.type == "error" else None)
+            driver = uc.Chrome(options=options, version_main=146)
 
-                # Load the base page and let SPA initialize
-                page.goto(SITE_URL, timeout=60000)
-                page.wait_for_timeout(5000)
-                print(f"[B365] Base loaded, URL: {page.url}")
+            # Load homepage and dismiss cookie consent
+            driver.get(SITE_URL)
+            for _ in range(5):
+                try:
+                    btn = WebDriverWait(driver, 3).until(
+                        EC.element_to_be_clickable(
+                            (By.XPATH, "//*[contains(text(),'Accept All')]")
+                        )
+                    )
+                    btn.click()
+                    import time
+                    time.sleep(1)
+                except Exception:
+                    break
 
-                # Navigate to Tennis
-                page.get_by_text("Tennis", exact=True).first.click()
-                page.wait_for_timeout(5000)
-                print(f"[B365] After Tennis click, URL: {page.url}")
+            # Navigate to each circuit and capture responses
+            for circuit, url in _CIRCUIT_URLS.items():
+                try:
+                    driver.get(url)
+                    import time
+                    time.sleep(12)
 
-                circuit_labels = {"atp": "ATP Tour", "challenger": "Challenger Tour"}
-                for circuit, pd_param in _CIRCUITS:
-                    try:
-                        label = circuit_labels[circuit]
-                        page.get_by_text(label, exact=True).first.click()
-                        page.wait_for_timeout(10000)
-                        page.screenshot(path=f"/tmp/b365_{circuit}.png")
-                        print(f"[B365] {circuit}: screenshot saved, page URL: {page.url}")
-                        if circuit not in captured:
-                            print(f"[B365] {circuit}: no API response after 10s")
-                    except Exception as e:
-                        logger.error("B365 %s navigation failed: %s", circuit, e)
+                    raw = _extract_api_responses(driver, circuit)
+                    if raw:
+                        raw_responses.append(raw)
+                        entries = _parse_pipe_response(raw, circuit, now)
+                        all_entries.extend(entries)
+                        logger.info("B365 %s: %d entries", circuit, len(entries))
+                    else:
+                        logger.warning("B365 %s: no API response captured", circuit)
+                except Exception as e:
+                    logger.error("B365 %s failed: %s", circuit, e)
 
-                print(f"[B365] Total responses seen: {len(all_responses)}")
-                for u in all_responses[:20]:
-                    print(f"[B365]   {u[:120]}")
-
-                browser.close()
         except Exception as e:
-            logger.error("B365 Playwright failed: %s", e)
-            print(f"[B365] Playwright error: {e}")
-            return [], []
-
-        for circuit, _ in _CIRCUITS:
-            if circuit in captured:
-                raw = captured[circuit]
-                raw_responses.append(raw)
-                entries = _parse_pipe_response(raw, circuit, now)
-                all_entries.extend(entries)
-                logger.info("B365 %s: %d entries", circuit, len(entries))
-            else:
-                logger.warning("B365 %s: no API response captured", circuit)
-                print(f"[B365] No response captured for {circuit}")
+            logger.error("B365 Chrome launch failed: %s", e)
+        finally:
+            if driver:
+                try:
+                    driver.quit()
+                except Exception:
+                    pass
 
         logger.info("B365 fetch complete: %d total entries", len(all_entries))
         return all_entries, raw_responses
@@ -300,9 +287,9 @@ class Bet365OddsScraper(BaseExtractor):
             logger.info("No B365 odds entries found")
             return 0
 
-        # Save raw responses as text files
+        circuits = list(_CIRCUIT_URLS.keys())
         for i, raw in enumerate(raw_responses):
-            circuit = _CIRCUITS[i][0] if i < len(_CIRCUITS) else "unknown"
+            circuit = circuits[i] if i < len(circuits) else "unknown"
             raw_path = self.build_path(
                 "raw", "moneyline", f"odds_{circuit}.txt", version="datetime",
             )
