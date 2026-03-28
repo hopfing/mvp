@@ -243,7 +243,10 @@ class Bet365OddsScraper(BaseExtractor):
 
                 for circuit, pd_param in _CIRCUITS:
                     try:
-                        url = SITE_URL + "#" + pd_param
+                        # Convert pd_param to SPA URL format:
+                        # "#AC#B13#..." -> "#/AC/B13/..."
+                        frag = pd_param.strip("#").replace("#", "/")
+                        url = SITE_URL + "#/" + frag + "/"
                         page.goto(url, wait_until="networkidle", timeout=30000)
                         page.screenshot(path=f"/tmp/b365_{circuit}.png")
                         print(f"[B365] {circuit}: screenshot saved, page URL: {page.url}")
