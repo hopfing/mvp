@@ -228,7 +228,9 @@ class Bet365OddsScraper(BaseExtractor):
 
     def _warm_session(self) -> None:
         """Visit the tennis page to establish cookies needed for the API."""
+        print("[B365 DEBUG] warming session...")
         self._fetch(TENNIS_URL)
+        print("[B365 DEBUG] warmup done")
 
     def _fetch_circuit(self, pd_param: str) -> str:
         """Fetch upcoming matches for a given pd parameter. Returns raw text."""
@@ -237,7 +239,7 @@ class Bet365OddsScraper(BaseExtractor):
             f"{k}={quote(v, safe='')}" for k, v in params.items()
         )
         resp = self._fetch(url, headers=_API_HEADERS)
-        logger.warning("B365 response: %d chars, preview: %s", len(resp.text), resp.text[:300])
+        print(f"[B365 DEBUG] response: {len(resp.text)} chars, preview: {resp.text[:300]}")
         return resp.text
 
     def fetch_all_odds(self) -> tuple[list[Bet365OddsEntry], list[str]]:
