@@ -257,13 +257,8 @@ class Bet365OddsScraper(BaseJob):
             time.sleep(5)
             print(f"[B365] Homepage: {driver.current_url}")
 
-            # Don't click cookie consent — it resets the SPA on some systems.
-            # Instead, remove the overlay via JS so content is accessible.
-            driver.execute_script("""
-                var overlays = document.querySelectorAll('.rcc-a, [class*="cookie"], [class*="consent"]');
-                overlays.forEach(function(el) { el.remove(); });
-            """)
-            print("[B365] Cookie overlay removed via JS")
+            # Skip cookie consent — clicking it resets the SPA on some systems.
+            # The SPA loads content behind the overlay regardless.
 
             # Navigate to each circuit and capture responses
             for circuit, url in _CIRCUIT_URLS.items():
