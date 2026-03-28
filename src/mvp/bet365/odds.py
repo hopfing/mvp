@@ -231,7 +231,16 @@ class Bet365OddsScraper(BaseJob):
 
         driver = None
         try:
-            driver = uc.Chrome(options=options)
+            # Detect installed Chrome major version
+            import subprocess as _sp
+            try:
+                _ver = _sp.check_output(
+                    ["google-chrome", "--version"], text=True,
+                ).strip().split()[-1]
+                chrome_major = int(_ver.split(".")[0])
+            except Exception:
+                chrome_major = None
+            driver = uc.Chrome(options=options, version_main=chrome_major)
 
             # Load homepage and dismiss cookie consent
             driver.get(SITE_URL)
