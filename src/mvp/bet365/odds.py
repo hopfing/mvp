@@ -243,16 +243,21 @@ class Bet365OddsScraper(BaseExtractor):
                 Stealth().apply_stealth_sync(page)
                 page.on("response", on_response)
 
-                # Load the base page first and let the SPA initialize
+                # Load the base page and let SPA initialize
                 page.goto(SITE_URL, timeout=60000)
                 page.wait_for_timeout(5000)
+                print(f"[B365] Base loaded, URL: {page.url}")
 
+                # Navigate to Tennis
+                page.get_by_text("Tennis", exact=True).first.click()
+                page.wait_for_timeout(5000)
+                print(f"[B365] After Tennis click, URL: {page.url}")
+
+                circuit_labels = {"atp": "ATP Tour", "challenger": "Challenger Tour"}
                 for circuit, pd_param in _CIRCUITS:
                     try:
-                        frag = pd_param.strip("#").replace("#", "/")
-                        frag = frag.replace("^", "%5E")
-                        url = SITE_URL + "#/" + frag + "/"
-                        page.goto(url, timeout=60000)
+                        label = circuit_labels[circuit]
+                        page.get_by_text(label, exact=True).first.click()
                         page.wait_for_timeout(10000)
                         page.screenshot(path=f"/tmp/b365_{circuit}.png")
                         print(f"[B365] {circuit}: screenshot saved, page URL: {page.url}")
