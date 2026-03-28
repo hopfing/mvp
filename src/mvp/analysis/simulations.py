@@ -11,14 +11,22 @@ logger = logging.getLogger(__name__)
 _BEST_CLOSE = "pred_odds_best_close"
 
 EDGE_BANDS = [
-    {"name": "edge_5pct", "conditions": [(">=", 0.05)]},
-    {"name": "edge_3pct", "conditions": [(">=", 0.03), ("<", 0.05)]},
-    {"name": "edge_1pct", "conditions": [(">=", 0.01), ("<", 0.03)]},
+    {"name": "edge_7pct", "conditions": [(">=", 0.07)]},
+    {"name": "edge_6pct", "conditions": [(">=", 0.06), ("<", 0.07)]},
+    {"name": "edge_5pct", "conditions": [(">=", 0.05), ("<", 0.06)]},
+    {"name": "edge_4pct", "conditions": [(">=", 0.04), ("<", 0.05)]},
+    {"name": "edge_3pct", "conditions": [(">=", 0.03), ("<", 0.04)]},
+    {"name": "edge_2pct", "conditions": [(">=", 0.02), ("<", 0.03)]},
+    {"name": "edge_1pct", "conditions": [(">=", 0.01), ("<", 0.02)]},
     {"name": "edge_0pct", "conditions": [(">", 0), ("<", 0.01)]},
     {"name": "neg_0pct", "conditions": [("<=", 0), (">", -0.01)]},
-    {"name": "neg_1pct", "conditions": [("<=", -0.01), (">", -0.03)]},
-    {"name": "neg_3pct", "conditions": [("<=", -0.03), (">", -0.05)]},
-    {"name": "neg_5pct", "conditions": [("<=", -0.05)]},
+    {"name": "neg_1pct", "conditions": [("<=", -0.01), (">", -0.02)]},
+    {"name": "neg_2pct", "conditions": [("<=", -0.02), (">", -0.03)]},
+    {"name": "neg_3pct", "conditions": [("<=", -0.03), (">", -0.04)]},
+    {"name": "neg_4pct", "conditions": [("<=", -0.04), (">", -0.05)]},
+    {"name": "neg_5pct", "conditions": [("<=", -0.05), (">", -0.06)]},
+    {"name": "neg_6pct", "conditions": [("<=", -0.06), (">", -0.07)]},
+    {"name": "neg_7pct", "conditions": [("<=", -0.07)]},
 ]
 
 EDGE_BASES = [
