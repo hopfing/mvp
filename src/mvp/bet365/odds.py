@@ -237,6 +237,7 @@ class Bet365OddsScraper(BaseExtractor):
             f"{k}={quote(v, safe='')}" for k, v in params.items()
         )
         resp = self._fetch(url, headers=_API_HEADERS)
+        logger.info("B365 response: %d chars, preview: %s", len(resp.text), resp.text[:200])
         return resp.text
 
     def fetch_all_odds(self) -> tuple[list[Bet365OddsEntry], list[str]]:
