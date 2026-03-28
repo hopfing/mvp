@@ -250,18 +250,30 @@ class Bet365OddsScraper(BaseJob):
             time.sleep(5)
             print(f"[B365] Homepage: {driver.current_url}")
 
-            for _ in range(5):
+            # Dismiss cookie consent — try multiple selectors
+            for selector in [
+                "//*[contains(text(),'Accept All')]",
+                "//*[contains(text(),'Accept all')]",
+                "//*[contains(text(),'ACCEPT ALL')]",
+                "//*[contains(text(),'Accept All Cookies')]",
+                "//*[contains(text(),'Allow All')]",
+                "//button[contains(@class,'ccm')]",
+            ]:
                 try:
-                    btn = WebDriverWait(driver, 3).until(
-                        EC.element_to_be_clickable(
-                            (By.XPATH, "//*[contains(text(),'Accept All')]")
-                        )
+                    btn = WebDriverWait(driver, 5).until(
+                        EC.element_to_be_clickable((By.XPATH, selector))
                     )
                     btn.click()
-                    print("[B365] Dismissed cookie dialog")
-                    time.sleep(1)
-                except Exception:
+                    print(f"[B365] Cookie dismissed via: {selector}")
+                    time.sleep(2)
                     break
+                except Exception:
+                    continue
+            else:
+                # Dump page buttons for debugging
+                buttons = driver.find_elements(By.TAG_NAME, "button")
+                btn_texts = [b.text for b in buttons if b.text.strip()]
+                print(f"[B365] No cookie button found. Buttons on page: {btn_texts[:10]}")
 
             # Navigate to each circuit and capture responses
             for circuit, url in _CIRCUIT_URLS.items():
