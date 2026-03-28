@@ -250,16 +250,12 @@ class Bet365OddsScraper(BaseExtractor):
                         frag = pd_param.strip("#").replace("#", "/")
                         url = SITE_URL + "#/" + frag + "/"
                         page.goto(url, timeout=60000)
-                        # Wait for the specific API call rather than networkidle
-                        try:
-                            page.wait_for_response(
-                                lambda r: "matchmarketscontentapi" in r.url,
-                                timeout=30000,
-                            )
-                        except Exception:
-                            print(f"[B365] {circuit}: API call not seen within 30s")
+                        # Give the SPA time to initialize and make API calls
+                        page.wait_for_timeout(15000)
                         page.screenshot(path=f"/tmp/b365_{circuit}.png")
                         print(f"[B365] {circuit}: screenshot saved, page URL: {page.url}")
+                        if circuit not in captured:
+                            print(f"[B365] {circuit}: no API response after 15s")
                     except Exception as e:
                         logger.error("B365 %s navigation failed: %s", circuit, e)
 
