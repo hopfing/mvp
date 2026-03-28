@@ -13,6 +13,15 @@ from mvp.common.base_extractor import BaseExtractor
 logger = logging.getLogger(__name__)
 
 UPCOMING_URL = "https://www.il.bet365.com/matchmarketscontentapi/upcomingmatches"
+TENNIS_URL = "https://www.il.bet365.com/#/AC#B13#C1#D1002#G83#"
+
+_API_HEADERS = {
+    "Accept": "*/*",
+    "Referer": "https://www.il.bet365.com/",
+    "Sec-Fetch-Dest": "empty",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Site": "same-origin",
+}
 
 _BASE_PARAMS = {
     "lid": "32",
@@ -203,13 +212,31 @@ class Bet365OddsScraper(BaseExtractor):
     def __init__(self, data_root=None):
         super().__init__(domain="bet365", data_root=data_root)
 
+    def _create_session(self):
+        """Override to use cloudscraper for Cloudflare bypass."""
+        import cloudscraper
+
+        session = cloudscraper.create_scraper()
+        session.headers.update({
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/131.0.0.0 Safari/537.36"
+            ),
+        })
+        return session
+
+    def _warm_session(self) -> None:
+        """Visit the tennis page to establish cookies needed for the API."""
+        self._fetch(TENNIS_URL)
+
     def _fetch_circuit(self, pd_param: str) -> str:
         """Fetch upcoming matches for a given pd parameter. Returns raw text."""
         params = {**_BASE_PARAMS, "pd": pd_param}
         url = UPCOMING_URL + "?" + "&".join(
             f"{k}={quote(v, safe='')}" for k, v in params.items()
         )
-        resp = self._fetch(url)
+        resp = self._fetch(url, headers=_API_HEADERS)
         return resp.text
 
     def fetch_all_odds(self) -> tuple[list[Bet365OddsEntry], list[str]]:
@@ -217,6 +244,8 @@ class Bet365OddsScraper(BaseExtractor):
         all_entries: list[Bet365OddsEntry] = []
         raw_responses: list[str] = []
         now = datetime.now(UTC)
+
+        self._warm_session()
 
         for circuit, pd_param in _CIRCUITS:
             try:
