@@ -229,11 +229,8 @@ class Bet365OddsScraper(BaseExtractor):
         try:
             with sync_playwright() as p:
                 browser = p.chromium.launch(
-                    headless=True,
-                    args=[
-                        "--no-sandbox",
-                        "--disable-blink-features=AutomationControlled",
-                    ],
+                    headless=False,
+                    args=["--no-sandbox"],
                 )
                 context = browser.new_context(
                     user_agent=(
