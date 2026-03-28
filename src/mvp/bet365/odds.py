@@ -270,8 +270,10 @@ class Bet365OddsScraper(BaseJob):
                     raw = _extract_api_responses(driver, circuit)
                     if raw:
                         raw_responses.append(raw)
+                        print(f"[B365] {circuit}: raw preview: {raw[:300]}")
                         entries = _parse_pipe_response(raw, circuit, now)
                         all_entries.extend(entries)
+                        print(f"[B365] {circuit}: parsed {len(entries)} entries")
                         logger.info("B365 %s: %d entries", circuit, len(entries))
                     else:
                         logger.warning("B365 %s: no API response captured", circuit)
