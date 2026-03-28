@@ -257,26 +257,13 @@ class Bet365OddsScraper(BaseJob):
             time.sleep(5)
             print(f"[B365] Homepage: {driver.current_url}")
 
-            # Dismiss cookie consent — may have multiple dialogs
-            for _ in range(3):
-                clicked = driver.execute_script("""
-                    var targets = ['Accept All Cookies', 'Accept All', 'Accept all'];
-                    var btns = document.querySelectorAll('button, [role="button"], a');
-                    for (var t = 0; t < targets.length; t++) {
-                        for (var i = 0; i < btns.length; i++) {
-                            if (btns[i].textContent.trim() === targets[t]) {
-                                btns[i].click();
-                                return targets[t];
-                            }
-                        }
-                    }
-                    return null;
-                """)
-                if clicked:
-                    print(f"[B365] Cookie: clicked '{clicked}'")
-                    time.sleep(2)
-                else:
-                    break
+            # Don't click cookie consent — it resets the SPA on some systems.
+            # Instead, remove the overlay via JS so content is accessible.
+            driver.execute_script("""
+                var overlays = document.querySelectorAll('.rcc-a, [class*="cookie"], [class*="consent"]');
+                overlays.forEach(function(el) { el.remove(); });
+            """)
+            print("[B365] Cookie overlay removed via JS")
 
             # Navigate to each circuit and capture responses
             for circuit, url in _CIRCUIT_URLS.items():
