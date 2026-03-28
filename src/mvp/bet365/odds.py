@@ -229,7 +229,11 @@ class Bet365OddsScraper(BaseExtractor):
         try:
             with sync_playwright() as p:
                 browser = p.chromium.launch(
-                    headless=True, args=["--no-sandbox"],
+                    headless=True,
+                    args=[
+                        "--no-sandbox",
+                        "--disable-blink-features=AutomationControlled",
+                    ],
                 )
                 context = browser.new_context(
                     user_agent=(
@@ -239,6 +243,10 @@ class Bet365OddsScraper(BaseExtractor):
                     ),
                 )
                 page = context.new_page()
+                page.add_init_script(
+                    "Object.defineProperty(navigator, 'webdriver', "
+                    "{get: () => undefined})"
+                )
                 page.on("response", on_response)
 
                 for circuit, pd_param in _CIRCUITS:
