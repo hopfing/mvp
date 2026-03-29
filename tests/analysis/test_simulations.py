@@ -72,13 +72,13 @@ class TestSimulations:
         ds = _make_analysis_ds()
         sims = run_simulations(ds)
 
-        edge_7 = sims.filter(
-            (pl.col("scenario") == "edge_7pct")
+        edge_10 = sims.filter(
+            (pl.col("scenario") == "edge_10pct")
             & (pl.col("segment") == "overall")
         )
-        assert len(edge_7) == 1
-        # model_edge_best_close >= 0.07: m1 (0.15), m4 (0.15)
-        assert edge_7["n_bets"][0] == 2
+        assert len(edge_10) == 1
+        # model_edge_best_close >= 0.10: m1 (0.15), m4 (0.15)
+        assert edge_10["n_bets"][0] == 2
 
     def test_consensus_filter(self):
         from mvp.analysis.simulations import run_simulations
@@ -133,7 +133,10 @@ class TestSimulations:
             return rows["n_bets"][0] if len(rows) > 0 else 0
 
         # edges: 0.15, 0.0, 0.03, 0.15, -0.02, -0.06
-        assert _n("edge_7pct") == 2       # 0.15, 0.15
+        assert _n("edge_10pct") == 2      # 0.15, 0.15
+        assert _n("edge_9pct") == 0
+        assert _n("edge_8pct") == 0
+        assert _n("edge_7pct") == 0
         assert _n("edge_6pct") == 0
         assert _n("edge_5pct") == 0
         assert _n("edge_4pct") == 0
@@ -149,14 +152,19 @@ class TestSimulations:
         assert _n("neg_5pct") == 0
         assert _n("neg_6pct") == 1        # -0.06
         assert _n("neg_7pct") == 0
+        assert _n("neg_8pct") == 0
+        assert _n("neg_9pct") == 0
+        assert _n("neg_10pct") == 0
 
         # Bands should sum to total
         total = sum(
             _n(s) for s in [
+                "edge_10pct", "edge_9pct", "edge_8pct",
                 "edge_7pct", "edge_6pct", "edge_5pct", "edge_4pct",
                 "edge_3pct", "edge_2pct", "edge_1pct", "edge_0pct",
                 "neg_0pct", "neg_1pct", "neg_2pct", "neg_3pct",
                 "neg_4pct", "neg_5pct", "neg_6pct", "neg_7pct",
+                "neg_8pct", "neg_9pct", "neg_10pct",
             ]
         )
         assert total == 6
@@ -175,7 +183,7 @@ class TestSimulations:
             return rows["n_bets"][0] if len(rows) > 0 else 0
 
         # open edges: 0.17, 0.01, 0.06, 0.16, -0.01, -0.04
-        assert _n("edge_7pct_open") == 2   # 0.17, 0.16
+        assert _n("edge_10pct_open") == 2  # 0.17, 0.16
         assert _n("edge_6pct_open") == 1   # 0.06
         assert _n("edge_1pct_open") == 1   # 0.01
         assert _n("neg_1pct_open") == 1    # -0.01
@@ -183,10 +191,12 @@ class TestSimulations:
 
         total = sum(
             _n(f"{b}_open") for b in [
+                "edge_10pct", "edge_9pct", "edge_8pct",
                 "edge_7pct", "edge_6pct", "edge_5pct", "edge_4pct",
                 "edge_3pct", "edge_2pct", "edge_1pct", "edge_0pct",
                 "neg_0pct", "neg_1pct", "neg_2pct", "neg_3pct",
                 "neg_4pct", "neg_5pct", "neg_6pct", "neg_7pct",
+                "neg_8pct", "neg_9pct", "neg_10pct",
             ]
         )
         assert total == 6
