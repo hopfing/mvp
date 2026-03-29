@@ -454,6 +454,27 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         "--verbose", "-v", action="store_true", help="Print progress"
     )
 
+    # tune subcommand - hyperparameter grid search
+    tune_parser = subparsers.add_parser(
+        "tune", help="Tune model hyperparameters via grid search"
+    )
+    tune_parser.add_argument(
+        "config", type=str,
+        help="Model config to tune (looks in models/)",
+    )
+    tune_parser.add_argument(
+        "--metric", type=str, default="log_loss",
+        help="Metric to track (default: log_loss)",
+    )
+    tune_parser.add_argument(
+        "--verbose", "-v", action="store_true",
+        help="Print per-combo results",
+    )
+    tune_parser.add_argument(
+        "--param", action="append", metavar="KEY=VALUE",
+        help="Fix a param to a specific value (e.g. --param n_estimators=300)",
+    )
+
     # train subcommand - train production model
     subparsers.add_parser(
         "train", help="Train (or retrain) the production model from production.yaml"
@@ -537,6 +558,50 @@ def cmd_train(args: argparse.Namespace) -> int:
         n_voters = predictor.train_voters()
         if n_voters > 0:
             print(f"Trained {n_voters} {section} voter model(s).")
+    return 0
+
+
+def cmd_tune(args: argparse.Namespace) -> int:
+    """Run hyperparameter grid search."""
+    from mvp.model.tuning import HyperparamTuner
+
+    config_path = resolve_config_path(args.config, MODEL_DIR)
+    if not config_path.exists():
+        raise FileNotFoundError(
+            f"Config not found: {args.config} (tried {config_path})"
+        )
+
+    param_overrides = {}
+    if args.param:
+        for p in args.param:
+            if "=" not in p:
+                raise ValueError(f"Invalid --param format: {p} (expected KEY=VALUE)")
+            k, v = p.split("=", 1)
+            try:
+                v = int(v)
+            except ValueError:
+                try:
+                    v = float(v)
+                except ValueError:
+                    pass
+            param_overrides[k] = v
+
+    tuner = HyperparamTuner(
+        config_path=config_path,
+        param_overrides=param_overrides or None,
+        metric=args.metric,
+    )
+
+    total = tuner._count_combos()
+    already = len(tuner.state.results)
+    logger.info(
+        "Tuning %s (%s): %d in grid, %d done",
+        config_path.stem, tuner.model_type, total, already,
+    )
+
+    state = tuner.run()
+    logger.info("Results saved to %s", tuner.state_path)
+    logger.info("Total runs: %d", len(state.results))
     return 0
 
 
@@ -1686,6 +1751,8 @@ def main(args: list[str] | None = None) -> int:
         return cmd_train(parsed)
     elif parsed.command == "model":
         return cmd_model(parsed)
+    elif parsed.command == "tune":
+        return cmd_tune(parsed)
     elif parsed.command == "experiment":
         return cmd_experiment(parsed)
     elif parsed.command == "live":
