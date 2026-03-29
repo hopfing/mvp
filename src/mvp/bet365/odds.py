@@ -25,10 +25,13 @@ logger = logging.getLogger(__name__)
 
 SITE_URL = "https://www.il.bet365.com/"
 
-# SPA URLs — navigate here to trigger the matchmarketscontentapi calls
+# SPA URLs — navigate to each tab to trigger matchmarketscontentapi calls.
+# B365 serves ATP/WTA/Challenger content non-deterministically across J codes,
+# so we hit all three and filter by tournament name prefix after parsing.
 _CIRCUIT_URLS = {
-    "atp": "https://www.il.bet365.com/#/AC/B13/C1/D1002/G83/J10/Q1/F%5E24/",
-    "challenger": "https://www.il.bet365.com/#/AC/B13/C1/D1002/G83/J12/Q1/F%5E24/",
+    "j10": "https://www.il.bet365.com/#/AC/B13/C1/D1002/G83/J10/Q1/F%5E24/",
+    "j11": "https://www.il.bet365.com/#/AC/B13/C1/D1002/G83/J11/Q1/F%5E24/",
+    "j12": "https://www.il.bet365.com/#/AC/B13/C1/D1002/G83/J12/Q1/F%5E24/",
 }
 
 
@@ -71,9 +74,19 @@ class Bet365OddsEntry:
     fetched_at: datetime
 
 
+def _classify_circuit(tournament_name: str) -> str | None:
+    """Classify tournament as atp/challenger or None (skip) from its name."""
+    name = tournament_name.lower()
+    if name.startswith("atp"):
+        return "atp"
+    if name.startswith("challenger"):
+        return "challenger"
+    # WTA, ITF, UTR, etc. — not our target
+    return None
+
+
 def _parse_pipe_response(
     raw: str,
-    circuit: str,
     fetched_at: datetime,
 ) -> list[Bet365OddsEntry]:
     """Parse Bet365's pipe-delimited response into odds entries.
@@ -86,11 +99,14 @@ def _parse_pipe_response(
 
     Odds come in pairs of gb blocks: first block = p1 odds, second = p2 odds,
     matched by PZ index.
+
+    Only ATP and Challenger tournaments are kept; WTA and others are skipped.
     """
     records = raw.split("|")
     entries: list[Bet365OddsEntry] = []
 
     current_tournament = ""
+    current_circuit: str | None = None
     matches_by_pz: dict[str, dict] = {}
     gb_blocks: list[dict[str, str]] = []
     in_gb_block = False
@@ -105,8 +121,12 @@ def _parse_pipe_response(
 
         if rec_type == "MG" and fields.get("SY") == "fk":
             current_tournament = fields.get("NA", "")
+            current_circuit = _classify_circuit(current_tournament)
 
         elif rec_type == "PA" and "N2" in fields:
+            if current_circuit is None:
+                continue
+
             p1 = fields.get("NA", "")
             p2 = fields.get("N2", "")
             if "/" in p1 or "/" in p2:
@@ -120,6 +140,7 @@ def _parse_pipe_response(
                     "p2": p2,
                     "fi": fi,
                     "tournament": current_tournament,
+                    "circuit": current_circuit,
                 }
 
         elif rec_type == "MA" and fields.get("SY") == "gb":
@@ -166,7 +187,7 @@ def _parse_pipe_response(
                 player_name=match_info["p1"],
                 odds=p1_dec,
                 tournament=match_info["tournament"],
-                circuit=circuit,
+                circuit=match_info["circuit"],
                 opponent_name=match_info["p2"],
                 event_status="NOT_STARTED",
                 fetched_at=fetched_at,
@@ -178,7 +199,7 @@ def _parse_pipe_response(
                 player_name=match_info["p2"],
                 odds=p2_dec,
                 tournament=match_info["tournament"],
-                circuit=circuit,
+                circuit=match_info["circuit"],
                 opponent_name=match_info["p1"],
                 event_status="NOT_STARTED",
                 fetched_at=fetched_at,
@@ -187,11 +208,9 @@ def _parse_pipe_response(
     return entries
 
 
-def _extract_api_responses(driver, circuit_key: str) -> str | None:
-    """Extract matchmarketscontentapi response for a circuit from perf logs."""
+def _extract_api_responses(driver) -> str | None:
+    """Extract the first matchmarketscontentapi response from perf logs."""
     logs = driver.get_log("performance")
-    circuit_markers = {"atp": "J10", "challenger": "J12"}
-    marker = circuit_markers.get(circuit_key, "")
 
     for entry in logs:
         msg = json.loads(entry["message"])["message"]
@@ -199,8 +218,6 @@ def _extract_api_responses(driver, circuit_key: str) -> str | None:
             continue
         url = msg["params"]["response"]["url"]
         if "matchmarketscontentapi" not in url:
-            continue
-        if marker and marker not in url:
             continue
         try:
             body = driver.execute_cdp_cmd(
@@ -222,10 +239,10 @@ class Bet365OddsScraper(BaseJob):
     def __init__(self, data_root=None):
         super().__init__(domain="bet365", data_root=data_root)
 
-    def fetch_all_odds(self) -> tuple[list[Bet365OddsEntry], list[str]]:
+    def fetch_all_odds(self) -> tuple[list[Bet365OddsEntry], list[tuple[str, str]]]:
         """Launch Chrome, navigate to tennis pages, capture API responses."""
         all_entries: list[Bet365OddsEntry] = []
-        raw_responses: list[str] = []
+        raw_responses: list[tuple[str, str]] = []  # (tab_name, raw_text)
         now = datetime.now(UTC)
 
         options = uc.ChromeOptions()
@@ -266,25 +283,33 @@ class Bet365OddsScraper(BaseJob):
             driver.get(SITE_URL)
             time.sleep(5)
 
-            # Load each circuit — navigate to about:blank between them
-            # to force a fresh SPA load (hash-only changes don't re-fetch)
-            for circuit, url in _CIRCUIT_URLS.items():
+            # Navigate to each J-code tab and capture API responses.
+            # B365 serves ATP/WTA/Challenger non-deterministically across
+            # J codes, so we hit all three and dedupe by event ID.
+            seen_event_ids: set[str] = set()
+            for tab, url in _CIRCUIT_URLS.items():
                 try:
                     driver.get("about:blank")
                     time.sleep(1)
                     driver.get(url)
                     time.sleep(12)
 
-                    raw = _extract_api_responses(driver, circuit)
+                    raw = _extract_api_responses(driver)
                     if raw:
-                        raw_responses.append(raw)
-                        entries = _parse_pipe_response(raw, circuit, now)
-                        all_entries.extend(entries)
-                        logger.info("B365 %s: %d entries", circuit, len(entries))
+                        raw_responses.append((tab, raw))
+                        entries = _parse_pipe_response(raw, now)
+                        new = [e for e in entries
+                               if e.b365_event_id not in seen_event_ids]
+                        seen_event_ids.update(e.b365_event_id for e in new)
+                        all_entries.extend(new)
+                        logger.info(
+                            "B365 %s: %d entries (%d new)",
+                            tab, len(entries), len(new),
+                        )
                     else:
-                        logger.warning("B365 %s: no API response captured", circuit)
+                        logger.warning("B365 %s: no API response captured", tab)
                 except Exception as e:
-                    logger.error("B365 %s failed: %s", circuit, e)
+                    logger.error("B365 %s failed: %s", tab, e)
 
         except Exception as e:
             logger.error("B365 Chrome launch failed: %s", e)
@@ -309,15 +334,13 @@ class Bet365OddsScraper(BaseJob):
         entries, raw_responses = self.fetch_all_odds()
 
         # Always save raw responses for debugging, even if parser finds 0 entries
-        circuits = list(_CIRCUIT_URLS.keys())
-        for i, raw in enumerate(raw_responses):
-            circuit = circuits[i] if i < len(circuits) else "unknown"
+        for tab, raw in raw_responses:
             raw_path = self.build_path(
-                "raw", "moneyline", f"odds_{circuit}.txt", version="datetime",
+                "raw", "moneyline", f"odds_{tab}.txt", version="datetime",
             )
             raw_path.parent.mkdir(parents=True, exist_ok=True)
             raw_path.write_text(raw, encoding="utf-8")
-            logger.info("Saved raw B365 %s response to %s", circuit, raw_path)
+            logger.info("Saved raw B365 %s response to %s", tab, raw_path)
 
         if not entries:
             logger.info("No B365 odds entries found")

@@ -103,7 +103,7 @@ class TestParsePipeResponse:
         from mvp.bet365.odds import _parse_pipe_response
 
         now = datetime.now(UTC)
-        entries = _parse_pipe_response(SAMPLE_RESPONSE, "atp", now)
+        entries = _parse_pipe_response(SAMPLE_RESPONSE, now)
 
         # 2 matches × 2 sides = 4 entries
         assert len(entries) == 4
@@ -145,23 +145,56 @@ class TestParsePipeResponse:
             "PA;ID=6;FI=300;OD=6/4;SU=0;PZ=0|"
         )
         now = datetime.now(UTC)
-        entries = _parse_pipe_response(response, "atp", now)
+        entries = _parse_pipe_response(response, now)
         assert len(entries) == 0
 
     def test_empty_response(self):
         from mvp.bet365.odds import _parse_pipe_response
 
         now = datetime.now(UTC)
-        entries = _parse_pipe_response("F|CL;ID=13", "atp", now)
+        entries = _parse_pipe_response("F|CL;ID=13", now)
         assert len(entries) == 0
 
     def test_all_entries_have_book_b365(self):
         from mvp.bet365.odds import _parse_pipe_response
 
         now = datetime.now(UTC)
-        entries = _parse_pipe_response(SAMPLE_RESPONSE, "challenger", now)
+        entries = _parse_pipe_response(SAMPLE_RESPONSE, now)
         for e in entries:
             assert e.book == "b365"
-            assert e.circuit == "challenger"
+            assert e.circuit == "atp"
             assert e.market == "moneyline"
             assert e.event_status == "NOT_STARTED"
+
+    def test_wta_filtered_out(self):
+        from mvp.bet365.odds import _parse_pipe_response
+
+        response = (
+            "F|MG;ID=83;NA=WTA Charleston - Round 1;SY=fk|"
+            "PA;ID=PC1;NA=Bianca Andreescu;N2=Ashlyn Krueger;"
+            "FI=400;BC=20260328170000;SY=ed;PZ=0|"
+            "MA;ID=M83;NA=;FI=400;CN=1;SY=gb;PY=ed;PF=2;MA=83|"
+            "PA;ID=1;FI=400;OD=1/2;SU=0;PZ=0|"
+            "MA;ID=M83;NA=;FI=400;CN=1;SY=gb;PY=ed;PF=2;MA=83|"
+            "PA;ID=2;FI=400;OD=6/4;SU=0;PZ=0|"
+        )
+        now = datetime.now(UTC)
+        entries = _parse_pipe_response(response, now)
+        assert len(entries) == 0
+
+    def test_challenger_circuit_classified(self):
+        from mvp.bet365.odds import _parse_pipe_response
+
+        response = (
+            "F|MG;ID=83;NA=Challenger Braga - Round 1;SY=fk|"
+            "PA;ID=PC1;NA=Player A;N2=Player B;"
+            "FI=500;BC=20260328170000;SY=ed;PZ=0|"
+            "MA;ID=M83;NA=;FI=500;CN=1;SY=gb;PY=ed;PF=2;MA=83|"
+            "PA;ID=1;FI=500;OD=1/1;SU=0;PZ=0|"
+            "MA;ID=M83;NA=;FI=500;CN=1;SY=gb;PY=ed;PF=2;MA=83|"
+            "PA;ID=2;FI=500;OD=1/1;SU=0;PZ=0|"
+        )
+        now = datetime.now(UTC)
+        entries = _parse_pipe_response(response, now)
+        assert len(entries) == 2
+        assert all(e.circuit == "challenger" for e in entries)
