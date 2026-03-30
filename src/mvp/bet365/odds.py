@@ -251,9 +251,15 @@ def _parse_pipe_response(
     return entries
 
 
-def _extract_api_responses(driver) -> str | None:
-    """Extract the first matchmarketscontentapi response from perf logs."""
+def _extract_api_responses(driver, j_filter: str | None = None) -> str | None:
+    """Extract a matchmarketscontentapi response from perf logs.
+
+    Args:
+        j_filter: If set, only match responses whose URL contains this J code
+                  (e.g. "J12"). If None, returns the last response found.
+    """
     logs = driver.get_log("performance")
+    result: str | None = None
 
     for entry in logs:
         msg = json.loads(entry["message"])["message"]
@@ -262,6 +268,8 @@ def _extract_api_responses(driver) -> str | None:
         url = msg["params"]["response"]["url"]
         if "matchmarketscontentapi" not in url:
             continue
+        if j_filter and f"J{j_filter}" not in url and f"%23J{j_filter}%23" not in url:
+            continue
         try:
             body = driver.execute_cdp_cmd(
                 "Network.getResponseBody",
@@ -269,18 +277,19 @@ def _extract_api_responses(driver) -> str | None:
             )
             data = body.get("body", "")
             if data:
-                return data
+                result = data
         except Exception:
             pass
 
-    return None
+    return result
 
 
-def _click_tour_tab(driver, tour_name: str) -> str | None:
+def _click_tour_tab(driver, tour_name: str, j_code: str) -> str | None:
     """Click a tour tab in the SPA and capture the resulting API response.
 
     Finds the tab element by its text content, clicks it (which fires
-    the matchmarketscontentapi call), then captures from perf logs.
+    the matchmarketscontentapi call), then captures the response matching
+    the expected J code from perf logs.
     """
     # Drain any existing perf logs before clicking.
     try:
@@ -305,7 +314,7 @@ def _click_tour_tab(driver, tour_name: str) -> str | None:
     logger.info("B365: clicked '%s' tab, waiting for API response", tour_name)
     time.sleep(8)
 
-    return _extract_api_responses(driver)
+    return _extract_api_responses(driver, j_filter=j_code)
 
 
 class Bet365OddsScraper(BaseJob):
@@ -413,7 +422,7 @@ class Bet365OddsScraper(BaseJob):
                 if not tour_name:
                     continue
                 try:
-                    raw = _click_tour_tab(driver, tour_name)
+                    raw = _click_tour_tab(driver, tour_name, j)
                     tab = f"j{j}"
                     if raw:
                         raw_responses.append((tab, raw))
