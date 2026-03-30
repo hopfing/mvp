@@ -289,21 +289,17 @@ def _click_tour_tab(driver, tour_name: str) -> str | None:
         pass
 
     # Find and click the tab element by data-content attribute.
+    # Use Selenium's native click (not JS .click()) so the SPA's event
+    # handlers fire the same way as a real user click.
+    from selenium.webdriver.common.by import By
+
     try:
-        tab = driver.execute_script(
-            """
-            var name = arguments[0];
-            var el = document.querySelector('[data-content="' + name + '"]');
-            if (el) { el.click(); return true; }
-            return false;
-            """,
-            tour_name,
+        el = driver.find_element(
+            By.CSS_SELECTOR, f'[data-content="{tour_name}"]',
         )
-        if not tab:
-            logger.warning("B365: could not find tab '%s' in DOM", tour_name)
-            return None
+        el.click()
     except Exception as e:
-        logger.error("B365: failed to click tab '%s': %s", tour_name, e)
+        logger.warning("B365: could not find/click tab '%s': %s", tour_name, e)
         return None
 
     logger.info("B365: clicked '%s' tab, waiting for API response", tour_name)
