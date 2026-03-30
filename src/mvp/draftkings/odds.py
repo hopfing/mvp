@@ -282,6 +282,14 @@ class DraftKingsOddsScraper(BaseExtractor):
             if not all_entries:
                 continue
 
+            # Derive run_at from raw filename timestamp
+            run_at = datetime.now(UTC)
+            try:
+                parts = raw_path.stem.replace("odds_", "")
+                run_at = datetime.strptime(parts, "%Y%m%d_%H%M%S").replace(tzinfo=UTC)
+            except ValueError:
+                pass
+
             df = pl.DataFrame([
                 {
                     "book": e.book,
@@ -298,6 +306,7 @@ class DraftKingsOddsScraper(BaseExtractor):
                     "opponent_name": e.opponent_name,
                     "event_status": e.event_status,
                     "fetched_at": e.fetched_at,
+                    "run_at": run_at,
                 }
                 for e in all_entries
             ])
