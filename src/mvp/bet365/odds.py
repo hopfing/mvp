@@ -276,30 +276,56 @@ def _extract_api_responses(driver) -> str | None:
     return None
 
 
-def _fetch_j_code(driver, j: str) -> str | None:
-    """Fetch a J code's odds by calling the API directly from the SPA context.
+def _click_tour_tab(driver, tour_name: str) -> str | None:
+    """Click a tour tab in the SPA and capture the resulting API response.
 
-    The SPA must already be loaded (session established) before calling this.
-    Uses fetch() within the browser so we inherit the full session state.
+    Finds the tab element by its text content, clicks it (which fires
+    the matchmarketscontentapi call), then captures from perf logs.
     """
-    api_url = _API_URL_TEMPLATE.format(j=j)
+    # Drain any existing perf logs before clicking.
     try:
-        result = driver.execute_async_script(
+        driver.get_log("performance")
+    except Exception:
+        pass
+
+    # Find and click the tab element containing the tour name.
+    try:
+        tab = driver.execute_script(
             """
-            var callback = arguments[arguments.length - 1];
-            fetch(arguments[0])
-                .then(function(r) { return r.text(); })
-                .then(callback)
-                .catch(function(e) { callback(null); });
+            var name = arguments[0];
+            var els = document.querySelectorAll('[class*="cm-CouponModule"]'
+                + ' [class*="cm-MarketGroupButton"]');
+            for (var i = 0; i < els.length; i++) {
+                if (els[i].textContent.trim() === name) {
+                    els[i].click();
+                    return true;
+                }
+            }
+            // Fallback: search all elements for exact text match.
+            var all = document.querySelectorAll('*');
+            for (var i = 0; i < all.length; i++) {
+                var el = all[i];
+                if (el.children.length === 0
+                    && el.textContent.trim() === name) {
+                    el.click();
+                    return true;
+                }
+            }
+            return false;
             """,
-            api_url,
+            tour_name,
         )
-        if result:
-            logger.info("B365 j%s: fetched %d bytes via API", j, len(result))
-            return result
+        if not tab:
+            logger.warning("B365: could not find tab '%s' in DOM", tour_name)
+            return None
     except Exception as e:
-        logger.error("B365 j%s: API fetch failed: %s", j, e)
-    return None
+        logger.error("B365: failed to click tab '%s': %s", tour_name, e)
+        return None
+
+    logger.info("B365: clicked '%s' tab, waiting for API response", tour_name)
+    time.sleep(8)
+
+    return _extract_api_responses(driver)
 
 
 class Bet365OddsScraper(BaseJob):
@@ -396,12 +422,19 @@ class Bet365OddsScraper(BaseJob):
             for circuit, j in j_codes.items():
                 unique_j.setdefault(j, []).append(circuit)
 
-            for j, circuits in unique_j.items():
+            # Click each target tour tab and capture the API response.
+            # Map circuit keys back to tour label names for clicking.
+            _CIRCUIT_TO_TOUR = {v: k for k, v in _TARGET_TOURS.items()}
+
+            for circuit, j in j_codes.items():
                 if j == "10" and raw:
                     continue  # Already captured from SPA load
-                tab = f"j{j}"
+                tour_name = _CIRCUIT_TO_TOUR.get(circuit, "")
+                if not tour_name:
+                    continue
                 try:
-                    raw = _fetch_j_code(driver, j)
+                    raw = _click_tour_tab(driver, tour_name)
+                    tab = f"j{j}"
                     if raw:
                         raw_responses.append((tab, raw))
                         entries = _parse_pipe_response(raw, now)
@@ -411,12 +444,15 @@ class Bet365OddsScraper(BaseJob):
                         all_entries.extend(new)
                         logger.info(
                             "B365 %s (%s): %d entries (%d new)",
-                            tab, "/".join(circuits), len(entries), len(new),
+                            tab, circuit, len(entries), len(new),
                         )
                     else:
-                        logger.warning("B365 %s: no API response captured", tab)
+                        logger.warning(
+                            "B365 %s: no API response after clicking '%s'",
+                            tab, tour_name,
+                        )
                 except Exception as e:
-                    logger.error("B365 %s failed: %s", tab, e)
+                    logger.error("B365 %s failed: %s", circuit, e)
 
         except Exception as e:
             logger.error("B365 Chrome launch failed: %s", e)
