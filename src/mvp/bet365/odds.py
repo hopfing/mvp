@@ -284,7 +284,7 @@ def _extract_api_responses(driver, j_filter: str | None = None) -> str | None:
     return result
 
 
-def _click_tour_tab(driver, tour_name: str, j_code: str) -> str | None:
+def _click_tour_tab(driver, tour_name: str) -> str | None:
     """Click a tour tab in the SPA and capture the resulting API response.
 
     Finds the tab element by its text content, clicks it (which fires
@@ -314,7 +314,7 @@ def _click_tour_tab(driver, tour_name: str, j_code: str) -> str | None:
     logger.info("B365: clicked '%s' tab, waiting for API response", tour_name)
     time.sleep(8)
 
-    return _extract_api_responses(driver, j_filter=j_code)
+    return _extract_api_responses(driver)
 
 
 class Bet365OddsScraper(BaseJob):
@@ -391,7 +391,7 @@ class Bet365OddsScraper(BaseJob):
 
             # Click Challenger tab and capture its API response.
             try:
-                raw = _click_tour_tab(driver, "Challenger Tour", "12")
+                raw = _click_tour_tab(driver, "Challenger Tour")
                 if raw:
                     raw_responses.append(("challenger", raw))
                     entries = _parse_pipe_response(raw, now)
