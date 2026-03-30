@@ -434,6 +434,10 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
     model_parser.add_argument(
         "--refresh", action="store_true", help="Rebuild matches.parquet before running"
     )
+    model_parser.add_argument(
+        "--memory-limit", type=int, default=None,
+        help="Override memory limit %% (0 to disable, default 75)",
+    )
 
     # experiment subcommand - discovery from experiments/ directory
     exp_parser = subparsers.add_parser(
@@ -476,6 +480,10 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
     tune_parser.add_argument(
         "--verbose", "-v", action="store_true",
         help="Print per-combo results",
+    )
+    tune_parser.add_argument(
+        "--memory-limit", type=int, default=None,
+        help="Override memory limit %% (0 to disable, default 75)",
     )
     tune_parser.add_argument(
         "--param", action="append", metavar="KEY=VALUE",
