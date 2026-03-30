@@ -1263,24 +1263,11 @@ def cmd_project(args: argparse.Namespace) -> int:
 
 
 def _fetch_book_quiet(book: BookConfig) -> int:
-    """Run a book's odds fetch with logging suppressed (runs in background thread)."""
+    """Run a book's odds fetch in background thread."""
     import importlib
-    import logging as _logging
 
-    loggers = [
-        _logging.getLogger(f"mvp.{book.domain}"),
-        _logging.getLogger("mvp.common.base_extractor"),
-        _logging.getLogger("mvp.common.base_job"),
-    ]
-    prev_levels = [lg.level for lg in loggers]
-    for lg in loggers:
-        lg.setLevel(_logging.WARNING)
-    try:
-        mod = importlib.import_module(f"mvp.{book.domain}.odds")
-        return mod.fetch_and_save()
-    finally:
-        for lg, lv in zip(loggers, prev_levels):
-            lg.setLevel(lv)
+    mod = importlib.import_module(f"mvp.{book.domain}.odds")
+    return mod.fetch_and_save()
 
 
 def cmd_live(args: argparse.Namespace) -> int:
