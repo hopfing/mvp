@@ -370,78 +370,45 @@ class Bet365OddsScraper(BaseJob):
             driver.get(_URL_TEMPLATE.format(j="10"))
             time.sleep(12)
 
-            # Capture J10 data from perf logs (the SPA-triggered API call).
+            # Capture ATP data from perf logs (the SPA-triggered API call).
             raw = _extract_api_responses(driver)
 
-            j_codes = _FALLBACK_J_CODES.copy()
-            if raw:
-                discovered = _discover_j_codes(raw)
-                if discovered:
-                    j_codes = discovered
-                    logger.info("B365 discovered J codes: %s", j_codes)
-                else:
-                    logger.warning(
-                        "B365 nav parse found no target tours, "
-                        "using fallbacks: %s", j_codes,
-                    )
-                raw_responses.append(("j10", raw))
-            else:
-                logger.warning(
-                    "B365 discovery page returned no data, "
-                    "using fallbacks: %s", j_codes,
-                )
-
-            # Now fetch each target J code. Use the SPA-loaded response
-            # for J10 if it's a target, then fetch() others directly.
             seen_event_ids: set[str] = set()
 
-            if raw and "10" in j_codes.values():
+            if raw:
+                raw_responses.append(("atp", raw))
                 entries = _parse_pipe_response(raw, now)
                 new = [e for e in entries
                        if e.b365_event_id not in seen_event_ids]
                 seen_event_ids.update(e.b365_event_id for e in new)
                 all_entries.extend(new)
                 logger.info(
-                    "B365 j10 (SPA): %d entries (%d new)",
+                    "B365 atp (SPA): %d entries (%d new)",
                     len(entries), len(new),
                 )
+            else:
+                logger.warning("B365: no ATP API response captured")
 
-            # Dedupe — ATP and Challenger may be on the same J code.
-            unique_j: dict[str, list[str]] = {}
-            for circuit, j in j_codes.items():
-                unique_j.setdefault(j, []).append(circuit)
-
-            # Click each target tour tab and capture the API response.
-            # Map circuit keys back to tour label names for clicking.
-            _CIRCUIT_TO_TOUR = {v: k for k, v in _TARGET_TOURS.items()}
-
-            for circuit, j in j_codes.items():
-                if j == "10" and raw:
-                    continue  # Already captured from SPA load
-                tour_name = _CIRCUIT_TO_TOUR.get(circuit, "")
-                if not tour_name:
-                    continue
-                try:
-                    raw = _click_tour_tab(driver, tour_name, j)
-                    tab = f"j{j}"
-                    if raw:
-                        raw_responses.append((tab, raw))
-                        entries = _parse_pipe_response(raw, now)
-                        new = [e for e in entries
-                               if e.b365_event_id not in seen_event_ids]
-                        seen_event_ids.update(e.b365_event_id for e in new)
-                        all_entries.extend(new)
-                        logger.info(
-                            "B365 %s (%s): %d entries (%d new)",
-                            tab, circuit, len(entries), len(new),
-                        )
-                    else:
-                        logger.warning(
-                            "B365 %s: no API response after clicking '%s'",
-                            tab, tour_name,
-                        )
-                except Exception as e:
-                    logger.error("B365 %s failed: %s", circuit, e)
+            # Click Challenger tab and capture its API response.
+            try:
+                raw = _click_tour_tab(driver, "Challenger Tour", "12")
+                if raw:
+                    raw_responses.append(("challenger", raw))
+                    entries = _parse_pipe_response(raw, now)
+                    new = [e for e in entries
+                           if e.b365_event_id not in seen_event_ids]
+                    seen_event_ids.update(e.b365_event_id for e in new)
+                    all_entries.extend(new)
+                    logger.info(
+                        "B365 challenger (click): %d entries (%d new)",
+                        len(entries), len(new),
+                    )
+                else:
+                    logger.warning(
+                        "B365: no API response after clicking Challenger Tour",
+                    )
+            except Exception as e:
+                logger.error("B365 challenger click failed: %s", e)
 
         except Exception as e:
             logger.error("B365 Chrome launch failed: %s", e)
