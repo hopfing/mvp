@@ -456,6 +456,10 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         "--n-jobs", type=int, default=None,
         help="Override n_jobs for parallelism (limits CPU usage)",
     )
+    exp_parser.add_argument(
+        "--memory-limit", type=int, default=None,
+        help="Override memory limit %% (0 to disable, default 75)",
+    )
 
     # tune subcommand - hyperparameter grid search
     tune_parser = subparsers.add_parser(
@@ -1759,6 +1763,10 @@ def main(args: list[str] | None = None) -> int:
     if getattr(parsed, "n_jobs", None) is not None:
         from mvp.model.models import set_n_jobs_override
         set_n_jobs_override(parsed.n_jobs)
+
+    if getattr(parsed, "memory_limit", None) is not None:
+        import mvp.model.engine as _engine
+        _engine._MEMORY_LIMIT_PCT = parsed.memory_limit
 
     if parsed.command == "train":
         return cmd_train(parsed)
