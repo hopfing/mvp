@@ -7,6 +7,7 @@ then captures the pipe-delimited API responses from the performance log.
 import json
 import logging
 import os
+import re
 import subprocess
 import time
 from dataclasses import dataclass
@@ -23,14 +24,14 @@ logger = logging.getLogger(__name__)
 
 SITE_URL = "https://www.il.bet365.com/"
 
-# SPA URLs — navigate to each tab to trigger matchmarketscontentapi calls.
-# B365 serves ATP/WTA/Challenger content non-deterministically across J codes,
-# so we hit all three and filter by tournament name prefix after parsing.
-_CIRCUIT_URLS = {
-    "j10": "https://www.il.bet365.com/#/AC/B13/C1/D1002/G83/J10/Q1/F%5E24/",
-    "j11": "https://www.il.bet365.com/#/AC/B13/C1/D1002/G83/J11/Q1/F%5E24/",
-    "j12": "https://www.il.bet365.com/#/AC/B13/C1/D1002/G83/J12/Q1/F%5E24/",
-}
+# URL template — J code is discovered dynamically from the nav sidebar.
+_URL_TEMPLATE = "https://www.il.bet365.com/#/AC/B13/C1/D1002/G83/J{j}/Q1/F%5E24/"
+
+# Fallback J codes if dynamic discovery fails.
+_FALLBACK_J_CODES = {"atp": "10", "challenger": "12"}
+
+# Tours we care about — keys are matched case-insensitively against nav labels.
+_TARGET_TOURS = {"ATP Tour": "atp", "Challenger Tour": "challenger"}
 
 
 def _frac_to_decimal(frac_str: str) -> float:
@@ -70,6 +71,42 @@ class Bet365OddsEntry:
     opponent_name: str
     event_status: str
     fetched_at: datetime
+
+
+def _discover_j_codes(raw: str) -> dict[str, str]:
+    """Parse the navigation sidebar to discover J codes for target tours.
+
+    The nav section contains MA records after MG;SY=cm with entries like:
+      MA;NA=ATP Tour;PD=#AC#B13#C1#D1002#G83#J10#Q1#F^24#;...
+      MA;NA=Challenger Tour;PD=#AC#B13#C1#D1002#G83#J12#Q1#F^24#;...
+
+    Returns dict mapping circuit key ("atp", "challenger") to J-code string.
+    """
+    result: dict[str, str] = {}
+    in_nav = False
+
+    for record in raw.split("|"):
+        record = record.strip()
+        if not record:
+            continue
+
+        if "MG" in record and "SY=cm" in record:
+            in_nav = True
+            continue
+
+        if in_nav and record.startswith("MA;"):
+            _, fields = _parse_record(record)
+            name = fields.get("NA", "")
+            pd = fields.get("PD", "")
+            circuit_key = _TARGET_TOURS.get(name)
+            if circuit_key and pd:
+                j_match = re.search(r"J(\d+)", pd)
+                if j_match:
+                    result[circuit_key] = j_match.group(1)
+        elif in_nav and not record.startswith("MA;"):
+            in_nav = False
+
+    return result
 
 
 def _classify_circuit(tournament_name: str) -> str | None:
@@ -281,11 +318,60 @@ class Bet365OddsScraper(BaseJob):
             driver.get(SITE_URL)
             time.sleep(5)
 
-            # Navigate to each J-code tab and capture API responses.
-            # B365 serves ATP/WTA/Challenger non-deterministically across
-            # J codes, so we hit all three and dedupe by event ID.
+            # Step 1: Load any page to discover which J codes have our tours.
+            discovery_url = _URL_TEMPLATE.format(j="10")
+            driver.get("about:blank")
+            time.sleep(1)
+            driver.get(discovery_url)
+            time.sleep(12)
+
+            j_codes = _FALLBACK_J_CODES.copy()
+            discovery_j = "10"
+            discovery_raw = _extract_api_responses(driver)
+            if discovery_raw:
+                discovered = _discover_j_codes(discovery_raw)
+                if discovered:
+                    j_codes = discovered
+                    logger.info("B365 discovered J codes: %s", j_codes)
+                else:
+                    logger.warning(
+                        "B365 nav parse found no target tours, "
+                        "using fallbacks: %s", j_codes,
+                    )
+            else:
+                logger.warning(
+                    "B365 discovery page returned no data, "
+                    "using fallbacks: %s", j_codes,
+                )
+
+            # Step 2: Navigate to each unique target J code and capture odds.
+            # The discovery page already loaded J10, so reuse that response.
             seen_event_ids: set[str] = set()
-            for tab, url in _CIRCUIT_URLS.items():
+            visited_j: set[str] = set()
+
+            if discovery_raw:
+                raw_responses.append((f"j{discovery_j}", discovery_raw))
+                entries = _parse_pipe_response(discovery_raw, now)
+                new = [e for e in entries
+                       if e.b365_event_id not in seen_event_ids]
+                seen_event_ids.update(e.b365_event_id for e in new)
+                all_entries.extend(new)
+                visited_j.add(discovery_j)
+                logger.info(
+                    "B365 j%s (discovery): %d entries (%d new)",
+                    discovery_j, len(entries), len(new),
+                )
+
+            # Dedupe — ATP and Challenger may be on the same J code.
+            unique_j: dict[str, list[str]] = {}
+            for circuit, j in j_codes.items():
+                unique_j.setdefault(j, []).append(circuit)
+
+            for j, circuits in unique_j.items():
+                if j in visited_j:
+                    continue
+                tab = f"j{j}"
+                url = _URL_TEMPLATE.format(j=j)
                 try:
                     driver.get("about:blank")
                     time.sleep(1)
@@ -301,8 +387,8 @@ class Bet365OddsScraper(BaseJob):
                         seen_event_ids.update(e.b365_event_id for e in new)
                         all_entries.extend(new)
                         logger.info(
-                            "B365 %s: %d entries (%d new)",
-                            tab, len(entries), len(new),
+                            "B365 %s (%s): %d entries (%d new)",
+                            tab, "/".join(circuits), len(entries), len(new),
                         )
                     else:
                         logger.warning("B365 %s: no API response captured", tab)
