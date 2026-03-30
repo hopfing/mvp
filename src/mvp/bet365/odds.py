@@ -288,29 +288,13 @@ def _click_tour_tab(driver, tour_name: str) -> str | None:
     except Exception:
         pass
 
-    # Find and click the tab element containing the tour name.
+    # Find and click the tab element by data-content attribute.
     try:
         tab = driver.execute_script(
             """
             var name = arguments[0];
-            var els = document.querySelectorAll('[class*="cm-CouponModule"]'
-                + ' [class*="cm-MarketGroupButton"]');
-            for (var i = 0; i < els.length; i++) {
-                if (els[i].textContent.trim() === name) {
-                    els[i].click();
-                    return true;
-                }
-            }
-            // Fallback: search all elements for exact text match.
-            var all = document.querySelectorAll('*');
-            for (var i = 0; i < all.length; i++) {
-                var el = all[i];
-                if (el.children.length === 0
-                    && el.textContent.trim() === name) {
-                    el.click();
-                    return true;
-                }
-            }
+            var el = document.querySelector('[data-content="' + name + '"]');
+            if (el) { el.click(); return true; }
             return false;
             """,
             tour_name,
