@@ -1513,10 +1513,11 @@ def cmd_live(args: argparse.Namespace) -> int:
                 len(no_odds), len(predictions),
             )
             for row in no_odds.sort("effective_match_date").iter_rows(named=True):
-                p1 = row.get("player_display_name") or row.get("player_id", "?")
-                p2 = row.get("opp_display_name") or row.get("opp_id", "?")
+                p1 = row.get("p1_name") or row.get("player_id", "?")
+                p2 = row.get("p2_name") or row.get("opp_id", "?")
                 t = row.get("tournament_name") or "?"
-                logger.info("  No odds: %s — %s vs %s", t, p1, p2)
+                uid = row.get("match_uid", "?")
+                logger.info("  No odds: %s — %s vs %s (%s)", t, p1, p2, uid)
 
         print_predictions(predictions, book_odds=all_odds_maps or None)
 
