@@ -283,7 +283,35 @@ def merge_predictions(
     new_uids = set(new_predictions["match_uid"].to_list())
     truly_new = new_uids - existing_uids
 
-    # 2. Build new rows with all columns
+    # 2a. Update schedule/logistics columns on existing rows
+    REFRESH_COLUMNS = {"date", "time", "round", "tournament", "surface", "circuit", "tournament_day"}
+    if existing_uids and len(new_predictions) > 0:
+        refresh_lookup: dict[str, dict[str, str]] = {}
+        refresh_preds = new_predictions.filter(
+            pl.col("match_uid").is_in(list(existing_uids & new_uids))
+        )
+        for row in refresh_preds.iter_rows(named=True):
+            refresh_lookup[row["match_uid"]] = {
+                col: str(row[col]) if row[col] is not None else ""
+                for col in REFRESH_COLUMNS
+                if col in row
+            }
+
+        if refresh_lookup:
+            updated_cols: dict[str, list[str]] = {col: [] for col in REFRESH_COLUMNS}
+            for row in existing.iter_rows(named=True):
+                uid = row.get("match_uid", "")
+                refreshed = refresh_lookup.get(uid)
+                for col in REFRESH_COLUMNS:
+                    if refreshed and refreshed.get(col):
+                        updated_cols[col].append(refreshed[col])
+                    else:
+                        updated_cols[col].append(row.get(col, ""))
+            existing = existing.with_columns(
+                pl.Series(col, vals) for col, vals in updated_cols.items()
+            )
+
+    # 2b. Build new rows with all columns
     if truly_new:
         new_rows = new_predictions.filter(pl.col("match_uid").is_in(list(truly_new)))
         for col_def in COLUMN_SCHEMA:

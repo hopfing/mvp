@@ -221,7 +221,10 @@ def _sheet_df(rows):
 
 def _matches_df(rows):
     """Build a minimal matches DataFrame for result lookup."""
-    return pl.DataFrame(rows)
+    schema_overrides = {}
+    if "won" in rows:
+        schema_overrides["won"] = pl.Boolean
+    return pl.DataFrame(rows, schema_overrides=schema_overrides)
 
 
 class TestMergePredictions:
@@ -515,6 +518,39 @@ class TestMergePredictions:
         m1 = result.filter(pl.col("match_uid") == "M1")
         assert m1["p1_odds"][0] == "2.10"
         assert m1["p2_odds"][0] == "1.75"
+
+    def test_schedule_columns_refreshed_on_existing_rows(self):
+        row = _make_sheet_row(
+            match_uid="2024-0001-MS001",
+            date="2024-01-14",
+            time="21:00",
+            round="R32",
+            tournament="Brisbane",
+            surface="Hard",
+            circuit="ATP",
+            tournament_day="2024-01-14",
+            p1_prob="0.65",
+        )
+        existing = _sheet_df([row])
+        # New prediction has updated schedule (match moved to next day)
+        new = prepare_predictions(_make_predictions(
+            scheduled_datetime=datetime(2024, 1, 16, 3, 0, 0),
+            effective_match_date=date(2024, 1, 16),
+        ))
+        matches = _matches_df({
+            "match_uid": ["2024-0001-MS001"],
+            "won": [None],
+            "player_id": ["A"],
+            "opp_id": ["B"],
+        })
+        result = merge_predictions(existing, new, matches)
+        assert len(result) == 1
+        # Schedule columns should be updated
+        assert result["date"][0] == "2024-01-15"  # CT conversion of Jan 16 3am UTC
+        assert result["time"][0] == "21:00"
+        assert result["tournament_day"][0] == "2024-01-15"
+        # Prediction columns should NOT be updated
+        assert result["p1_prob"][0] == "0.65"
 
     def test_no_odds_maps_leaves_odds_unchanged(self):
         row = _make_sheet_row(match_uid="M1", p1_odds="2.00", stake="")
