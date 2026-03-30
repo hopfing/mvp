@@ -3,7 +3,7 @@
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 import numpy as np
 import polars as pl
@@ -119,6 +119,7 @@ def compare_single_vs_split(
         SplitComparisonResult with comparison.
     """
     import tempfile
+
     import yaml
 
     from mvp.model.config import ExperimentConfig

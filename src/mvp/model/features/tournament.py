@@ -5,8 +5,14 @@ import polars as pl
 
 from mvp.model.features._score_helpers import (
     sets_lost as _sets_lost,
+)
+from mvp.model.features._score_helpers import (
     sets_won as _sets_won,
+)
+from mvp.model.features._score_helpers import (
     total_games_lost as _total_games_lost,
+)
+from mvp.model.features._score_helpers import (
     total_games_won as _total_games_won,
 )
 from mvp.model.registry import feature, register_diff

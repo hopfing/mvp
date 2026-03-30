@@ -15,16 +15,12 @@ from mvp.model.discovery.config import DiscoveryConfig
 from mvp.model.discovery.fast_selection import FastForwardSelector
 from mvp.model.discovery.importance import compute_importance
 from mvp.model.discovery.segments import (
-    SegmentAnalyzer,
     SegmentImportanceResult,
-    compute_segment_importance,
 )
 from mvp.model.discovery.selection import FeatureSelector, SelectionResult
 from mvp.model.discovery.sweeps import (
-    DEFAULT_SWEEP_RANGES,
     ParameterSweep,
     SweepResult,
-    build_feature_spec,
     parse_feature_spec,
 )
 from mvp.model.registry import get_registry
@@ -388,7 +384,7 @@ class FeatureDiscovery:
             all_features = [f for f in all_features if f not in excluded]
             self._log(f"Excluding {len(excluded)} features: {list(excluded)}")
 
-        self._log(f"PHASE 1: Feature Selection")
+        self._log("PHASE 1: Feature Selection")
 
         base = feat_cfg.base
         method = self.config.discovery.selection_method
@@ -500,19 +496,9 @@ class FeatureDiscovery:
         temp_path = self._create_temp_config(features)
 
         try:
-            analyzer = SegmentAnalyzer(
-                config_path=temp_path,
-                segment_columns=["circuit", "surface"],
-                importance_method=self.config.discovery.importance_method,
-                metric=self.config.discovery.metric,
-                matches_path=self.matches_path,
-                cache_dir=self.cache_dir,
-            )
-
             # Run experiment to get model + data for importance
             result = self._run_experiment(features)
             diagnostics = result.get("diagnostics")
-            feature_cols = result.get("feature_columns", [])
 
             # Note: Full segment importance requires access to trained model
             # and data, which we don't have direct access to here.

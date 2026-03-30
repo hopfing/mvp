@@ -9,7 +9,11 @@ import numpy as np
 import polars as pl
 from sklearn.metrics import accuracy_score, brier_score_loss, log_loss, roc_auc_score
 
-from mvp.model.metrics import compute_calibration_error, compute_error_rate_80plus, compute_signed_calibration
+from mvp.model.metrics import (
+    compute_calibration_error,
+    compute_error_rate_80plus,
+    compute_signed_calibration,
+)
 
 # Ordered rounds for per-round diagnostics
 ROUND_ORDER: list[str] = ["Q1", "Q2", "Q3", "RR", "R128", "R64", "R32", "R16", "QF", "SF", "F"]
@@ -229,7 +233,7 @@ def _build_correction_breakdowns(
         p33, p67 = np.percentile(vals, [33, 67])
         buckets = [
             (f"Low (≤p33: {p33:.0f})", vals <= p33),
-            (f"Mid (p33-p67)", (vals > p33) & (vals < p67)),
+            ("Mid (p33-p67)", (vals > p33) & (vals < p67)),
             (f"High (≥p67: {p67:.0f})", vals >= p67),
         ]
         sections.append((section_label, buckets))

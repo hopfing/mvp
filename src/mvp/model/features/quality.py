@@ -6,7 +6,6 @@ import polars as pl
 from mvp.model.primitives import cumulative_mean, ratio_feature, rolling_mean
 from mvp.model.registry import feature, register_diff
 
-
 # --- Base features ---
 
 

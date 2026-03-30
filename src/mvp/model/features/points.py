@@ -6,7 +6,6 @@ import polars as pl
 from mvp.model.primitives import ratio_feature
 from mvp.model.registry import feature, register_diff, register_matchup
 
-
 # =============================================================================
 # Single Stats
 # =============================================================================

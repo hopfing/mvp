@@ -305,7 +305,7 @@ def merge_predictions(
     # 3. Auto-fill results using player IDs
     if len(merged) > 0 and len(matches) > 0:
         # Build winner_id map: match_uid -> player_id of winner
-        won_rows = matches.filter(pl.col("won") == True).select(
+        won_rows = matches.filter(pl.col("won")).select(
             "match_uid", pl.col("player_id").alias("winner_id"),
         )
         winner_map: dict[str, str] = {}

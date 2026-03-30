@@ -5,7 +5,11 @@ import polars as pl
 
 from mvp.model.features._score_helpers import (
     is_straight_set_win as _is_straight_set_win,
+)
+from mvp.model.features._score_helpers import (
     total_games_lost as _total_games_lost,
+)
+from mvp.model.features._score_helpers import (
     total_games_won as _total_games_won,
 )
 from mvp.model.primitives import cumulative_mean, ratio_feature, rolling_mean

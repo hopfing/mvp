@@ -1,12 +1,11 @@
 """Configuration schema for game projection pipeline."""
 
 
-from datetime import date
 from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel
 
 from mvp.model.config import DataConfig, FeaturesConfig, ValidationConfig
 

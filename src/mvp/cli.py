@@ -689,14 +689,17 @@ def _run_voter_confidence(args: argparse.Namespace, config_path: Path) -> int:
     data up to the fold's training cutoff, then predicts on the full
     (unfiltered) primary test set. Only the binary pick is used for consensus.
     """
-    from pathlib import Path
 
     import numpy as np
     import yaml
 
     from mvp.model.confidence.report import format_report
     from mvp.model.confidence.validator import ConfidenceValidator, prepare_oof
-    from mvp.model.config import ExperimentConfig, apply_filters, get_filter_feature_specs
+    from mvp.model.config import (
+        ExperimentConfig,
+        apply_filters,
+        get_filter_feature_specs,
+    )
     from mvp.model.engine import FeatureEngine, get_feature_columns
     from mvp.model.models import get_model
     from mvp.model.runner import ExperimentRunner
@@ -741,7 +744,7 @@ def _run_voter_confidence(args: argparse.Namespace, config_path: Path) -> int:
         )
 
         # Get primary's full filtered DataFrame for fold replay
-        primary_engine = FeatureEngine(
+        FeatureEngine(
             matches_path=get_data_root() / "aggregate" / "atptour" / "matches.parquet",
             cache_dir=get_local_data_root() / "features" / "cache",
         )
@@ -787,7 +790,11 @@ def _run_voter_confidence(args: argparse.Namespace, config_path: Path) -> int:
             voter_feature_cols = get_feature_columns(voter_feature_specs)
 
             # Build imputation specs for voter features
-            from mvp.model.imputation import build_imputation, fit_imputation, apply_imputation
+            from mvp.model.imputation import (
+                apply_imputation,
+                build_imputation,
+                fit_imputation,
+            )
             from mvp.model.registry import get_registry
             voter_build = build_imputation(voter_feature_specs, get_registry())
             voter_augmented_cols = voter_feature_cols + voter_build.aux_base_col_names
@@ -914,7 +921,6 @@ def _run_voter_confidence(args: argparse.Namespace, config_path: Path) -> int:
 
 def cmd_confidence(args: argparse.Namespace) -> int:
     """Run confidence validation on a model."""
-    from pathlib import Path
 
     from mvp.model.confidence.report import format_report
     from mvp.model.confidence.validator import ConfidenceValidator
@@ -1398,7 +1404,10 @@ def cmd_live(args: argparse.Namespace) -> int:
 
         # Map new book events to matches using full player database
     
-        from mvp.analysis.event_map import load_event_map_with_overrides, save_event_mappings
+        from mvp.analysis.event_map import (
+            load_event_map_with_overrides,
+            save_event_mappings,
+        )
         from mvp.common.event_mapper import (
             build_match_catalog,
             build_player_lookup,
@@ -1456,6 +1465,7 @@ def cmd_live(args: argparse.Namespace) -> int:
                     # Merge per-book aliases into lookup
                     if aliases_path.exists():
                         import yaml
+
                         from mvp.common.odds_matching import normalize_name
 
                         with open(aliases_path) as f:
@@ -1583,7 +1593,7 @@ def cmd_live(args: argparse.Namespace) -> int:
         if matches_path.exists():
             matches_for_results = pl.read_parquet(matches_path)
             if "won" in matches_for_results.columns:
-                won = matches_for_results.filter(pl.col("won") == True).select(
+                won = matches_for_results.filter(pl.col("won")).select(
                     "match_uid", pl.col("player_id").alias("winner_id")
                 )
                 if len(won) > 0:
@@ -1624,12 +1634,12 @@ def cmd_live(args: argparse.Namespace) -> int:
 def cmd_analysis(parsed: argparse.Namespace) -> int:
     """Run standalone analysis pipeline: odds → dataset → simulations."""
 
+    import importlib
+
     from mvp.analysis.dataset import build_analysis_dataset
     from mvp.analysis.event_map import load_event_map_with_overrides
     from mvp.analysis.report import format_analysis_summary
     from mvp.analysis.simulations import run_simulations
-    import importlib
-
     from mvp.odds.aggregator import (
         compute_book_odds,
         compute_cross_book_odds,

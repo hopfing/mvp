@@ -30,7 +30,12 @@ def _make_metric_fn(metric: str) -> Callable[[np.ndarray, np.ndarray], float]:
     Avoids the overhead of compute_metrics() which calculates all 6 metrics
     when only one is needed per iteration.
     """
-    from sklearn.metrics import accuracy_score, brier_score_loss, log_loss, roc_auc_score
+    from sklearn.metrics import (
+        accuracy_score,
+        brier_score_loss,
+        log_loss,
+        roc_auc_score,
+    )
 
     from mvp.model.metrics import compute_calibration_error, compute_error_rate_80plus
 

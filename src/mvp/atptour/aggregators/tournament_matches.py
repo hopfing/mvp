@@ -12,8 +12,6 @@ from mvp.atptour.aggregators.helpers import (
     pivot_to_player_match,
 )
 from mvp.atptour.aggregators.match_beats import MatchBeatsAggregator
-from mvp.atptour.aggregators.rally_analysis import RallyAnalysisAggregator
-from mvp.atptour.aggregators.stroke_analysis import StrokeAnalysisAggregator
 from mvp.common.base_job import BaseJob
 from mvp.common.enums import Circuit
 
@@ -497,8 +495,6 @@ class TournamentMatchesAggregator(BaseJob):
 
         has_round = round_col in df.columns
         has_round_sched = round_sched in df.columns
-        has_opp = opp_col in df.columns
-        has_opp_sched = opp_sched in df.columns
 
         if not (has_round or has_round_sched):
             return df
@@ -663,7 +659,6 @@ class TournamentMatchesAggregator(BaseJob):
             return pl.DataFrame()
 
         raw = raw.with_columns(pl.col("match_id").str.to_uppercase())
-        sa_agg = StrokeAnalysisAggregator(data_root=self.data_root)
         player_match = pivot_to_player_match(raw)
 
         if "opp_id" in player_match.columns:
@@ -701,7 +696,6 @@ class TournamentMatchesAggregator(BaseJob):
             return pl.DataFrame()
 
         raw = raw.with_columns(pl.col("match_id").str.to_uppercase())
-        ra_agg = RallyAnalysisAggregator(data_root=self.data_root)
         player_match = pivot_to_player_match(raw)
 
         if "opp_id" in player_match.columns:

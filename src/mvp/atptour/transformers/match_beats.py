@@ -8,9 +8,9 @@ from pathlib import Path
 import polars as pl
 
 from mvp.atptour.schemas.match_beats import (
+    SCHEMA_HASH,
     MatchBeatsPointRecord,
     PointResult,
-    SCHEMA_HASH,
 )
 from mvp.atptour.tournament import Tournament
 from mvp.common.base_job import BaseJob

@@ -5,8 +5,8 @@ from pathlib import Path
 
 import polars as pl
 
-from mvp.common.base_job import BaseJob
 from mvp.atptour.aggregators.helpers import pivot_to_player_match
+from mvp.common.base_job import BaseJob
 
 logger = logging.getLogger(__name__)
 

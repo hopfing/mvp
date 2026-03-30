@@ -3,7 +3,7 @@
 
 import itertools
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
@@ -216,10 +216,12 @@ class ParameterSweep:
         Returns:
             SweepResult with best parameters and all results.
         """
+        import tempfile
+
+        import yaml
+
         from mvp.model.config import ExperimentConfig
         from mvp.model.runner import ExperimentRunner
-        import tempfile
-        import yaml
 
         base_config = ExperimentConfig.from_file(str(self.base_config_path))
         combinations = self._generate_combinations()

@@ -636,11 +636,8 @@ class FeatureEngine:
             dep_cache_specs = []
             for dep_name in feature_def.depends_on:
                 for dep_prefix in ["player", "opp"]:
-                    dep_spec = f"{dep_prefix}_{dep_name}"
                     if params:
                         param_str = ",".join(f"{k}={v}" for k, v in params.items())
-                        dep_spec = f"{dep_prefix}_{dep_name}({param_str})"
-                    # Load player_ version from cache
                     player_dep_spec = f"player_{dep_name}"
                     if params:
                         player_dep_spec = f"player_{dep_name}({param_str})"

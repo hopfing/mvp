@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from mvp.model.confidence.metrics import ReliabilityProfile, WindowDistribution
+from mvp.model.confidence.metrics import ReliabilityProfile
 from mvp.model.confidence.validator import ValidationResult
 from mvp.model.confidence.voter_analysis import (
     CoverageCurveResult,

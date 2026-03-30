@@ -265,7 +265,6 @@ def compute_voter_marginal_value(
         # Where voter has a vote: remove their contribution
         voted_mask = has_vote
         agreed_mask = voted_mask & voter_agreed
-        disagreed_mask = voted_mask & ~voter_agreed
 
         new_total[voted_mask] -= 1
         new_agree[agreed_mask] -= 1

@@ -4,7 +4,6 @@ from datetime import datetime
 
 from pydantic import BaseModel, field_validator
 
-
 SHOT_TYPES = [
     "ground_stroke",
     "overhead",

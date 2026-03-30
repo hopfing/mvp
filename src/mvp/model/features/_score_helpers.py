@@ -5,7 +5,6 @@ Used by score_depth, tournament, and tiebreak feature modules.
 
 import polars as pl
 
-
 # --- Game counting ---
 
 

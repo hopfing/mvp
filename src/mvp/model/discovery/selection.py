@@ -1,13 +1,12 @@
 """Feature selection algorithms."""
 
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Literal
+from typing import Any, Literal
 
 import numpy as np
-
-from mvp.model.discovery.importance import compute_importance
 
 
 @dataclass

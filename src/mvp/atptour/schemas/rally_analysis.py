@@ -4,7 +4,6 @@ from datetime import datetime
 
 from pydantic import BaseModel, field_validator
 
-
 RALLY_LENGTHS = ["short", "medium", "long"]
 
 # Maps rally_analysis category index to rally length bucket

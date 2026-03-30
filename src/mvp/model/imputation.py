@@ -23,7 +23,6 @@ import numpy as np
 from mvp.model.engine import build_column_name, get_feature_columns, parse_feature_spec
 from mvp.model.registry import FeatureRegistry
 
-
 # ---------------------------------------------------------------------------
 # Data structures
 # ---------------------------------------------------------------------------

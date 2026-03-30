@@ -3,7 +3,7 @@
 
 import logging
 import warnings
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -328,7 +328,7 @@ class ProductionPredictor:
         joblib.dump(artifact_data, artifact_path)
 
         # Update trained_at in config
-        entry["trained_at"] = datetime.now(timezone.utc).isoformat()
+        entry["trained_at"] = datetime.now(UTC).isoformat()
         with open(self.production_config_path, "w") as f:
             yaml.dump(self.full_config, f, default_flow_style=False)
 
@@ -757,7 +757,7 @@ class ProductionPredictor:
 
         # Build output
         model_version = Path(self.config["active"]["config"]).stem
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         # Bio name (first + last) preferred; schedule/results display_name as fallback
         _p1_name_expr = pl.coalesce(

@@ -5,7 +5,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import polars as pl
@@ -202,7 +202,7 @@ class DraftKingsOddsScraper(BaseExtractor):
         resp = self._fetch(url, headers=_API_HEADERS)
         data = resp.json()
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         entries = _parse_odds_response(data, market, now)
         return entries, data
 
@@ -276,7 +276,7 @@ class DraftKingsOddsScraper(BaseExtractor):
             all_entries: list[OddsEntry] = []
             for item in data_list:
                 resp = item.get("response", item)
-                fetched_at = datetime.now(timezone.utc)
+                fetched_at = datetime.now(UTC)
                 all_entries.extend(_parse_odds_response(resp, market, fetched_at))
 
             if not all_entries:

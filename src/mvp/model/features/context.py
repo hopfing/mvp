@@ -3,7 +3,12 @@
 
 import polars as pl
 
-from mvp.model.primitives import cumulative_mean, cumulative_sum, cumulative_count, rolling_mean, rolling_sum, rolling_count
+from mvp.model.primitives import (
+    cumulative_count,
+    cumulative_sum,
+    rolling_count,
+    rolling_sum,
+)
 from mvp.model.registry import feature, register_diff
 
 

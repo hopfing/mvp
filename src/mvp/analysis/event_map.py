@@ -1,7 +1,7 @@
 """Event mapping: book event IDs <-> match_uids."""
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import polars as pl
@@ -44,7 +44,7 @@ def save_event_mappings(
     if not matches:
         return
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     new_df = pl.DataFrame([
         {
             "match_uid": m.match_uid,
@@ -86,7 +86,7 @@ def load_event_map_with_overrides(
     if override_path.exists():
         overrides = yaml.safe_load(override_path.read_text()) or []
         if overrides:
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             override_df = pl.DataFrame([
                 {**entry, "matched_at": now, "source": "manual"}
                 for entry in overrides

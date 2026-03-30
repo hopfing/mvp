@@ -182,7 +182,7 @@ class DateWindowSplitter(BaseSplitter):
 
     def __init__(
         self,
-        test_start: "date",
+        test_start: date,
         date_col: str = "effective_match_date",
     ) -> None:
         self.test_start = test_start
@@ -215,7 +215,7 @@ def make_splitter(
     initial_train_size: int | None = None,
     step_size: int | None = None,
     train_size: int | None = None,
-    test_start: "date | None" = None,
+    test_start: date | None = None,
 ) -> BaseSplitter:
     """Create a splitter from validation parameters.
 

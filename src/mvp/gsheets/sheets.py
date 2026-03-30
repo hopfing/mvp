@@ -12,7 +12,6 @@ from dotenv import load_dotenv
 
 from mvp.gsheets.base import (
     COLUMN_NAMES,
-    FORMULA_COLUMNS,
     _col_letter,
     generate_formulas,
 )

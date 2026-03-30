@@ -7,7 +7,6 @@ from typing import Any
 
 import numpy as np
 
-
 _n_jobs_override: int | None = None
 
 
@@ -444,8 +443,10 @@ class NeuralNetModel(BaseModel):
             self._module.train()
             for batch in loader:
                 idx = 0
-                xb = batch[idx]; idx += 1
-                yb = batch[idx]; idx += 1
+                xb = batch[idx]
+                idx += 1
+                yb = batch[idx]
+                idx += 1
                 eb = batch[idx] if has_emb else None
                 if has_emb:
                     idx += 1
@@ -507,8 +508,10 @@ class NeuralNetModel(BaseModel):
                 self._module.train()
                 for batch in ft_loader:
                     idx = 0
-                    xb = batch[idx]; idx += 1
-                    yb = batch[idx]; idx += 1
+                    xb = batch[idx]
+                    idx += 1
+                    yb = batch[idx]
+                    idx += 1
                     eb = batch[idx] if has_emb else None
                     if has_emb:
                         idx += 1
