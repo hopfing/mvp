@@ -170,10 +170,10 @@ class BetRiversOddsScraper(BaseExtractor):
                 continue
 
             # Derive timestamps from raw filename
-            file_ts = datetime.now(UTC)
+            file_ts = datetime.now()
             try:
                 parts = raw_path.stem.replace("odds_", "")
-                file_ts = datetime.strptime(parts, "%Y%m%d_%H%M%S").replace(tzinfo=UTC)
+                file_ts = datetime.strptime(parts, "%Y%m%d_%H%M%S")
             except ValueError:
                 pass
 
