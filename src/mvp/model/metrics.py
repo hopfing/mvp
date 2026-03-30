@@ -107,5 +107,6 @@ def compute_metrics(
         "brier_score": float(brier_score_loss(y_true, y_prob)),
         "roc_auc": float(roc_auc_score(y_true, y_prob)),
         "calibration_error": compute_calibration_error(y_true, y_prob),
+        "signed_calibration": compute_signed_calibration(y_true, y_prob),
         "error_rate_80plus": compute_error_rate_80plus(y_true, y_prob),
     }
