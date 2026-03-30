@@ -1502,17 +1502,17 @@ def cmd_live(args: argparse.Namespace) -> int:
 
         odds_pool.shutdown(wait=False)
 
-        # Log upcoming predictions with no odds coverage from any book
-        all_covered_uids = set()
-        for odds_map in all_odds_maps.values():
-            all_covered_uids.update(odds_map.keys())
-        no_odds = predictions.filter(~pl.col("match_uid").is_in(all_covered_uids))
-        if len(no_odds) > 0:
+        # Log predictions that have never been mapped to any book event
+        mapped_uids = set(existing_map["match_uid"].to_list())
+        never_mapped = predictions.filter(
+            ~pl.col("match_uid").is_in(mapped_uids)
+        )
+        if len(never_mapped) > 0:
             logger.info(
                 "Predictions with no odds from any book: %d/%d",
-                len(no_odds), len(predictions),
+                len(never_mapped), len(predictions),
             )
-            for row in no_odds.sort("effective_match_date").iter_rows(named=True):
+            for row in never_mapped.sort("effective_match_date").iter_rows(named=True):
                 p1 = row.get("p1_name") or row.get("player_id", "?")
                 p2 = row.get("p2_name") or row.get("opp_id", "?")
                 t = row.get("tournament_name") or "?"
