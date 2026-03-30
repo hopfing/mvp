@@ -12,6 +12,8 @@ from typing import Any
 warnings.filterwarnings("ignore", message="All-NaN slice encountered")
 warnings.filterwarnings("ignore", category=UserWarning, module="sklearn.utils.parallel")
 
+import polars as pl
+
 from mvp.common.base_job import get_data_root, get_local_data_root
 
 
@@ -320,7 +322,6 @@ def print_predictions(
     book_odds: dict[str, dict[str, dict[str, float]]] | None = None,
 ) -> None:
     """Print human-readable prediction summary."""
-    import polars as pl
 
     has_odds = bool(book_odds)
     width = 105 if has_odds else 78
@@ -691,7 +692,6 @@ def _run_voter_confidence(args: argparse.Namespace, config_path: Path) -> int:
     from pathlib import Path
 
     import numpy as np
-    import polars as pl
     import yaml
 
     from mvp.model.confidence.report import format_report
@@ -936,7 +936,6 @@ def cmd_confidence(args: argparse.Namespace) -> int:
     base_names = _get_ensemble_base_names(config_path)
 
     if oof_path.exists() and not args.refresh:
-        import polars as pl
         logger.info("Loading cached OOF from %s", oof_path)
         oof_df = pl.read_parquet(oof_path)
         validator = ConfidenceValidator.from_oof(oof_df, base_names=base_names)
@@ -1398,8 +1397,7 @@ def cmd_live(args: argparse.Namespace) -> int:
                 print(f"Warning: {book.label} odds fetch failed ({e})")
 
         # Map new book events to matches using full player database
-        import polars as pl
-
+    
         from mvp.analysis.event_map import load_event_map_with_overrides, save_event_mappings
         from mvp.common.event_mapper import (
             build_match_catalog,
@@ -1518,8 +1516,7 @@ def cmd_live(args: argparse.Namespace) -> int:
 
     # Sync to Google Sheets (best-effort, must be last)
     try:
-        import polars as pl
-
+    
         from mvp.gsheets.base import merge_predictions, prepare_predictions
         from mvp.gsheets.sheets import SheetsSync
 
@@ -1550,8 +1547,7 @@ def cmd_live(args: argparse.Namespace) -> int:
 
     # Build analysis dataset (best-effort)
     try:
-        import polars as pl
-
+    
         from mvp.analysis.dataset import build_analysis_dataset
         from mvp.analysis.event_map import load_event_map_with_overrides
         from mvp.analysis.odds import compute_odds_by_book
@@ -1627,7 +1623,6 @@ def cmd_live(args: argparse.Namespace) -> int:
 
 def cmd_analysis(parsed: argparse.Namespace) -> int:
     """Run standalone analysis pipeline: odds → dataset → simulations."""
-    import polars as pl
 
     from mvp.analysis.dataset import build_analysis_dataset
     from mvp.analysis.event_map import load_event_map_with_overrides
