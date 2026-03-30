@@ -594,9 +594,10 @@ def cmd_tune(args: argparse.Namespace) -> int:
                 raise ValueError(f"Invalid --param format: {p} (expected KEY=VALUE)")
             k, v = p.split("=", 1)
             # Try JSON first (handles lists, bools, null)
+            # json.loads requires lowercase true/false, so normalize first
             import json
             try:
-                v = json.loads(v)
+                v = json.loads(v.lower() if v.lower() in ("true", "false") else v)
             except (json.JSONDecodeError, ValueError):
                 # Fall back to numeric parsing
                 try:
