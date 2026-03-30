@@ -24,8 +24,16 @@ logger = logging.getLogger(__name__)
 
 SITE_URL = "https://www.il.bet365.com/"
 
-# URL template — J code is discovered dynamically from the nav sidebar.
-_URL_TEMPLATE = "https://www.il.bet365.com/#/AC/B13/C1/D1002/G83/J{j}/Q1/F%5E24/"
+# SPA URL for initial page load (triggers anti-bot handshake).
+_SPA_URL_TEMPLATE = "https://www.il.bet365.com/#/AC/B13/C1/D1002/G83/J{j}/Q1/F%5E24/"
+
+# Direct API URL — bypasses SPA navigation entirely.
+_API_URL_TEMPLATE = (
+    "https://www.il.bet365.com/matchmarketscontentapi/upcomingmatches"
+    "?lid=32&zid=0"
+    "&pd=%23AC%23B13%23C1%23D1002%23G83%23J{j}%23Q1%23F%5E24%23"
+    "&cid=198&cgid=3&ctid=198&csid=28"
+)
 
 # Fallback J codes if dynamic discovery fails.
 _FALLBACK_J_CODES = {"atp": "10", "challenger": "12"}
@@ -268,22 +276,30 @@ def _extract_api_responses(driver) -> str | None:
     return None
 
 
-def _load_j_code(driver, j: str) -> str | None:
-    """Load a J-code page with clean browser state.
+def _fetch_j_code(driver, j: str) -> str | None:
+    """Fetch odds for a J code by calling the API directly from the browser.
 
-    B365's SPA sometimes doesn't fire new API calls on tab switches when
-    not logged in, so we clear cookies/cache and reload the homepage
-    before each navigation to force a fresh matchmarketscontentapi call.
+    Uses fetch() within the Chrome session so we inherit cookies/session
+    from the homepage load. No SPA navigation needed.
     """
+    api_url = _API_URL_TEMPLATE.format(j=j)
     try:
-        driver.delete_all_cookies()
-        driver.execute_cdp_cmd("Network.clearBrowserCache", {})
-    except Exception:
-        pass
-
-    driver.get(_URL_TEMPLATE.format(j=j))
-    time.sleep(12)
-    return _extract_api_responses(driver)
+        result = driver.execute_async_script(
+            """
+            var callback = arguments[arguments.length - 1];
+            fetch(arguments[0])
+                .then(function(r) { return r.text(); })
+                .then(callback)
+                .catch(function() { callback(null); });
+            """,
+            api_url,
+        )
+        if result:
+            logger.info("B365 j%s: fetched %d bytes from API", j, len(result))
+            return result
+    except Exception as e:
+        logger.error("B365 j%s: fetch failed: %s", j, e)
+    return None
 
 
 class Bet365OddsScraper(BaseJob):
@@ -332,8 +348,12 @@ class Bet365OddsScraper(BaseJob):
                 chrome_major = None
             driver = uc.Chrome(options=options, version_main=chrome_major)
 
-            # Step 1: Load any page to discover which J codes have our tours.
-            raw = _load_j_code(driver, "10")
+            # Load homepage to establish session (anti-bot handshake).
+            driver.get(SITE_URL)
+            time.sleep(5)
+
+            # Step 1: Fetch any J code to discover tour -> J code mapping.
+            raw = _fetch_j_code(driver, "10")
 
             j_codes = _FALLBACK_J_CODES.copy()
             if raw:
@@ -349,13 +369,11 @@ class Bet365OddsScraper(BaseJob):
                 raw_responses.append(("j10", raw))
             else:
                 logger.warning(
-                    "B365 discovery page returned no data, "
+                    "B365 discovery fetch returned no data, "
                     "using fallbacks: %s", j_codes,
                 )
 
-            # Step 2: Load each unique target J code with a fresh SPA init.
-            # B365's SPA doesn't update content on tab switches when not
-            # logged in, so each J code needs a clean page load.
+            # Step 2: Fetch each unique target J code via direct API call.
             seen_event_ids: set[str] = set()
 
             # Process discovery response if it's a target J code.
@@ -380,7 +398,7 @@ class Bet365OddsScraper(BaseJob):
                     continue  # Already captured from discovery
                 tab = f"j{j}"
                 try:
-                    raw = _load_j_code(driver, j)
+                    raw = _fetch_j_code(driver, j)
                     if raw:
                         raw_responses.append((tab, raw))
                         entries = _parse_pipe_response(raw, now)
