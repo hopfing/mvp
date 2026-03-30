@@ -8,8 +8,19 @@ from typing import Any
 import numpy as np
 
 
+_n_jobs_override: int | None = None
+
+
+def set_n_jobs_override(n: int | None) -> None:
+    """Set a global n_jobs override for all models."""
+    global _n_jobs_override
+    _n_jobs_override = n
+
+
 def _default_n_jobs() -> int:
-    """Return a capped n_jobs value, leaving 2 cores for the OS."""
+    """Return n_jobs: global override if set, else cpu_count - 2."""
+    if _n_jobs_override is not None:
+        return _n_jobs_override
     cpu_count = os.cpu_count() or 4
     return max(1, cpu_count - 2)
 

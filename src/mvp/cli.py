@@ -422,7 +422,6 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
     )
-
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # model subcommand - trains from models/ directory
@@ -452,6 +451,10 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
     )
     exp_parser.add_argument(
         "--verbose", "-v", action="store_true", help="Print progress"
+    )
+    exp_parser.add_argument(
+        "--n-jobs", type=int, default=None,
+        help="Override n_jobs for parallelism (limits CPU usage)",
     )
 
     # tune subcommand - hyperparameter grid search
@@ -1746,6 +1749,10 @@ def main(args: list[str] | None = None) -> int:
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+
+    if getattr(parsed, "n_jobs", None) is not None:
+        from mvp.model.models import set_n_jobs_override
+        set_n_jobs_override(parsed.n_jobs)
 
     if parsed.command == "train":
         return cmd_train(parsed)
