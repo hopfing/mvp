@@ -281,6 +281,15 @@ def _load_j_code(driver, j: str) -> str | None:
     except Exception:
         pass
 
+    driver.get(SITE_URL)
+    time.sleep(5)
+
+    # Drain perf logs from homepage load before navigating to target.
+    try:
+        driver.get_log("performance")
+    except Exception:
+        pass
+
     driver.get(_URL_TEMPLATE.format(j=j))
     time.sleep(12)
     return _extract_api_responses(driver)
