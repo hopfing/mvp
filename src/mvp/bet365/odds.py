@@ -320,8 +320,8 @@ def _click_tour_tab(driver, tour_name: str) -> str | None:
 class Bet365OddsScraper(BaseJob):
     """Scraper for Bet365 tennis odds via undetected-chromedriver."""
 
-    def __init__(self, data_root=None):
-        super().__init__(domain="bet365", data_root=data_root)
+    def __init__(self, data_root=None, run_at=None):
+        super().__init__(domain="bet365", data_root=data_root, run_at=run_at)
 
     def fetch_all_odds(self) -> tuple[list[Bet365OddsEntry], list[tuple[str, str]]]:
         """Launch Chrome, navigate to tennis pages, capture API responses."""
@@ -535,7 +535,7 @@ class Bet365OddsScraper(BaseJob):
         return n
 
 
-def fetch_and_save() -> int:
+def fetch_and_save(run_at=None) -> int:
     """Full flow: fetch, stage, consolidate."""
-    scraper = Bet365OddsScraper()
+    scraper = Bet365OddsScraper(run_at=run_at)
     return scraper.run()

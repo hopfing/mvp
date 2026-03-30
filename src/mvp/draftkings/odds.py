@@ -158,8 +158,9 @@ def _parse_odds_response(
 class DraftKingsOddsScraper(BaseExtractor):
     """Scraper for DraftKings tennis odds."""
 
-    def __init__(self, data_root=None):
-        super().__init__(domain="draftkings", data_root=data_root)
+    def __init__(self, data_root=None, run_at=None):
+        super().__init__(domain="draftkings", data_root=data_root,
+                         run_at=run_at)
 
     def _warm_session(self) -> None:
         """Visit the tennis page to establish cookies needed for the API."""
@@ -343,7 +344,7 @@ class DraftKingsOddsScraper(BaseExtractor):
 
 
 # Module-level convenience for CLI
-def fetch_and_save(market: str = "moneyline") -> int:
+def fetch_and_save(market: str = "moneyline", run_at=None) -> int:
     """Full flow: fetch, stage, consolidate."""
-    scraper = DraftKingsOddsScraper()
+    scraper = DraftKingsOddsScraper(run_at=run_at)
     return scraper.run(market=market)

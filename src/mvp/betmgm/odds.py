@@ -170,8 +170,9 @@ def _parse_fixtures(
 class BetMGMOddsScraper(BaseExtractor):
     """Scraper for BetMGM tennis odds via bwin CDS API."""
 
-    def __init__(self, data_root=None):
-        super().__init__(domain="betmgm", data_root=data_root)
+    def __init__(self, data_root=None, run_at=None):
+        super().__init__(domain="betmgm", data_root=data_root,
+                         run_at=run_at)
 
     def _create_session(self):
         """Override to use cloudscraper for Cloudflare bypass."""
@@ -331,7 +332,7 @@ class BetMGMOddsScraper(BaseExtractor):
         return n
 
 
-def fetch_and_save() -> int:
+def fetch_and_save(run_at=None) -> int:
     """Full flow: fetch, stage, consolidate."""
-    scraper = BetMGMOddsScraper()
+    scraper = BetMGMOddsScraper(run_at=run_at)
     return scraper.run()

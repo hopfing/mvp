@@ -14,8 +14,8 @@ logger = logging.getLogger(__name__)
 class BaseExtractor(BaseJob):
     """Base extractor with HTTP session, retry, and backoff."""
 
-    def __init__(self, domain: str, data_root=None, timeout: int = 30):
-        super().__init__(domain=domain, data_root=data_root)
+    def __init__(self, domain: str, data_root=None, timeout: int = 30, run_at=None):
+        super().__init__(domain=domain, data_root=data_root, run_at=run_at)
         self.timeout = timeout
         self.session = self._create_session()
 

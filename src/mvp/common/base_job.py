@@ -37,12 +37,17 @@ def get_local_data_root() -> Path:
 class BaseJob:
     """Base class providing file I/O and path management for pipeline jobs."""
 
-    def __init__(self, domain: str, data_root: Path | None = None):
+    def __init__(
+        self,
+        domain: str,
+        data_root: Path | None = None,
+        run_at: dt.datetime | None = None,
+    ):
         if data_root is None:
             data_root = get_data_root()
         self.domain = domain
         self.data_root = data_root
-        self._run_dt = dt.datetime.now()
+        self._run_dt = run_at or dt.datetime.now()
         self._run_date_str = self._run_dt.strftime("%Y%m%d")
         self._run_datetime_str = self._run_dt.strftime("%Y%m%d_%H%M%S")
 

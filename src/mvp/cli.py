@@ -1262,12 +1262,12 @@ def cmd_project(args: argparse.Namespace) -> int:
 
 
 
-def _fetch_book_quiet(book: BookConfig) -> int:
+def _fetch_book_quiet(book: BookConfig, run_at=None) -> int:
     """Run a book's odds fetch in background thread."""
     import importlib
 
     mod = importlib.import_module(f"mvp.{book.domain}.odds")
-    return mod.fetch_and_save()
+    return mod.fetch_and_save(run_at=run_at)
 
 
 def cmd_live(args: argparse.Namespace) -> int:
@@ -1285,12 +1285,13 @@ def cmd_live(args: argparse.Namespace) -> int:
     from mvp.model.predictor import ProductionPredictor
 
     current_year = datetime.now().year
+    pipeline_run_at = datetime.now()
 
-    # Start DK odds fetch in background (fully independent of pipeline).
-    # Suppress its logs — result is reported after collection.
+    # Start odds fetch in background (fully independent of pipeline).
     odds_pool = ThreadPoolExecutor(max_workers=len(BOOK_REGISTRY))
     book_futures = {
-        b.code: odds_pool.submit(_fetch_book_quiet, b) for b in BOOK_REGISTRY
+        b.code: odds_pool.submit(_fetch_book_quiet, b, pipeline_run_at)
+        for b in BOOK_REGISTRY
     }
 
     try:  # ensure odds_pool cleanup on early failure
