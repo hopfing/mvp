@@ -169,20 +169,20 @@ class BetRiversOddsScraper(BaseExtractor):
                 logger.warning("Skipping corrupt raw file: %s", raw_path.name)
                 continue
 
+            # Derive timestamps from raw filename
+            file_ts = datetime.now(UTC)
+            try:
+                parts = raw_path.stem.replace("odds_", "")
+                file_ts = datetime.strptime(parts, "%Y%m%d_%H%M%S").replace(tzinfo=UTC)
+            except ValueError:
+                pass
+
             all_entries: list[BetRiversOddsEntry] = []
             for item in data_list:
-                fetched_at = datetime.now(UTC)
-                all_entries.extend(_parse_response(item, fetched_at))
+                all_entries.extend(_parse_response(item, file_ts))
 
             if not all_entries:
                 continue
-
-            run_at = datetime.now(UTC)
-            try:
-                parts = raw_path.stem.replace("odds_", "")
-                run_at = datetime.strptime(parts, "%Y%m%d_%H%M%S").replace(tzinfo=UTC)
-            except ValueError:
-                pass
 
             df = pl.DataFrame([
                 {
@@ -200,7 +200,7 @@ class BetRiversOddsScraper(BaseExtractor):
                     "opponent_name": e.opponent_name,
                     "event_status": e.event_status,
                     "fetched_at": e.fetched_at,
-                    "run_at": run_at,
+                    "run_at": file_ts,
                 }
                 for e in all_entries
             ])

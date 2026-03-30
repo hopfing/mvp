@@ -470,22 +470,20 @@ class Bet365OddsScraper(BaseJob):
                 logger.warning("Skipping unreadable raw file: %s", raw_path.name)
                 continue
 
-            fetched_at = datetime.now(UTC)  # approximate; close enough
-            entries = _parse_pipe_response(raw_text, fetched_at)
+            # B365 raw files have tab in name: odds_j10_20260330_130003.txt
+            # Extract the datetime portion
+            file_ts = datetime.now(UTC)
+            try:
+                stem = raw_path.stem
+                ts_part = "_".join(stem.split("_")[-2:])
+                file_ts = datetime.strptime(ts_part, "%Y%m%d_%H%M%S").replace(tzinfo=UTC)
+            except (ValueError, IndexError):
+                pass
+
+            entries = _parse_pipe_response(raw_text, file_ts)
 
             if not entries:
                 continue
-
-            # B365 raw files have tab in name: odds_j10_20260330_130003.txt
-            # Extract the datetime portion
-            run_at = datetime.now(UTC)
-            try:
-                stem = raw_path.stem
-                # Strip "odds_" prefix and optional tab prefix (e.g. "j10_")
-                ts_part = "_".join(stem.split("_")[-2:])
-                run_at = datetime.strptime(ts_part, "%Y%m%d_%H%M%S").replace(tzinfo=UTC)
-            except (ValueError, IndexError):
-                pass
 
             df = pl.DataFrame([
                 {
@@ -499,7 +497,7 @@ class Bet365OddsScraper(BaseJob):
                     "opponent_name": e.opponent_name,
                     "event_status": e.event_status,
                     "fetched_at": e.fetched_at,
-                    "run_at": run_at,
+                    "run_at": file_ts,
                 }
                 for e in entries
             ])

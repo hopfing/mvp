@@ -270,18 +270,18 @@ class BetMGMOddsScraper(BaseExtractor):
             else:
                 all_fixtures.extend(data_list.get("fixtures", []))
 
-            fetched_at = datetime.now(UTC)
-            entries = _parse_fixtures(all_fixtures, fetched_at)
+            # Derive timestamps from raw filename
+            file_ts = datetime.now(UTC)
+            try:
+                parts = raw_path.stem.replace("odds_", "")
+                file_ts = datetime.strptime(parts, "%Y%m%d_%H%M%S").replace(tzinfo=UTC)
+            except ValueError:
+                pass
+
+            entries = _parse_fixtures(all_fixtures, file_ts)
 
             if not entries:
                 continue
-
-            run_at = datetime.now(UTC)
-            try:
-                parts = raw_path.stem.replace("odds_", "")
-                run_at = datetime.strptime(parts, "%Y%m%d_%H%M%S").replace(tzinfo=UTC)
-            except ValueError:
-                pass
 
             df = pl.DataFrame([
                 {
@@ -296,7 +296,7 @@ class BetMGMOddsScraper(BaseExtractor):
                     "opponent_name": e.opponent_name,
                     "event_status": e.event_status,
                     "fetched_at": e.fetched_at,
-                    "run_at": run_at,
+                    "run_at": file_ts,
                 }
                 for e in entries
             ])
