@@ -3,6 +3,7 @@
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 
 import polars as pl
 
@@ -128,50 +129,106 @@ class BetRiversOddsScraper(BaseExtractor):
         logger.info("Fetched %d BR odds entries", len(entries))
         return entries, data
 
-    def fetch_and_save(self) -> int:
-        """Fetch odds, save raw JSON + stage parquet."""
-        run_at = datetime.now(UTC)
+    def fetch_and_save_raw(self) -> Path | None:
+        """Fetch odds from BR and save raw JSON.
+
+        Returns raw file path, or None if no entries found.
+        """
         entries, raw = self.fetch_all_odds()
 
         if not entries:
             logger.info("No BR odds entries found")
-            return 0
+            return None
 
         raw_path = self.build_path("raw", "moneyline", "odds.json", version="datetime")
         self.save_json([raw], raw_path)
+        return raw_path
 
-        stage_path = self.build_path("stage", "moneyline.parquet")
-        new_df = pl.DataFrame([
-            {
-                "book": e.book,
-                "br_event_id": e.br_event_id,
-                "market": e.market,
-                "br_selection_id": e.br_selection_id,
-                "player_name": e.player_name,
-                "side": e.side,
-                "odds": e.odds,
-                "points": e.points,
-                "tournament": e.tournament,
-                "br_tournament_id": e.br_tournament_id,
-                "circuit": e.circuit,
-                "opponent_name": e.opponent_name,
-                "event_status": e.event_status,
-                "fetched_at": e.fetched_at,
-                "run_at": run_at,
-            }
-            for e in entries
-        ])
+    def stage(self) -> list[Path]:
+        """Parse raw JSON files that don't have staged counterparts.
 
-        if stage_path.exists():
-            existing = pl.read_parquet(stage_path)
-            new_df = pl.concat([existing, new_df], how="diagonal_relaxed")
+        Returns list of staged parquet paths written.
+        """
+        raw_dir = self.build_path("raw", "moneyline")
+        stage_dir = self.build_path("stage", "moneyline")
+        raw_files = self.list_files(raw_dir, "odds_*.json")
+        if not raw_files:
+            return []
 
-        self.save_parquet(new_df, stage_path)
-        return len(entries)
+        existing = {p.stem for p in self.list_files(stage_dir, "*.parquet")}
+
+        staged: list[Path] = []
+        for raw_path in raw_files:
+            if raw_path.stem in existing:
+                continue
+
+            try:
+                data_list = self.read_json(raw_path)
+            except Exception:
+                logger.warning("Skipping corrupt raw file: %s", raw_path.name)
+                continue
+
+            all_entries: list[BetRiversOddsEntry] = []
+            for item in data_list:
+                fetched_at = datetime.now(UTC)
+                all_entries.extend(_parse_response(item, fetched_at))
+
+            if not all_entries:
+                continue
+
+            df = pl.DataFrame([
+                {
+                    "book": e.book,
+                    "br_event_id": e.br_event_id,
+                    "market": e.market,
+                    "br_selection_id": e.br_selection_id,
+                    "player_name": e.player_name,
+                    "side": e.side,
+                    "odds": e.odds,
+                    "points": e.points,
+                    "tournament": e.tournament,
+                    "br_tournament_id": e.br_tournament_id,
+                    "circuit": e.circuit,
+                    "opponent_name": e.opponent_name,
+                    "event_status": e.event_status,
+                    "fetched_at": e.fetched_at,
+                }
+                for e in all_entries
+            ])
+
+            out_path = stage_dir / f"{raw_path.stem}.parquet"
+            result = self.save_parquet(df, out_path)
+            if result:
+                staged.append(result)
+
+        if staged:
+            logger.info("BR staged %d new snapshots", len(staged))
+        return staged
+
+    def consolidate(self) -> Path | None:
+        """Merge all per-snapshot parquets into moneyline.parquet."""
+        stage_dir = self.build_path("stage", "moneyline")
+        snapshots = self.list_files(stage_dir, "*.parquet")
+        if not snapshots:
+            logger.info("No BR snapshots to consolidate")
+            return None
+
+        dfs = [pl.read_parquet(f) for f in snapshots]
+        df = pl.concat(dfs, how="diagonal_relaxed")
+
+        out_path = self.build_path("stage", "moneyline.parquet")
+        return self.save_parquet(df, out_path)
+
+    def run(self) -> int:
+        """Full flow: fetch raw, stage, consolidate."""
+        self.fetch_and_save_raw()
+        self.stage()
+        self.consolidate()
+        return 0
 
 
 # Module-level convenience for CLI
 def fetch_and_save() -> int:
-    """Full flow: fetch odds, save raw + stage parquet."""
+    """Full flow: fetch, stage, consolidate."""
     scraper = BetRiversOddsScraper()
-    return scraper.fetch_and_save()
+    return scraper.run()

@@ -12,6 +12,7 @@ import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from fractions import Fraction
+from pathlib import Path
 
 import polars as pl
 import undetected_chromedriver as uc
@@ -328,12 +329,14 @@ class Bet365OddsScraper(BaseJob):
         logger.info("B365 fetch complete: %d total entries", len(all_entries))
         return all_entries, raw_responses
 
-    def fetch_and_save(self) -> int:
-        """Fetch odds, save raw text + stage parquet."""
-        run_at = datetime.now(UTC)
+    def fetch_and_save_raw(self) -> list[Path]:
+        """Fetch odds from B365 and save raw text files.
+
+        Returns list of raw file paths written.
+        """
         entries, raw_responses = self.fetch_all_odds()
 
-        # Always save raw responses for debugging, even if parser finds 0 entries
+        saved: list[Path] = []
         for tab, raw in raw_responses:
             raw_path = self.build_path(
                 "raw", "moneyline", f"odds_{tab}.txt", version="datetime",
@@ -341,38 +344,92 @@ class Bet365OddsScraper(BaseJob):
             raw_path.parent.mkdir(parents=True, exist_ok=True)
             raw_path.write_text(raw, encoding="utf-8")
             logger.info("Saved raw B365 %s response to %s", tab, raw_path)
+            saved.append(raw_path)
 
-        if not entries:
-            logger.info("No B365 odds entries found")
-            return 0
+        if not saved:
+            logger.info("No B365 raw responses saved")
+        return saved
 
-        stage_path = self.build_path("stage", "moneyline.parquet")
-        new_df = pl.DataFrame([
-            {
-                "book": e.book,
-                "b365_event_id": e.b365_event_id,
-                "market": e.market,
-                "player_name": e.player_name,
-                "odds": e.odds,
-                "tournament": e.tournament,
-                "circuit": e.circuit,
-                "opponent_name": e.opponent_name,
-                "event_status": e.event_status,
-                "fetched_at": e.fetched_at,
-                "run_at": run_at,
-            }
-            for e in entries
-        ])
+    def stage(self) -> list[Path]:
+        """Parse raw files that don't have staged counterparts.
 
-        if stage_path.exists():
-            existing = pl.read_parquet(stage_path)
-            new_df = pl.concat([existing, new_df], how="diagonal_relaxed")
+        Each raw .txt file produces a per-snapshot parquet in
+        stage/bet365/moneyline/<stem>.parquet.
+        Returns list of staged parquet paths written.
+        """
+        raw_dir = self.build_path("raw", "moneyline")
+        stage_dir = self.build_path("stage", "moneyline")
+        raw_files = self.list_files(raw_dir, "odds_*.txt")
+        if not raw_files:
+            return []
 
-        self.save_parquet(new_df, stage_path)
-        return len(entries)
+        existing = {p.stem for p in self.list_files(stage_dir, "*.parquet")}
+
+        staged: list[Path] = []
+        for raw_path in raw_files:
+            if raw_path.stem in existing:
+                continue
+
+            try:
+                raw_text = raw_path.read_text(encoding="utf-8")
+            except Exception:
+                logger.warning("Skipping unreadable raw file: %s", raw_path.name)
+                continue
+
+            fetched_at = datetime.now(UTC)  # approximate; close enough
+            entries = _parse_pipe_response(raw_text, fetched_at)
+
+            if not entries:
+                continue
+
+            df = pl.DataFrame([
+                {
+                    "book": e.book,
+                    "b365_event_id": e.b365_event_id,
+                    "market": e.market,
+                    "player_name": e.player_name,
+                    "odds": e.odds,
+                    "tournament": e.tournament,
+                    "circuit": e.circuit,
+                    "opponent_name": e.opponent_name,
+                    "event_status": e.event_status,
+                    "fetched_at": e.fetched_at,
+                }
+                for e in entries
+            ])
+
+            out_path = stage_dir / f"{raw_path.stem}.parquet"
+            result = self.save_parquet(df, out_path)
+            if result:
+                staged.append(result)
+
+        if staged:
+            logger.info("B365 staged %d new snapshots", len(staged))
+        return staged
+
+    def consolidate(self) -> Path | None:
+        """Merge all per-snapshot parquets into moneyline.parquet."""
+        stage_dir = self.build_path("stage", "moneyline")
+        snapshots = self.list_files(stage_dir, "*.parquet")
+        if not snapshots:
+            logger.info("No B365 snapshots to consolidate")
+            return None
+
+        dfs = [pl.read_parquet(f) for f in snapshots]
+        df = pl.concat(dfs, how="diagonal_relaxed")
+
+        out_path = self.build_path("stage", "moneyline.parquet")
+        return self.save_parquet(df, out_path)
+
+    def run(self) -> int:
+        """Full flow: fetch raw, stage, consolidate."""
+        self.fetch_and_save_raw()
+        self.stage()
+        self.consolidate()
+        return 0
 
 
 def fetch_and_save() -> int:
-    """Full flow: fetch odds, save raw + stage parquet."""
+    """Full flow: fetch, stage, consolidate."""
     scraper = Bet365OddsScraper()
-    return scraper.fetch_and_save()
+    return scraper.run()
