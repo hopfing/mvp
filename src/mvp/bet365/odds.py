@@ -329,14 +329,13 @@ class Bet365OddsScraper(BaseJob):
         logger.info("B365 fetch complete: %d total entries", len(all_entries))
         return all_entries, raw_responses
 
-    def fetch_and_save_raw(self) -> list[Path]:
+    def fetch_and_save_raw(self) -> int:
         """Fetch odds from B365 and save raw text files.
 
-        Returns list of raw file paths written.
+        Returns number of entries fetched.
         """
         entries, raw_responses = self.fetch_all_odds()
 
-        saved: list[Path] = []
         for tab, raw in raw_responses:
             raw_path = self.build_path(
                 "raw", "moneyline", f"odds_{tab}.txt", version="datetime",
@@ -344,11 +343,8 @@ class Bet365OddsScraper(BaseJob):
             raw_path.parent.mkdir(parents=True, exist_ok=True)
             raw_path.write_text(raw, encoding="utf-8")
             logger.info("Saved raw B365 %s response to %s", tab, raw_path)
-            saved.append(raw_path)
 
-        if not saved:
-            logger.info("No B365 raw responses saved")
-        return saved
+        return len(entries)
 
     def stage(self) -> list[Path]:
         """Parse raw files that don't have staged counterparts.
@@ -423,10 +419,10 @@ class Bet365OddsScraper(BaseJob):
 
     def run(self) -> int:
         """Full flow: fetch raw, stage, consolidate."""
-        self.fetch_and_save_raw()
+        n = self.fetch_and_save_raw()
         self.stage()
         self.consolidate()
-        return 0
+        return n
 
 
 def fetch_and_save() -> int:

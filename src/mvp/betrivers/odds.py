@@ -129,20 +129,20 @@ class BetRiversOddsScraper(BaseExtractor):
         logger.info("Fetched %d BR odds entries", len(entries))
         return entries, data
 
-    def fetch_and_save_raw(self) -> Path | None:
+    def fetch_and_save_raw(self) -> int:
         """Fetch odds from BR and save raw JSON.
 
-        Returns raw file path, or None if no entries found.
+        Returns number of entries fetched.
         """
         entries, raw = self.fetch_all_odds()
 
         if not entries:
             logger.info("No BR odds entries found")
-            return None
+            return 0
 
         raw_path = self.build_path("raw", "moneyline", "odds.json", version="datetime")
         self.save_json([raw], raw_path)
-        return raw_path
+        return len(entries)
 
     def stage(self) -> list[Path]:
         """Parse raw JSON files that don't have staged counterparts.
@@ -221,10 +221,10 @@ class BetRiversOddsScraper(BaseExtractor):
 
     def run(self) -> int:
         """Full flow: fetch raw, stage, consolidate."""
-        self.fetch_and_save_raw()
+        n = self.fetch_and_save_raw()
         self.stage()
         self.consolidate()
-        return 0
+        return n
 
 
 # Module-level convenience for CLI

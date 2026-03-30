@@ -234,20 +234,20 @@ class DraftKingsOddsScraper(BaseExtractor):
 
         return all_entries, raw_responses
 
-    def fetch_and_save_raw(self, market: str = "moneyline") -> Path | None:
+    def fetch_and_save_raw(self, market: str = "moneyline") -> int:
         """Fetch odds from DK and save raw JSON.
 
-        Returns raw file path, or None if no entries found.
+        Returns number of entries fetched.
         """
         entries, raw_responses = self.fetch_all_odds(market=market)
 
         if not entries:
             logger.info("No DK odds entries found")
-            return None
+            return 0
 
         raw_path = self.build_path("raw", market, "odds.json", version="datetime")
         self.save_json(raw_responses, raw_path)
-        return raw_path
+        return len(entries)
 
     def stage(self, market: str = "moneyline") -> list[Path]:
         """Parse raw JSON files that don't have staged counterparts.
@@ -327,10 +327,10 @@ class DraftKingsOddsScraper(BaseExtractor):
 
     def run(self, market: str = "moneyline") -> int:
         """Full flow: fetch raw, stage, consolidate."""
-        self.fetch_and_save_raw(market=market)
+        n = self.fetch_and_save_raw(market=market)
         self.stage(market=market)
         self.consolidate(market=market)
-        return 0
+        return n
 
 
 # Module-level convenience for CLI
