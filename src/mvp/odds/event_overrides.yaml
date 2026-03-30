@@ -1,0 +1,93 @@
+# Manual event mapping overrides
+# These take precedence over auto-mapped entries in event_map.parquet.
+# Use when the mapper can't disambiguate (e.g., back-to-back Challengers).
+
+# DK: Kigali week 1 — Napolitano vs Gea SF (2026-03-06)
+- match_uid: "2026_2913_SGL_SF_G0IX_N679"
+  book: dk
+  event_id: "33756897"
+  p1_book_name: "Stefano Napolitano"
+  p2_book_name: "Arthur Gea"
+  p1_id: "N679"
+  p2_id: "G0IX"
+
+# DK: Kigali week 1 — Napolitano vs Schwaerzler F (2026-03-08)
+- match_uid: "2026_2913_SGL_F_N679_S0WT"
+  book: dk
+  event_id: "33763633"
+  p1_book_name: "Joel Schwaerzler"
+  p2_book_name: "Stefano Napolitano"
+  p1_id: "S0WT"
+  p2_id: "N679"
+
+# DK: Kigali week 2 — Napolitano vs Schwaerzler R32 (2026-03-10)
+- match_uid: "2026_2915_SGL_R32_N679_S0WT"
+  book: dk
+  event_id: "33777359"
+  p1_book_name: "Stefano Napolitano"
+  p2_book_name: "Joel Schwaerzler"
+  p1_id: "N679"
+  p2_id: "S0WT"
+
+# DK: Kigali week 2 — Cecchinato vs Kopp R16 (2026-03-11)
+- match_uid: "2026_2915_SGL_R16_CF01_K0CJ"
+  book: dk
+  event_id: "33789665"
+  p1_book_name: "Marco Cecchinato"
+  p2_book_name: "Sandro Kopp"
+  p1_id: "CF01"
+  p2_id: "K0CJ"
+
+# DK: Hersonissos week 2 — Pereira vs Geerts R32 (2026-03-09)
+- match_uid: "2026_2985_SGL_R32_GG65_P0K4"
+  book: dk
+  event_id: "33778104"
+  p1_book_name: "Tiago Pereira"
+  p2_book_name: "Michael Geerts"
+  p1_id: "P0K4"
+  p2_id: "GG65"
+
+# BR: Kigali week 2 — Napolitano vs Schwaerzler R32 (2026-03-10)
+- match_uid: "2026_2915_SGL_R32_N679_S0WT"
+  book: br
+  event_id: "1026892916"
+  p1_book_name: "Stefano Napolitano"
+  p2_book_name: "Joel Josef Schwarzler"
+  p1_id: "N679"
+  p2_id: "S0WT"
+
+# MGM: Alicante/Montemar qualifying — Brancaccio vs Sanchez Quilez Q2 (2026-03-23)
+- match_uid: "2026_2955_SGL_Q2_BV24_S0XE"
+  book: mgm
+  event_id: "19264847"
+  p1_book_name: "Raul Brancaccio"
+  p2_book_name: "Alejo Sanchez Quilez"
+  p1_id: "BV24"
+  p2_id: "S0XE"
+
+# MGM: Alicante/Montemar qualifying — Brancaccio vs Sanchez Quilez Q2 (re-listed)
+- match_uid: "2026_2955_SGL_Q2_BV24_S0XE"
+  book: mgm
+  event_id: "19264862"
+  p1_book_name: "Raul Brancaccio"
+  p2_book_name: "Alejo Sanchez Quilez"
+  p1_id: "BV24"
+  p2_id: "S0XE"
+
+# MGM: Alicante/Montemar — Choinski vs Safiullin R16 (2026-03-26)
+- match_uid: "2026_2955_SGL_R16_CH12_SX50"
+  book: mgm
+  event_id: "19276413"
+  p1_book_name: "Jan Choinski"
+  p2_book_name: "Roman Safiullin"
+  p1_id: "CH12"
+  p2_id: "SX50"
+
+# MGM: Naples — Carboni vs Forti Q2 (2026-03-24), ambiguous with Barletta
+- match_uid: "2026_2911_SGL_Q2_C0OW_F0A4"
+  book: mgm
+  event_id: "19264988"
+  p1_book_name: "Lorenzo Carboni"
+  p2_book_name: "Francesco Forti"
+  p1_id: "C0OW"
+  p2_id: "F0A4"

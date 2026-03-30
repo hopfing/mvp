@@ -25,7 +25,7 @@ EVENT_MAP_SCHEMA = {
 }
 
 DEFAULT_PATH = get_data_root() / "odds" / "event_map.parquet"
-DEFAULT_OVERRIDE_PATH = get_data_root() / "odds" / "event_overrides.yaml"
+DEFAULT_OVERRIDE_PATH = Path(__file__).resolve().parents[1] / "odds" / "event_overrides.yaml"
 
 
 def load_event_map(path: Path = DEFAULT_PATH) -> pl.DataFrame:
