@@ -269,9 +269,27 @@ def _extract_api_responses(driver) -> str | None:
 
 
 def _load_j_code(driver, j: str) -> str | None:
-    """Load a J-code page and capture the API response."""
-    driver.get("about:blank")
-    time.sleep(1)
+    """Load a J-code page with clean browser state.
+
+    B365's SPA sometimes doesn't fire new API calls on tab switches when
+    not logged in, so we clear cookies/cache and reload the homepage
+    before each navigation to force a fresh matchmarketscontentapi call.
+    """
+    try:
+        driver.delete_all_cookies()
+        driver.execute_cdp_cmd("Network.clearBrowserCache", {})
+    except Exception:
+        pass
+
+    driver.get(SITE_URL)
+    time.sleep(5)
+
+    # Drain perf logs from homepage load before navigating to the target.
+    try:
+        driver.get_log("performance")
+    except Exception:
+        pass
+
     driver.get(_URL_TEMPLATE.format(j=j))
     time.sleep(12)
     return _extract_api_responses(driver)
@@ -322,10 +340,6 @@ class Bet365OddsScraper(BaseJob):
             except Exception:
                 chrome_major = None
             driver = uc.Chrome(options=options, version_main=chrome_major)
-
-            # Load homepage to initialize SPA
-            driver.get(SITE_URL)
-            time.sleep(5)
 
             # Step 1: Load any page to discover which J codes have our tours.
             raw = _load_j_code(driver, "10")
