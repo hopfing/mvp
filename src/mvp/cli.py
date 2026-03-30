@@ -70,11 +70,11 @@ def print_run_summary(results: dict[str, Any], name: str | None = None) -> None:
         train_auc = train_metrics.get("roc_auc", 0)
         train_ll = train_metrics.get("log_loss", 0)
         train_brier = train_metrics.get("brier_score", 0)
-        print(f"\n{'':8} {'Accuracy':>10} {'AUC':>10} {'Log Loss':>10} {'Brier':>10}")
-        print(f"{'Train':8} {train_acc:>10.1%} {train_auc:>10.3f} {train_ll:>10.3f} {train_brier:>10.4f}")
-        print(f"{'Test':8} {test_acc:>10.1%} {test_auc:>10.3f} {test_ll:>10.3f} {test_brier:>10.4f}")
+        print(f"\n{'':8} {'Accuracy':>10} {'AUC':>10} {'Log Loss':>11} {'Brier':>10}")
+        print(f"{'Train':8} {train_acc:>10.1%} {train_auc:>10.3f} {train_ll:>11.4f} {train_brier:>10.4f}")
+        print(f"{'Test':8} {test_acc:>10.1%} {test_auc:>10.3f} {test_ll:>11.4f} {test_brier:>10.4f}")
     else:
-        print(f"\nTest: {test_acc:.1%} acc | {test_auc:.3f} AUC | {test_ll:.3f} LL | {test_brier:.4f} Brier")
+        print(f"\nTest: {test_acc:.1%} acc | {test_auc:.3f} AUC | {test_ll:.4f} LL | {test_brier:.4f} Brier")
 
 
     if not diagnostics:
@@ -100,7 +100,7 @@ def print_run_summary(results: dict[str, Any], name: str | None = None) -> None:
             cal = overall.get('calibration_error', 0)
             err = overall.get('error_rate_80plus', 0)
             n = overall.get('n_matches', 0)
-            print(f"\n  {circuit.upper()}  {acc:5.1%} acc | {auc:.3f} AUC | {ll:.3f} ll | {brier:.4f} brier | {cal:.1%} cal | {err:.1%} err80 | n={n:,}")
+            print(f"\n  {circuit.upper()}  {acc:5.1%} acc | {auc:.3f} AUC | {ll:.4f} ll | {brier:.4f} brier | {cal:.2%} cal | {err:.1%} err80 | n={n:,}")
 
             # Surface subsegments
             if circuit_data.get("surface"):
@@ -113,7 +113,7 @@ def print_run_summary(results: dict[str, Any], name: str | None = None) -> None:
                     cal = m.get('calibration_error', 0)
                     err = m.get('error_rate_80plus', 0)
                     n = m.get('n_matches', 0)
-                    print(f"      {surface:8} {acc:5.1%} | {auc:.3f} | {ll:.3f} | {brier:.4f} | {cal:.1%} | {err:.1%} | n={n:,}")
+                    print(f"      {surface:8} {acc:5.1%} | {auc:.3f} | {ll:.4f} | {brier:.4f} | {cal:.2%} | {err:.1%} | n={n:,}")
 
             # Per-round metrics
             if circuit_data.get("round"):
@@ -130,7 +130,7 @@ def print_run_summary(results: dict[str, Any], name: str | None = None) -> None:
                     cal = m.get('calibration_error', 0)
                     err = m.get('error_rate_80plus', 0)
                     n = m.get('n_matches', 0)
-                    print(f"      {rnd:10} {acc:5.1%} | {auc:.3f} | {ll:.3f} | {brier:.4f} | {cal:.1%} | {err:.1%} | n={n:,}")
+                    print(f"      {rnd:10} {acc:5.1%} | {auc:.3f} | {ll:.4f} | {brier:.4f} | {cal:.2%} | {err:.1%} | n={n:,}")
 
             # Betting group subsegments (circuit-aware performance groups)
             if circuit_data.get("betting_group"):
@@ -143,7 +143,7 @@ def print_run_summary(results: dict[str, Any], name: str | None = None) -> None:
                     cal = m.get('calibration_error', 0)
                     err = m.get('error_rate_80plus', 0)
                     n = m.get('n_matches', 0)
-                    print(f"      {group:10} {acc:5.1%} | {auc:.3f} | {ll:.3f} | {brier:.4f} | {cal:.1%} | {err:.1%} | n={n:,}")
+                    print(f"      {group:10} {acc:5.1%} | {auc:.3f} | {ll:.4f} | {brier:.4f} | {cal:.2%} | {err:.1%} | n={n:,}")
 
     # Calibration buckets table
     cal_data = diagnostics.calibration
@@ -152,9 +152,9 @@ def print_run_summary(results: dict[str, Any], name: str | None = None) -> None:
         worst_err = max(b["error"] for b in buckets)
         raw_cal = metrics.get("raw_calibration_error")
         if raw_cal is not None:
-            print(f"\nCalibration ({cal_data['calibration_error']:.1%} mean error, {raw_cal:.1%} raw):")
+            print(f"\nCalibration ({cal_data['calibration_error']:.2%} mean error, {raw_cal:.2%} raw):")
         else:
-            print(f"\nCalibration ({cal_data['calibration_error']:.1%} mean error):")
+            print(f"\nCalibration ({cal_data['calibration_error']:.2%} mean error):")
         for b in buckets:
             low, high = b["range"]
             marker = " <- worst" if b["error"] == worst_err else ""
@@ -206,8 +206,8 @@ def print_run_summary(results: dict[str, Any], name: str | None = None) -> None:
         per_model = ediag.get("per_model_metrics", {})
         if per_model:
             print("\nPer-Model Comparison:")
-            print(f"  {'Model':40} {'Acc':>7} {'AUC':>7} {'LL':>7} {'Cal':>7}")
-            print(f"  {'-' * 68}")
+            print(f"  {'Model':40} {'Acc':>7} {'AUC':>7} {'LL':>8} {'Cal':>7}")
+            print(f"  {'-' * 69}")
             for model_name, m in per_model.items():
                 label = model_name
                 if model_name != "ensemble":
@@ -219,7 +219,7 @@ def print_run_summary(results: dict[str, Any], name: str | None = None) -> None:
                 auc = m.get("roc_auc", 0)
                 ll = m.get("log_loss", 0)
                 cal = m.get("calibration_error", 0)
-                print(f"  {label:40} {acc:6.1%} {auc:7.3f} {ll:7.3f} {cal:6.1%}")
+                print(f"  {label:40} {acc:6.1%} {auc:7.3f} {ll:8.4f} {cal:7.2%}")
 
         corr = ediag.get("correlation", {})
         matrix = corr.get("matrix", [])
