@@ -38,7 +38,7 @@ DEFAULT_GRIDS: dict[str, dict[str, list[Any]]] = {
         "min_samples_leaf": [10, 20, 50],
     },
     "neural_net": {
-        "hidden_layers": [[32, 16], [64, 32], [128, 64], [64, 32, 16]],
+        "hidden_layers": [[32], [64], [32, 16], [64, 32], [128, 64], [256, 128], [64, 32, 16], [128, 64, 32]],
         "dropout": [0.1, 0.2, 0.3, 0.5],
         "learning_rate": [0.0001, 0.0005, 0.001, 0.005],
         "batch_size": [256, 512, 1024, 2048],
