@@ -268,6 +268,15 @@ def _extract_api_responses(driver) -> str | None:
     return None
 
 
+def _load_j_code(driver, j: str) -> str | None:
+    """Load a J-code page and capture the API response."""
+    driver.get("about:blank")
+    time.sleep(1)
+    driver.get(_URL_TEMPLATE.format(j=j))
+    time.sleep(12)
+    return _extract_api_responses(driver)
+
+
 class Bet365OddsScraper(BaseJob):
     """Scraper for Bet365 tennis odds via undetected-chromedriver."""
 
@@ -319,17 +328,11 @@ class Bet365OddsScraper(BaseJob):
             time.sleep(5)
 
             # Step 1: Load any page to discover which J codes have our tours.
-            discovery_url = _URL_TEMPLATE.format(j="10")
-            driver.get("about:blank")
-            time.sleep(1)
-            driver.get(discovery_url)
-            time.sleep(12)
+            raw = _load_j_code(driver, "10")
 
             j_codes = _FALLBACK_J_CODES.copy()
-            discovery_j = "10"
-            discovery_raw = _extract_api_responses(driver)
-            if discovery_raw:
-                discovered = _discover_j_codes(discovery_raw)
+            if raw:
+                discovered = _discover_j_codes(raw)
                 if discovered:
                     j_codes = discovered
                     logger.info("B365 discovered J codes: %s", j_codes)
@@ -338,28 +341,28 @@ class Bet365OddsScraper(BaseJob):
                         "B365 nav parse found no target tours, "
                         "using fallbacks: %s", j_codes,
                     )
+                raw_responses.append(("j10", raw))
             else:
                 logger.warning(
                     "B365 discovery page returned no data, "
                     "using fallbacks: %s", j_codes,
                 )
 
-            # Step 2: Navigate to each unique target J code and capture odds.
-            # The discovery page already loaded J10, so reuse that response.
+            # Step 2: Load each unique target J code with a fresh SPA init.
+            # B365's SPA doesn't update content on tab switches when not
+            # logged in, so each J code needs a clean page load.
             seen_event_ids: set[str] = set()
-            visited_j: set[str] = set()
 
-            if discovery_raw:
-                raw_responses.append((f"j{discovery_j}", discovery_raw))
-                entries = _parse_pipe_response(discovery_raw, now)
+            # Process discovery response if it's a target J code.
+            if raw and "10" in j_codes.values():
+                entries = _parse_pipe_response(raw, now)
                 new = [e for e in entries
                        if e.b365_event_id not in seen_event_ids]
                 seen_event_ids.update(e.b365_event_id for e in new)
                 all_entries.extend(new)
-                visited_j.add(discovery_j)
                 logger.info(
-                    "B365 j%s (discovery): %d entries (%d new)",
-                    discovery_j, len(entries), len(new),
+                    "B365 j10 (discovery): %d entries (%d new)",
+                    len(entries), len(new),
                 )
 
             # Dedupe — ATP and Challenger may be on the same J code.
@@ -368,17 +371,11 @@ class Bet365OddsScraper(BaseJob):
                 unique_j.setdefault(j, []).append(circuit)
 
             for j, circuits in unique_j.items():
-                if j in visited_j:
-                    continue
+                if j == "10" and raw:
+                    continue  # Already captured from discovery
                 tab = f"j{j}"
-                url = _URL_TEMPLATE.format(j=j)
                 try:
-                    driver.get("about:blank")
-                    time.sleep(1)
-                    driver.get(url)
-                    time.sleep(12)
-
-                    raw = _extract_api_responses(driver)
+                    raw = _load_j_code(driver, j)
                     if raw:
                         raw_responses.append((tab, raw))
                         entries = _parse_pipe_response(raw, now)
