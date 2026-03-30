@@ -99,7 +99,10 @@ class TuneState:
         )
 
     def _params_key(self, params: dict[str, Any]) -> tuple:
-        return tuple(sorted(params.items()))
+        return tuple(
+            (k, tuple(v) if isinstance(v, list) else v)
+            for k, v in sorted(params.items())
+        )
 
     @property
     def _completed_keys(self) -> set[tuple]:

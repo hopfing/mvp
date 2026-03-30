@@ -580,13 +580,19 @@ def cmd_tune(args: argparse.Namespace) -> int:
             if "=" not in p:
                 raise ValueError(f"Invalid --param format: {p} (expected KEY=VALUE)")
             k, v = p.split("=", 1)
+            # Try JSON first (handles lists, bools, null)
+            import json
             try:
-                v = int(v)
-            except ValueError:
+                v = json.loads(v)
+            except (json.JSONDecodeError, ValueError):
+                # Fall back to numeric parsing
                 try:
-                    v = float(v)
+                    v = int(v)
                 except ValueError:
-                    pass
+                    try:
+                        v = float(v)
+                    except ValueError:
+                        pass
             param_overrides[k] = v
 
     tuner = HyperparamTuner(
