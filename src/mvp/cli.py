@@ -1494,6 +1494,22 @@ def cmd_live(args: argparse.Namespace) -> int:
 
         odds_pool.shutdown(wait=False)
 
+        # Log upcoming predictions with no odds coverage from any book
+        all_covered_uids = set()
+        for odds_map in all_odds_maps.values():
+            all_covered_uids.update(odds_map.keys())
+        no_odds = predictions.filter(~pl.col("match_uid").is_in(all_covered_uids))
+        if len(no_odds) > 0:
+            logger.info(
+                "Predictions with no odds from any book: %d/%d",
+                len(no_odds), len(predictions),
+            )
+            for row in no_odds.sort("effective_match_date").iter_rows(named=True):
+                p1 = row.get("player_display_name") or row.get("player_id", "?")
+                p2 = row.get("opp_display_name") or row.get("opp_id", "?")
+                t = row.get("tournament_name") or "?"
+                logger.info("  No odds: %s — %s vs %s", t, p1, p2)
+
         print_predictions(predictions, book_odds=all_odds_maps or None)
 
     except Exception:
