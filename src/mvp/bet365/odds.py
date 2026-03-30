@@ -24,8 +24,16 @@ logger = logging.getLogger(__name__)
 
 SITE_URL = "https://www.il.bet365.com/"
 
-# URL template — J code is discovered dynamically from the nav sidebar.
+# SPA URL template for navigation.
 _URL_TEMPLATE = "https://www.il.bet365.com/#/AC/B13/C1/D1002/G83/J{j}/Q1/F%5E24/"
+
+# Direct API URL template for fetch() calls from within the SPA.
+_API_URL_TEMPLATE = (
+    "https://www.il.bet365.com/matchmarketscontentapi/upcomingmatches"
+    "?lid=32&zid=0"
+    "&pd=%23AC%23B13%23C1%23D1002%23G83%23J{j}%23Q1%23F%5E24%23"
+    "&cid=198&cgid=3&ctid=198&csid=28"
+)
 
 # Fallback J codes if dynamic discovery fails.
 _FALLBACK_J_CODES = {"atp": "10", "challenger": "12"}
@@ -268,31 +276,30 @@ def _extract_api_responses(driver) -> str | None:
     return None
 
 
-def _load_j_code(driver, j: str) -> str | None:
-    """Load a J-code page with clean browser state.
+def _fetch_j_code(driver, j: str) -> str | None:
+    """Fetch a J code's odds by calling the API directly from the SPA context.
 
-    B365's SPA sometimes doesn't fire new API calls on tab switches when
-    not logged in, so we clear cookies/cache and reload the homepage
-    before each navigation to force a fresh matchmarketscontentapi call.
+    The SPA must already be loaded (session established) before calling this.
+    Uses fetch() within the browser so we inherit the full session state.
     """
+    api_url = _API_URL_TEMPLATE.format(j=j)
     try:
-        driver.delete_all_cookies()
-        driver.execute_cdp_cmd("Network.clearBrowserCache", {})
-    except Exception:
-        pass
-
-    driver.get(SITE_URL)
-    time.sleep(5)
-
-    # Drain perf logs from homepage load before navigating to target.
-    try:
-        driver.get_log("performance")
-    except Exception:
-        pass
-
-    driver.get(_URL_TEMPLATE.format(j=j))
-    time.sleep(12)
-    return _extract_api_responses(driver)
+        result = driver.execute_async_script(
+            """
+            var callback = arguments[arguments.length - 1];
+            fetch(arguments[0])
+                .then(function(r) { return r.text(); })
+                .then(callback)
+                .catch(function(e) { callback(null); });
+            """,
+            api_url,
+        )
+        if result:
+            logger.info("B365 j%s: fetched %d bytes via API", j, len(result))
+            return result
+    except Exception as e:
+        logger.error("B365 j%s: API fetch failed: %s", j, e)
+    return None
 
 
 class Bet365OddsScraper(BaseJob):
@@ -341,8 +348,15 @@ class Bet365OddsScraper(BaseJob):
                 chrome_major = None
             driver = uc.Chrome(options=options, version_main=chrome_major)
 
-            # Step 1: Load any page to discover which J codes have our tours.
-            raw = _load_j_code(driver, "10")
+            # Load SPA fully to establish session. Navigate to J10 via
+            # the normal SPA route so all JS/session state initializes.
+            driver.get(SITE_URL)
+            time.sleep(5)
+            driver.get(_URL_TEMPLATE.format(j="10"))
+            time.sleep(12)
+
+            # Capture J10 data from perf logs (the SPA-triggered API call).
+            raw = _extract_api_responses(driver)
 
             j_codes = _FALLBACK_J_CODES.copy()
             if raw:
@@ -362,12 +376,10 @@ class Bet365OddsScraper(BaseJob):
                     "using fallbacks: %s", j_codes,
                 )
 
-            # Step 2: Load each unique target J code with a fresh SPA init.
-            # B365's SPA doesn't update content on tab switches when not
-            # logged in, so each J code needs a clean page load.
+            # Now fetch each target J code. Use the SPA-loaded response
+            # for J10 if it's a target, then fetch() others directly.
             seen_event_ids: set[str] = set()
 
-            # Process discovery response if it's a target J code.
             if raw and "10" in j_codes.values():
                 entries = _parse_pipe_response(raw, now)
                 new = [e for e in entries
@@ -375,7 +387,7 @@ class Bet365OddsScraper(BaseJob):
                 seen_event_ids.update(e.b365_event_id for e in new)
                 all_entries.extend(new)
                 logger.info(
-                    "B365 j10 (discovery): %d entries (%d new)",
+                    "B365 j10 (SPA): %d entries (%d new)",
                     len(entries), len(new),
                 )
 
@@ -386,10 +398,10 @@ class Bet365OddsScraper(BaseJob):
 
             for j, circuits in unique_j.items():
                 if j == "10" and raw:
-                    continue  # Already captured from discovery
+                    continue  # Already captured from SPA load
                 tab = f"j{j}"
                 try:
-                    raw = _load_j_code(driver, j)
+                    raw = _fetch_j_code(driver, j)
                     if raw:
                         raw_responses.append((tab, raw))
                         entries = _parse_pipe_response(raw, now)
