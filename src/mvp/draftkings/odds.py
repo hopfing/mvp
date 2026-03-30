@@ -275,12 +275,8 @@ class DraftKingsOddsScraper(BaseExtractor):
                 continue
 
             # Derive timestamps from raw filename
-            file_ts = datetime.now()
-            try:
-                parts = raw_path.stem.replace("odds_", "")
-                file_ts = datetime.strptime(parts, "%Y%m%d_%H%M%S")
-            except ValueError:
-                pass
+            parts = raw_path.stem.replace("odds_", "")
+            file_ts = datetime.strptime(parts, "%Y%m%d_%H%M%S")
 
             all_entries: list[OddsEntry] = []
             for item in data_list:

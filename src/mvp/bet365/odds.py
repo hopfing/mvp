@@ -471,14 +471,9 @@ class Bet365OddsScraper(BaseJob):
                 continue
 
             # B365 raw files have tab in name: odds_j10_20260330_130003.txt
-            # Extract the datetime portion
-            file_ts = datetime.now()
-            try:
-                stem = raw_path.stem
-                ts_part = "_".join(stem.split("_")[-2:])
-                file_ts = datetime.strptime(ts_part, "%Y%m%d_%H%M%S")
-            except (ValueError, IndexError):
-                pass
+            stem = raw_path.stem
+            ts_part = "_".join(stem.split("_")[-2:])
+            file_ts = datetime.strptime(ts_part, "%Y%m%d_%H%M%S")
 
             entries = _parse_pipe_response(raw_text, file_ts)
 

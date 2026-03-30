@@ -271,12 +271,8 @@ class BetMGMOddsScraper(BaseExtractor):
                 all_fixtures.extend(data_list.get("fixtures", []))
 
             # Derive timestamps from raw filename
-            file_ts = datetime.now()
-            try:
-                parts = raw_path.stem.replace("odds_", "")
-                file_ts = datetime.strptime(parts, "%Y%m%d_%H%M%S")
-            except ValueError:
-                pass
+            parts = raw_path.stem.replace("odds_", "")
+            file_ts = datetime.strptime(parts, "%Y%m%d_%H%M%S")
 
             entries = _parse_fixtures(all_fixtures, file_ts)
 
