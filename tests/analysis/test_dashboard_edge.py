@@ -96,3 +96,12 @@ def test_filter_edge_scenarios_by_consensus():
         (r["segment"] == "consensus" and r["segment_value"] == "0.8")
         for r in result.iter_rows(named=True)
     )
+
+
+def test_filter_all_bases():
+    from mvp.analysis.dashboard.edge import filter_edge_scenarios
+
+    sims = _make_sims()
+    for basis in ["open", "formed", "close"]:
+        result = filter_edge_scenarios(sims, basis=basis)
+        assert len(result) > 0

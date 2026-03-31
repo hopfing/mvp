@@ -93,11 +93,12 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
     with col1:
         basis = st.radio(
             "Odds basis",
-            options=["close", "open", "formed"],
+            options=["open", "formed", "close", "all"],
             format_func=lambda x: {
-                "close": "Close",
                 "open": "Open",
                 "formed": "Mkt Formed",
+                "close": "Close",
+                "all": "All",
             }[x],
             horizontal=True,
         )
@@ -122,19 +123,44 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
     # --- Edge band table ---
     st.subheader("Edge band profitability")
 
-    edge_df = filter_edge_scenarios(sims, basis=basis, consensus=consensus)
-
-    if edge_df.is_empty():
-        st.info("No data for the selected filters.")
+    if basis == "all":
+        cols = st.columns(3)
+        for col_widget, b, label in zip(
+            cols,
+            ["open", "formed", "close"],
+            ["Open", "Mkt Formed", "Close"],
+        ):
+            with col_widget:
+                st.subheader(label)
+                edge_df = filter_edge_scenarios(sims, basis=b, consensus=consensus)
+                if edge_df.is_empty():
+                    st.info("No data.")
+                else:
+                    suffix = _BASIS_SUFFIX[b]
+                    display = edge_df.select([
+                        pl.col("scenario")
+                        .str.replace_all(f"{suffix}$", "")
+                        .alias("Band"),
+                        pl.col("n_bets").alias("N"),
+                        (pl.col("accuracy") * 100).round(1).alias("Acc %"),
+                        (pl.col("roi") * 100).round(2).alias("ROI %"),
+                        pl.col("net_pnl").round(2).alias("P&L"),
+                    ])
+                    st.dataframe(display, use_container_width=True, hide_index=True)
     else:
-        display = edge_df.select([
-            pl.col("scenario").alias("Band"),
-            pl.col("n_bets").alias("N"),
-            (pl.col("accuracy") * 100).round(1).alias("Acc %"),
-            (pl.col("roi") * 100).round(2).alias("ROI %"),
-            pl.col("net_pnl").round(2).alias("P&L"),
-        ])
-        st.dataframe(display, use_container_width=True, hide_index=True)
+        edge_df = filter_edge_scenarios(sims, basis=basis, consensus=consensus)
+
+        if edge_df.is_empty():
+            st.info("No data for the selected filters.")
+        else:
+            display = edge_df.select([
+                pl.col("scenario").alias("Band"),
+                pl.col("n_bets").alias("N"),
+                (pl.col("accuracy") * 100).round(1).alias("Acc %"),
+                (pl.col("roi") * 100).round(2).alias("ROI %"),
+                pl.col("net_pnl").round(2).alias("P&L"),
+            ])
+            st.dataframe(display, use_container_width=True, hide_index=True)
 
     # --- Scenario summary table ---
     st.subheader("Scenario summary")

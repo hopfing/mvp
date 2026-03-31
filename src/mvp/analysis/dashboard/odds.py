@@ -57,11 +57,20 @@ def bucket_by_odds(ds: pl.DataFrame, odds_col: str) -> pl.DataFrame:
     return df.with_columns(expr)
 
 
-def odds_range_summary(ds: pl.DataFrame, odds_col: str) -> pl.DataFrame:
-    """Group by odds_bucket and compute n, accuracy, roi, pnl.
+def odds_range_summary(
+    ds: pl.DataFrame,
+    odds_col: str = "pred_odds_best_close",
+    edge_col: str | None = None,
+) -> pl.DataFrame:
+    """Group by odds_bucket and compute n, accuracy, roi, pnl, mean_edge.
 
     roi is flat $1 stake ROI: (odds - 1) if correct, -1 if incorrect.
+    mean_edge is the average model edge within each bucket (null if edge_col
+    is not provided or not present in ds).
     """
+    if edge_col is None:
+        edge_col = _ODDS_TO_EDGE.get(odds_col)
+
     bucketed = bucket_by_odds(ds, odds_col=odds_col)
 
     # Compute per-row P&L
@@ -73,15 +82,18 @@ def odds_range_summary(ds: pl.DataFrame, odds_col: str) -> pl.DataFrame:
     )
     bucketed = bucketed.with_columns(pnl_expr)
 
-    summary = (
-        bucketed.group_by("odds_bucket")
-        .agg([
-            pl.len().alias("n"),
-            pl.col("model_correct").mean().alias("accuracy"),
-            pl.col("_pnl").mean().alias("roi"),
-            pl.col("_pnl").sum().alias("pnl"),
-        ])
-    )
+    agg_exprs = [
+        pl.len().alias("n"),
+        pl.col("model_correct").mean().alias("accuracy"),
+        pl.col("_pnl").mean().alias("roi"),
+        pl.col("_pnl").sum().alias("pnl"),
+    ]
+    if edge_col and edge_col in bucketed.columns:
+        agg_exprs.append(pl.col(edge_col).mean().alias("mean_edge"))
+    else:
+        agg_exprs.append(pl.lit(None).cast(pl.Float64).alias("mean_edge"))
+
+    summary = bucketed.group_by("odds_bucket").agg(agg_exprs)
 
     # Sort by canonical bucket order
     bucket_order_df = pl.DataFrame({
@@ -122,10 +134,21 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
     odds_col = next(col for k, col, _ in available_bases if k == basis_key)
     edge_col = _ODDS_TO_EDGE.get(odds_col)
 
+    # --- Edge filter ---
+    _EDGE_OPTIONS = ["All edges", ">0%", ">5%", ">10%"]
+    _EDGE_THRESHOLDS = {"All edges": None, ">0%": 0.0, ">5%": 0.05, ">10%": 0.10}
+
+    edge_filter = st.selectbox("Min edge filter", options=_EDGE_OPTIONS, index=0)
+    min_edge = _EDGE_THRESHOLDS[edge_filter]
+
+    ds_filtered = ds
+    if min_edge is not None and edge_col and edge_col in ds.columns:
+        ds_filtered = ds.filter(pl.col(edge_col) > min_edge)
+
     # --- Performance by Odds Range table ---
     st.subheader("Performance by Odds Range")
 
-    summary = odds_range_summary(ds, odds_col=odds_col)
+    summary = odds_range_summary(ds_filtered, odds_col=odds_col, edge_col=edge_col)
 
     if summary.is_empty():
         st.info("No resolved data for selected odds basis.")
@@ -135,6 +158,7 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
             pl.col("n").alias("N"),
             (pl.col("accuracy") * 100).round(1).alias("Acc %"),
             (pl.col("roi") * 100).round(2).alias("ROI %"),
+            (pl.col("mean_edge") * 100).round(1).alias("Mean Edge %"),
             pl.col("pnl").round(2).alias("P&L"),
         ])
         st.dataframe(display, use_container_width=True, hide_index=True)
