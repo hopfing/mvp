@@ -1,0 +1,44 @@
+data:
+  date_range:
+    start: 2020-01-01
+    end: 2025-12-31
+  filters:
+    circuit:
+    - tour
+    - chal
+    draw_type: singles
+features:
+  include:
+  - player_glicko_diff
+  - opp_tourn_sets_margin
+  - player_tourn_sets_margin
+  - player_elo_surface_diff
+  - player_days_since_surface
+  - opp_days_since_surface
+  - opp_deciding_set_pct
+  - player_deciding_set_pct
+  - round_ordinal
+  - player_glicko_rd_diff
+metrics:
+  primary: log_loss
+model:
+  type: xgboost
+  params:
+    colsample_bylevel: 1.0
+    colsample_bynode: 1.0
+    colsample_bytree: 1.0
+    gamma: 1.0
+    learning_rate: 0.1
+    max_delta_step: 1
+    max_depth: 4
+    min_child_weight: 5
+    n_estimators: 200
+    reg_alpha: 0
+    reg_lambda: 5.0
+    scale_pos_weight: 1.0
+    subsample: 0.9
+    random_state: 42
+validation:
+  type: expanding_window
+  initial_train_size: 25000
+  step_size: 25000

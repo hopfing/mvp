@@ -1,7 +1,7 @@
 winner:
   active:
     artifact: data/models/production.joblib
-    config: models/production/xgb_e00_45_cAll_9f.yaml
+    config: models/production/xgb_fs_log_tuned_260331.yaml
     filters:
       circuit:
       - tour
@@ -13,19 +13,8 @@ winner:
     trained_at: '2026-03-20T17:56:42.942474+00:00'
   history: []
   voters:
-  - artifact: data/models/lr_ability.joblib
-    config: models/voters/lr_ability.yaml
-    name: lr_ability
+  - artifact: data/models/lr_fs_15f_260331.joblib
+    config: models/voters/lr_fs_15f_260331.yaml
+    name: lr_fs_15f_260331
     scoped: false
-  - artifact: data/models/lr_context_form.joblib
-    config: models/voters/lr_context_form.yaml
-    name: lr_context_form
-    scoped: false
-  - artifact: data/models/xgb_e00_45_cAll_6f.joblib
-    config: models/voters/xgb_e00_45_cAll_6f.yaml
-    name: xgb_02
-    scoped: false
-  - artifact: data/models/xgb_e00_45_cAll_4f.joblib
-    config: models/voters/xgb_e00_45_cAll_4f.yaml
-    name: xgb_03
-    scoped: false
+  
