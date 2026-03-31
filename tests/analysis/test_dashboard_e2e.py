@@ -28,6 +28,7 @@ def _make_full_ds():
             "consensus": [random.choice([1.0, 0.8, 0.6]) for _ in range(n)],
             "circuit": [random.choice(["chal", "tour"]) for _ in range(n)],
             "surface": [random.choice(["Hard", "Clay", "Grass"]) for _ in range(n)],
+            "bet_side": ["P1" if i < 20 else None for i in range(n)],
             "stake": [
                 str(random.randint(5, 20)) if i < 20 else None for i in range(n)
             ],
@@ -118,3 +119,27 @@ def test_odds_bucketing_without_error():
     ds = _make_full_ds()
     summary = odds_range_summary(ds, odds_col="pred_odds_best_close")
     assert len(summary) > 0
+
+
+def test_execution_clv_by_group():
+    from mvp.analysis.dashboard.execution import clv_by_group
+
+    ds = _make_full_ds()
+    result = clv_by_group(ds, group_col="consensus", clv_col="clv_vs_avg")
+    assert "group" in result.columns
+
+
+def test_execution_summary_on_full_ds():
+    from mvp.analysis.dashboard.execution import execution_summary
+
+    ds = _make_full_ds()
+    ex = execution_summary(ds)
+    assert ex["n_bets"] > 0
+
+
+def test_sharpness_detect_books():
+    from mvp.analysis.dashboard.sharpness import detect_books
+
+    sims = _make_full_sims()
+    books = detect_books(sims)
+    assert isinstance(books, list)

@@ -10,12 +10,14 @@ import streamlit as st
 if TYPE_CHECKING:
     import polars as pl
 
-from mvp.analysis.dashboard import edge, odds, overview
+from mvp.analysis.dashboard import edge, execution, odds, overview, sharpness
 
 PAGE_REGISTRY: list[dict] = [
     {"name": "Overview", "icon": "house", "render": overview.render},
     {"name": "Edge Analysis", "icon": "bar-chart", "render": edge.render},
     {"name": "Odds", "icon": "currency-dollar", "render": odds.render},
+    {"name": "Execution", "icon": "activity", "render": execution.render},
+    {"name": "Book Sharpness", "icon": "book", "render": sharpness.render},
 ]
 
 
