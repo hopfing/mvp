@@ -12,7 +12,9 @@ def compute_headlines(ds: pl.DataFrame) -> dict:
     """Extract headline metrics from analysis dataset. Pure data, no Streamlit."""
     n_predictions = len(ds)
 
-    resolved = ds.filter(pl.col("status") == "resolved") if "status" in ds.columns else ds
+    resolved = (
+        ds.filter(pl.col("status") == "resolved") if "status" in ds.columns else ds
+    )
     n_resolved = len(resolved)
 
     accuracy = None

@@ -21,8 +21,9 @@ PAGE_REGISTRY: list[dict] = [
 
 def _load_data(data_root: str) -> tuple[pl.DataFrame, pl.DataFrame]:
     """Load cached analysis and simulation parquets."""
-    import polars as pl
     from pathlib import Path
+
+    import polars as pl
 
     root = Path(data_root)
     ds = pl.read_parquet(root / "analysis" / "analysis.parquet")

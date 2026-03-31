@@ -5,7 +5,15 @@ from __future__ import annotations
 import polars as pl
 
 ODDS_BREAKS = [1.00, 1.25, 1.50, 1.75, 2.00, 2.25, 2.50]
-ODDS_LABELS = ["1.00-1.25", "1.25-1.50", "1.50-1.75", "1.75-2.00", "2.00-2.25", "2.25-2.50", "2.50+"]
+ODDS_LABELS = [
+    "1.00-1.25",
+    "1.25-1.50",
+    "1.50-1.75",
+    "1.75-2.00",
+    "2.00-2.25",
+    "2.25-2.50",
+    "2.50+",
+]
 
 # Map odds column -> edge column
 _ODDS_TO_EDGE: dict[str, str] = {
