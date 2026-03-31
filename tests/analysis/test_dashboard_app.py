@@ -8,6 +8,8 @@ def test_page_registry_has_expected_pages():
     assert "Overview" in names
     assert "Edge Analysis" in names
     assert "Odds" in names
+    assert "Execution" in names
+    assert "Book Sharpness" in names
 
 
 def test_page_registry_entries_have_render():
