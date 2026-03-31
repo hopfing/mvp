@@ -520,8 +520,8 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         "config", type=str, help="Model config name (e.g., 'tu_log_fs_75_20f')"
     )
     conf_parser.add_argument(
-        "--refresh", action="store_true",
-        help="Force re-run model even if cached OOF exists"
+        "--no-refresh", action="store_true",
+        help="Use cached OOF if available (skip model re-run)"
     )
 
     # project subcommand - game projection from projections/ directory
@@ -536,8 +536,13 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
     )
 
     # analysis subcommand
-    subparsers.add_parser(
+    analysis_parser = subparsers.add_parser(
         "analysis", help="Build analysis dataset with odds, CLV, and simulations"
+    )
+    analysis_parser.add_argument(
+        "--no-ui",
+        action="store_true",
+        help="Run pipeline only, skip dashboard",
     )
 
     return parser.parse_args(args)
@@ -715,7 +720,7 @@ def _run_voter_confidence(args: argparse.Namespace, config_path: Path) -> int:
     oof_path = oof_dir / "oof.parquet"
     voter_names = [v["name"] for v in voter_config["voters"]]
 
-    if oof_path.exists() and not args.refresh:
+    if oof_path.exists() and args.no_refresh:
         logger.info("Loading cached OOF from %s", oof_path)
         oof_df = pl.read_parquet(oof_path)
         validator = ConfidenceValidator.from_oof(oof_df, voter_names=voter_names)
@@ -942,7 +947,7 @@ def cmd_confidence(args: argparse.Namespace) -> int:
     # Resolve base model names for ensemble identity slices
     base_names = _get_ensemble_base_names(config_path)
 
-    if oof_path.exists() and not args.refresh:
+    if oof_path.exists() and args.no_refresh:
         logger.info("Loading cached OOF from %s", oof_path)
         oof_df = pl.read_parquet(oof_path)
         validator = ConfidenceValidator.from_oof(oof_df, base_names=base_names)
@@ -1628,7 +1633,6 @@ def cmd_analysis(parsed: argparse.Namespace) -> int:
 
     from mvp.analysis.dataset import build_analysis_dataset
     from mvp.analysis.event_map import load_event_map_with_overrides
-    from mvp.analysis.report import format_analysis_summary
     from mvp.analysis.simulations import run_simulations
     from mvp.odds.aggregator import (
         compute_book_odds,
@@ -1764,8 +1768,20 @@ def cmd_analysis(parsed: argparse.Namespace) -> int:
     sims.write_parquet(sims_path)
     print(f"Simulations: {len(sims)} scenario × segment rows")
 
-    # CLI summary
-    print(format_analysis_summary(ds, sims))
+    if getattr(parsed, "no_ui", False):
+        print("Pipeline complete. Skipping dashboard.")
+    else:
+        import subprocess
+        import sys
+
+        print("Launching dashboard...")
+        app_path = Path(__file__).resolve().parent / "analysis" / "dashboard" / "app.py"
+        subprocess.run(
+            [sys.executable, "-m", "streamlit", "run", str(app_path),
+             "--server.headless=true",
+             "--browser.gatherUsageStats=false",
+             "--", str(data_root)],
+        )
 
     return 0
 

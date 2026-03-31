@@ -23,6 +23,7 @@ dependencies = [
     "cloudscraper (>=1.2,<2.0.0)",
     "torch (>=2.2,<3.0.0)",
     "undetected-chromedriver (>=3.5.5,<4.0.0)",
+    "streamlit (>=1.45.0,<2.0.0)",
 ]
 
 
