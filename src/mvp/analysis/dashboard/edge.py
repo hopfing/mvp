@@ -87,8 +87,6 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
     """Render the edge analysis page."""
     import streamlit as st
 
-    st.header("Edge Analysis")
-
     # --- Controls ---
     col1, col2 = st.columns(2)
 

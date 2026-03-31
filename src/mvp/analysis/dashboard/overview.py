@@ -37,8 +37,12 @@ def compute_headlines(ds: pl.DataFrame) -> dict:
             net_vals = bets["net"].cast(pl.Float64, strict=False).drop_nulls()
             if len(net_vals) > 0:
                 pnl = net_vals.sum()
-        if n_bets > 0 and "clv_vs_avg" in bets.columns:
-            clv = bets["clv_vs_avg"].drop_nulls()
+        clv_col = next(
+            (c for c in ["clv_vs_avg", "clv_vs_best"] if c in bets.columns),
+            None,
+        )
+        if n_bets > 0 and clv_col is not None:
+            clv = bets[clv_col].drop_nulls()
             if len(clv) > 0:
                 mean_clv = clv.mean()
                 median_clv = clv.median()
@@ -57,8 +61,6 @@ def compute_headlines(ds: pl.DataFrame) -> dict:
 
 def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
     """Render the overview page."""
-    st.header("Overview")
-
     h = compute_headlines(ds)
 
     cards = [

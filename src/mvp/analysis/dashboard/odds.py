@@ -101,8 +101,6 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
     """Render the odds page."""
     import streamlit as st
 
-    st.header("Odds")
-
     # Determine which odds columns are present in ds
     available_bases = [
         (key, col, label)

@@ -38,12 +38,12 @@ def run(data_root: str) -> None:
         page_icon="chart_with_upwards_trend",
         layout="wide",
     )
-    st.title("Model Performance × Odds Analysis")
-
     ds, sims = _load_data(data_root)
 
     page_names = [p["name"] for p in PAGE_REGISTRY]
     selected = st.sidebar.radio("Page", page_names, index=0)
+
+    st.title(selected)
 
     for page in PAGE_REGISTRY:
         if page["name"] == selected:
