@@ -324,7 +324,18 @@ class DraftKingsOddsScraper(BaseExtractor):
             logger.info("No DK snapshots to consolidate")
             return None
 
-        dfs = [pl.read_parquet(f) for f in snapshots]
+        dfs = []
+        for f in snapshots:
+            _df = pl.read_parquet(f)
+            tz_cols = [
+                c for c, dt in _df.schema.items()
+                if isinstance(dt, pl.Datetime) and dt.time_zone is not None
+            ]
+            if tz_cols:
+                _df = _df.with_columns(
+                    pl.col(c).dt.replace_time_zone(None) for c in tz_cols
+                )
+            dfs.append(_df)
         df = pl.concat(dfs, how="diagonal_relaxed")
 
         out_path = self.build_path("stage", f"{market}.parquet")
