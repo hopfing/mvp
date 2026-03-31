@@ -520,8 +520,8 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         "config", type=str, help="Model config name (e.g., 'tu_log_fs_75_20f')"
     )
     conf_parser.add_argument(
-        "--refresh", action="store_true",
-        help="Force re-run model even if cached OOF exists"
+        "--no-refresh", action="store_true",
+        help="Use cached OOF if available (skip model re-run)"
     )
 
     # project subcommand - game projection from projections/ directory
@@ -720,7 +720,7 @@ def _run_voter_confidence(args: argparse.Namespace, config_path: Path) -> int:
     oof_path = oof_dir / "oof.parquet"
     voter_names = [v["name"] for v in voter_config["voters"]]
 
-    if oof_path.exists() and not args.refresh:
+    if oof_path.exists() and args.no_refresh:
         logger.info("Loading cached OOF from %s", oof_path)
         oof_df = pl.read_parquet(oof_path)
         validator = ConfidenceValidator.from_oof(oof_df, voter_names=voter_names)
@@ -947,7 +947,7 @@ def cmd_confidence(args: argparse.Namespace) -> int:
     # Resolve base model names for ensemble identity slices
     base_names = _get_ensemble_base_names(config_path)
 
-    if oof_path.exists() and not args.refresh:
+    if oof_path.exists() and args.no_refresh:
         logger.info("Loading cached OOF from %s", oof_path)
         oof_df = pl.read_parquet(oof_path)
         validator = ConfidenceValidator.from_oof(oof_df, base_names=base_names)
