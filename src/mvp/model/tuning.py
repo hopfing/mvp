@@ -33,9 +33,15 @@ DEFAULT_GRIDS: dict[str, dict[str, list[Any]]] = {
         "C": [0.01, 0.1, 1.0, 10.0],
     },
     "random_forest": {
-        "n_estimators": [100, 200, 500],
-        "max_depth": [4, 6, 8],
-        "min_samples_leaf": [10, 20, 50],
+        "n_estimators": [100, 200, 300, 500],
+        "max_depth": [3, 4, 6, 8, 10, None],
+        "min_samples_split": [2, 5, 10, 20],
+        "min_samples_leaf": [5, 10, 20, 50],
+        "max_features": ["sqrt", "log2", 0.3, 0.5, 0.7, 1.0],
+        "max_leaf_nodes": [None, 50, 100, 200, 500],
+        "min_impurity_decrease": [0.0, 0.001, 0.005, 0.01],
+        "bootstrap": [True, False],
+        "criterion": ["gini", "log_loss"],
     },
     "neural_net": {
         "hidden_layers": [[32], [64], [32, 16], [64, 32], [128, 64], [256, 128], [64, 32, 16], [128, 64, 32]],

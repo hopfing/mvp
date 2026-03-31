@@ -599,19 +599,24 @@ def cmd_tune(args: argparse.Namespace) -> int:
                 raise ValueError(f"Invalid --param format: {p} (expected KEY=VALUE)")
             k, v = p.split("=", 1)
             # Try JSON first (handles lists, bools, null)
-            # json.loads requires lowercase true/false, so normalize first
             import json
-            try:
-                v = json.loads(v.lower() if v.lower() in ("true", "false") else v)
-            except (json.JSONDecodeError, ValueError):
-                # Fall back to numeric parsing
+            v_lower = v.lower()
+            if v_lower == "none":
+                v = None
+            elif v_lower in ("true", "false"):
+                v = json.loads(v_lower)
+            else:
                 try:
-                    v = int(v)
-                except ValueError:
+                    v = json.loads(v)
+                except (json.JSONDecodeError, ValueError):
+                    # Fall back to numeric parsing
                     try:
-                        v = float(v)
+                        v = int(v)
                     except ValueError:
-                        pass
+                        try:
+                            v = float(v)
+                        except ValueError:
+                            pass
             param_overrides[k] = v
 
     tuner = HyperparamTuner(
