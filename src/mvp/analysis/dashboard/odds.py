@@ -26,7 +26,7 @@ _ODDS_TO_EDGE: dict[str, str] = {
 _BASIS_OPTIONS = [
     ("close", "pred_odds_best_close", "Close"),
     ("open", "pred_odds_open", "Open"),
-    ("formed", "pred_odds_market_formed", "Mkt Formed"),
+    ("formed", "pred_odds_market_formed", "Formed"),
 ]
 
 

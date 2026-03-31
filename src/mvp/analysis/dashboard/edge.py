@@ -96,7 +96,7 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
             options=["open", "formed", "close", "all"],
             format_func=lambda x: {
                 "open": "Open",
-                "formed": "Mkt Formed",
+                "formed": "Formed",
                 "close": "Close",
                 "all": "All",
             }[x],
@@ -128,7 +128,7 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
         for col_widget, b, label in zip(
             cols,
             ["open", "formed", "close"],
-            ["Open", "Mkt Formed", "Close"],
+            ["Open", "Formed", "Close"],
         ):
             with col_widget:
                 st.subheader(label)
