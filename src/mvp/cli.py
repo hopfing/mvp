@@ -1776,11 +1776,12 @@ def cmd_analysis(parsed: argparse.Namespace) -> int:
 
         print("Launching dashboard...")
         app_path = Path(__file__).resolve().parent / "analysis" / "dashboard" / "app.py"
-        subprocess.Popen(
+        subprocess.run(
             [sys.executable, "-m", "streamlit", "run", str(app_path),
+             "--server.headless=true",
+             "--browser.gatherUsageStats=false",
              "--", str(data_root)],
         )
-        print("Dashboard launched in browser.")
 
     return 0
 
