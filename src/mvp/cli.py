@@ -536,8 +536,13 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
     )
 
     # analysis subcommand
-    subparsers.add_parser(
+    analysis_parser = subparsers.add_parser(
         "analysis", help="Build analysis dataset with odds, CLV, and simulations"
+    )
+    analysis_parser.add_argument(
+        "--no-ui",
+        action="store_true",
+        help="Run pipeline only, skip dashboard",
     )
 
     return parser.parse_args(args)
@@ -1628,7 +1633,6 @@ def cmd_analysis(parsed: argparse.Namespace) -> int:
 
     from mvp.analysis.dataset import build_analysis_dataset
     from mvp.analysis.event_map import load_event_map_with_overrides
-    from mvp.analysis.report import format_analysis_summary
     from mvp.analysis.simulations import run_simulations
     from mvp.odds.aggregator import (
         compute_book_odds,
@@ -1764,8 +1768,19 @@ def cmd_analysis(parsed: argparse.Namespace) -> int:
     sims.write_parquet(sims_path)
     print(f"Simulations: {len(sims)} scenario × segment rows")
 
-    # CLI summary
-    print(format_analysis_summary(ds, sims))
+    if getattr(parsed, "no_ui", False):
+        print("Pipeline complete. Skipping dashboard.")
+    else:
+        import subprocess
+        import sys
+
+        print("Launching dashboard...")
+        app_path = Path(__file__).resolve().parent / "analysis" / "dashboard" / "app.py"
+        subprocess.Popen(
+            [sys.executable, "-m", "streamlit", "run", str(app_path),
+             "--", str(data_root)],
+        )
+        print("Dashboard launched in browser.")
 
     return 0
 

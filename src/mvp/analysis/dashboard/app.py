@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from typing import TYPE_CHECKING
 
 import streamlit as st
@@ -47,3 +48,20 @@ def run(data_root: str) -> None:
         if page["name"] == selected:
             page["render"](ds, sims)
             break
+
+
+def _get_data_root_from_args() -> str:
+    """Extract data_root from command line or environment."""
+    from mvp.common.base_job import get_data_root
+
+    # Streamlit passes args after "--" in sys.argv
+    try:
+        idx = sys.argv.index("--")
+        if idx + 1 < len(sys.argv):
+            return sys.argv[idx + 1]
+    except ValueError:
+        pass
+    return str(get_data_root())
+
+
+run(_get_data_root_from_args())
