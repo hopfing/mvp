@@ -53,3 +53,11 @@ def test_2_50_plus_bucket():
     # 2.60 -> 2.50+
     row = bucketed.filter(pl.col("match_uid") == "m6")
     assert row["odds_bucket"][0] == "2.50+"
+
+
+def test_odds_range_summary_includes_edge():
+    from mvp.analysis.dashboard.odds import odds_range_summary
+
+    ds = _make_ds()
+    summary = odds_range_summary(ds, odds_col="pred_odds_best_close", edge_col="model_edge_best_close")
+    assert "mean_edge" in summary.columns
