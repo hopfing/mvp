@@ -277,10 +277,13 @@ def _make_embedding_mlp():
             dropout: float,
             batch_norm: bool,
             layer_norm: bool = False,
+            dual_embedding: bool = False,
         ):
             super().__init__()
             self.embedding = nn.Embedding(n_players + 1, embedding_dim, padding_idx=0)
-            mlp_input_dim = n_features + embedding_dim
+            self.dual_embedding = dual_embedding
+            n_emb = 2 * embedding_dim if dual_embedding else embedding_dim
+            mlp_input_dim = n_features + n_emb
             layers: list[nn.Module] = []
             in_dim = mlp_input_dim
             for hidden_dim in hidden_layers:
@@ -297,9 +300,18 @@ def _make_embedding_mlp():
             layers.append(nn.Sigmoid())
             self.mlp = nn.Sequential(*layers)
 
-        def forward(self, x: torch.Tensor, player_idx: torch.Tensor) -> torch.Tensor:
-            emb = self.embedding(player_idx)
-            combined = torch.cat([x, emb], dim=1)
+        def forward(
+            self,
+            x: torch.Tensor,
+            player_idx: torch.Tensor,
+            opp_idx: torch.Tensor | None = None,
+        ) -> torch.Tensor:
+            player_emb = self.embedding(player_idx)
+            parts = [x, player_emb]
+            if opp_idx is not None:
+                opp_emb = self.embedding(opp_idx)
+                parts.append(opp_emb)
+            combined = torch.cat(parts, dim=1)
             return self.mlp(combined)
 
     return EmbeddingMLP
@@ -369,6 +381,7 @@ class NeuralNetModel(BaseModel):
                 dropout=self.dropout,
                 batch_norm=self.batch_norm,
                 layer_norm=self.layer_norm,
+                dual_embedding=self._has_opp_embeddings,
             )
 
         layers: list[nn.Module] = []
@@ -419,10 +432,10 @@ class NeuralNetModel(BaseModel):
             return torch.optim.AdamW(params, lr=lr, weight_decay=self.weight_decay)
         return torch.optim.Adam(params, lr=lr)
 
-    def _forward(self, X_t, emb_t=None):
-        """Forward pass handling both plain MLP and embedding MLP."""
+    def _forward(self, X_t, emb_t=None, opp_emb_t=None):
+        """Forward pass handling plain MLP, single embedding, and dual embedding."""
         if emb_t is not None:
-            return self._module(X_t, emb_t)
+            return self._module(X_t, emb_t, opp_emb_t)
         return self._module(X_t)
 
     def fit(
