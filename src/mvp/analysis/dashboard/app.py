@@ -7,13 +7,15 @@ from typing import TYPE_CHECKING
 
 import streamlit as st
 
+from mvp.analysis.dashboard import edge, execution, odds, overview, sharpness
+from mvp.analysis.dashboard import insights as insights_page
+
 if TYPE_CHECKING:
     import polars as pl
 
-from mvp.analysis.dashboard import edge, execution, odds, overview, sharpness
-
 PAGE_REGISTRY: list[dict] = [
     {"name": "Overview", "icon": "house", "render": overview.render},
+    {"name": "Insights", "icon": "search", "render": insights_page.render},
     {"name": "Edge Analysis", "icon": "bar-chart", "render": edge.render},
     {"name": "Odds", "icon": "currency-dollar", "render": odds.render},
     {"name": "Execution", "icon": "activity", "render": execution.render},
@@ -21,8 +23,10 @@ PAGE_REGISTRY: list[dict] = [
 ]
 
 
-def _load_data(data_root: str) -> tuple[pl.DataFrame, pl.DataFrame]:
-    """Load cached analysis and simulation parquets."""
+def _load_data(
+    data_root: str,
+) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame | None]:
+    """Load cached analysis, simulation, and insights parquets."""
     from pathlib import Path
 
     import polars as pl
@@ -30,7 +34,9 @@ def _load_data(data_root: str) -> tuple[pl.DataFrame, pl.DataFrame]:
     root = Path(data_root)
     ds = pl.read_parquet(root / "analysis" / "analysis.parquet")
     sims = pl.read_parquet(root / "analysis" / "simulations.parquet")
-    return ds, sims
+    insights_path = root / "analysis" / "insights.parquet"
+    insights = pl.read_parquet(insights_path) if insights_path.exists() else None
+    return ds, sims, insights
 
 
 def run(data_root: str) -> None:
@@ -40,7 +46,7 @@ def run(data_root: str) -> None:
         page_icon="chart_with_upwards_trend",
         layout="wide",
     )
-    ds, sims = _load_data(data_root)
+    ds, sims, insights = _load_data(data_root)
 
     page_names = [p["name"] for p in PAGE_REGISTRY]
     selected = st.sidebar.radio("Page", page_names, index=0)
@@ -49,7 +55,10 @@ def run(data_root: str) -> None:
 
     for page in PAGE_REGISTRY:
         if page["name"] == selected:
-            page["render"](ds, sims)
+            if page["name"] == "Insights":
+                page["render"](ds, sims, insights)
+            else:
+                page["render"](ds, sims)
             break
 
 
