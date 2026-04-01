@@ -24,14 +24,17 @@ def compute_model_performance(ds: pl.DataFrame) -> dict:
     losses = n - wins
     accuracy = wins / n
 
-    # Flat $1 stake ROI
+    # Flat $1 stake ROI — only count rows that have closing odds
     pnl = None
     roi = None
     if "pred_odds_best_close" in resolved.columns:
-        correct = resolved.filter(pl.col("model_correct"))
-        returned = correct["pred_odds_best_close"].drop_nulls().sum()
-        pnl = returned - n
-        roi = pnl / n
+        has_odds = resolved.filter(pl.col("pred_odds_best_close").is_not_null())
+        n_with_odds = len(has_odds)
+        if n_with_odds > 0:
+            correct = has_odds.filter(pl.col("model_correct"))
+            returned = correct["pred_odds_best_close"].sum()
+            pnl = returned - n_with_odds
+            roi = pnl / n_with_odds
 
     return {
         "n": n, "wins": wins, "losses": losses,
@@ -150,6 +153,24 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
     m = compute_model_performance(ds)
     b = compute_bet_performance(ds)
 
+    # --- Bet Performance ---
+    st.subheader("Bet Performance")
+    if b["n"] > 0:
+        record_bet = f"{b['wins']} - {b['losses']} - {b['void']}"
+    else:
+        record_bet = "—"
+    render_metric_cards([
+        metric_card_data("N", b["n"], fmt="d"),
+        {"label": "Record", "value": record_bet},
+        metric_card_data("Accuracy", b["accuracy"], fmt=".1%"),
+        {
+            "label": "Stake",
+            "value": f"${b['stake']:,.2f}" if b["stake"] else "\u2014",
+        },
+        metric_card_data("P&L", b["pnl"], fmt="$.2f"),
+        metric_card_data("ROI", b["roi"], fmt=".1%"),
+    ])
+
     # --- Model Performance ---
     st.subheader("Model Performance")
     record_model = f"{m['wins']} - {m['losses']}" if m["n"] > 0 else "—"
@@ -165,7 +186,7 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
         metric_card_data("ROI", m["roi"], fmt=".1%"),
     ])
 
-    # Edge / No Edge sub-rows
+    # Edge sub-rows
     if "model_edge_best_close" in ds.columns:
         for label, subset in [
             ("Positive Edge", ds.filter(pl.col("model_edge_best_close") > 0)),
@@ -186,23 +207,20 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
                 metric_card_data("ROI", sm["roi"], fmt=".1%"),
             ])
 
-    # --- Bet Performance ---
-    st.subheader("Bet Performance")
-    if b["n"] > 0:
-        record_bet = f"{b['wins']} - {b['losses']} - {b['void']}"
-    else:
-        record_bet = "—"
-    render_metric_cards([
-        metric_card_data("N", b["n"], fmt="d"),
-        {"label": "Record", "value": record_bet},
-        metric_card_data("Accuracy", b["accuracy"], fmt=".1%"),
-        {
-            "label": "Stake",
-            "value": f"${b['stake']:,.2f}" if b["stake"] else "\u2014",
-        },
-        metric_card_data("P&L", b["pnl"], fmt="$.2f"),
-        metric_card_data("ROI", b["roi"], fmt=".1%"),
-    ])
+        # No closing odds row
+        no_odds = ds.filter(pl.col("model_edge_best_close").is_null())
+        nm = compute_model_performance(no_odds)
+        if nm["n"] > 0:
+            record_no = f"{nm['wins']} - {nm['losses']}"
+            st.markdown("#### No Odds")
+            render_metric_cards([
+                metric_card_data("N", nm["n"], fmt="d"),
+                {"label": "Record", "value": record_no},
+                metric_card_data("Accuracy", nm["accuracy"], fmt=".1%"),
+                {"label": "Stake", "value": "\u2014"},
+                {"label": "P&L", "value": "\u2014"},
+                {"label": "ROI", "value": "\u2014"},
+            ])
 
     # --- Odds Coverage ---
     st.subheader("Odds Coverage")
