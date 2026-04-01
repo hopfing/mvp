@@ -1638,6 +1638,7 @@ def cmd_analysis(parsed: argparse.Namespace) -> int:
 
     from mvp.analysis.dataset import build_analysis_dataset
     from mvp.analysis.event_map import load_event_map_with_overrides
+    from mvp.analysis.scanner import run_scanner
     from mvp.analysis.simulations import run_simulations
     from mvp.odds.aggregator import (
         compute_book_odds,
@@ -1772,6 +1773,13 @@ def cmd_analysis(parsed: argparse.Namespace) -> int:
     sims_path = data_root / "analysis" / "simulations.parquet"
     sims.write_parquet(sims_path)
     print(f"Simulations: {len(sims)} scenario × segment rows")
+
+    # Layer 6: Insight scanner
+    print("Running insight scanner...")
+    insights = run_scanner(ds)
+    insights_path = data_root / "analysis" / "insights.parquet"
+    insights.write_parquet(insights_path)
+    print(f"Insights: {len(insights)} slices")
 
     if getattr(parsed, "no_ui", False):
         print("Pipeline complete. Skipping dashboard.")

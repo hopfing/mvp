@@ -143,6 +143,41 @@ def compute_slices(
     return pl.DataFrame(rows)
 
 
+def run_scanner(
+    ds: pl.DataFrame,
+    max_depth: int = 2,
+    min_n: int = MIN_N,
+) -> pl.DataFrame:
+    """Run the full insight scanner pipeline."""
+    required = [
+        "status", "model_correct",
+        "pred_odds_best_close", "model_edge_best_close",
+    ]
+    if not all(c in ds.columns for c in required):
+        return pl.DataFrame(schema={
+            "depth": pl.Int64, "dimensions": pl.Utf8, "filters": pl.Utf8,
+            "n": pl.Int64, "accuracy": pl.Float64, "roi": pl.Float64,
+            "pnl": pl.Float64, "parent_dimensions": pl.Utf8,
+            "parent_filters": pl.Utf8, "parent_roi": pl.Float64,
+            "roi_delta": pl.Float64, "direction": pl.Utf8,
+            "surprise": pl.Float64,
+        })
+
+    bucketed = bucket_dimensions(ds)
+    if len(bucketed) == 0:
+        return pl.DataFrame(schema={
+            "depth": pl.Int64, "dimensions": pl.Utf8, "filters": pl.Utf8,
+            "n": pl.Int64, "accuracy": pl.Float64, "roi": pl.Float64,
+            "pnl": pl.Float64, "parent_dimensions": pl.Utf8,
+            "parent_filters": pl.Utf8, "parent_roi": pl.Float64,
+            "roi_delta": pl.Float64, "direction": pl.Utf8,
+            "surprise": pl.Float64,
+        })
+
+    slices = compute_slices(bucketed, max_depth=max_depth, min_n=min_n)
+    return score_surprises(slices)
+
+
 def score_surprises(slices: pl.DataFrame) -> pl.DataFrame:
     """Compare each slice to parent slices and compute surprise scores.
 

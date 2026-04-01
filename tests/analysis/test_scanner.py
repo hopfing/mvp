@@ -201,3 +201,27 @@ def test_score_surprises_has_surprise_column():
     for row in depth_1.iter_rows(named=True):
         expected = abs(row["roi_delta"]) * math.sqrt(row["n"])
         assert abs(row["surprise"] - expected) < 0.001
+
+
+def test_run_scanner():
+    from mvp.analysis.scanner import run_scanner
+
+    ds = _make_resolved_ds()
+    insights = run_scanner(ds)
+
+    assert "depth" in insights.columns
+    assert "surprise" in insights.columns
+    assert "direction" in insights.columns
+    assert len(insights) > 0
+    assert 0 in insights["depth"].to_list()
+
+
+def test_run_scanner_empty():
+    from mvp.analysis.scanner import run_scanner
+
+    ds = pl.DataFrame(schema={
+        "match_uid": pl.Utf8, "status": pl.Utf8,
+        "model_correct": pl.Boolean,
+    })
+    insights = run_scanner(ds)
+    assert len(insights) == 0
