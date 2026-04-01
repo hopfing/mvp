@@ -1,6 +1,8 @@
 # tests/analysis/test_scanner.py
 """Tests for insight scanner."""
 
+import math
+
 import polars as pl
 import pytest
 
@@ -119,3 +121,83 @@ def test_compute_slices_has_roi():
     assert "roi" in slices.columns
     assert "accuracy" in slices.columns
     assert "pnl" in slices.columns
+
+
+def test_score_surprises_depth_0_has_no_parent():
+    from mvp.analysis.scanner import bucket_dimensions, compute_slices, score_surprises
+
+    ds = _make_resolved_ds()
+    bucketed = bucket_dimensions(ds)
+    slices = compute_slices(bucketed, max_depth=1)
+    scored = score_surprises(slices)
+
+    depth_0 = scored.filter(pl.col("depth") == 0)
+    assert depth_0["parent_dimensions"][0] is None
+    assert depth_0["roi_delta"][0] is None
+
+
+def test_score_surprises_depth_1_compares_to_overall():
+    from mvp.analysis.scanner import bucket_dimensions, compute_slices, score_surprises
+
+    ds = _make_resolved_ds()
+    bucketed = bucket_dimensions(ds)
+    slices = compute_slices(bucketed, max_depth=1)
+    scored = score_surprises(slices)
+
+    depth_1 = scored.filter(pl.col("depth") == 1)
+    assert all(d == "" for d in depth_1["parent_dimensions"].to_list())
+    overall_roi = scored.filter(pl.col("depth") == 0)["roi"][0]
+    for row in depth_1.iter_rows(named=True):
+        expected_delta = row["roi"] - overall_roi
+        assert abs(row["roi_delta"] - expected_delta) < 0.001
+
+
+def test_score_surprises_has_direction():
+    from mvp.analysis.scanner import bucket_dimensions, compute_slices, score_surprises
+
+    ds = _make_resolved_ds()
+    bucketed = bucket_dimensions(ds)
+    slices = compute_slices(bucketed, max_depth=1)
+    scored = score_surprises(slices)
+
+    depth_1 = scored.filter(pl.col("depth") == 1)
+    for row in depth_1.iter_rows(named=True):
+        assert row["direction"] in ("outperformer", "danger_zone")
+        if row["roi_delta"] >= 0:
+            assert row["direction"] == "outperformer"
+        else:
+            assert row["direction"] == "danger_zone"
+
+
+def test_score_surprises_depth_2_picks_max_delta_parent():
+    from mvp.analysis.scanner import bucket_dimensions, compute_slices, score_surprises
+
+    ds = _make_resolved_ds()
+    bucketed = bucket_dimensions(ds)
+    slices = compute_slices(bucketed, max_depth=2)
+    scored = score_surprises(slices)
+
+    depth_2 = scored.filter(pl.col("depth") == 2)
+    if len(depth_2) == 0:
+        pytest.skip("No depth-2 slices with enough N")
+
+    for row in depth_2.iter_rows(named=True):
+        child_dims = row["dimensions"].split("|")
+        parent_dims = row["parent_dimensions"].split("|") if row["parent_dimensions"] else []
+        assert len(parent_dims) == 1
+        assert parent_dims[0] in child_dims
+
+
+def test_score_surprises_has_surprise_column():
+    from mvp.analysis.scanner import bucket_dimensions, compute_slices, score_surprises
+
+    ds = _make_resolved_ds()
+    bucketed = bucket_dimensions(ds)
+    slices = compute_slices(bucketed, max_depth=1)
+    scored = score_surprises(slices)
+
+    assert "surprise" in scored.columns
+    depth_1 = scored.filter(pl.col("depth") == 1)
+    for row in depth_1.iter_rows(named=True):
+        expected = abs(row["roi_delta"]) * math.sqrt(row["n"])
+        assert abs(row["surprise"] - expected) < 0.001

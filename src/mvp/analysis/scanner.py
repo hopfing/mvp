@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import math
 from itertools import combinations
 
 import polars as pl
@@ -140,3 +141,72 @@ def compute_slices(
                 })
 
     return pl.DataFrame(rows)
+
+
+def score_surprises(slices: pl.DataFrame) -> pl.DataFrame:
+    """Compare each slice to parent slices and compute surprise scores.
+
+    For depth-N slices, the parent is the depth-(N-1) slice with the largest
+    absolute ROI delta. Depth-0 has no parent.
+    """
+    lookup: dict[tuple[str, str], float] = {}
+    for row in slices.iter_rows(named=True):
+        lookup[(row["dimensions"], row["filters"])] = row["roi"]
+
+    results = []
+    for row in slices.iter_rows(named=True):
+        row = dict(row)
+
+        if row["depth"] == 0:
+            row["parent_dimensions"] = None
+            row["parent_filters"] = None
+            row["parent_roi"] = None
+            row["roi_delta"] = None
+            row["direction"] = None
+            row["surprise"] = None
+            results.append(row)
+            continue
+
+        child_dims = row["dimensions"].split("|")
+        child_filters = row["filters"].split(" | ")
+
+        best_parent_dims = None
+        best_parent_filters = None
+        best_parent_roi = None
+        best_delta = None
+
+        for i in range(len(child_dims)):
+            parent_dim_list = child_dims[:i] + child_dims[i + 1:]
+            parent_filter_list = child_filters[:i] + child_filters[i + 1:]
+
+            parent_dims_str = "|".join(parent_dim_list)
+            parent_filters_str = (
+                " | ".join(parent_filter_list) if parent_filter_list else "overall"
+            )
+
+            parent_roi = lookup.get((parent_dims_str, parent_filters_str))
+            if parent_roi is None:
+                continue
+
+            delta = row["roi"] - parent_roi
+            if best_delta is None or abs(delta) > abs(best_delta):
+                best_delta = delta
+                best_parent_dims = parent_dims_str
+                best_parent_filters = parent_filters_str
+                best_parent_roi = parent_roi
+
+        row["parent_dimensions"] = best_parent_dims
+        row["parent_filters"] = best_parent_filters
+        row["parent_roi"] = best_parent_roi
+        row["roi_delta"] = best_delta
+
+        if best_delta is not None:
+            row["direction"] = "outperformer" if best_delta >= 0 else "danger_zone"
+            row["surprise"] = abs(best_delta) * math.sqrt(row["n"])
+        else:
+            row["direction"] = None
+            row["surprise"] = None
+
+        results.append(row)
+
+    return pl.DataFrame(results)
