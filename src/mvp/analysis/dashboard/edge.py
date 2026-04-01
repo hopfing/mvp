@@ -16,11 +16,9 @@ _BASIS_SUFFIX: dict[str, str] = {
     "formed": "_mkt_formed",
 }
 
-# Scenario summary rows to show beneath the edge band table
-_SUMMARY_SCENARIOS = [
-    "consensus_100",
-    "consensus_80",
-    "consensus_60",
+# Flat scenarios always shown in summary
+_FLAT_SCENARIOS = [
+    "flat_best_open",
     "flat_best_close",
     "flat_best_intraday",
     "flat_worst_intraday",
@@ -115,9 +113,11 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
             horizontal=True,
         )
 
-    # Detect consensus values present in sims
+    # Detect consensus values for selected model
+    mv = model_version or "all"
+    model_sims = sims.filter(pl.col("model_version") == mv)
     consensus_vals = (
-        sims.filter(pl.col("segment") == "consensus")["segment_value"]
+        model_sims.filter(pl.col("segment") == "consensus")["segment_value"]
         .unique()
         .sort()
         .to_list()
@@ -134,8 +134,6 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
 
     # --- Edge band table ---
     st.subheader("Edge band profitability")
-
-    mv = model_version or "all"
 
     if basis == "all":
         cols = st.columns(3)
@@ -184,19 +182,26 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
     # --- Scenario summary table ---
     st.subheader("Scenario summary")
 
-    summary_df = sims.filter(
-        (pl.col("model_version") == mv)
-        & (pl.col("segment") == "overall")
-        & pl.col("scenario").is_in(_SUMMARY_SCENARIOS)
-    )
+    # Flat scenarios, filtered by consensus if selected
+    if consensus is not None:
+        summary_df = model_sims.filter(
+            (pl.col("segment") == "consensus")
+            & (pl.col("segment_value") == consensus)
+            & pl.col("scenario").is_in(_FLAT_SCENARIOS)
+        )
+    else:
+        summary_df = model_sims.filter(
+            (pl.col("segment") == "overall")
+            & pl.col("scenario").is_in(_FLAT_SCENARIOS)
+        )
 
     if summary_df.is_empty():
         st.info("No scenario summary data available.")
     else:
-        # Preserve canonical scenario order
+        summary_order = {s: i for i, s in enumerate(_FLAT_SCENARIOS)}
         summary_order_df = pl.DataFrame({
-            "scenario": _SUMMARY_SCENARIOS,
-            "_sort_key": list(range(len(_SUMMARY_SCENARIOS))),
+            "scenario": list(summary_order.keys()),
+            "_sort_key": list(summary_order.values()),
         })
         summary_df = (
             summary_df.join(summary_order_df, on="scenario", how="left")
