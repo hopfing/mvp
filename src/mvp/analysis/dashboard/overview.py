@@ -165,6 +165,27 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
         metric_card_data("ROI", m["roi"], fmt=".1%"),
     ])
 
+    # Edge / No Edge sub-rows
+    if "model_edge_best_close" in ds.columns:
+        for label, subset in [
+            ("Positive Edge", ds.filter(pl.col("model_edge_best_close") > 0)),
+            ("Negative Edge", ds.filter(pl.col("model_edge_best_close") <= 0)),
+        ]:
+            sm = compute_model_performance(subset)
+            record = f"{sm['wins']} - {sm['losses']}" if sm["n"] > 0 else "—"
+            st.markdown(f"#### {label}")
+            render_metric_cards([
+                metric_card_data("N", sm["n"], fmt="d"),
+                {"label": "Record", "value": record},
+                metric_card_data("Accuracy", sm["accuracy"], fmt=".1%"),
+                {
+                    "label": "Stake",
+                    "value": f"${sm['stake']:,.2f}" if sm["stake"] else "\u2014",
+                },
+                metric_card_data("P&L", sm["pnl"], fmt="$.2f"),
+                metric_card_data("ROI", sm["roi"], fmt=".1%"),
+            ])
+
     # --- Bet Performance ---
     st.subheader("Bet Performance")
     if b["n"] > 0:
