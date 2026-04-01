@@ -5,6 +5,98 @@ from __future__ import annotations
 import polars as pl
 
 
+def get_active_model() -> str | None:
+    """Read the active model name from production.yaml."""
+    from pathlib import Path
+
+    import yaml
+
+    prod_path = Path("production.yaml")
+    if not prod_path.exists():
+        return None
+    try:
+        with open(prod_path) as f:
+            config = yaml.safe_load(f)
+        config_path = (
+            config.get("winner", {}).get("active", {}).get("config", "")
+        )
+        return Path(config_path).stem if config_path else None
+    except Exception:
+        return None
+
+
+def model_selector(
+    ds: pl.DataFrame,
+    key: str,
+    default_to_active: bool = False,
+) -> str | None:
+    """Render a model version selectbox. Returns selected version or None.
+
+    Args:
+        ds: Full (unfiltered) analysis dataset.
+        key: Unique Streamlit widget key to avoid conflicts across pages.
+        default_to_active: If True, default to production model instead of All.
+    """
+    import streamlit as st
+
+    if "model_version" not in ds.columns:
+        return None
+
+    versions = ds["model_version"].drop_nulls().unique().to_list()
+    if len(versions) <= 1:
+        return None
+
+    active_model = get_active_model()
+
+    # Sort: active first, then by most recent prediction date
+    if "effective_match_date" in ds.columns:
+        max_dates = (
+            ds.filter(pl.col("model_version").is_not_null())
+            .group_by("model_version")
+            .agg(pl.col("effective_match_date").max().alias("_d"))
+        )
+        date_order = {
+            r["model_version"]: r["_d"]
+            for r in max_dates.iter_rows(named=True)
+            if r["_d"] is not None
+        }
+    else:
+        date_order = {}
+
+    if active_model and active_model in versions:
+        active = [v for v in versions if v == active_model]
+        rest = sorted(
+            [v for v in versions if v != active_model],
+            key=lambda v: date_order.get(v, ""),
+            reverse=True,
+        )
+        versions = active + rest
+    else:
+        versions.sort(
+            key=lambda v: date_order.get(v, ""), reverse=True
+        )
+
+    options = ["All Models"] + versions
+
+    # Default
+    state_key = f"model_sel_{key}"
+    if state_key not in st.session_state:
+        if default_to_active and active_model and active_model in versions:
+            st.session_state[state_key] = active_model
+        else:
+            st.session_state[state_key] = "All Models"
+    if st.session_state[state_key] not in options:
+        st.session_state[state_key] = "All Models"
+
+    if active_model and active_model in versions:
+        st.sidebar.caption(f"Production: {active_model}")
+
+    st.sidebar.selectbox("Model", options=options, key=state_key)
+
+    selected = st.session_state[state_key]
+    return None if selected == "All Models" else selected
+
+
 def metric_card_data(
     label: str,
     value: float | int | None,

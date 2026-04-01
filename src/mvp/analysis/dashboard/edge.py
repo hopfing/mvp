@@ -87,6 +87,18 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
     """Render the edge analysis page."""
     import streamlit as st
 
+    from mvp.analysis.dashboard.components import model_selector
+
+    # --- Model filter ---
+    model_version = model_selector(ds, key="edge", default_to_active=True)
+    if model_version is not None:
+        ds = ds.filter(pl.col("model_version") == model_version)
+        if "model_version" in sims.columns:
+            sims = sims.filter(
+                (pl.col("model_version") == model_version)
+                | (pl.col("model_version") == "all")
+            )
+
     # --- Controls ---
     col1, col2 = st.columns(2)
 
@@ -123,6 +135,8 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
     # --- Edge band table ---
     st.subheader("Edge band profitability")
 
+    mv = model_version or "all"
+
     if basis == "all":
         cols = st.columns(3)
         for col_widget, b, label in zip(
@@ -132,7 +146,10 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
         ):
             with col_widget:
                 st.subheader(label)
-                edge_df = filter_edge_scenarios(sims, basis=b, consensus=consensus)
+                edge_df = filter_edge_scenarios(
+                    sims, basis=b, consensus=consensus,
+                    model_version=mv,
+                )
                 if edge_df.is_empty():
                     st.info("No data.")
                 else:
@@ -148,7 +165,9 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
                     ])
                     st.dataframe(display, use_container_width=True, hide_index=True)
     else:
-        edge_df = filter_edge_scenarios(sims, basis=basis, consensus=consensus)
+        edge_df = filter_edge_scenarios(
+            sims, basis=basis, consensus=consensus, model_version=mv,
+        )
 
         if edge_df.is_empty():
             st.info("No data for the selected filters.")
@@ -166,7 +185,7 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
     st.subheader("Scenario summary")
 
     summary_df = sims.filter(
-        (pl.col("model_version") == "all")
+        (pl.col("model_version") == mv)
         & (pl.col("segment") == "overall")
         & pl.col("scenario").is_in(_SUMMARY_SCENARIOS)
     )
