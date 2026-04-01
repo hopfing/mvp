@@ -373,3 +373,33 @@ class TestModelTraining:
         assert model.weight_decay == 0.0
         assert model.grad_clip_norm is None
         assert model.layer_norm is False
+
+    def test_neural_net_dual_embedding_fit_predict(self, sample_data):
+        """Neural net with dual player+opponent embeddings can fit and predict."""
+        X, y = sample_data  # X is (100, 5)
+        player_ids = np.random.randint(0, 20, size=(100, 1))
+        opp_ids = np.random.randint(0, 20, size=(100, 1))
+        X_with_ids = np.hstack([X, player_ids, opp_ids])
+
+        model = get_model("neural_net", {
+            "hidden_layers": [32, 16],
+            "epochs": 20,
+            "patience": 5,
+            "embedding_dim": 8,
+            "embedding_col_idx": 5,
+            "opp_embedding_col_idx": 6,
+            "n_players": 20,
+        })
+        model.fit(X_with_ids, y)
+        probs = model.predict_proba(X_with_ids)
+
+        assert probs.shape == (100,)
+        assert all(0 <= p <= 1 for p in probs)
+        assert hasattr(model._module, "embedding")
+
+    def test_neural_net_opp_embedding_without_player_raises(self):
+        """Setting opp_embedding_col_idx without player embedding raises ValueError."""
+        with pytest.raises(ValueError, match="opp_embedding_col_idx requires"):
+            get_model("neural_net", {
+                "opp_embedding_col_idx": 6,
+            })

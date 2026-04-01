@@ -318,6 +318,7 @@ class NeuralNetModel(BaseModel):
         self.batch_norm: bool = params.get("batch_norm", False)
         self.embedding_dim: int = params.get("embedding_dim", 0)
         self.embedding_col_idx: int | None = params.get("embedding_col_idx", None)
+        self.opp_embedding_col_idx: int | None = params.get("opp_embedding_col_idx", None)
         self.n_players: int = params.get("n_players", 0)
         self.shuffle: bool = params.get("shuffle", True)
         self.finetune_frac: float = params.get("finetune_frac", 0.0)
@@ -336,6 +337,13 @@ class NeuralNetModel(BaseModel):
             raise ValueError(
                 "batch_norm and layer_norm are mutually exclusive; enable only one"
             )
+        if self.opp_embedding_col_idx is not None and not (
+            self.embedding_dim > 0 and self.n_players > 0 and self.embedding_col_idx is not None
+        ):
+            raise ValueError(
+                "opp_embedding_col_idx requires embedding_dim, embedding_col_idx, "
+                "and n_players to also be set"
+            )
         self._module = None
         self._device = None
         self._n_features = None
@@ -343,6 +351,10 @@ class NeuralNetModel(BaseModel):
     @property
     def _has_embeddings(self) -> bool:
         return self.embedding_dim > 0 and self.n_players > 0 and self.embedding_col_idx is not None
+
+    @property
+    def _has_opp_embeddings(self) -> bool:
+        return self._has_embeddings and self.opp_embedding_col_idx is not None
 
     def _build_module(self, n_features: int):
         import torch.nn as nn
@@ -384,13 +396,20 @@ class NeuralNetModel(BaseModel):
             return torch.device("cuda")
         return torch.device("cpu")
 
-    def _split_embedding_col(self, X: np.ndarray) -> tuple[np.ndarray, np.ndarray | None]:
-        """Separate embedding ID column from feature columns."""
+    def _split_embedding_col(
+        self, X: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray | None, np.ndarray | None]:
+        """Separate embedding ID column(s) from feature columns."""
         if not self._has_embeddings:
-            return X, None
+            return X, None, None
+        cols_to_remove = [self.embedding_col_idx]
+        opp_ids = None
+        if self._has_opp_embeddings:
+            cols_to_remove.append(self.opp_embedding_col_idx)
+            opp_ids = X[:, self.opp_embedding_col_idx].astype(int)
         emb_ids = X[:, self.embedding_col_idx].astype(int)
-        X_features = np.delete(X, self.embedding_col_idx, axis=1)
-        return X_features, emb_ids
+        X_features = np.delete(X, cols_to_remove, axis=1)
+        return X_features, emb_ids, opp_ids
 
     def _make_optimizer(self, params, lr: float):
         """Create optimizer — AdamW when weight_decay > 0, else Adam."""
@@ -418,7 +437,7 @@ class NeuralNetModel(BaseModel):
         self._device = self._get_device()
 
         # Separate embedding column before counting features
-        X_features, emb_ids = self._split_embedding_col(X)
+        X_features, emb_ids, opp_emb_ids = self._split_embedding_col(X)
         self._n_features = X_features.shape[1]
         self._module = self._build_module(self._n_features).to(self._device)
 
@@ -612,7 +631,7 @@ class NeuralNetModel(BaseModel):
             raise RuntimeError("Model not fitted")
         self._module.eval()
         with torch.no_grad():
-            X_features, emb_ids = self._split_embedding_col(X)
+            X_features, emb_ids, opp_emb_ids = self._split_embedding_col(X)
             X_t = torch.tensor(X_features, dtype=torch.float32, device=self._device)
             emb_t = None
             if emb_ids is not None:
