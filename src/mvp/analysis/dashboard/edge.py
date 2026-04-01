@@ -103,7 +103,7 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
     with col1:
         basis = st.radio(
             "Odds basis",
-            options=["open", "formed", "close", "all"],
+            options=["all", "open", "formed", "close"],
             format_func=lambda x: {
                 "open": "Open",
                 "formed": "Formed",
