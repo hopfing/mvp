@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import polars as pl
-import streamlit as st
 
 from mvp.analysis.dashboard.components import metric_card_data, render_metric_cards
 
