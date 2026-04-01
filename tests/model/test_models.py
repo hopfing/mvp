@@ -217,3 +217,159 @@ class TestModelTraining:
         model.fit(X, y)
         probs = model.predict_proba(X)
         assert probs.shape == (100,)
+
+    # --- Training enhancement tests ---
+
+    def test_neural_net_label_smoothing(self, sample_data):
+        """Neural net with label smoothing can fit and predict."""
+        X, y = sample_data
+        model = get_model("neural_net", {
+            "hidden_layers": [16],
+            "epochs": 10,
+            "patience": 5,
+            "label_smoothing": 0.05,
+        })
+        model.fit(X, y)
+        probs = model.predict_proba(X)
+        assert probs.shape == (100,)
+        assert all(0 <= p <= 1 for p in probs)
+
+    def test_neural_net_weight_decay(self, sample_data):
+        """Neural net with weight decay uses AdamW."""
+        X, y = sample_data
+        model = get_model("neural_net", {
+            "hidden_layers": [16],
+            "epochs": 10,
+            "patience": 5,
+            "weight_decay": 0.001,
+        })
+        model.fit(X, y)
+        probs = model.predict_proba(X)
+        assert probs.shape == (100,)
+        assert all(0 <= p <= 1 for p in probs)
+
+    def test_neural_net_lr_scheduler(self, sample_data):
+        """Neural net with ReduceLROnPlateau can fit and predict."""
+        X, y = sample_data
+        model = get_model("neural_net", {
+            "hidden_layers": [16],
+            "epochs": 10,
+            "patience": 5,
+            "lr_scheduler": "plateau",
+            "lr_scheduler_factor": 0.5,
+            "lr_scheduler_patience": 3,
+        })
+        model.fit(X, y)
+        probs = model.predict_proba(X)
+        assert probs.shape == (100,)
+        assert all(0 <= p <= 1 for p in probs)
+
+    def test_neural_net_grad_clipping(self, sample_data):
+        """Neural net with gradient clipping can fit and predict."""
+        X, y = sample_data
+        model = get_model("neural_net", {
+            "hidden_layers": [16],
+            "epochs": 10,
+            "patience": 5,
+            "grad_clip_norm": 1.0,
+        })
+        model.fit(X, y)
+        probs = model.predict_proba(X)
+        assert probs.shape == (100,)
+        assert all(0 <= p <= 1 for p in probs)
+
+    def test_neural_net_layer_norm(self, sample_data):
+        """Neural net with layer normalization can fit and predict."""
+        X, y = sample_data
+        model = get_model("neural_net", {
+            "hidden_layers": [16],
+            "epochs": 10,
+            "patience": 5,
+            "layer_norm": True,
+        })
+        model.fit(X, y)
+        probs = model.predict_proba(X)
+        assert probs.shape == (100,)
+        assert all(0 <= p <= 1 for p in probs)
+
+    def test_neural_net_batch_and_layer_norm_raises(self):
+        """Setting both batch_norm and layer_norm raises ValueError."""
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            get_model("neural_net", {
+                "batch_norm": True,
+                "layer_norm": True,
+            })
+
+    def test_neural_net_all_enhancements_combined(self, sample_data):
+        """Neural net with all enhancements enabled can fit and predict."""
+        X, y = sample_data
+        model = get_model("neural_net", {
+            "hidden_layers": [32, 16],
+            "epochs": 15,
+            "patience": 5,
+            "label_smoothing": 0.05,
+            "weight_decay": 0.001,
+            "lr_scheduler": "plateau",
+            "lr_scheduler_patience": 3,
+            "grad_clip_norm": 1.0,
+            "layer_norm": True,
+        })
+        model.fit(X, y)
+        probs = model.predict_proba(X)
+        assert probs.shape == (100,)
+        assert all(0 <= p <= 1 for p in probs)
+
+    def test_neural_net_enhanced_serialization(self, sample_data, tmp_path):
+        """Neural net with new params survives joblib round-trip."""
+        import joblib
+
+        X, y = sample_data
+        model = get_model("neural_net", {
+            "hidden_layers": [16],
+            "epochs": 10,
+            "patience": 5,
+            "label_smoothing": 0.05,
+            "weight_decay": 0.001,
+            "layer_norm": True,
+            "grad_clip_norm": 1.0,
+        })
+        model.fit(X, y)
+        probs_before = model.predict_proba(X)
+
+        path = tmp_path / "enhanced_model.pkl"
+        joblib.dump(model, path)
+        loaded = joblib.load(path)
+        probs_after = loaded.predict_proba(X)
+
+        np.testing.assert_array_almost_equal(probs_before, probs_after)
+
+    def test_neural_net_finetune_with_enhancements(self, sample_data):
+        """Fine-tuning phase also uses enhancements."""
+        X, y = sample_data
+        model = get_model("neural_net", {
+            "hidden_layers": [16],
+            "epochs": 10,
+            "patience": 5,
+            "finetune_frac": 0.3,
+            "finetune_epochs": 5,
+            "finetune_patience": 3,
+            "label_smoothing": 0.05,
+            "weight_decay": 0.001,
+            "lr_scheduler": "plateau",
+            "grad_clip_norm": 1.0,
+        })
+        model.fit(X, y)
+        probs = model.predict_proba(X)
+        assert probs.shape == (100,)
+        assert all(0 <= p <= 1 for p in probs)
+
+    def test_neural_net_defaults_backward_compatible(self):
+        """New params all default to no-op values."""
+        model = get_model("neural_net", {})
+        assert model.label_smoothing == 0.0
+        assert model.lr_scheduler is None
+        assert model.lr_scheduler_factor == 0.5
+        assert model.lr_scheduler_patience == 5
+        assert model.weight_decay == 0.0
+        assert model.grad_clip_norm is None
+        assert model.layer_norm is False

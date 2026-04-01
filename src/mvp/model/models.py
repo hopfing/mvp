@@ -276,6 +276,7 @@ def _make_embedding_mlp():
             hidden_layers: list[int],
             dropout: float,
             batch_norm: bool,
+            layer_norm: bool = False,
         ):
             super().__init__()
             self.embedding = nn.Embedding(n_players + 1, embedding_dim, padding_idx=0)
@@ -284,7 +285,9 @@ def _make_embedding_mlp():
             in_dim = mlp_input_dim
             for hidden_dim in hidden_layers:
                 layers.append(nn.Linear(in_dim, hidden_dim))
-                if batch_norm:
+                if layer_norm:
+                    layers.append(nn.LayerNorm(hidden_dim))
+                elif batch_norm:
                     layers.append(nn.BatchNorm1d(hidden_dim))
                 layers.append(nn.ReLU())
                 if dropout > 0:
@@ -322,6 +325,17 @@ class NeuralNetModel(BaseModel):
         self.finetune_epochs: int = params.get("finetune_epochs", 100)
         self.finetune_patience: int = params.get("finetune_patience", 10)
         self.device: str | None = params.get("device", None)
+        self.label_smoothing: float = params.get("label_smoothing", 0.0)
+        self.weight_decay: float = params.get("weight_decay", 0.0)
+        self.grad_clip_norm: float | None = params.get("grad_clip_norm", None)
+        self.lr_scheduler: str | None = params.get("lr_scheduler", None)
+        self.lr_scheduler_factor: float = params.get("lr_scheduler_factor", 0.5)
+        self.lr_scheduler_patience: int = params.get("lr_scheduler_patience", 5)
+        self.layer_norm: bool = params.get("layer_norm", False)
+        if self.batch_norm and self.layer_norm:
+            raise ValueError(
+                "batch_norm and layer_norm are mutually exclusive; enable only one"
+            )
         self._module = None
         self._device = None
         self._n_features = None
@@ -342,13 +356,16 @@ class NeuralNetModel(BaseModel):
                 hidden_layers=self.hidden_layers,
                 dropout=self.dropout,
                 batch_norm=self.batch_norm,
+                layer_norm=self.layer_norm,
             )
 
         layers: list[nn.Module] = []
         in_dim = n_features
         for hidden_dim in self.hidden_layers:
             layers.append(nn.Linear(in_dim, hidden_dim))
-            if self.batch_norm:
+            if self.layer_norm:
+                layers.append(nn.LayerNorm(hidden_dim))
+            elif self.batch_norm:
                 layers.append(nn.BatchNorm1d(hidden_dim))
             layers.append(nn.ReLU())
             if self.dropout > 0:
@@ -374,6 +391,14 @@ class NeuralNetModel(BaseModel):
         emb_ids = X[:, self.embedding_col_idx].astype(int)
         X_features = np.delete(X, self.embedding_col_idx, axis=1)
         return X_features, emb_ids
+
+    def _make_optimizer(self, params, lr: float):
+        """Create optimizer — AdamW when weight_decay > 0, else Adam."""
+        import torch
+
+        if self.weight_decay > 0:
+            return torch.optim.AdamW(params, lr=lr, weight_decay=self.weight_decay)
+        return torch.optim.Adam(params, lr=lr)
 
     def _forward(self, X_t, emb_t=None):
         """Forward pass handling both plain MLP and embedding MLP."""
@@ -421,7 +446,15 @@ class NeuralNetModel(BaseModel):
         else:
             w_t = None
 
-        optimizer = torch.optim.Adam(self._module.parameters(), lr=self.learning_rate)
+        optimizer = self._make_optimizer(self._module.parameters(), self.learning_rate)
+        scheduler = None
+        if self.lr_scheduler == "plateau":
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer,
+                mode="min",
+                factor=self.lr_scheduler_factor,
+                patience=self.lr_scheduler_patience,
+            )
         loss_fn = torch.nn.BCELoss(reduction="none")
 
         # Build dataset with optional embedding and weight tensors
@@ -452,6 +485,8 @@ class NeuralNetModel(BaseModel):
                     idx += 1
                 wb = batch[idx] if has_w else None
 
+                if self.label_smoothing > 0:
+                    yb = yb * (1 - self.label_smoothing) + 0.5 * self.label_smoothing
                 optimizer.zero_grad()
                 pred = self._forward(xb, eb)
                 loss = loss_fn(pred, yb)
@@ -460,6 +495,10 @@ class NeuralNetModel(BaseModel):
                 else:
                     loss = loss.mean()
                 loss.backward()
+                if self.grad_clip_norm is not None:
+                    torch.nn.utils.clip_grad_norm_(
+                        self._module.parameters(), max_norm=self.grad_clip_norm
+                    )
                 optimizer.step()
 
             # Validation
@@ -468,6 +507,8 @@ class NeuralNetModel(BaseModel):
                 val_pred = self._forward(X_v, emb_v)
                 val_loss = loss_fn(val_pred, y_v).mean().item()
 
+            if scheduler is not None:
+                scheduler.step(val_loss)
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 best_state = {
@@ -499,7 +540,15 @@ class NeuralNetModel(BaseModel):
             ft_dataset = TensorDataset(*ft_tensors)
             ft_loader = DataLoader(ft_dataset, batch_size=self.batch_size, shuffle=True)
 
-            ft_optimizer = torch.optim.Adam(self._module.parameters(), lr=self.finetune_lr)
+            ft_optimizer = self._make_optimizer(self._module.parameters(), self.finetune_lr)
+            ft_scheduler = None
+            if self.lr_scheduler == "plateau":
+                ft_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                    ft_optimizer,
+                    mode="min",
+                    factor=self.lr_scheduler_factor,
+                    patience=self.lr_scheduler_patience,
+                )
             best_val_loss = float("inf")
             best_state = None
             wait = 0
@@ -517,6 +566,8 @@ class NeuralNetModel(BaseModel):
                         idx += 1
                     wb = batch[idx] if has_w else None
 
+                    if self.label_smoothing > 0:
+                        yb = yb * (1 - self.label_smoothing) + 0.5 * self.label_smoothing
                     ft_optimizer.zero_grad()
                     pred = self._forward(xb, eb)
                     loss = loss_fn(pred, yb)
@@ -525,6 +576,10 @@ class NeuralNetModel(BaseModel):
                     else:
                         loss = loss.mean()
                     loss.backward()
+                    if self.grad_clip_norm is not None:
+                        torch.nn.utils.clip_grad_norm_(
+                            self._module.parameters(), max_norm=self.grad_clip_norm
+                        )
                     ft_optimizer.step()
 
                 self._module.eval()
@@ -532,6 +587,8 @@ class NeuralNetModel(BaseModel):
                     val_pred = self._forward(X_v, emb_v)
                     val_loss = loss_fn(val_pred, y_v).mean().item()
 
+                if ft_scheduler is not None:
+                    ft_scheduler.step(val_loss)
                 if val_loss < best_val_loss:
                     best_val_loss = val_loss
                     best_state = {

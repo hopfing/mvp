@@ -51,6 +51,11 @@ DEFAULT_GRIDS: dict[str, dict[str, list[Any]]] = {
         "epochs": [15, 30, 50],
         "patience": [3, 5, 10],
         "batch_norm": [True, False],
+        "label_smoothing": [0.0, 0.01, 0.05, 0.1],
+        "weight_decay": [0.0, 0.0001, 0.001, 0.01],
+        "grad_clip_norm": [None, 1.0, 5.0],
+        "layer_norm": [True, False],
+        "lr_scheduler": [None, "plateau"],
     },
 }
 
