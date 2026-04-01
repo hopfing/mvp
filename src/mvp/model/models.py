@@ -472,6 +472,12 @@ class NeuralNetModel(BaseModel):
         else:
             emb_t = None
             emb_v = None
+        if opp_emb_ids is not None:
+            opp_emb_t = torch.tensor(opp_emb_ids[:-val_size], dtype=torch.long, device=self._device)
+            opp_emb_v = torch.tensor(opp_emb_ids[-val_size:], dtype=torch.long, device=self._device)
+        else:
+            opp_emb_t = None
+            opp_emb_v = None
 
         if w_train is not None:
             w_t = torch.tensor(w_train, dtype=torch.float32, device=self._device).unsqueeze(1)
@@ -493,6 +499,8 @@ class NeuralNetModel(BaseModel):
         tensors = [X_t, y_t]
         if emb_t is not None:
             tensors.append(emb_t)
+        if opp_emb_t is not None:
+            tensors.append(opp_emb_t)
         if w_t is not None:
             tensors.append(w_t)
         dataset = TensorDataset(*tensors)
@@ -503,6 +511,7 @@ class NeuralNetModel(BaseModel):
         wait = 0
         has_emb = emb_t is not None
         has_w = w_t is not None
+        has_opp_emb = opp_emb_t is not None
 
         for _epoch in range(self.epochs):
             self._module.train()
@@ -515,12 +524,15 @@ class NeuralNetModel(BaseModel):
                 eb = batch[idx] if has_emb else None
                 if has_emb:
                     idx += 1
+                oeb = batch[idx] if has_opp_emb else None
+                if has_opp_emb:
+                    idx += 1
                 wb = batch[idx] if has_w else None
 
                 if self.label_smoothing > 0:
                     yb = yb * (1 - self.label_smoothing) + 0.5 * self.label_smoothing
                 optimizer.zero_grad()
-                pred = self._forward(xb, eb)
+                pred = self._forward(xb, eb, oeb)
                 loss = loss_fn(pred, yb)
                 if wb is not None:
                     loss = (loss * wb).mean()
@@ -536,7 +548,7 @@ class NeuralNetModel(BaseModel):
             # Validation
             self._module.eval()
             with torch.no_grad():
-                val_pred = self._forward(X_v, emb_v)
+                val_pred = self._forward(X_v, emb_v, opp_emb_v)
                 val_loss = loss_fn(val_pred, y_v).mean().item()
 
             if scheduler is not None:
@@ -562,11 +574,14 @@ class NeuralNetModel(BaseModel):
             ft_X = X_t[-n_recent:]
             ft_y = y_t[-n_recent:]
             ft_emb = emb_t[-n_recent:] if emb_t is not None else None
+            ft_opp_emb = opp_emb_t[-n_recent:] if opp_emb_t is not None else None
             ft_w = w_t[-n_recent:] if w_t is not None else None
 
             ft_tensors = [ft_X, ft_y]
             if ft_emb is not None:
                 ft_tensors.append(ft_emb)
+            if ft_opp_emb is not None:
+                ft_tensors.append(ft_opp_emb)
             if ft_w is not None:
                 ft_tensors.append(ft_w)
             ft_dataset = TensorDataset(*ft_tensors)
@@ -596,12 +611,15 @@ class NeuralNetModel(BaseModel):
                     eb = batch[idx] if has_emb else None
                     if has_emb:
                         idx += 1
+                    oeb = batch[idx] if has_opp_emb else None
+                    if has_opp_emb:
+                        idx += 1
                     wb = batch[idx] if has_w else None
 
                     if self.label_smoothing > 0:
                         yb = yb * (1 - self.label_smoothing) + 0.5 * self.label_smoothing
                     ft_optimizer.zero_grad()
-                    pred = self._forward(xb, eb)
+                    pred = self._forward(xb, eb, oeb)
                     loss = loss_fn(pred, yb)
                     if wb is not None:
                         loss = (loss * wb).mean()
@@ -616,7 +634,7 @@ class NeuralNetModel(BaseModel):
 
                 self._module.eval()
                 with torch.no_grad():
-                    val_pred = self._forward(X_v, emb_v)
+                    val_pred = self._forward(X_v, emb_v, opp_emb_v)
                     val_loss = loss_fn(val_pred, y_v).mean().item()
 
                 if ft_scheduler is not None:
@@ -647,9 +665,12 @@ class NeuralNetModel(BaseModel):
             X_features, emb_ids, opp_emb_ids = self._split_embedding_col(X)
             X_t = torch.tensor(X_features, dtype=torch.float32, device=self._device)
             emb_t = None
+            opp_emb_t = None
             if emb_ids is not None:
                 emb_t = torch.tensor(emb_ids, dtype=torch.long, device=self._device)
-            preds = self._forward(X_t, emb_t).squeeze(1).cpu().numpy()
+            if opp_emb_ids is not None:
+                opp_emb_t = torch.tensor(opp_emb_ids, dtype=torch.long, device=self._device)
+            preds = self._forward(X_t, emb_t, opp_emb_t).squeeze(1).cpu().numpy()
         return preds
 
     def __getstate__(self):
