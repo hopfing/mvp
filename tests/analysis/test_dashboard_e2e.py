@@ -96,12 +96,22 @@ def _make_full_sims():
 
 
 def test_overview_computes_without_error():
-    from mvp.analysis.dashboard.overview import compute_headlines
+    from mvp.analysis.dashboard.overview import (
+        compute_bet_performance,
+        compute_model_performance,
+        compute_odds_coverage,
+    )
 
     ds = _make_full_ds()
-    h = compute_headlines(ds)
-    assert h["n_predictions"] == 50
-    assert h["accuracy"] is not None
+    m = compute_model_performance(ds)
+    assert m["n"] > 0
+    assert m["accuracy"] is not None
+
+    b = compute_bet_performance(ds)
+    assert b["n"] >= 0
+
+    c = compute_odds_coverage(ds)
+    assert c["n_predictions"] == 50
 
 
 def test_edge_filters_without_error():
