@@ -157,7 +157,10 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
         metric_card_data("N", m["n"], fmt="d"),
         {"label": "Record", "value": record_model},
         metric_card_data("Accuracy", m["accuracy"], fmt=".1%"),
-        {"label": "Stake", "value": f"${m['stake']:,.2f}" if m["stake"] is not None else "—"},
+        {
+            "label": "Stake",
+            "value": f"${m['stake']:,.2f}" if m["stake"] else "\u2014",
+        },
         metric_card_data("P&L", m["pnl"], fmt="$.2f"),
         metric_card_data("ROI", m["roi"], fmt=".1%"),
     ])
@@ -172,7 +175,10 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
         metric_card_data("N", b["n"], fmt="d"),
         {"label": "Record", "value": record_bet},
         metric_card_data("Accuracy", b["accuracy"], fmt=".1%"),
-        {"label": "Stake", "value": f"${b['stake']:,.2f}" if b["stake"] is not None else "—"},
+        {
+            "label": "Stake",
+            "value": f"${b['stake']:,.2f}" if b["stake"] else "\u2014",
+        },
         metric_card_data("P&L", b["pnl"], fmt="$.2f"),
         metric_card_data("ROI", b["roi"], fmt=".1%"),
     ])

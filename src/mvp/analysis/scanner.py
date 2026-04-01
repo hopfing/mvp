@@ -143,39 +143,71 @@ def compute_slices(
     return pl.DataFrame(rows)
 
 
+_EMPTY_SCHEMA = {
+    "model_version": pl.Utf8,
+    "depth": pl.Int64, "dimensions": pl.Utf8, "filters": pl.Utf8,
+    "n": pl.Int64, "accuracy": pl.Float64, "roi": pl.Float64,
+    "pnl": pl.Float64, "parent_dimensions": pl.Utf8,
+    "parent_filters": pl.Utf8, "parent_roi": pl.Float64,
+    "roi_delta": pl.Float64, "direction": pl.Utf8,
+    "surprise": pl.Float64,
+}
+
+
+def _scan_one_model(
+    ds: pl.DataFrame,
+    max_depth: int,
+    min_n: int,
+) -> pl.DataFrame:
+    """Run scanner pipeline on a single model's data."""
+    bucketed = bucket_dimensions(ds)
+    if len(bucketed) == 0:
+        return pl.DataFrame(schema=_EMPTY_SCHEMA)
+
+    slices = compute_slices(bucketed, max_depth=max_depth, min_n=min_n)
+    return score_surprises(slices)
+
+
 def run_scanner(
     ds: pl.DataFrame,
     max_depth: int = 2,
     min_n: int = MIN_N,
 ) -> pl.DataFrame:
-    """Run the full insight scanner pipeline."""
+    """Run the insight scanner per model version.
+
+    Produces the same depth 0/1/2 slices for each model independently.
+    Returns all results stacked with a model_version column.
+    """
     required = [
         "status", "model_correct",
         "pred_odds_best_close", "model_edge_best_close",
     ]
     if not all(c in ds.columns for c in required):
-        return pl.DataFrame(schema={
-            "depth": pl.Int64, "dimensions": pl.Utf8, "filters": pl.Utf8,
-            "n": pl.Int64, "accuracy": pl.Float64, "roi": pl.Float64,
-            "pnl": pl.Float64, "parent_dimensions": pl.Utf8,
-            "parent_filters": pl.Utf8, "parent_roi": pl.Float64,
-            "roi_delta": pl.Float64, "direction": pl.Utf8,
-            "surprise": pl.Float64,
-        })
+        return pl.DataFrame(schema=_EMPTY_SCHEMA)
 
-    bucketed = bucket_dimensions(ds)
-    if len(bucketed) == 0:
-        return pl.DataFrame(schema={
-            "depth": pl.Int64, "dimensions": pl.Utf8, "filters": pl.Utf8,
-            "n": pl.Int64, "accuracy": pl.Float64, "roi": pl.Float64,
-            "pnl": pl.Float64, "parent_dimensions": pl.Utf8,
-            "parent_filters": pl.Utf8, "parent_roi": pl.Float64,
-            "roi_delta": pl.Float64, "direction": pl.Utf8,
-            "surprise": pl.Float64,
-        })
+    if "model_version" not in ds.columns:
+        result = _scan_one_model(ds, max_depth, min_n)
+        if len(result) > 0:
+            result = result.with_columns(
+                pl.lit("unknown").alias("model_version")
+            )
+        return result
 
-    slices = compute_slices(bucketed, max_depth=max_depth, min_n=min_n)
-    return score_surprises(slices)
+    versions = ds["model_version"].drop_nulls().unique().to_list()
+    parts = []
+    for version in versions:
+        model_ds = ds.filter(pl.col("model_version") == version)
+        result = _scan_one_model(model_ds, max_depth, min_n)
+        if len(result) > 0:
+            result = result.with_columns(
+                pl.lit(version).alias("model_version")
+            )
+            parts.append(result)
+
+    if not parts:
+        return pl.DataFrame(schema=_EMPTY_SCHEMA)
+
+    return pl.concat(parts, how="diagonal_relaxed")
 
 
 def score_surprises(slices: pl.DataFrame) -> pl.DataFrame:

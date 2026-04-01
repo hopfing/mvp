@@ -35,9 +35,34 @@ def render(
     """Render the insights page."""
     import streamlit as st
 
+    from mvp.analysis.dashboard.components import model_selector
+
     if insights is None or len(insights) == 0:
         st.info("No insights available. Run the pipeline to generate them.")
         return
+
+    # Model selector — defaults to production model
+    model_version = model_selector(ds, key="insights", default_to_active=True)
+
+    # Filter insights to selected model
+    if "model_version" in insights.columns:
+        if model_version is None:
+            # "All Models" selected — default to production
+            from mvp.analysis.dashboard.components import get_active_model
+
+            effective = get_active_model()
+        else:
+            effective = model_version
+
+        if effective is not None:
+            filtered = insights.filter(
+                pl.col("model_version") == effective
+            )
+            if len(filtered) > 0:
+                insights = filtered
+            else:
+                st.warning(f"No insights for model '{effective}'.")
+                return
 
     max_depth = insights["depth"].max()
 

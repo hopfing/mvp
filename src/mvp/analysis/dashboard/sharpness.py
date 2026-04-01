@@ -88,6 +88,17 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
     """Render the book sharpness page."""
     import streamlit as st
 
+    from mvp.analysis.dashboard.components import model_selector
+
+    # --- Model filter ---
+    model_version = model_selector(ds, key="sharpness", default_to_active=True)
+    if model_version is not None:
+        if "model_version" in sims.columns:
+            sims = sims.filter(
+                (pl.col("model_version") == model_version)
+                | (pl.col("model_version") == "all")
+            )
+
     books = detect_books(sims)
     if not books:
         st.info("No per-book simulation data available.")
