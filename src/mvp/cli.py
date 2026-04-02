@@ -1308,8 +1308,13 @@ def cmd_live(args: argparse.Namespace) -> int:
         for b in BOOK_REGISTRY
     }
 
-    try:  # ensure odds_pool cleanup on early failure
-        # Rankings + discovery in parallel
+    errors: list[str] = []
+    predictions = None
+    all_odds_maps: dict[str, dict[str, dict[str, float]]] = {}
+    existing_map = None
+
+    # --- Stage 1: Rankings, discovery, tournament processing, aggregation ---
+    try:
         with ThreadPoolExecutor(max_workers=2) as pool:
             rankings_future = pool.submit(
                 run_rankings, start_year=current_year - 1
@@ -1339,7 +1344,6 @@ def cmd_live(args: argparse.Namespace) -> int:
         logger.info("Running cross-tournament aggregation")
         MatchesAggregator().run()
 
-        # Report extraction/aggregation failures
         if player_result.has_failures:
             logger.warning(
                 "%d failed player operation(s) — continuing",
@@ -1350,30 +1354,34 @@ def cmd_live(args: argparse.Namespace) -> int:
                 logger.error(
                     "  FAILED: tournament %s (%d): %s", tid, year, error
                 )
-            raise RuntimeError(
-                f"Pipeline finished with {len(failed)} failed tournament(s)"
-            )
+                errors.append(f"tournament {tid} ({year}): {error}")
+    except Exception as e:
+        logger.error("Stage 1 (extract/aggregate) failed: %s", e)
+        errors.append(f"extract/aggregate: {e}")
+        odds_pool.shutdown(wait=False)
+        raise RuntimeError(
+            f"Pipeline cannot continue — extract/aggregate failed: {e}"
+        )
 
-        # Predict with production model(s) — one per target section
-        target_sections = _get_target_sections()
-
-        # Winner predictions (primary — drives odds matching, sheets, analysis)
+    # --- Stage 2: Winner predictions ---
+    target_sections = _get_target_sections()
+    try:
         predictor = ProductionPredictor(target_section="winner")
         predictions = predictor.predict(tournament_keys=pairs)
 
-        if len(predictions) == 0:
+        if len(predictions) > 0:
+            predictions = predictor.predict_voters(pairs, predictions)
+
+        if predictions is not None and len(predictions) > 0:
+            predictor.save_predictions(predictions)
+        else:
             print("\nNo pending matches to predict.")
-            return 0
+    except Exception as e:
+        logger.error("Winner predictions failed: %s", e)
+        errors.append(f"winner predictions: {e}")
 
-        predictions = predictor.predict_voters(pairs, predictions)
-
-        if len(predictions) == 0:
-            print("\nNo pending matches to predict.")
-            return 0
-
-        predictor.save_predictions(predictions)
-
-        # Additional target sections (e.g., deciding_set)
+    # --- Stage 3: Additional target sections ---
+    if predictions is not None and len(predictions) > 0:
         for section in target_sections:
             if section == "winner":
                 continue
@@ -1394,19 +1402,19 @@ def cmd_live(args: argparse.Namespace) -> int:
                 print(f"Generated {len(ds_predictions)} {section} predictions")
             except Exception as e:
                 logger.error("%s prediction failed: %s", section, e)
-                print(f"Warning: {section} prediction failed ({e})")
+                errors.append(f"{section} predictions: {e}")
 
-        # Wait for odds fetches
-        for book in BOOK_REGISTRY:
-            try:
-                n = book_futures[book.code].result(timeout=30)
-                print(f"Fetched {n} {book.label} moneyline odds entries")
-            except Exception as e:
-                logger.error("%s odds fetch failed: %s", book.label, e)
-                print(f"Warning: {book.label} odds fetch failed ({e})")
+    # --- Stage 4: Odds fetching ---
+    for book in BOOK_REGISTRY:
+        try:
+            n = book_futures[book.code].result(timeout=30)
+            print(f"Fetched {n} {book.label} moneyline odds entries")
+        except Exception as e:
+            logger.error("%s odds fetch failed: %s", book.label, e)
+            errors.append(f"{book.label} odds fetch: {e}")
 
-        # Map new book events to matches using full player database
-    
+    # --- Stage 5: Event mapping ---
+    try:
         from mvp.analysis.event_map import (
             load_event_map_with_overrides,
             save_event_mappings,
@@ -1426,7 +1434,6 @@ def cmd_live(args: argparse.Namespace) -> int:
         existing_map = load_event_map_with_overrides()
         data_root = get_data_root()
 
-        # Collect unmapped events across all books to determine year range
         unmapped_odds: list[tuple[str, str, Path, pl.DataFrame]] = []
         for book, eid_col, odds_rel, aliases_path in _book_mapping_config:
             odds_path = data_root / odds_rel
@@ -1437,18 +1444,15 @@ def cmd_live(args: argparse.Namespace) -> int:
             existing_eids = set(
                 existing_map.filter(pl.col("book") == book)["event_id"].to_list()
             )
-            # Filter to only unmapped events
             unmapped = staged_latest.filter(~pl.col(eid_col).is_in(existing_eids))
             if len(unmapped) > 0:
                 unmapped_odds.append((book, eid_col, aliases_path, unmapped))
 
         if unmapped_odds:
-            # Derive year range from unmapped events
             min_year = min(
                 df["fetched_at"].min().year for _, _, _, df in unmapped_odds
             )
 
-            # Build catalog filtered to relevant years only
             matches_path = data_root / "aggregate" / "atptour" / "matches.parquet"
             if matches_path.exists():
                 catalog_df = pl.read_parquet(
@@ -1460,12 +1464,10 @@ def cmd_live(args: argparse.Namespace) -> int:
             else:
                 match_catalog = {}
 
-            # Build player lookup once (shared across books)
             base_lookup = build_player_lookup()
 
             for book, eid_col, aliases_path, unmapped_df in unmapped_odds:
                 try:
-                    # Merge per-book aliases into lookup
                     if aliases_path.exists():
                         import yaml
 
@@ -1487,11 +1489,15 @@ def cmd_live(args: argparse.Namespace) -> int:
                         print(f"Event mapper: {len(map_result.event_matches)} new {book.upper()} mappings")
                 except Exception as e:
                     logger.error("Event mapping failed for %s: %s", book.upper(), e)
+                    errors.append(f"event mapping {book.upper()}: {e}")
+    except Exception as e:
+        logger.error("Event mapping setup failed: %s", e)
+        errors.append(f"event mapping setup: {e}")
 
-        # Look up odds for predictions using event map
+    # --- Stage 6: Odds matching ---
+    if predictions is not None and len(predictions) > 0:
         import importlib
 
-        all_odds_maps: dict[str, dict[str, dict[str, float]]] = {}
         for book in BOOK_REGISTRY:
             try:
                 mod = importlib.import_module(f"mvp.{book.domain}.matcher")
@@ -1502,70 +1508,81 @@ def cmd_live(args: argparse.Namespace) -> int:
                     print(f"Matched {book.label} odds for {len(result)}/{len(predictions)} predictions")
             except Exception as e:
                 logger.error("%s odds lookup failed: %s", book.label, e)
+                errors.append(f"{book.label} odds lookup: {e}")
 
-        odds_pool.shutdown(wait=False)
+    odds_pool.shutdown(wait=False)
 
-        # Log predictions that have never been mapped to any book event
-        mapped_uids = set(existing_map["match_uid"].to_list())
-        never_mapped = predictions.filter(
-            ~pl.col("match_uid").is_in(mapped_uids)
-        )
-        if len(never_mapped) > 0:
-            logger.info(
-                "Predictions with no odds from any book: %d/%d",
-                len(never_mapped), len(predictions),
+    # --- Stage 7: Log unmapped predictions ---
+    if predictions is not None and len(predictions) > 0 and existing_map is not None:
+        try:
+            mapped_uids = set(existing_map["match_uid"].to_list())
+            never_mapped = predictions.filter(
+                ~pl.col("match_uid").is_in(mapped_uids)
             )
-            for row in never_mapped.sort("effective_match_date").iter_rows(named=True):
-                p1 = row.get("p1_name") or row.get("player_id", "?")
-                p2 = row.get("p2_name") or row.get("opp_id", "?")
-                t = row.get("tournament_name") or "?"
-                uid = row.get("match_uid", "?")
-                logger.info("  No odds: %s — %s vs %s (%s)", t, p1, p2, uid)
+            if len(never_mapped) > 0:
+                logger.info(
+                    "Predictions with no odds from any book: %d/%d",
+                    len(never_mapped), len(predictions),
+                )
+                for row in never_mapped.sort("effective_match_date").iter_rows(named=True):
+                    p1 = row.get("p1_name") or row.get("player_id", "?")
+                    p2 = row.get("p2_name") or row.get("opp_id", "?")
+                    t = row.get("tournament_name") or "?"
+                    uid = row.get("match_uid", "?")
+                    logger.info("  No odds: %s — %s vs %s (%s)", t, p1, p2, uid)
 
-        print_predictions(predictions, book_odds=all_odds_maps or None)
+            print_predictions(predictions, book_odds=all_odds_maps or None)
+        except Exception as e:
+            logger.error("Prediction display failed: %s", e)
+            errors.append(f"prediction display: {e}")
 
-    except Exception:
-        odds_pool.shutdown(wait=False)
-        raise
+    # --- Stage 8: Sheets sync ---
+    if predictions is not None and len(predictions) > 0:
+        try:
+            from mvp.gsheets.base import merge_predictions, prepare_predictions
+            from mvp.gsheets.sheets import SheetsSync
 
-    # Sync to Google Sheets (best-effort, must be last)
-    try:
-    
-        from mvp.gsheets.base import merge_predictions, prepare_predictions
-        from mvp.gsheets.sheets import SheetsSync
+            matches_path = get_data_root() / "aggregate" / "atptour" / "matches.parquet"
+            sheets = SheetsSync()
+            existing = sheets.read_existing()
 
-        matches_path = get_data_root() / "aggregate" / "atptour" / "matches.parquet"
-        sheets = SheetsSync()
-        existing = sheets.read_existing()
+            matches_df = pl.read_parquet(matches_path) if matches_path.exists() else pl.DataFrame()
 
-        matches_df = pl.read_parquet(matches_path) if matches_path.exists() else pl.DataFrame()
+            prepared = prepare_predictions(predictions)
+            book_odds_for_sheets = {
+                book.display_name: all_odds_maps[book.code]
+                for book in BOOK_REGISTRY
+                if book.code in all_odds_maps
+            }
+            merged = merge_predictions(existing, prepared, matches_df, odds_maps=book_odds_for_sheets or None)
+            sheets.write(merged)
 
-        prepared = prepare_predictions(predictions)
-        book_odds_for_sheets = {
-            book.display_name: all_odds_maps[book.code]
-            for book in BOOK_REGISTRY
-            if book.code in all_odds_maps
-        }
-        merged = merge_predictions(existing, prepared, matches_df, odds_maps=book_odds_for_sheets or None)
-        sheets.write(merged)
+            sheets_parquet = get_data_root() / "sheets" / "bets.parquet"
+            sheets_parquet.parent.mkdir(parents=True, exist_ok=True)
+            merged.write_parquet(sheets_parquet)
 
-        sheets_parquet = get_data_root() / "sheets" / "bets.parquet"
-        sheets_parquet.parent.mkdir(parents=True, exist_ok=True)
-        merged.write_parquet(sheets_parquet)
+            n_new = len(merged) - len(existing)
+            print(f"Synced to Google Sheets ({n_new} new matches)")
+        except Exception as e:
+            logger.error("Sheets sync failed: %s", e)
+            print(f"Warning: Sheets sync failed ({e}). Predictions saved locally.")
+            errors.append(f"sheets sync: {e}")
 
-        n_new = len(merged) - len(existing)
-        print(f"Synced to Google Sheets ({n_new} new matches)")
-    except Exception as e:
-        logger.error("Sheets sync failed: %s", e)
-        print(f"Warning: Sheets sync failed ({e}). Predictions saved locally.")
-
-    # Refresh analysis data for dashboard
+    # --- Stage 9: Analysis refresh ---
     try:
         from mvp.analysis.refresh import refresh_analysis_data
         refresh_analysis_data(get_data_root(), BOOK_REGISTRY)
     except Exception as e:
         logger.error("Analysis refresh failed: %s", e)
         print(f"Warning: Analysis data refresh failed ({e})")
+        errors.append(f"analysis refresh: {e}")
+
+    # --- Raise all collected errors at the very end ---
+    if errors:
+        summary = "; ".join(errors)
+        raise RuntimeError(
+            f"Pipeline finished with {len(errors)} error(s): {summary}"
+        )
 
     return 0
 
