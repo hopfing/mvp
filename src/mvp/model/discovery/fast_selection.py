@@ -294,7 +294,8 @@ class FastForwardSelector:
             try:
                 col_names = get_feature_columns(features)
                 col_indices = np.array([col_to_idx[c] for c in col_names])
-            except KeyError:
+            except KeyError as e:
+                logger.warning("Column lookup failed for %s: %s", features, e)
                 return float("inf")
 
             fold_metrics = []

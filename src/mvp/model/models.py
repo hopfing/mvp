@@ -338,6 +338,7 @@ class NeuralNetModel(BaseModel):
         self.finetune_epochs: int = params.get("finetune_epochs", 100)
         self.finetune_patience: int = params.get("finetune_patience", 10)
         self.device: str | None = params.get("device", None)
+        self.random_state: int | None = params.get("random_state", None)
         self.label_smoothing: float = params.get("label_smoothing", 0.0)
         self.weight_decay: float = params.get("weight_decay", 0.0)
         self.grad_clip_norm: float | None = params.get("grad_clip_norm", None)
@@ -404,6 +405,8 @@ class NeuralNetModel(BaseModel):
         import torch
 
         if self.device is not None:
+            if self.device == "cuda" and not torch.cuda.is_available():
+                return torch.device("cpu")
             return torch.device(self.device)
         if torch.cuda.is_available():
             return torch.device("cuda")
@@ -447,6 +450,8 @@ class NeuralNetModel(BaseModel):
         import torch
         from torch.utils.data import DataLoader, TensorDataset
 
+        if self.random_state is not None:
+            torch.manual_seed(self.random_state)
         self._device = self._get_device()
 
         # Separate embedding column before counting features

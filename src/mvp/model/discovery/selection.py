@@ -118,7 +118,8 @@ class FeatureSelector:
                 candidate = selected + [feature]
                 try:
                     metric = self.scorer(candidate)
-                except Exception:
+                except Exception as e:
+                    sel_logger.warning("Scorer failed for %s: %s", feature, e)
                     continue
 
                 round_results.append((feature, metric))
