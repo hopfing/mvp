@@ -45,7 +45,7 @@ def _load_data(
 
 def run(data_root: str) -> None:
     """Launch the Streamlit dashboard."""
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     st.set_page_config(
         page_title="MVP Analysis",
@@ -57,7 +57,7 @@ def run(data_root: str) -> None:
     # Global refresh indicator (top-right on every page)
     if latest_run and latest_run.get("timestamp"):
         ts = datetime.fromisoformat(latest_run["timestamp"])
-        age_minutes = (datetime.now(timezone.utc) - ts).total_seconds() / 60
+        age_minutes = (datetime.now() - ts).total_seconds() / 60
         color = "red" if age_minutes > 30 else "green"
         label = ts.strftime("%Y-%m-%d %H:%M")
         st.markdown(

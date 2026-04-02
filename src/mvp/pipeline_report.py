@@ -6,7 +6,7 @@ Collects metrics from each pipeline stage and persists as JSONL.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 
 
@@ -15,7 +15,7 @@ class PipelineReport:
 
     def __init__(self) -> None:
         self.data: dict = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now().isoformat(),
             "tournaments_processed": 0,
             "tournaments_failed": 0,
             "tournament_failures": [],
