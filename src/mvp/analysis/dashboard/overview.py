@@ -141,7 +141,7 @@ def _fmt(val: float | int | None, fmt: str) -> str:
     return str(val)
 
 
-def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
+def render(ds: pl.DataFrame, sims: pl.DataFrame, latest_run: dict | None = None) -> None:
     """Render the overview page."""
     import streamlit as st
 
@@ -150,6 +150,23 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
         model_selector,
         render_metric_cards,
     )
+
+    # --- Pipeline Health Strip ---
+    if latest_run:
+        books_fetched = latest_run.get("books_fetched", {})
+        books_with_odds = sum(1 for v in books_fetched.values() if v > 0)
+        books_total = len(books_fetched)
+        error_count = len(latest_run.get("errors", []))
+
+        h_cols = st.columns(2)
+        with h_cols[0]:
+            st.metric("Books with Odds", f"{books_with_odds}/{books_total}")
+        with h_cols[1]:
+            if error_count > 0:
+                st.metric("Pipeline Errors", error_count)
+            else:
+                st.metric("Pipeline Errors", "0")
+        st.divider()
 
     model_version = model_selector(ds, key="overview", default_to_active=False)
     if model_version is not None:
