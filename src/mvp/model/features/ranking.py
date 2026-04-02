@@ -51,8 +51,13 @@ def ranking_ratio() -> pl.Expr:
     """Ratio of rankings (player_rank / opp_rank).
 
     < 1 means player is ranked higher (better).
+    Returns null when either rank is 0 or null.
     """
-    return pl.col("player_rank") / pl.col("opp_rank")
+    return (
+        pl.when((pl.col("player_rank") > 0) & (pl.col("opp_rank") > 0))
+        .then(pl.col("player_rank") / pl.col("opp_rank"))
+        .otherwise(None)
+    )
 
 
 @feature(
@@ -64,7 +69,11 @@ def ranking_ratio() -> pl.Expr:
 )
 def ranking_ratio_capped(cap: float = 3.0) -> pl.Expr:
     """Ranking ratio capped symmetrically at [1/cap, cap]."""
-    ratio = pl.col("player_rank") / pl.col("opp_rank")
+    ratio = (
+        pl.when((pl.col("player_rank") > 0) & (pl.col("opp_rank") > 0))
+        .then(pl.col("player_rank") / pl.col("opp_rank"))
+        .otherwise(None)
+    )
     return ratio.clip(lower_bound=1/cap, upper_bound=cap)
 
 
