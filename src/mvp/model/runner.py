@@ -312,9 +312,11 @@ class ExperimentRunner:
 
         # Embedding configuration
         embedding_col = None
+        opp_embedding_col = None
         min_player_matches = 10
         if self.config.model.params:
             embedding_col = self.config.model.params.get("embedding_col")
+            opp_embedding_col = self.config.model.params.get("opp_embedding_col")
             min_player_matches = self.config.model.params.get(
                 "min_player_matches", 10
             )
@@ -418,16 +420,22 @@ class ExperimentRunner:
 
                 # Append embedding column (integer-encoded, not scaled)
                 if embedding_col and embedding_col in train_df.columns:
-                    player_counts = train_df[embedding_col].value_counts()
-                    eligible = player_counts.filter(
-                        pl.col("count") >= min_player_matches
-                    )
+                    # Build vocab from player column (and opp column if dual)
+                    player_ids = train_df[embedding_col].to_list()
+                    if opp_embedding_col and opp_embedding_col in train_df.columns:
+                        opp_ids = train_df[opp_embedding_col].to_list()
+                        all_ids = player_ids + opp_ids
+                    else:
+                        all_ids = player_ids
+                    id_counts: dict[str, int] = {}
+                    for pid in all_ids:
+                        id_counts[pid] = id_counts.get(pid, 0) + 1
                     vocab = {
                         pid: idx + 1
-                        for idx, pid in enumerate(
-                            eligible[embedding_col].to_list()
-                        )
+                        for idx, (pid, count) in enumerate(id_counts.items())
+                        if count >= min_player_matches
                     }
+
                     emb_train = np.array(
                         [vocab.get(p, 0) for p in train_df[embedding_col].to_list()]
                     ).reshape(-1, 1)
@@ -437,6 +445,18 @@ class ExperimentRunner:
                     X_train = np.hstack([X_train, emb_train.astype(np.float64)])
                     X_test = np.hstack([X_test, emb_test.astype(np.float64)])
                     self.config.model.params["embedding_col_idx"] = X_train.shape[1] - 1
+
+                    if opp_embedding_col and opp_embedding_col in train_df.columns:
+                        opp_emb_train = np.array(
+                            [vocab.get(p, 0) for p in train_df[opp_embedding_col].to_list()]
+                        ).reshape(-1, 1)
+                        opp_emb_test = np.array(
+                            [vocab.get(p, 0) for p in test_df[opp_embedding_col].to_list()]
+                        ).reshape(-1, 1)
+                        X_train = np.hstack([X_train, opp_emb_train.astype(np.float64)])
+                        X_test = np.hstack([X_test, opp_emb_test.astype(np.float64)])
+                        self.config.model.params["opp_embedding_col_idx"] = X_train.shape[1] - 1
+
                     self.config.model.params["n_players"] = len(vocab)
 
                 # Compute sample weights if configured
