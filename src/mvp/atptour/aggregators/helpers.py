@@ -280,9 +280,10 @@ def explode_schedule(df: pl.DataFrame) -> pl.DataFrame:
     }
     shared_cols = [
         "match_uid", "tournament_id", "year", "circuit",
-        "draw_type", "round", "match_date", "scheduled_datetime",
+        "draw_type", "round", "match_date", "schedule_day", "scheduled_datetime",
         "time_suffix", "display_time", "court_name",
         "court_match_num", "is_time_estimated", "status", "score",
     ]
+    shared_cols = [c for c in shared_cols if c in df.columns]
 
     return explode_to_player_match(df, player_cols, opp_cols, shared_cols)

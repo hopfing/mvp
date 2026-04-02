@@ -128,7 +128,7 @@ class FeatureSelector:
                     best_feature = feature
                     best_feature_metric = metric
                     if hasattr(feature_iter, "set_postfix"):
-                        feature_iter.set_postfix(best=f"{best_feature_metric:.4f}")
+                        feature_iter.set_postfix(best=f"{best_feature_metric:.4f}", feat=best_feature)
 
             # If no improvement, stop
             if best_feature is None or not self._is_better(

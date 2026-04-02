@@ -297,7 +297,6 @@ def _make_embedding_mlp():
                     layers.append(nn.Dropout(dropout))
                 in_dim = hidden_dim
             layers.append(nn.Linear(in_dim, 1))
-            layers.append(nn.Sigmoid())
             self.mlp = nn.Sequential(*layers)
 
         def forward(
@@ -398,7 +397,6 @@ class NeuralNetModel(BaseModel):
                 layers.append(nn.Dropout(self.dropout))
             in_dim = hidden_dim
         layers.append(nn.Linear(in_dim, 1))
-        layers.append(nn.Sigmoid())
         return nn.Sequential(*layers)
 
     def _get_device(self):
@@ -498,7 +496,7 @@ class NeuralNetModel(BaseModel):
                 factor=self.lr_scheduler_factor,
                 patience=self.lr_scheduler_patience,
             )
-        loss_fn = torch.nn.BCELoss(reduction="none")
+        loss_fn = torch.nn.BCEWithLogitsLoss(reduction="none")
 
         # Build dataset with optional embedding and weight tensors
         tensors = [X_t, y_t]
@@ -675,7 +673,7 @@ class NeuralNetModel(BaseModel):
                 emb_t = torch.tensor(emb_ids, dtype=torch.long, device=self._device)
             if opp_emb_ids is not None:
                 opp_emb_t = torch.tensor(opp_emb_ids, dtype=torch.long, device=self._device)
-            preds = self._forward(X_t, emb_t, opp_emb_t).squeeze(1).cpu().numpy()
+            preds = torch.sigmoid(self._forward(X_t, emb_t, opp_emb_t)).squeeze(1).cpu().numpy()
         return preds
 
     def __getstate__(self):

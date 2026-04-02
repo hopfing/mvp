@@ -183,6 +183,7 @@ MATCHES_SCHEMA: dict[str, pl.DataType] = {
     "currency": pl.String,
     # Schedule-only
     "match_date": pl.Date,
+    "schedule_day": pl.Int64,
     "scheduled_datetime": pl.Datetime,
     "time_suffix": pl.String,
     "display_time": pl.String,
@@ -1073,6 +1074,7 @@ class TournamentMatchesAggregator(BaseJob):
             "currency",
             # Schedule-only
             "match_date",
+            "schedule_day",
             "scheduled_datetime",
             "time_suffix",
             "display_time",

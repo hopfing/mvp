@@ -43,7 +43,7 @@ _PREDICTOR_EXTRA_COLS = [
     "player_first_name", "player_last_name",
     "opp_first_name", "opp_last_name",
     "player_display_name", "opp_display_name",
-    "draw_p1_id", "scheduled_datetime", "match_date",
+    "draw_p1_id", "scheduled_datetime", "match_date", "schedule_day",
     "player_elo", "opp_elo",
     "player_hard_adj", "player_clay_adj", "player_grass_adj",
     "opp_hard_adj", "opp_clay_adj", "opp_grass_adj",
@@ -810,6 +810,8 @@ class ProductionPredictor:
             select_exprs.append(pl.col("scheduled_datetime"))
         if "match_date" in canonical.columns:
             select_exprs.append(pl.col("match_date"))
+        if "schedule_day" in canonical.columns:
+            select_exprs.append(pl.col("schedule_day"))
         if not is_deciding_set:
             for col in canonical.columns:
                 if col.startswith("conf_"):

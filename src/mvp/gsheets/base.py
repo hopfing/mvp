@@ -215,6 +215,7 @@ def prepare_predictions(predictions: pl.DataFrame) -> pl.DataFrame:
             "p1_id": row["p1_id"],
             "p2_id": row["p2_id"],
             "_tournament_id": row["tournament_id"],
+            "_schedule_day": row.get("schedule_day"),
             "_raw_match_date": _format_date(row.get("match_date")) or match_date,
             "tournament_day": "",  # filled below after grouping
             "model_version": row["model_version"],
@@ -238,14 +239,21 @@ def prepare_predictions(predictions: pl.DataFrame) -> pl.DataFrame:
         )
 
     # tournament_day = earliest CT date among matches sharing the same
-    # (tournament_id, venue-local match_date) group.
+    # tournament session.  Prefer the ATP schedule_day number (immune to
+    # timezone edge-cases); fall back to venue-local match_date.
+    result = result.with_columns(
+        pl.coalesce(
+            pl.col("_schedule_day").cast(pl.Utf8),
+            pl.col("_raw_match_date"),
+        ).alias("_day_group"),
+    )
     result = result.with_columns(
         pl.col("date")
         .min()
-        .over("_tournament_id", "_raw_match_date")
+        .over("_tournament_id", "_day_group")
         .alias("tournament_day"),
     )
-    result = result.drop("_tournament_id", "_raw_match_date")
+    result = result.drop("_tournament_id", "_schedule_day", "_raw_match_date", "_day_group")
 
     # Ensure correct types: elo as int, probs as float, everything else string
     result = result.with_columns(

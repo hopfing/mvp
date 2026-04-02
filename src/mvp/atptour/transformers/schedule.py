@@ -130,6 +130,16 @@ def _parse_schedule_html(
     soup = BeautifulSoup(html, "lxml")
     records = []
 
+    # Extract tournament schedule day number from "<h4 class="day">...(Day N)</h4>"
+    schedule_day: int | None = None
+    day_heading = soup.select_one("h4.day")
+    if day_heading:
+        day_span = day_heading.select_one("span")
+        if day_span:
+            day_match = re.search(r"Day\s+(\d+)", day_span.get_text())
+            if day_match:
+                schedule_day = int(day_match.group(1))
+
     for group in soup.select("div.content-group"):
         court_name = None
         court_match_num = 0
@@ -227,6 +237,7 @@ def _parse_schedule_html(
                     circuit=circuit,
                     draw_type=draw_type,
                     match_date=match_date,
+                    schedule_day=schedule_day,
                     scheduled_datetime=scheduled_datetime,
                     time_suffix=time_suffix,
                     display_time=display_time,

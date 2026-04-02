@@ -23,6 +23,7 @@ class ScheduleRecord(BaseModel):
     circuit: Circuit
     draw_type: DrawType
     match_date: date
+    schedule_day: int | None = None
     scheduled_datetime: datetime | None
     time_suffix: str
     display_time: str
