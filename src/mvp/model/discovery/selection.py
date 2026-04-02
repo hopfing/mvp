@@ -111,7 +111,7 @@ class FeatureSelector:
                 remaining,
                 desc=f"Round {round_num}/{self.max_features}",
                 leave=False,
-                ncols=80,
+                ncols=120,
             )
 
             for feature in feature_iter:
