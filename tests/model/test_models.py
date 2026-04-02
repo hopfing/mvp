@@ -403,3 +403,84 @@ class TestModelTraining:
             get_model("neural_net", {
                 "opp_embedding_col_idx": 6,
             })
+
+    def test_neural_net_dual_embedding_serialization(self, sample_data, tmp_path):
+        """Neural net with dual embeddings survives joblib round-trip."""
+        import joblib
+
+        X, y = sample_data
+        player_ids = np.random.randint(0, 20, size=(100, 1))
+        opp_ids = np.random.randint(0, 20, size=(100, 1))
+        X_with_ids = np.hstack([X, player_ids, opp_ids])
+
+        model = get_model("neural_net", {
+            "hidden_layers": [16],
+            "epochs": 10,
+            "patience": 5,
+            "embedding_dim": 8,
+            "embedding_col_idx": 5,
+            "opp_embedding_col_idx": 6,
+            "n_players": 20,
+        })
+        model.fit(X_with_ids, y)
+        probs_before = model.predict_proba(X_with_ids)
+
+        path = tmp_path / "dual_emb_model.pkl"
+        joblib.dump(model, path)
+        loaded = joblib.load(path)
+        probs_after = loaded.predict_proba(X_with_ids)
+
+        np.testing.assert_array_almost_equal(probs_before, probs_after)
+
+    def test_neural_net_dual_embedding_with_enhancements(self, sample_data):
+        """Dual embeddings work with all training enhancements."""
+        X, y = sample_data
+        player_ids = np.random.randint(0, 20, size=(100, 1))
+        opp_ids = np.random.randint(0, 20, size=(100, 1))
+        X_with_ids = np.hstack([X, player_ids, opp_ids])
+
+        model = get_model("neural_net", {
+            "hidden_layers": [32, 16],
+            "epochs": 15,
+            "patience": 5,
+            "embedding_dim": 8,
+            "embedding_col_idx": 5,
+            "opp_embedding_col_idx": 6,
+            "n_players": 20,
+            "label_smoothing": 0.05,
+            "weight_decay": 0.001,
+            "lr_scheduler": "plateau",
+            "grad_clip_norm": 1.0,
+            "layer_norm": True,
+        })
+        model.fit(X_with_ids, y)
+        probs = model.predict_proba(X_with_ids)
+        assert probs.shape == (100,)
+        assert all(0 <= p <= 1 for p in probs)
+
+    def test_neural_net_single_embedding_unchanged_with_dual_support(self, sample_data):
+        """Single embedding (no opp) still works identically."""
+        X, y = sample_data
+        player_ids = np.random.randint(0, 20, size=(100, 1))
+        X_with_ids = np.hstack([X, player_ids])
+
+        model = get_model("neural_net", {
+            "hidden_layers": [16],
+            "epochs": 10,
+            "patience": 5,
+            "embedding_dim": 8,
+            "embedding_col_idx": 5,
+            "n_players": 20,
+        })
+        model.fit(X_with_ids, y)
+        probs = model.predict_proba(X_with_ids)
+        assert probs.shape == (100,)
+        assert all(0 <= p <= 1 for p in probs)
+        assert model.opp_embedding_col_idx is None
+        assert not model._has_opp_embeddings
+
+    def test_neural_net_dual_embedding_defaults(self):
+        """Dual embedding params default to None/disabled."""
+        model = get_model("neural_net", {})
+        assert model.opp_embedding_col_idx is None
+        assert not model._has_opp_embeddings
