@@ -1,7 +1,6 @@
 """Tests for pipeline report builder."""
 
 import json
-from datetime import datetime
 from pathlib import Path
 
 from mvp.pipeline_report import PipelineReport
