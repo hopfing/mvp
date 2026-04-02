@@ -490,6 +490,10 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         "--param", action="append", metavar="KEY=VALUE",
         help="Fix a param to a specific value (e.g. --param n_estimators=300)",
     )
+    tune_parser.add_argument(
+        "--limit", type=int, default=None,
+        help="Stop after N runs (useful for incremental tuning)",
+    )
 
     # train subcommand - train production model
     subparsers.add_parser(
@@ -632,7 +636,7 @@ def cmd_tune(args: argparse.Namespace) -> int:
         config_path.stem, tuner.model_type, total, already,
     )
 
-    state = tuner.run()
+    state = tuner.run(limit=args.limit)
     logger.info("Results saved to %s", tuner.state_path)
     logger.info("Total runs: %d", len(state.results))
     return 0

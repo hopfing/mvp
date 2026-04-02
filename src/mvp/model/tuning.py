@@ -275,7 +275,7 @@ class HyperparamTuner:
         finally:
             temp_path.unlink(missing_ok=True)
 
-    def run(self, verbose: bool = True) -> TuneState:
+    def run(self, verbose: bool = True, limit: int | None = None) -> TuneState:
         """Run the grid search, skipping already-completed combos."""
         total_grid = self._count_combos()
         already_done = len(self.state.results)
@@ -298,12 +298,16 @@ class HyperparamTuner:
         )
         remaining = total_grid - done_in_grid
 
+        effective_total = min(remaining, limit) if limit else remaining
         run_count = 0
         for params in tqdm(
             self._iter_combos(),
             desc="Tuning",
-            total=remaining,
+            total=effective_total,
         ):
+            if limit and run_count >= limit:
+                logger.info("Reached --limit of %d runs, stopping", limit)
+                break
             run_count += 1
             try:
                 result = self._run_one(params)
