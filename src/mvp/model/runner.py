@@ -430,11 +430,11 @@ class ExperimentRunner:
                     id_counts: dict[str, int] = {}
                     for pid in all_ids:
                         id_counts[pid] = id_counts.get(pid, 0) + 1
-                    vocab = {
-                        pid: idx + 1
-                        for idx, (pid, count) in enumerate(id_counts.items())
+                    eligible_ids = [
+                        pid for pid, count in id_counts.items()
                         if count >= min_player_matches
-                    }
+                    ]
+                    vocab = {pid: idx + 1 for idx, pid in enumerate(eligible_ids)}
 
                     emb_train = np.array(
                         [vocab.get(p, 0) for p in train_df[embedding_col].to_list()]
