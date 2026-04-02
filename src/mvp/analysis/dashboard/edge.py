@@ -85,7 +85,12 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
     """Render the edge analysis page."""
     import streamlit as st
 
-    from mvp.analysis.dashboard.components import model_selector
+    from mvp.analysis.dashboard.components import (
+        metric_card_data,
+        model_selector,
+        render_metric_cards,
+    )
+    from mvp.analysis.dashboard.overview import compute_model_performance
 
     # --- Model filter ---
     model_version = model_selector(ds, key="edge", default_to_active=True)
@@ -131,6 +136,30 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
         )
 
     consensus = None if consensus_sel == "All" else consensus_sel
+
+    # --- Summary metrics ---
+    filtered_ds = ds
+    if consensus is not None and "consensus" in ds.columns:
+        filtered_ds = ds.filter(pl.col("consensus") == float(consensus))
+
+    for label, subset in [
+        ("Positive Edge", filtered_ds.filter(pl.col("model_edge_best_close") > 0)
+         if "model_edge_best_close" in filtered_ds.columns else filtered_ds.head(0)),
+        ("Negative Edge", filtered_ds.filter(pl.col("model_edge_best_close") <= 0)
+         if "model_edge_best_close" in filtered_ds.columns else filtered_ds.head(0)),
+    ]:
+        m = compute_model_performance(subset)
+        if m["n"] == 0:
+            continue
+        record = f"{m['wins']} - {m['losses']}" if m["n"] > 0 else "—"
+        st.markdown(f"**{label}**")
+        render_metric_cards([
+            metric_card_data("N", m["n"], fmt="d"),
+            {"label": "Record", "value": record},
+            metric_card_data("Accuracy", m["accuracy"], fmt=".1%"),
+            metric_card_data("P&L", m["pnl"], fmt="$.2f"),
+            metric_card_data("ROI", m["roi"], fmt=".1%"),
+        ])
 
     # --- Edge band table ---
     st.subheader("Edge band profitability")
