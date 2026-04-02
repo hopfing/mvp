@@ -11,6 +11,8 @@ from typing import Any
 
 import yaml
 
+from mvp.common.base_job import get_data_root
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_GRIDS: dict[str, dict[str, list[Any]]] = {
@@ -172,8 +174,8 @@ class HyperparamTuner:
             for k, v in param_overrides.items():
                 self.param_grid[k] = [v]
 
-        state_dir = Path(state_dir) if state_dir else Path(
-            "data/tuning"
+        state_dir = Path(state_dir) if state_dir else (
+            get_data_root() / "tuning"
         )
         state_dir.mkdir(parents=True, exist_ok=True)
         self.state_path = state_dir / f"{self.config_path.stem}.json"
