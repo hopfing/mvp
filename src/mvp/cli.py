@@ -1301,6 +1301,9 @@ def cmd_live(args: argparse.Namespace) -> int:
     current_year = datetime.now().year
     pipeline_run_at = datetime.now()
 
+    from mvp.pipeline_report import PipelineReport
+    report = PipelineReport()
+
     # Start odds fetch in background (fully independent of pipeline).
     odds_pool = ThreadPoolExecutor(max_workers=len(BOOK_REGISTRY))
     book_futures = {
@@ -1349,6 +1352,10 @@ def cmd_live(args: argparse.Namespace) -> int:
                 "%d failed player operation(s) — continuing",
                 len(player_result.all_failures),
             )
+        report.record_tournaments(
+            processed=len(tournaments),
+            failed=failed,
+        )
         if failed:
             for tid, year, error in failed:
                 logger.error(
@@ -1358,6 +1365,8 @@ def cmd_live(args: argparse.Namespace) -> int:
     except Exception as e:
         logger.error("Stage 1 (extract/aggregate) failed: %s", e)
         errors.append(f"extract/aggregate: {e}")
+        report.set_errors(errors)
+        report.save(get_data_root() / "pipeline" / "runs.jsonl")
         odds_pool.shutdown(wait=False)
         raise RuntimeError(
             f"Pipeline cannot continue — extract/aggregate failed: {e}"
@@ -1374,8 +1383,10 @@ def cmd_live(args: argparse.Namespace) -> int:
 
         if predictions is not None and len(predictions) > 0:
             predictor.save_predictions(predictions)
+            report.record_predictions(total=len(predictions))
         else:
             print("\nNo pending matches to predict.")
+            report.record_predictions(total=0)
     except Exception as e:
         logger.error("Winner predictions failed: %s", e)
         errors.append(f"winner predictions: {e}")
@@ -1409,9 +1420,11 @@ def cmd_live(args: argparse.Namespace) -> int:
         try:
             n = book_futures[book.code].result(timeout=30)
             print(f"Fetched {n} {book.label} moneyline odds entries")
+            report.record_book_fetched(book.code, n)
         except Exception as e:
             logger.error("%s odds fetch failed: %s", book.label, e)
             errors.append(f"{book.label} odds fetch: {e}")
+            report.record_book_fetched(book.code, 0)
 
     # --- Stage 5: Event mapping ---
     try:
@@ -1484,6 +1497,7 @@ def cmd_live(args: argparse.Namespace) -> int:
                     map_result = map_book_events(
                         unmapped_df, eid_col, book, book_lookup, match_catalog,
                     )
+                    report.record_unresolved_names(book, map_result.unresolved_names)
                     if map_result.event_matches:
                         save_event_mappings(map_result.event_matches, book=book)
                         print(f"Event mapper: {len(map_result.event_matches)} new {book.upper()} mappings")
@@ -1519,6 +1533,16 @@ def cmd_live(args: argparse.Namespace) -> int:
             never_mapped = predictions.filter(
                 ~pl.col("match_uid").is_in(mapped_uids)
             )
+            no_odds_items = [
+                {
+                    "match_uid": row.get("match_uid", "?"),
+                    "tournament": row.get("tournament_name", "?"),
+                    "p1": row.get("p1_name") or row.get("player_id", "?"),
+                    "p2": row.get("p2_name") or row.get("opp_id", "?"),
+                }
+                for row in never_mapped.iter_rows(named=True)
+            ]
+            report.record_predictions_without_odds(no_odds_items)
             if len(never_mapped) > 0:
                 logger.info(
                     "Predictions with no odds from any book: %d/%d",
@@ -1563,10 +1587,12 @@ def cmd_live(args: argparse.Namespace) -> int:
 
             n_new = len(merged) - len(existing)
             print(f"Synced to Google Sheets ({n_new} new matches)")
+            report.record_sheets_sync(success=True, count=n_new)
         except Exception as e:
             logger.error("Sheets sync failed: %s", e)
             print(f"Warning: Sheets sync failed ({e}). Predictions saved locally.")
             errors.append(f"sheets sync: {e}")
+            report.record_sheets_sync(success=False, count=0, error=str(e))
 
     # --- Stage 9: Analysis refresh ---
     try:
@@ -1576,6 +1602,9 @@ def cmd_live(args: argparse.Namespace) -> int:
         logger.error("Analysis refresh failed: %s", e)
         print(f"Warning: Analysis data refresh failed ({e})")
         errors.append(f"analysis refresh: {e}")
+
+    report.set_errors(errors)
+    report.save(get_data_root() / "pipeline" / "runs.jsonl")
 
     # --- Raise all collected errors at the very end ---
     if errors:
