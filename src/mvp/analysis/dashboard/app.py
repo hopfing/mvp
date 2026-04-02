@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 import streamlit as st
 
-from mvp.analysis.dashboard import edge, execution, odds, overview, sharpness
+from mvp.analysis.dashboard import edge, execution, health, odds, overview, sharpness
 from mvp.analysis.dashboard import insights as insights_page
 
 if TYPE_CHECKING:
@@ -20,33 +20,51 @@ PAGE_REGISTRY: list[dict] = [
     {"name": "Odds", "icon": "currency-dollar", "render": odds.render},
     {"name": "Execution", "icon": "activity", "render": execution.render},
     {"name": "Book Sharpness", "icon": "book", "render": sharpness.render},
+    {"name": "Pipeline Health", "icon": "heart-pulse", "render": health.render},
 ]
 
 
 def _load_data(
     data_root: str,
-) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame | None]:
-    """Load cached analysis, simulation, and insights parquets."""
+) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame | None, dict | None]:
+    """Load cached analysis, simulation, insights parquets, and health data."""
     from pathlib import Path
 
     import polars as pl
+
+    from mvp.analysis.dashboard.health_data import load_latest_run
 
     root = Path(data_root)
     ds = pl.read_parquet(root / "analysis" / "analysis.parquet")
     sims = pl.read_parquet(root / "analysis" / "simulations.parquet")
     insights_path = root / "analysis" / "insights.parquet"
     insights = pl.read_parquet(insights_path) if insights_path.exists() else None
-    return ds, sims, insights
+    latest_run = load_latest_run(root)
+    return ds, sims, insights, latest_run
 
 
 def run(data_root: str) -> None:
     """Launch the Streamlit dashboard."""
+    from datetime import datetime, timezone
+
     st.set_page_config(
         page_title="MVP Analysis",
         page_icon="chart_with_upwards_trend",
         layout="wide",
     )
-    ds, sims, insights = _load_data(data_root)
+    ds, sims, insights, latest_run = _load_data(data_root)
+
+    # Global refresh indicator (top-right on every page)
+    if latest_run and latest_run.get("timestamp"):
+        ts = datetime.fromisoformat(latest_run["timestamp"])
+        age_minutes = (datetime.now(timezone.utc) - ts).total_seconds() / 60
+        color = "red" if age_minutes > 30 else "green"
+        label = ts.strftime("%Y-%m-%d %H:%M")
+        st.markdown(
+            f'<div style="text-align: right; color: {color};">'
+            f"Last Refreshed {label}</div>",
+            unsafe_allow_html=True,
+        )
 
     page_names = [p["name"] for p in PAGE_REGISTRY]
     selected = st.sidebar.radio("Page", page_names, index=0)
@@ -57,6 +75,10 @@ def run(data_root: str) -> None:
         if page["name"] == selected:
             if page["name"] == "Insights":
                 page["render"](ds, sims, insights)
+            elif page["name"] == "Pipeline Health":
+                page["render"](data_root)
+            elif page["name"] == "Overview":
+                page["render"](ds, sims, latest_run)
             else:
                 page["render"](ds, sims)
             break

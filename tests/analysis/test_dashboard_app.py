@@ -18,3 +18,10 @@ def test_page_registry_entries_have_render():
 
     for page in PAGE_REGISTRY:
         assert callable(page["render"]), f"{page['name']} missing render()"
+
+
+def test_page_registry_includes_pipeline_health():
+    from mvp.analysis.dashboard.app import PAGE_REGISTRY
+
+    names = [p["name"] for p in PAGE_REGISTRY]
+    assert "Pipeline Health" in names
