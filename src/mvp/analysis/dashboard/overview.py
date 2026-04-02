@@ -147,8 +147,13 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
 
     from mvp.analysis.dashboard.components import (
         metric_card_data,
+        model_selector,
         render_metric_cards,
     )
+
+    model_version = model_selector(ds, key="overview", default_to_active=False)
+    if model_version is not None:
+        ds = ds.filter(pl.col("model_version") == model_version)
 
     m = compute_model_performance(ds)
     b = compute_bet_performance(ds)
