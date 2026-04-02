@@ -36,7 +36,7 @@ class PlattCalibrator:
         Returns:
             self for chaining.
         """
-        clipped = np.clip(y_prob, 1e-15, 1 - 1e-15)
+        clipped = np.clip(y_prob, 1e-7, 1 - 1e-7)
         logits = np.log(clipped / (1 - clipped)).reshape(-1, 1)
         self._model = LogisticRegression(solver="lbfgs", max_iter=1000)
         self._model.fit(logits, y_true)
@@ -49,6 +49,6 @@ class PlattCalibrator:
         """
         if self._model is None:
             return y_prob
-        clipped = np.clip(y_prob, 1e-15, 1 - 1e-15)
+        clipped = np.clip(y_prob, 1e-7, 1 - 1e-7)
         logits = np.log(clipped / (1 - clipped)).reshape(-1, 1)
         return self._model.predict_proba(logits)[:, 1]
