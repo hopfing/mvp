@@ -466,21 +466,21 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         help="Override memory limit %% (0 to disable, default 75)",
     )
 
-    # tune subcommand - Bayesian hyperparameter optimization
+    # tune subcommand - hyperparameter optimization
     tune_parser = subparsers.add_parser(
-        "tune", help="Tune model hyperparameters via Optuna Bayesian optimization"
+        "tune", help="Tune model hyperparameters"
     )
     tune_parser.add_argument(
         "config", type=str,
         help="Model config to tune (looks in models/)",
     )
     tune_parser.add_argument(
-        "--metric", type=str, nargs="+", default=["log_loss"],
-        help="Metric(s) to optimize (default: log_loss). Multiple = multi-objective.",
+        "--strategy", type=str, choices=["grid", "bayesian"], default="grid",
+        help="Search strategy (default: grid)",
     )
     tune_parser.add_argument(
-        "--verbose", "-v", action="store_true",
-        help="Log per-trial results",
+        "--metric", type=str, nargs="+", default=["log_loss"],
+        help="Metric(s) to optimize (default: log_loss). Multiple = multi-objective (bayesian only).",
     )
     tune_parser.add_argument(
         "--memory-limit", type=int, default=None,
@@ -491,8 +491,8 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         help="Fix a param to a specific value (e.g. --param n_estimators=300)",
     )
     tune_parser.add_argument(
-        "--limit", type=int, required=True,
-        help="Number of trials to run",
+        "--limit", type=int, default=None,
+        help="Stop after N runs",
     )
 
     # tune-review subcommand
@@ -607,50 +607,83 @@ def cmd_train(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_tune(args: argparse.Namespace) -> int:
-    """Run Bayesian hyperparameter optimization."""
-    from mvp.model.tuning import HyperparamTuner
+def _parse_param_overrides(raw_params: list[str] | None) -> dict[str, Any]:
+    """Parse --param KEY=VALUE arguments into a dict."""
+    import json as _json
 
+    overrides: dict[str, Any] = {}
+    if not raw_params:
+        return overrides
+    for p in raw_params:
+        if "=" not in p:
+            raise ValueError(f"Invalid --param format: {p} (expected KEY=VALUE)")
+        k, v = p.split("=", 1)
+        v_lower = v.lower()
+        if v_lower == "none":
+            v = None
+        elif v_lower in ("true", "false"):
+            v = _json.loads(v_lower)
+        else:
+            try:
+                v = _json.loads(v)
+            except (_json.JSONDecodeError, ValueError):
+                try:
+                    v = int(v)
+                except ValueError:
+                    try:
+                        v = float(v)
+                    except ValueError:
+                        pass
+        overrides[k] = v
+    return overrides
+
+
+def cmd_tune(args: argparse.Namespace) -> int:
+    """Run hyperparameter tuning."""
     config_path = resolve_config_path(args.config, MODEL_DIR)
     if not config_path.exists():
         raise FileNotFoundError(
             f"Config not found: {args.config} (tried {config_path})"
         )
 
-    param_overrides = {}
-    if args.param:
-        for p in args.param:
-            if "=" not in p:
-                raise ValueError(f"Invalid --param format: {p} (expected KEY=VALUE)")
-            k, v = p.split("=", 1)
-            import json as _json
-            v_lower = v.lower()
-            if v_lower == "none":
-                v = None
-            elif v_lower in ("true", "false"):
-                v = _json.loads(v_lower)
-            else:
-                try:
-                    v = _json.loads(v)
-                except (_json.JSONDecodeError, ValueError):
-                    try:
-                        v = int(v)
-                    except ValueError:
-                        try:
-                            v = float(v)
-                        except ValueError:
-                            pass
-            param_overrides[k] = v
+    param_overrides = _parse_param_overrides(args.param)
 
-    tuner = HyperparamTuner(
-        config_path=config_path,
-        param_overrides=param_overrides or None,
-        metrics=args.metric,
-    )
+    if args.strategy == "grid":
+        from mvp.model.grid_tuning import GridTuner
 
-    study = tuner.run(n_trials=args.limit, verbose=args.verbose)
-    logger.info("Results saved to %s", tuner.db_path)
-    logger.info("Total trials: %d", len(study.trials))
+        tuner = GridTuner(
+            config_path=config_path,
+            param_overrides=param_overrides or None,
+            metric=args.metric[0],
+        )
+
+        total = tuner._count_combos()
+        already = len(tuner.state.results)
+        logger.info(
+            "Tuning %s (%s): %d in grid, %d done",
+            config_path.stem, tuner.model_type, total, already,
+        )
+
+        state = tuner.run(limit=args.limit)
+        logger.info("Results saved to %s", tuner.state_path)
+        logger.info("Total runs: %d", len(state.results))
+
+    else:
+        from mvp.model.tuning import HyperparamTuner
+
+        if args.limit is None:
+            raise ValueError("--limit is required for bayesian strategy")
+
+        tuner = HyperparamTuner(
+            config_path=config_path,
+            param_overrides=param_overrides or None,
+            metrics=args.metric,
+        )
+
+        study = tuner.run(n_trials=args.limit)
+        logger.info("Results saved to %s", tuner.db_path)
+        logger.info("Total trials: %d", len(study.trials))
+
     return 0
 
 
