@@ -1,5 +1,6 @@
 """Tests for book sharpness page data functions."""
 
+import numpy as np
 import polars as pl
 
 
@@ -58,3 +59,72 @@ def test_book_comparison():
     result = book_comparison(sims, edge_band="edge_10pct", cut="close")
     assert "book" in result.columns
     assert len(result) == 3
+
+
+def _make_ds_with_books(n=200, seed=42):
+    """Synthetic analysis dataset with per-book odds and edge columns."""
+    rng = np.random.default_rng(seed)
+    books = ["dk", "br"]
+    cuts = ["open", "close"]
+    data = {
+        "status": ["resolved"] * n,
+        "model_correct": rng.choice([True, False], size=n, p=[0.6, 0.4]),
+        "pred_prob": rng.uniform(0.55, 0.75, size=n),
+    }
+    for book in books:
+        for cut in cuts:
+            odds = rng.uniform(1.2, 4.0, size=n)
+            data[f"pred_odds_{book}_{cut}"] = odds
+            data[f"model_edge_{book}_{cut}"] = (
+                data["pred_prob"] - 1.0 / odds
+            )
+    return pl.DataFrame(data)
+
+
+def test_compute_book_edge_table():
+    from mvp.analysis.dashboard.sharpness import compute_book_edge_table
+    ds = _make_ds_with_books()
+    result = compute_book_edge_table(ds, book="dk", cut="close")
+    assert not result.is_empty()
+    assert "scenario" in result.columns
+    assert "n_bets" in result.columns
+    assert "accuracy" in result.columns
+    assert "roi" in result.columns
+    assert "net_pnl" in result.columns
+    # Every scenario should reference dk_close
+    for s in result["scenario"].to_list():
+        assert s.endswith("_dk_close")
+
+
+def test_compute_book_edge_table_missing_columns():
+    from mvp.analysis.dashboard.sharpness import compute_book_edge_table
+    ds = pl.DataFrame({"status": ["resolved"], "model_correct": [True]})
+    result = compute_book_edge_table(ds, book="dk", cut="close")
+    assert result.is_empty()
+
+
+def test_compute_book_comparison():
+    from mvp.analysis.dashboard.sharpness import compute_book_comparison
+    ds = _make_ds_with_books()
+    # Use edge_10pct (>=10%) which captures a wide range of the synthetic data
+    result = compute_book_comparison(ds, edge_band="edge_10pct", cut="close")
+    assert "book" in result.columns
+    books = result["book"].to_list()
+    assert "dk" in books
+    assert "br" in books
+
+
+def test_compute_book_comparison_with_odds_range():
+    from mvp.analysis.dashboard.sharpness import compute_book_comparison
+    ds = _make_ds_with_books()
+    full = compute_book_comparison(ds, edge_band="edge_5pct", cut="close")
+    filtered = compute_book_comparison(
+        ds, edge_band="edge_5pct", cut="close", odds_range=(1.5, 2.5),
+    )
+    # Filtered should have fewer or equal bets per book
+    if not full.is_empty() and not filtered.is_empty():
+        full_n = dict(zip(
+            full["book"].to_list(), full["n_bets"].to_list(),
+        ))
+        for row in filtered.iter_rows(named=True):
+            assert row["n_bets"] <= full_n.get(row["book"], float("inf"))

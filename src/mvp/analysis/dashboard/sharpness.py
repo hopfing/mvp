@@ -6,7 +6,7 @@ import re
 
 import polars as pl
 
-from mvp.analysis.simulations import EDGE_BANDS
+from mvp.analysis.simulations import EDGE_BANDS, STAKE
 
 _BAND_NAMES = [b["name"] for b in EDGE_BANDS]
 
@@ -84,6 +84,107 @@ def book_comparison(
     ).sort("book")
 
 
+def _compute_band_stats(
+    df: pl.DataFrame, odds_col: str, scenario_name: str,
+) -> dict | None:
+    """Compute flat-bet stats for a filtered slice — mirrors _simulate."""
+    bettable = df.filter(pl.col(odds_col).is_not_null())
+    n_bets = len(bettable)
+    if n_bets == 0:
+        return None
+    wins = bettable.filter(pl.col("model_correct"))
+    n_wins = len(wins)
+    total_staked = n_bets * STAKE
+    total_returned = wins[odds_col].sum() * STAKE if n_wins > 0 else 0
+    net_pnl = total_returned - total_staked
+    roi = net_pnl / total_staked
+    return {
+        "scenario": scenario_name,
+        "n_bets": n_bets,
+        "accuracy": n_wins / n_bets,
+        "roi": roi,
+        "net_pnl": net_pnl,
+    }
+
+
+def _apply_edge_filter(
+    df: pl.DataFrame, edge_col: str, conditions: list[tuple[str, float]],
+) -> pl.DataFrame:
+    """Apply edge band conditions (op, val) pairs to df."""
+    _ops = {">=": "ge", ">": "gt", "<": "lt", "<=": "le"}
+    result = df
+    for op, val in conditions:
+        result = result.filter(getattr(pl.col(edge_col), _ops[op])(val))
+    return result
+
+
+def compute_book_edge_table(
+    ds: pl.DataFrame,
+    book: str,
+    cut: str = "close",
+) -> pl.DataFrame:
+    """Compute edge band stats for a book from the raw dataset."""
+    odds_col = f"pred_odds_{book}_{cut}"
+    edge_col = f"model_edge_{book}_{cut}"
+
+    if odds_col not in ds.columns or edge_col not in ds.columns:
+        return pl.DataFrame()
+
+    resolved = ds.filter(pl.col("status") == "resolved") if "status" in ds.columns else ds
+
+    rows = []
+    for band in EDGE_BANDS:
+        scenario_name = f"{band['name']}_{book}_{cut}"
+        filtered = _apply_edge_filter(resolved, edge_col, band["conditions"])
+        stats = _compute_band_stats(filtered, odds_col, scenario_name)
+        if stats:
+            rows.append(stats)
+
+    return pl.DataFrame(rows) if rows else pl.DataFrame()
+
+
+def compute_book_comparison(
+    ds: pl.DataFrame,
+    edge_band: str,
+    cut: str = "close",
+    odds_range: tuple[float, float] | None = None,
+) -> pl.DataFrame:
+    """Compare a single edge band across all books, computed from raw ds."""
+    resolved = ds.filter(pl.col("status") == "resolved") if "status" in ds.columns else ds
+
+    band_def = next((b for b in EDGE_BANDS if b["name"] == edge_band), None)
+    if band_def is None:
+        return pl.DataFrame()
+
+    # Detect books from ds columns
+    pattern = re.compile(rf"^pred_odds_([a-z0-9]+)_{re.escape(cut)}$")
+    books = sorted(
+        m.group(1) for col in ds.columns if (m := pattern.match(col))
+    )
+
+    rows = []
+    for book in books:
+        odds_col = f"pred_odds_{book}_{cut}"
+        edge_col = f"model_edge_{book}_{cut}"
+        if edge_col not in ds.columns:
+            continue
+        book_df = resolved
+        if odds_range is not None:
+            book_df = book_df.filter(
+                pl.col(odds_col).is_not_null()
+                & (pl.col(odds_col) >= odds_range[0])
+                & (pl.col(odds_col) <= odds_range[1])
+            )
+        scenario_name = f"{edge_band}_{book}_{cut}"
+        filtered = _apply_edge_filter(book_df, edge_col, band_def["conditions"])
+        stats = _compute_band_stats(filtered, odds_col, scenario_name)
+        if stats:
+            stats["book"] = book
+            rows.append(stats)
+
+    return pl.DataFrame(rows).sort("book") if rows else pl.DataFrame()
+
+
 def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
     """Render the book sharpness page."""
     import streamlit as st
@@ -98,6 +199,8 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
                 (pl.col("model_version") == model_version)
                 | (pl.col("model_version") == "all")
             )
+        if "model_version" in ds.columns:
+            ds = ds.filter(pl.col("model_version") == model_version)
 
     books = detect_books(sims)
     if not books:
@@ -123,6 +226,11 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
             horizontal=True,
         )
 
+    odds_range = st.slider(
+        "Odds range", 1.0, 5.0, (1.0, 5.0), step=0.05,
+    )
+    odds_filtered = odds_range != (1.0, 5.0)
+
     if view_mode == "per_book":
         book_sel = st.selectbox(
             "Book",
@@ -135,7 +243,17 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
             f"— Edge Bands ({_CUT_LABELS[cut]})"
         )
 
-        edge_df = book_edge_table(sims, book=book_sel, cut=cut)
+        if odds_filtered:
+            odds_col = f"pred_odds_{book_sel}_{cut}"
+            ds_filtered = ds.filter(
+                pl.col(odds_col).is_not_null()
+                & (pl.col(odds_col) >= odds_range[0])
+                & (pl.col(odds_col) <= odds_range[1])
+            ) if odds_col in ds.columns else ds
+            edge_df = compute_book_edge_table(ds_filtered, book=book_sel, cut=cut)
+        else:
+            edge_df = book_edge_table(sims, book=book_sel, cut=cut)
+
         if edge_df.is_empty():
             st.info("No data for this selection.")
         else:
@@ -160,7 +278,13 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
             f"{band_sel} — Across Books ({_CUT_LABELS[cut]})"
         )
 
-        comp = book_comparison(sims, edge_band=band_sel, cut=cut)
+        if odds_filtered:
+            comp = compute_book_comparison(
+                ds, edge_band=band_sel, cut=cut, odds_range=odds_range,
+            )
+        else:
+            comp = book_comparison(sims, edge_band=band_sel, cut=cut)
+
         if comp.is_empty():
             st.info("No comparison data for this selection.")
         else:
