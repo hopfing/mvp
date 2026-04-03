@@ -1,11 +1,8 @@
 """Model hyperparameter tuning via Optuna Bayesian optimization."""
 
-import itertools
-import json
 import logging
 import tempfile
 import time
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -108,95 +105,25 @@ def _decode_params(params: dict[str, Any]) -> dict[str, Any]:
     return decoded
 
 
-@dataclass
-class TuneResult:
-    """Result from a single tuning combo."""
-
-    params: dict[str, Any]
-    metrics: dict[str, float]
-    duration_s: float
-
-
-@dataclass
-class TuneState:
-    """Persistent state for a tuning session."""
-
-    config_path: str
-    model_type: str
-    results: list[TuneResult] = field(default_factory=list)
-
-    def save(self, path: Path) -> None:
-        data = {
-            "config_path": self.config_path,
-            "model_type": self.model_type,
-            "results": [
-                {
-                    "params": r.params,
-                    "metrics": r.metrics,
-                    "duration_s": r.duration_s,
-                }
-                for r in self.results
-            ],
-        }
-        path.write_text(json.dumps(data, indent=2))
-
-    @classmethod
-    def load(cls, path: Path) -> "TuneState":
-        data = json.loads(path.read_text())
-        results = [
-            TuneResult(
-                params=r["params"],
-                metrics=r["metrics"],
-                duration_s=r["duration_s"],
-            )
-            for r in data["results"]
-        ]
-        return cls(
-            config_path=data["config_path"],
-            model_type=data["model_type"],
-            results=results,
-        )
-
-    def _params_key(self, params: dict[str, Any]) -> tuple:
-        return tuple(
-            (k, tuple(v) if isinstance(v, list) else v)
-            for k, v in sorted(params.items())
-        )
-
-    @property
-    def _completed_keys(self) -> set[tuple]:
-        if not hasattr(self, "_cache"):
-            self._cache = {self._params_key(r.params) for r in self.results}
-        return self._cache
-
-    def _invalidate_cache(self) -> None:
-        if hasattr(self, "_cache"):
-            del self._cache
-
-    def already_run(self, params: dict[str, Any]) -> bool:
-        """Check if a param combo has already been evaluated."""
-        return self._params_key(params) in self._completed_keys
-
-
 def _param_combo_str(params: dict[str, Any]) -> str:
     return ", ".join(f"{k}={v}" for k, v in sorted(params.items()))
 
 
 class HyperparamTuner:
-    """Grid search over model hyperparameters."""
+    """Bayesian hyperparameter optimization via Optuna TPE."""
 
     def __init__(
         self,
         config_path: Path | str,
-        param_grid: dict[str, list[Any]] | None = None,
+        search_space: dict[str, dict[str, Any]] | None = None,
         param_overrides: dict[str, Any] | None = None,
-        metric: str = "log_loss",
+        metrics: list[str] | None = None,
         matches_path: Path | str | None = None,
         cache_dir: Path | str | None = None,
         state_dir: Path | str | None = None,
     ) -> None:
         self.config_path = Path(config_path)
-        self.metric = metric
+        self.metrics = metrics or ["log_loss"]
         self.matches_path = matches_path
         self.cache_dir = cache_dir
 
@@ -205,76 +132,74 @@ class HyperparamTuner:
 
         self.model_type = self.base_config["model"]["type"]
 
-        if param_grid is not None:
-            self.param_grid = param_grid
-        elif self.model_type in DEFAULT_GRIDS:
-            self.param_grid = dict(DEFAULT_GRIDS[self.model_type])
+        if search_space is not None:
+            self.search_space = dict(search_space)
+        elif self.model_type in DEFAULT_SEARCH_SPACES:
+            self.search_space = dict(DEFAULT_SEARCH_SPACES[self.model_type])
         else:
             raise ValueError(
-                f"No default grid for model type '{self.model_type}'"
-                " — pass param_grid explicitly"
+                f"No default search space for model type '{self.model_type}'"
+                " — pass search_space explicitly"
             )
 
-        # Fix specific params to a single value, removing them from the sweep
+        # Pin specific params, removing them from the search space
+        self.pinned_params: dict[str, Any] = {}
         if param_overrides:
             for k, v in param_overrides.items():
-                self.param_grid[k] = [v]
+                self.pinned_params[k] = v
+                self.search_space.pop(k, None)
 
-        state_dir = Path(state_dir) if state_dir else (
-            get_data_root() / "tuning"
+        # Set up Optuna storage
+        state_dir_path = Path(state_dir) if state_dir else (get_data_root() / "tuning")
+        state_dir_path.mkdir(parents=True, exist_ok=True)
+        self.db_path = state_dir_path / f"{self.config_path.stem}.db"
+        storage = f"sqlite:///{self.db_path}"
+
+        # Create or load study
+        directions = ["minimize"] * len(self.metrics)
+
+        self.study = optuna.create_study(
+            study_name=self.config_path.stem,
+            storage=storage,
+            directions=directions,
+            load_if_exists=True,
         )
-        state_dir.mkdir(parents=True, exist_ok=True)
-        self.state_path = state_dir / f"{self.config_path.stem}.json"
 
-        if self.state_path.exists():
-            self.state = TuneState.load(self.state_path)
-            logger.info(
-                "Resumed tuning state: %d combos already run",
-                len(self.state.results),
-            )
-        else:
-            self.state = TuneState(
-                config_path=str(self.config_path),
-                model_type=self.model_type,
-            )
+        # Enqueue baseline trial from config params
+        self._enqueue_baseline()
 
-    def _count_combos(self) -> int:
-        """Count total combinations without generating them."""
-        count = 1
-        for values in self.param_grid.values():
-            count *= len(values)
-        return count
-
-    def _iter_combos(self):
-        """Yield param combinations, baseline first, skipping already-run.
-
-        Generator — does not materialize the full grid in memory.
-        """
-        keys = sorted(self.param_grid.keys())
-        values = [self.param_grid[k] for k in keys]
-
-        # Extract current params from the base config as baseline
+    def _enqueue_baseline(self) -> None:
+        """Enqueue the current config params as the first trial (skip on resume)."""
+        if len(self.study.trials) > 0:
+            return  # Study already has trials — don't re-enqueue baseline
         base_params = self.base_config.get("model", {}).get("params", {})
-        baseline = {k: base_params[k] for k in keys if k in base_params}
+        baseline = {}
+        for k in self.search_space:
+            if k in base_params:
+                baseline[k] = base_params[k]
+        # Only enqueue if we have values for all search space params
+        if len(baseline) == len(self.search_space):
+            self.study.enqueue_trial(baseline)
 
-        baseline_in_grid = all(
-            baseline.get(k) in self.param_grid.get(k, [])
-            for k in keys
-        )
+    def _objective(self, trial: optuna.Trial) -> float | tuple[float, ...]:
+        """Optuna objective: suggest params, run experiment, return metric(s)."""
+        params = suggest_params(trial, self.search_space)
+        params.update(self.pinned_params)
+        params = _decode_params(params)
 
-        # Yield baseline first if applicable
-        if baseline_in_grid and not self.state.already_run(baseline):
-            yield baseline
+        result = self._run_one(params)
 
-        for combo_vals in itertools.product(*values):
-            params = dict(zip(keys, combo_vals))
-            if baseline_in_grid and params == baseline:
-                continue
-            if self.state.already_run(params):
-                continue
-            yield params
+        # Store all metrics as user attrs for review
+        for metric_name, metric_value in result["metrics"].items():
+            trial.set_user_attr(metric_name, metric_value)
 
-    def _run_one(self, params: dict[str, Any]) -> TuneResult:
+        trial.set_user_attr("duration_s", result["duration_s"])
+
+        if len(self.metrics) == 1:
+            return result["metrics"][self.metrics[0]]
+        return tuple(result["metrics"][m] for m in self.metrics)
+
+    def _run_one(self, params: dict[str, Any]) -> dict[str, Any]:
         """Run a single param combination through ExperimentRunner."""
         from mvp.model.runner import ExperimentRunner
 
@@ -313,60 +238,55 @@ class HyperparamTuner:
                 engine_logger.setLevel(prev_engine)
             duration = time.perf_counter() - t0
 
-            return TuneResult(
-                params=params,
-                metrics=result["metrics"],
-                duration_s=round(duration, 1),
-            )
+            return {
+                "params": params,
+                "metrics": result["metrics"],
+                "duration_s": round(duration, 1),
+            }
         finally:
             temp_path.unlink(missing_ok=True)
 
-    def run(self, verbose: bool = True, limit: int | None = None) -> TuneState:
-        """Run the grid search, skipping already-completed combos."""
-        total_grid = self._count_combos()
-        already_done = len(self.state.results)
+    def run(self, n_trials: int, verbose: bool = True) -> optuna.Study:
+        """Run Bayesian optimization for n_trials."""
+        already_done = len(self.study.trials)
+        logger.info(
+            "Tuning %s (%s): %d trials requested, %d already done",
+            self.config_path.stem, self.model_type, n_trials, already_done,
+        )
+
+        # Suppress Optuna's own trial-level logging; we log ourselves
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+        callbacks = []
+        if verbose:
+            callbacks.append(self._log_trial_callback)
+
+        self.study.optimize(
+            self._objective,
+            n_trials=n_trials,
+            callbacks=callbacks,
+        )
 
         logger.info(
-            "Tuning %s: %d in grid, %d done",
-            self.config_path.stem, total_grid, already_done,
+            "Tuning complete: %d total trials in %s",
+            len(self.study.trials), self.db_path,
         )
+        return self.study
 
-        from tqdm import tqdm
-
-        # Count remaining by checking how many grid combos are already done
-        done_in_grid = sum(
-            1 for combo_vals in itertools.product(
-                *[self.param_grid[k] for k in sorted(self.param_grid)]
-            )
-            if self.state.already_run(
-                dict(zip(sorted(self.param_grid), combo_vals))
-            )
+    def _log_trial_callback(
+        self, study: optuna.Study, trial: optuna.trial.FrozenTrial
+    ) -> None:
+        """Log each completed trial."""
+        metrics_str = ", ".join(
+            f"{m}={trial.user_attrs.get(m, 'N/A'):.4f}"
+            if isinstance(trial.user_attrs.get(m), float) else f"{m}=N/A"
+            for m in self.metrics
         )
-        remaining = total_grid - done_in_grid
-
-        effective_total = min(remaining, limit) if limit else remaining
-        run_count = 0
-        for params in tqdm(
-            self._iter_combos(),
-            desc="Tuning",
-            total=effective_total,
-        ):
-            if limit and run_count >= limit:
-                logger.info("Reached --limit of %d runs, stopping", limit)
-                break
-            run_count += 1
-            try:
-                result = self._run_one(params)
-                self.state.results.append(result)
-                self.state._invalidate_cache()
-                self.state.save(self.state_path)
-            except Exception as e:
-                logger.error("FAILED: %s", e)
-                logger.error("Stopping tuning due to failure")
-                break
-
+        duration = trial.user_attrs.get("duration_s", "?")
         logger.info(
-            "Tuning complete: %d results in %s",
-            len(self.state.results), self.state_path,
+            "Trial %d: %s | %s | %.1fs",
+            trial.number,
+            _param_combo_str(trial.params),
+            metrics_str,
+            duration if isinstance(duration, float) else 0.0,
         )
-        return self.state
