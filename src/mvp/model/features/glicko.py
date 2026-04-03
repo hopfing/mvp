@@ -10,6 +10,15 @@ from mvp.model.registry import feature
 
 
 @feature(
+    name="glicko_mu",
+    description="Glicko-2 mu rating",
+    mirror=True,
+)
+def glicko_mu_raw() -> pl.Expr:
+    return pl.col("player_glicko_mu")
+
+
+@feature(
     name="glicko_diff",
     description="Base Glicko-2 mu difference (player - opponent)",
     mirror=False,

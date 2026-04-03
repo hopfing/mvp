@@ -245,3 +245,48 @@ class TestStyleDimensionFeatures:
         })
         result = df.select(ret_clutch_matchup().alias("matchup"))
         assert result["matchup"].to_list() == [50.0, -50.0]
+
+
+class TestRawEloFeatures:
+    """Test raw Elo column passthrough features."""
+
+    def test_elo_raw_registered(self):
+        registry = get_registry()
+        for name in ["elo", "elo_surface", "serve_elo", "return_elo"]:
+            feat = registry.get(name)
+            assert feat is not None, f"Feature {name} not registered"
+            assert feat.mirror is True
+
+    def test_elo_raw_expr(self):
+        from mvp.model.features.elo import elo_raw
+
+        df = pl.DataFrame({"player_elo": [1500.0, 1800.0]})
+        result = df.select(elo_raw().alias("val"))
+        assert result["val"].to_list() == [1500.0, 1800.0]
+
+    def test_elo_surface_raw_expr(self):
+        from mvp.model.features.elo import elo_surface_raw
+
+        df = pl.DataFrame({
+            "player_elo": [1500.0],
+            "player_hard_adj": [30.0],
+            "player_clay_adj": [20.0],
+            "player_grass_adj": [10.0],
+            "surface": ["Hard"],
+        })
+        result = df.select(elo_surface_raw().alias("val"))
+        assert result["val"].to_list() == [1530.0]
+
+    def test_serve_elo_raw_expr(self):
+        from mvp.model.features.elo import serve_elo_raw
+
+        df = pl.DataFrame({"player_serve_elo": [1600.0, 1700.0]})
+        result = df.select(serve_elo_raw().alias("val"))
+        assert result["val"].to_list() == [1600.0, 1700.0]
+
+    def test_return_elo_raw_expr(self):
+        from mvp.model.features.elo import return_elo_raw
+
+        df = pl.DataFrame({"player_return_elo": [1550.0, 1650.0]})
+        result = df.select(return_elo_raw().alias("val"))
+        assert result["val"].to_list() == [1550.0, 1650.0]

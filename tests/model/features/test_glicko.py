@@ -85,10 +85,25 @@ class TestGlickoDiffXRdSum:
         assert result["val"][0] == pytest.approx(22000.0)
 
 
+class TestGlickoMuRaw:
+    def test_expr(self):
+        from mvp.model.features.glicko import glicko_mu_raw
+        df = _base_df()
+        result = df.select(glicko_mu_raw().alias("val"))
+        assert result["val"][0] == pytest.approx(1600.0)
+
+    def test_registered(self):
+        registry = get_registry()
+        feat = registry.get("glicko_mu")
+        assert feat is not None
+        assert feat.mirror is True
+
+
 class TestGlickoFeaturesRegistered:
     def test_all_features_in_registry(self):
         registry = get_registry()
         expected = [
+            "glicko_mu",
             "glicko_diff",
             "glicko_rd_sum", "glicko_rd_diff", "glicko_sigma_diff",
             "glicko_surface_rd_sum", "glicko_diff_x_rd_sum",

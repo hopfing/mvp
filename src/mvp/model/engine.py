@@ -454,12 +454,20 @@ class FeatureEngine:
         # Introspect base (non-derived) feature expressions
         seen_bases: set[str] = set()
         for spec in feature_specs:
-            _prefix, base_name, _full_name, params = parse_feature_spec(spec)
+            prefix, base_name, _full_name, params = parse_feature_spec(spec)
+            feature_def = self._registry.get(base_name)
+
+            # For opp_ specs of non-derived features, also request the raw
+            # opp_ column from parquet.  If it exists (e.g. opp_elo), it will
+            # be loaded directly and _mirror_features will skip the self-join.
+            # If it doesn't exist, the schema validation below filters it out.
+            if prefix == "opp" and not feature_def.depends_on:
+                needed.add(f"opp_{base_name}")
+
             if base_name in seen_bases:
                 continue
             seen_bases.add(base_name)
 
-            feature_def = self._registry.get(base_name)
             if feature_def.depends_on:
                 continue  # derived — references computed columns, not source
 
@@ -588,6 +596,9 @@ class FeatureEngine:
                 uncached_base.append((base_name, cache_spec, player_col, params))
 
         # Process uncached base features in batches
+        # Track raw parquet columns so we never drop them — other features
+        # (e.g. elo_diff) may reference them via pl.col("player_elo").
+        parquet_cols = set(df.columns)
         for i in range(0, len(uncached_base), batch_size):
             batch = uncached_base[i : i + batch_size]
             for base_name, cache_spec, player_col, params in batch:
@@ -595,8 +606,12 @@ class FeatureEngine:
                 expr = feature_def.func(**params)
                 df = df.with_columns(expr.alias(player_col))
                 self._cache_feature(cache_spec, df, [player_col], cache_key)
-            # Drop computed columns before next batch
-            cols_to_drop = [col for _, _, col, _ in batch if col in df.columns]
+            # Drop computed columns before next batch, but preserve raw
+            # parquet columns that other features may reference directly
+            cols_to_drop = [
+                col for _, _, col, _ in batch
+                if col in df.columns and col not in parquet_cols
+            ]
             if cols_to_drop:
                 df = df.drop(cols_to_drop)
             check_memory(f"ensure_cached: after base batch {i // batch_size + 1}")
@@ -1098,6 +1113,9 @@ class FeatureEngine:
         For each player_* column, creates an opp_* column containing the
         opponent's value of that feature within the same match.
 
+        Skips columns whose opp_* counterpart already exists in df
+        (e.g., raw parquet columns like opp_elo).
+
         Args:
             df: DataFrame with player_* feature columns.
             player_columns: List of player_* column names to mirror.
@@ -1105,6 +1123,14 @@ class FeatureEngine:
         Returns:
             DataFrame with additional opp_* columns.
         """
+        # Skip columns whose opp_ counterpart already exists (raw parquet columns)
+        player_columns = [
+            col for col in player_columns
+            if f"opp_{col[7:]}" not in df.columns
+        ]
+        if not player_columns:
+            return df
+
         # Create lookup table: for each (match_uid, player_id), get the feature values
         # We'll join this back using opp_id to get opponent's features
         lookup_cols = ["match_uid", "player_id"] + player_columns

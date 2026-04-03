@@ -25,6 +25,52 @@ def surface_elo_expr(prefix: str) -> pl.Expr:
     )
 
 
+# =============================================================================
+# Raw Elo column passthroughs — expose individual ratings as model features
+# =============================================================================
+
+
+@feature(
+    name="elo",
+    description="Overall Elo rating",
+    mirror=True,
+)
+def elo_raw() -> pl.Expr:
+    return pl.col("player_elo")
+
+
+@feature(
+    name="elo_surface",
+    description="Surface-adjusted Elo rating",
+    mirror=True,
+)
+def elo_surface_raw() -> pl.Expr:
+    return surface_elo_expr("player")
+
+
+@feature(
+    name="serve_elo",
+    description="Serve Elo rating",
+    mirror=True,
+)
+def serve_elo_raw() -> pl.Expr:
+    return pl.col("player_serve_elo")
+
+
+@feature(
+    name="return_elo",
+    description="Return Elo rating",
+    mirror=True,
+)
+def return_elo_raw() -> pl.Expr:
+    return pl.col("player_return_elo")
+
+
+# =============================================================================
+# Match-level context features
+# =============================================================================
+
+
 @feature(
     name="elo_avg",
     params=[],

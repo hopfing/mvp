@@ -328,6 +328,120 @@ class TestFeatureEngineMirroring:
         assert "opp_test_derived_bool" in result.columns
         assert "player_test_matchup_bool" in result.columns
 
+    def test_mirror_skips_existing_opp_columns(
+        self, tmp_path: Path, isolated_registry
+    ):
+        """When opp_ column already exists in raw data, mirror is skipped."""
+        # Register a feature whose name matches a raw column (player_elo / opp_elo)
+        @feature(name="elo", mirror=True)
+        def test_elo() -> pl.Expr:
+            return pl.col("player_elo")
+
+        df = pl.DataFrame({
+            "match_uid": ["m1", "m1"],
+            "player_id": ["A", "B"],
+            "opp_id": ["B", "A"],
+            "effective_match_date": [date(2024, 1, 1), date(2024, 1, 1)],
+            "player_elo": [1500.0, 1400.0],
+            "opp_elo": [1400.0, 1500.0],
+        })
+        matches_path = tmp_path / "matches.parquet"
+        df.write_parquet(matches_path)
+
+        engine = FeatureEngine(
+            matches_path=matches_path, cache_dir=tmp_path / "cache",
+        )
+        result = engine.compute(["player_elo", "opp_elo"])
+
+        assert "player_elo" in result.columns
+        assert "opp_elo" in result.columns
+        # Verify values are correct (not duplicated/suffixed)
+        row_a = result.filter(pl.col("player_id") == "A")
+        assert row_a["player_elo"][0] == 1500.0
+        assert row_a["opp_elo"][0] == 1400.0
+
+    def test_raw_column_feature_coexists_with_diff(
+        self, tmp_path: Path, isolated_registry
+    ):
+        """Raw column feature (elo) and diff feature (elo_diff) work together."""
+        @feature(name="elo", mirror=True)
+        def test_elo() -> pl.Expr:
+            return pl.col("player_elo")
+
+        @feature(name="elo_diff", mirror=False, impute=0)
+        def test_elo_diff() -> pl.Expr:
+            return pl.col("player_elo") - pl.col("opp_elo")
+
+        df = pl.DataFrame({
+            "match_uid": ["m1", "m1"],
+            "player_id": ["A", "B"],
+            "opp_id": ["B", "A"],
+            "effective_match_date": [date(2024, 1, 1), date(2024, 1, 1)],
+            "player_elo": [1500.0, 1400.0],
+            "opp_elo": [1400.0, 1500.0],
+        })
+        matches_path = tmp_path / "matches.parquet"
+        df.write_parquet(matches_path)
+
+        engine = FeatureEngine(
+            matches_path=matches_path, cache_dir=tmp_path / "cache",
+        )
+        result = engine.compute([
+            "player_elo", "opp_elo", "player_elo_diff",
+        ])
+
+        assert "player_elo" in result.columns
+        assert "opp_elo" in result.columns
+        assert "player_elo_diff" in result.columns
+
+        row_a = result.filter(pl.col("player_id") == "A")
+        assert row_a["player_elo_diff"][0] == 100.0
+
+    def test_ensure_cached_preserves_raw_columns(
+        self, tmp_path: Path, isolated_registry
+    ):
+        """ensure_cached batch drop doesn't remove raw parquet columns
+        needed by other features."""
+        @feature(name="elo", mirror=True)
+        def test_elo() -> pl.Expr:
+            return pl.col("player_elo")
+
+        @feature(name="elo_diff", mirror=False, impute=0)
+        def test_elo_diff() -> pl.Expr:
+            return pl.col("player_elo") - pl.col("opp_elo")
+
+        df = pl.DataFrame({
+            "match_uid": ["m1", "m1"],
+            "player_id": ["A", "B"],
+            "opp_id": ["B", "A"],
+            "effective_match_date": [date(2024, 1, 1), date(2024, 1, 1)],
+            "player_elo": [1500.0, 1400.0],
+            "opp_elo": [1400.0, 1500.0],
+        })
+        matches_path = tmp_path / "matches.parquet"
+        df.write_parquet(matches_path)
+
+        engine = FeatureEngine(
+            matches_path=matches_path, cache_dir=tmp_path / "cache",
+        )
+        # Use batch_size=1 to force elo and elo_diff into separate batches
+        cache_key = engine.ensure_cached(
+            ["player_elo", "player_elo_diff"],
+            batch_size=1,
+        )
+
+        # Load features and verify both work
+        base_df = df.select(["match_uid", "player_id", "opp_id"])
+        result = engine.load_features_numpy(
+            ["player_elo", "player_elo_diff"], base_df, cache_key,
+        )
+        assert "player_elo" in result.columns
+        assert "player_elo_diff" in result.columns
+
+        row_a = result.filter(pl.col("player_id") == "A")
+        assert row_a["player_elo"][0] == 1500.0
+        assert row_a["player_elo_diff"][0] == 100.0
+
 
 class TestFeatureEngineCaching:
     """Tests for feature caching functionality."""
