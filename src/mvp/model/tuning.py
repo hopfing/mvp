@@ -1,4 +1,4 @@
-"""Model hyperparameter tuning via grid search."""
+"""Model hyperparameter tuning via Optuna Bayesian optimization."""
 
 import itertools
 import json
@@ -9,57 +9,103 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import optuna
 import yaml
 
 from mvp.common.base_job import get_data_root
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_GRIDS: dict[str, dict[str, list[Any]]] = {
+DEFAULT_SEARCH_SPACES: dict[str, dict[str, dict[str, Any]]] = {
     "xgboost": {
-        "max_depth": [3, 4, 5, 6],
-        "learning_rate": [0.03, 0.05, 0.1, 0.15],
-        "n_estimators": [100, 200, 300, 500],
-        "min_child_weight": [3, 5, 10],
-        "subsample": [0.7, 0.8, 0.9],
-        "colsample_bytree": [0.7, 0.8, 0.9, 1.0],
-        "colsample_bylevel": [0.7, 0.8, 0.9, 1.0],
-        "colsample_bynode": [0.7, 0.8, 0.9, 1.0],
-        "gamma": [0, 0.1, 0.5, 1.0, 5.0],
-        "reg_alpha": [0, 0.01, 0.1, 1.0],
-        "reg_lambda": [0.1, 1.0, 5.0, 10.0],
-        "max_delta_step": [0, 1, 5],
-        "scale_pos_weight": [0.9, 1.0, 1.1],
+        "max_depth": {"type": "int", "low": 3, "high": 8},
+        "learning_rate": {"type": "float", "low": 0.01, "high": 0.3, "log": True},
+        "n_estimators": {"type": "int", "low": 100, "high": 800, "step": 50},
+        "min_child_weight": {"type": "int", "low": 1, "high": 20},
+        "subsample": {"type": "float", "low": 0.5, "high": 1.0},
+        "colsample_bytree": {"type": "float", "low": 0.5, "high": 1.0},
+        "colsample_bylevel": {"type": "float", "low": 0.5, "high": 1.0},
+        "colsample_bynode": {"type": "float", "low": 0.5, "high": 1.0},
+        "gamma": {"type": "float", "low": 0.0, "high": 5.0},
+        "reg_alpha": {"type": "float", "low": 0.0, "high": 1.0},
+        "reg_lambda": {"type": "float", "low": 0.1, "high": 10.0, "log": True},
+        "max_delta_step": {"type": "int", "low": 0, "high": 5},
+        "scale_pos_weight": {"type": "float", "low": 0.9, "high": 1.1},
     },
     "logistic": {
-        "C": [0.01, 0.1, 1.0, 10.0],
+        "C": {"type": "float", "low": 0.01, "high": 10.0, "log": True},
     },
     "random_forest": {
-        "n_estimators": [100, 200, 300, 500],
-        "max_depth": [3, 4, 6, 8, 10, None],
-        "min_samples_split": [2, 5, 10, 20],
-        "min_samples_leaf": [5, 10, 20, 50],
-        "max_features": ["sqrt", "log2", 0.3, 0.5, 0.7, 1.0],
-        "max_leaf_nodes": [None, 50, 100, 200, 500],
-        "min_impurity_decrease": [0.0, 0.001, 0.005, 0.01],
-        "bootstrap": [True, False],
-        "criterion": ["gini", "log_loss"],
+        "n_estimators": {"type": "int", "low": 100, "high": 500, "step": 50},
+        "max_depth": {"type": "categorical", "choices": [3, 4, 6, 8, 10, None]},
+        "min_samples_split": {"type": "int", "low": 2, "high": 20},
+        "min_samples_leaf": {"type": "int", "low": 5, "high": 50},
+        "max_features": {"type": "categorical", "choices": ["sqrt", "log2", 0.3, 0.5, 0.7, 1.0]},
+        "max_leaf_nodes": {"type": "categorical", "choices": [None, 50, 100, 200, 500]},
+        "min_impurity_decrease": {"type": "float", "low": 0.0, "high": 0.01},
+        "bootstrap": {"type": "categorical", "choices": [True, False]},
+        "criterion": {"type": "categorical", "choices": ["gini", "log_loss"]},
     },
     "neural_net": {
-        "hidden_layers": [[32], [64], [32, 16], [64, 32], [128, 64], [256, 128], [64, 32, 16], [128, 64, 32]],
-        "dropout": [0.1, 0.2, 0.3, 0.5],
-        "learning_rate": [0.0001, 0.0005, 0.001, 0.005],
-        "batch_size": [256, 512, 1024, 2048],
-        "epochs": [15, 30, 50],
-        "patience": [3, 5, 10],
-        "batch_norm": [True, False],
-        "label_smoothing": [0.0, 0.01, 0.05, 0.1],
-        "weight_decay": [0.0, 0.0001, 0.001, 0.01],
-        "grad_clip_norm": [None, 1.0, 5.0],
-        "layer_norm": [True, False],
-        "lr_scheduler": [None, "plateau"],
+        "hidden_layers": {"type": "categorical", "choices": ["32", "64", "32-16", "64-32", "128-64", "256-128", "64-32-16", "128-64-32"]},
+        "dropout": {"type": "float", "low": 0.1, "high": 0.5},
+        "learning_rate": {"type": "float", "low": 0.0001, "high": 0.005, "log": True},
+        "batch_size": {"type": "categorical", "choices": [256, 512, 1024, 2048]},
+        "epochs": {"type": "int", "low": 15, "high": 50},
+        "patience": {"type": "int", "low": 3, "high": 10},
+        "batch_norm": {"type": "categorical", "choices": [True, False]},
+        "label_smoothing": {"type": "float", "low": 0.0, "high": 0.1},
+        "weight_decay": {"type": "float", "low": 0.0, "high": 0.01},
+        "grad_clip_norm": {"type": "categorical", "choices": [None, 1.0, 5.0]},
+        "layer_norm": {"type": "categorical", "choices": [True, False]},
+        "lr_scheduler": {"type": "categorical", "choices": [None, "plateau"]},
     },
 }
+
+
+def suggest_params(
+    trial: optuna.Trial, search_space: dict[str, dict[str, Any]]
+) -> dict[str, Any]:
+    """Use an Optuna trial to suggest values for all params in the search space."""
+    params: dict[str, Any] = {}
+    for name, spec in search_space.items():
+        ptype = spec["type"]
+        if ptype == "int":
+            kwargs = {}
+            if "step" in spec:
+                kwargs["step"] = spec["step"]
+            params[name] = trial.suggest_int(name, spec["low"], spec["high"], **kwargs)
+        elif ptype == "float":
+            params[name] = trial.suggest_float(
+                name, spec["low"], spec["high"], log=spec.get("log", False)
+            )
+        elif ptype == "categorical":
+            params[name] = trial.suggest_categorical(name, spec["choices"])
+        else:
+            raise ValueError(f"Unknown param type '{ptype}' for param '{name}'")
+    return params
+
+
+# Map string-encoded hidden_layers back to lists for neural_net models.
+# Optuna's suggest_categorical only supports scalar types, not lists.
+HIDDEN_LAYERS_MAP: dict[str, list[int]] = {
+    "32": [32],
+    "64": [64],
+    "32-16": [32, 16],
+    "64-32": [64, 32],
+    "128-64": [128, 64],
+    "256-128": [256, 128],
+    "64-32-16": [64, 32, 16],
+    "128-64-32": [128, 64, 32],
+}
+
+
+def _decode_params(params: dict[str, Any]) -> dict[str, Any]:
+    """Decode string-encoded params back to their real types."""
+    decoded = dict(params)
+    if "hidden_layers" in decoded and isinstance(decoded["hidden_layers"], str):
+        decoded["hidden_layers"] = HIDDEN_LAYERS_MAP[decoded["hidden_layers"]]
+    return decoded
 
 
 @dataclass
