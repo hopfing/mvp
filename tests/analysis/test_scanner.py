@@ -160,7 +160,11 @@ def test_score_surprises_has_direction():
     slices = compute_slices(bucketed, max_depth=1)
     scored = score_surprises(slices)
 
-    depth_1 = scored.filter(pl.col("depth") == 1)
+    # Expected findings have direction/surprise nulled out
+    depth_1 = scored.filter(
+        (pl.col("depth") == 1) & pl.col("direction").is_not_null()
+    )
+    assert len(depth_1) > 0
     for row in depth_1.iter_rows(named=True):
         assert row["direction"] in ("outperformer", "danger_zone")
         if row["roi_delta"] >= 0:
@@ -197,7 +201,11 @@ def test_score_surprises_has_surprise_column():
     scored = score_surprises(slices)
 
     assert "surprise" in scored.columns
-    depth_1 = scored.filter(pl.col("depth") == 1)
+    # Expected findings have surprise nulled out; check non-suppressed rows
+    depth_1 = scored.filter(
+        (pl.col("depth") == 1) & pl.col("surprise").is_not_null()
+    )
+    assert len(depth_1) > 0
     for row in depth_1.iter_rows(named=True):
         expected = abs(row["roi_delta"]) * math.sqrt(row["n"])
         assert abs(row["surprise"] - expected) < 0.001

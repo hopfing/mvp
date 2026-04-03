@@ -81,6 +81,24 @@ def render(
         )
     direction = None if direction_opt == "all" else direction_opt
 
+    with col2:
+        if "consensus_filter" in insights.columns:
+            vals = sorted(
+                v for v in insights["consensus_filter"].unique().to_list()
+                if v != "All"
+            )
+            consensus_options = ["All"] + vals
+        else:
+            consensus_options = ["All"]
+        consensus_sel = st.selectbox(
+            "Consensus", options=consensus_options, key="insights_consensus"
+        )
+
+    if "consensus_filter" in insights.columns:
+        insights = insights.filter(
+            pl.col("consensus_filter") == consensus_sel
+        )
+
     # --- Depth 1: Single-dimension findings ---
     st.subheader("Single-Dimension Findings")
     d1 = filter_insights(insights, depth=1, direction=direction)

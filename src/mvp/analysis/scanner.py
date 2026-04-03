@@ -23,9 +23,24 @@ EDGE_LABELS = [
     "7.5% to 10%", "10%+",
 ]
 
+# --- Expected findings (suppressed from results) ---
+_NEGATIVE_EDGE_BUCKETS = set(EDGE_LABELS[:5])  # "below -10%" through "-2.5% to 0%"
+
+
+def _is_expected_finding(dimensions: str, filters: str, direction: str) -> bool:
+    """Return True if this finding is domain-obvious and should be suppressed.
+
+    Currently: negative edge buckets flagged as danger zones.
+    """
+    for dim, val in zip(dimensions.split("|"), filters.split(" | ")):
+        if dim == "edge_bucket" and direction == "danger_zone":
+            if val in _NEGATIVE_EDGE_BUCKETS:
+                return True
+    return False
+
+
 # --- Dimension definitions ---
 DIMENSIONS = [
-    ("consensus", "Consensus"),
     ("edge_bucket", "Edge"),
     ("odds_bucket", "Odds"),
     ("circuit", "Circuit"),
@@ -145,6 +160,7 @@ def compute_slices(
 
 _EMPTY_SCHEMA = {
     "model_version": pl.Utf8,
+    "consensus_filter": pl.Utf8,
     "depth": pl.Int64, "dimensions": pl.Utf8, "filters": pl.Utf8,
     "n": pl.Int64, "accuracy": pl.Float64, "roi": pl.Float64,
     "pnl": pl.Float64, "parent_dimensions": pl.Utf8,
@@ -168,15 +184,44 @@ def _scan_one_model(
     return score_surprises(slices)
 
 
+def _scan_with_consensus(
+    ds: pl.DataFrame,
+    max_depth: int,
+    min_n: int,
+) -> list[pl.DataFrame]:
+    """Run scanner for 'All' consensus and per distinct consensus value."""
+    parts: list[pl.DataFrame] = []
+
+    # "All" consensus
+    result = _scan_one_model(ds, max_depth, min_n)
+    if len(result) > 0:
+        result = result.with_columns(pl.lit("All").alias("consensus_filter"))
+        parts.append(result)
+
+    # Per consensus value
+    if "consensus" in ds.columns:
+        for cv in sorted(ds["consensus"].drop_nulls().unique().to_list()):
+            consensus_ds = ds.filter(pl.col("consensus") == cv)
+            if len(consensus_ds) >= min_n:
+                sub = _scan_one_model(consensus_ds, max_depth, min_n)
+                if len(sub) > 0:
+                    sub = sub.with_columns(
+                        pl.lit(str(cv)).alias("consensus_filter")
+                    )
+                    parts.append(sub)
+
+    return parts
+
+
 def run_scanner(
     ds: pl.DataFrame,
     max_depth: int = 2,
     min_n: int = MIN_N,
 ) -> pl.DataFrame:
-    """Run the insight scanner per model version.
+    """Run the insight scanner per model version and consensus level.
 
-    Produces the same depth 0/1/2 slices for each model independently.
-    Returns all results stacked with a model_version column.
+    Produces depth 0/1/2 slices for each (model, consensus) combination.
+    Returns all results stacked with model_version and consensus_filter columns.
     """
     required = [
         "status", "model_correct",
@@ -186,28 +231,28 @@ def run_scanner(
         return pl.DataFrame(schema=_EMPTY_SCHEMA)
 
     if "model_version" not in ds.columns:
-        result = _scan_one_model(ds, max_depth, min_n)
-        if len(result) > 0:
-            result = result.with_columns(
+        parts = _scan_with_consensus(ds, max_depth, min_n)
+        for i, p in enumerate(parts):
+            parts[i] = p.with_columns(
                 pl.lit("unknown").alias("model_version")
             )
-        return result
+        if not parts:
+            return pl.DataFrame(schema=_EMPTY_SCHEMA)
+        return pl.concat(parts, how="diagonal_relaxed")
 
     versions = ds["model_version"].drop_nulls().unique().to_list()
-    parts = []
+    all_parts: list[pl.DataFrame] = []
     for version in versions:
         model_ds = ds.filter(pl.col("model_version") == version)
-        result = _scan_one_model(model_ds, max_depth, min_n)
-        if len(result) > 0:
-            result = result.with_columns(
-                pl.lit(version).alias("model_version")
+        for p in _scan_with_consensus(model_ds, max_depth, min_n):
+            all_parts.append(
+                p.with_columns(pl.lit(version).alias("model_version"))
             )
-            parts.append(result)
 
-    if not parts:
+    if not all_parts:
         return pl.DataFrame(schema=_EMPTY_SCHEMA)
 
-    return pl.concat(parts, how="diagonal_relaxed")
+    return pl.concat(all_parts, how="diagonal_relaxed")
 
 
 def score_surprises(slices: pl.DataFrame) -> pl.DataFrame:
@@ -268,8 +313,15 @@ def score_surprises(slices: pl.DataFrame) -> pl.DataFrame:
         row["roi_delta"] = best_delta
 
         if best_delta is not None:
-            row["direction"] = "outperformer" if best_delta >= 0 else "danger_zone"
-            row["surprise"] = abs(best_delta) * math.sqrt(row["n"])
+            direction = "outperformer" if best_delta >= 0 else "danger_zone"
+            if _is_expected_finding(
+                row["dimensions"], row["filters"], direction,
+            ):
+                row["direction"] = None
+                row["surprise"] = None
+            else:
+                row["direction"] = direction
+                row["surprise"] = abs(best_delta) * math.sqrt(row["n"])
         else:
             row["direction"] = None
             row["surprise"] = None
