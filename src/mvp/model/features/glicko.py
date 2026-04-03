@@ -14,8 +14,26 @@ from mvp.model.registry import feature
     description="Glicko-2 mu rating",
     mirror=True,
 )
-def glicko_mu_raw() -> pl.Expr:
+def glicko_mu() -> pl.Expr:
     return pl.col("player_glicko_mu")
+
+
+@feature(
+    name="glicko_rd",
+    description="Glicko-2 rating deviation (uncertainty)",
+    mirror=True,
+)
+def glicko_rd() -> pl.Expr:
+    return pl.col("player_glicko_rd")
+
+
+@feature(
+    name="glicko_sigma",
+    description="Glicko-2 volatility",
+    mirror=True,
+)
+def glicko_sigma() -> pl.Expr:
+    return pl.col("player_glicko_sigma")
 
 
 @feature(

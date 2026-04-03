@@ -87,9 +87,9 @@ class TestGlickoDiffXRdSum:
 
 class TestGlickoMuRaw:
     def test_expr(self):
-        from mvp.model.features.glicko import glicko_mu_raw
+        from mvp.model.features.glicko import glicko_mu
         df = _base_df()
-        result = df.select(glicko_mu_raw().alias("val"))
+        result = df.select(glicko_mu().alias("val"))
         assert result["val"][0] == pytest.approx(1600.0)
 
     def test_registered(self):

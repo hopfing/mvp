@@ -257,15 +257,15 @@ class TestRawEloFeatures:
             assert feat is not None, f"Feature {name} not registered"
             assert feat.mirror is True
 
-    def test_elo_raw_expr(self):
-        from mvp.model.features.elo import elo_raw
+    def test_elo_expr(self):
+        from mvp.model.features.elo import elo
 
         df = pl.DataFrame({"player_elo": [1500.0, 1800.0]})
-        result = df.select(elo_raw().alias("val"))
+        result = df.select(elo().alias("val"))
         assert result["val"].to_list() == [1500.0, 1800.0]
 
-    def test_elo_surface_raw_expr(self):
-        from mvp.model.features.elo import elo_surface_raw
+    def test_elo_surface_expr(self):
+        from mvp.model.features.elo import elo_surface
 
         df = pl.DataFrame({
             "player_elo": [1500.0],
@@ -274,19 +274,19 @@ class TestRawEloFeatures:
             "player_grass_adj": [10.0],
             "surface": ["Hard"],
         })
-        result = df.select(elo_surface_raw().alias("val"))
+        result = df.select(elo_surface().alias("val"))
         assert result["val"].to_list() == [1530.0]
 
-    def test_serve_elo_raw_expr(self):
-        from mvp.model.features.elo import serve_elo_raw
+    def test_serve_elo_expr(self):
+        from mvp.model.features.elo import serve_elo
 
         df = pl.DataFrame({"player_serve_elo": [1600.0, 1700.0]})
-        result = df.select(serve_elo_raw().alias("val"))
+        result = df.select(serve_elo().alias("val"))
         assert result["val"].to_list() == [1600.0, 1700.0]
 
-    def test_return_elo_raw_expr(self):
-        from mvp.model.features.elo import return_elo_raw
+    def test_return_elo_expr(self):
+        from mvp.model.features.elo import return_elo
 
         df = pl.DataFrame({"player_return_elo": [1550.0, 1650.0]})
-        result = df.select(return_elo_raw().alias("val"))
+        result = df.select(return_elo().alias("val"))
         assert result["val"].to_list() == [1550.0, 1650.0]

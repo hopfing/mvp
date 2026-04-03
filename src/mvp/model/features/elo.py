@@ -35,7 +35,7 @@ def surface_elo_expr(prefix: str) -> pl.Expr:
     description="Overall Elo rating",
     mirror=True,
 )
-def elo_raw() -> pl.Expr:
+def elo() -> pl.Expr:
     return pl.col("player_elo")
 
 
@@ -44,7 +44,7 @@ def elo_raw() -> pl.Expr:
     description="Surface-adjusted Elo rating",
     mirror=True,
 )
-def elo_surface_raw() -> pl.Expr:
+def elo_surface() -> pl.Expr:
     return surface_elo_expr("player")
 
 
@@ -53,7 +53,7 @@ def elo_surface_raw() -> pl.Expr:
     description="Serve Elo rating",
     mirror=True,
 )
-def serve_elo_raw() -> pl.Expr:
+def serve_elo() -> pl.Expr:
     return pl.col("player_serve_elo")
 
 
@@ -62,8 +62,134 @@ def serve_elo_raw() -> pl.Expr:
     description="Return Elo rating",
     mirror=True,
 )
-def return_elo_raw() -> pl.Expr:
+def return_elo() -> pl.Expr:
     return pl.col("player_return_elo")
+
+
+@feature(
+    name="elo_rd",
+    description="Elo rating deviation (uncertainty)",
+    mirror=True,
+)
+def elo_rd() -> pl.Expr:
+    return pl.col("player_elo_rd")
+
+
+@feature(
+    name="serve_elo_rd",
+    description="Serve Elo rating deviation",
+    mirror=True,
+)
+def serve_elo_rd() -> pl.Expr:
+    return pl.col("player_serve_elo_rd")
+
+
+@feature(
+    name="return_elo_rd",
+    description="Return Elo rating deviation",
+    mirror=True,
+)
+def return_elo_rd() -> pl.Expr:
+    return pl.col("player_return_elo_rd")
+
+
+@feature(
+    name="hard_adj",
+    description="Hard court Elo adjustment",
+    mirror=True,
+)
+def hard_adj() -> pl.Expr:
+    return pl.col("player_hard_adj")
+
+
+@feature(
+    name="clay_adj",
+    description="Clay court Elo adjustment",
+    mirror=True,
+)
+def clay_adj() -> pl.Expr:
+    return pl.col("player_clay_adj")
+
+
+@feature(
+    name="grass_adj",
+    description="Grass court Elo adjustment",
+    mirror=True,
+)
+def grass_adj() -> pl.Expr:
+    return pl.col("player_grass_adj")
+
+
+@feature(
+    name="indoor_adj",
+    description="Indoor venue Elo adjustment",
+    mirror=True,
+)
+def indoor_adj() -> pl.Expr:
+    return pl.col("player_indoor_adj")
+
+
+@feature(
+    name="first_serve_power",
+    description="First serve power rating",
+    mirror=True,
+)
+def first_serve_power() -> pl.Expr:
+    return pl.col("player_first_serve_power")
+
+
+@feature(
+    name="second_serve_reliability",
+    description="Second serve reliability rating",
+    mirror=True,
+)
+def second_serve_reliability() -> pl.Expr:
+    return pl.col("player_second_serve_reliability")
+
+
+@feature(
+    name="ace_resistance",
+    description="Ace resistance rating",
+    mirror=True,
+)
+def ace_resistance() -> pl.Expr:
+    return pl.col("player_ace_resistance")
+
+
+@feature(
+    name="serve_clutch",
+    description="Serve clutch (BP save) rating",
+    mirror=True,
+)
+def serve_clutch() -> pl.Expr:
+    return pl.col("player_serve_clutch")
+
+
+@feature(
+    name="return_clutch",
+    description="Return clutch (BP conversion) rating",
+    mirror=True,
+)
+def return_clutch() -> pl.Expr:
+    return pl.col("player_return_clutch")
+
+
+@feature(
+    name="tb_clutch",
+    description="Tiebreak clutch rating",
+    mirror=True,
+)
+def tb_clutch() -> pl.Expr:
+    return pl.col("player_tb_clutch")
+
+
+@feature(
+    name="overall_clutch",
+    description="Overall clutch rating",
+    mirror=True,
+)
+def overall_clutch() -> pl.Expr:
+    return pl.col("player_overall_clutch")
 
 
 # =============================================================================
