@@ -466,21 +466,21 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         help="Override memory limit %% (0 to disable, default 75)",
     )
 
-    # tune subcommand - hyperparameter grid search
+    # tune subcommand - Bayesian hyperparameter optimization
     tune_parser = subparsers.add_parser(
-        "tune", help="Tune model hyperparameters via grid search"
+        "tune", help="Tune model hyperparameters via Optuna Bayesian optimization"
     )
     tune_parser.add_argument(
         "config", type=str,
         help="Model config to tune (looks in models/)",
     )
     tune_parser.add_argument(
-        "--metric", type=str, default="log_loss",
-        help="Metric to track (default: log_loss)",
+        "--metric", type=str, nargs="+", default=["log_loss"],
+        help="Metric(s) to optimize (default: log_loss). Multiple = multi-objective.",
     )
     tune_parser.add_argument(
         "--verbose", "-v", action="store_true",
-        help="Print per-combo results",
+        help="Log per-trial results",
     )
     tune_parser.add_argument(
         "--memory-limit", type=int, default=None,
@@ -491,8 +491,29 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         help="Fix a param to a specific value (e.g. --param n_estimators=300)",
     )
     tune_parser.add_argument(
-        "--limit", type=int, default=None,
-        help="Stop after N runs (useful for incremental tuning)",
+        "--limit", type=int, required=True,
+        help="Number of trials to run",
+    )
+
+    # tune-review subcommand
+    tune_review_parser = subparsers.add_parser(
+        "tune-review", help="Review tuning results"
+    )
+    tune_review_parser.add_argument(
+        "config", type=str,
+        help="Model config to review (looks in models/)",
+    )
+    tune_review_parser.add_argument(
+        "--top", type=int, default=15,
+        help="Number of top trials to show (default: 15)",
+    )
+    tune_review_parser.add_argument(
+        "--sort", type=str, nargs="+", default=["log_loss"],
+        help="Metric(s) to sort by (default: log_loss)",
+    )
+    tune_review_parser.add_argument(
+        "--dashboard", action="store_true",
+        help="Launch optuna-dashboard in browser",
     )
 
     # train subcommand - train production model
@@ -587,7 +608,7 @@ def cmd_train(args: argparse.Namespace) -> int:
 
 
 def cmd_tune(args: argparse.Namespace) -> int:
-    """Run hyperparameter grid search."""
+    """Run Bayesian hyperparameter optimization."""
     from mvp.model.tuning import HyperparamTuner
 
     config_path = resolve_config_path(args.config, MODEL_DIR)
@@ -602,18 +623,16 @@ def cmd_tune(args: argparse.Namespace) -> int:
             if "=" not in p:
                 raise ValueError(f"Invalid --param format: {p} (expected KEY=VALUE)")
             k, v = p.split("=", 1)
-            # Try JSON first (handles lists, bools, null)
-            import json
+            import json as _json
             v_lower = v.lower()
             if v_lower == "none":
                 v = None
             elif v_lower in ("true", "false"):
-                v = json.loads(v_lower)
+                v = _json.loads(v_lower)
             else:
                 try:
-                    v = json.loads(v)
-                except (json.JSONDecodeError, ValueError):
-                    # Fall back to numeric parsing
+                    v = _json.loads(v)
+                except (_json.JSONDecodeError, ValueError):
                     try:
                         v = int(v)
                     except ValueError:
@@ -626,19 +645,62 @@ def cmd_tune(args: argparse.Namespace) -> int:
     tuner = HyperparamTuner(
         config_path=config_path,
         param_overrides=param_overrides or None,
-        metric=args.metric,
+        metrics=args.metric,
     )
 
-    total = tuner._count_combos()
-    already = len(tuner.state.results)
-    logger.info(
-        "Tuning %s (%s): %d in grid, %d done",
-        config_path.stem, tuner.model_type, total, already,
+    study = tuner.run(n_trials=args.limit, verbose=args.verbose)
+    logger.info("Results saved to %s", tuner.db_path)
+    logger.info("Total trials: %d", len(study.trials))
+    return 0
+
+
+def cmd_tune_review(args: argparse.Namespace) -> int:
+    """Review tuning results."""
+    import optuna
+
+    from mvp.common.base_job import get_data_root
+    from mvp.model.tune_review import (
+        format_leaderboard,
+        format_param_importance,
     )
 
-    state = tuner.run(limit=args.limit)
-    logger.info("Results saved to %s", tuner.state_path)
-    logger.info("Total runs: %d", len(state.results))
+    config_path = resolve_config_path(args.config, MODEL_DIR)
+    state_dir = get_data_root() / "tuning"
+    db_path = state_dir / f"{config_path.stem}.db"
+
+    if not db_path.exists():
+        print(f"No tuning results found: {db_path}")
+        return 1
+
+    if args.dashboard:
+        import subprocess
+        import sys
+
+        print(f"Launching dashboard for {db_path}...")
+        subprocess.run(
+            [sys.executable, "-m", "optuna_dashboard", f"sqlite:///{db_path}"],
+        )
+        return 0
+
+    storage = f"sqlite:///{db_path}"
+    study = optuna.load_study(
+        study_name=config_path.stem,
+        storage=storage,
+    )
+
+    completed = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
+    print(f"Study: {study.study_name}")
+    print(f"Total trials: {len(completed)}")
+    print()
+
+    for line in format_leaderboard(study, sort_by=args.sort, top_n=args.top):
+        print(line)
+    print()
+
+    for line in format_param_importance(study):
+        print(line)
+    print()
+
     return 0
 
 
@@ -1666,6 +1728,8 @@ def main(args: list[str] | None = None) -> int:
         return cmd_model(parsed)
     elif parsed.command == "tune":
         return cmd_tune(parsed)
+    elif parsed.command == "tune-review":
+        return cmd_tune_review(parsed)
     elif parsed.command == "experiment":
         return cmd_experiment(parsed)
     elif parsed.command == "live":
