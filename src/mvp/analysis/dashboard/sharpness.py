@@ -189,7 +189,7 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
     """Render the book sharpness page."""
     import streamlit as st
 
-    from mvp.analysis.dashboard.components import model_selector
+    from mvp.analysis.dashboard.components import consensus_selector, model_selector
 
     # --- Model filter ---
     model_version = model_selector(ds, key="sharpness", default_to_active=True)
@@ -201,6 +201,11 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
             )
         if "model_version" in ds.columns:
             ds = ds.filter(pl.col("model_version") == model_version)
+
+    # --- Consensus filter ---
+    consensus = consensus_selector(ds, key="sharpness")
+    if consensus is not None:
+        ds = ds.filter(pl.col("consensus") == consensus)
 
     books = detect_books(sims)
     if not books:

@@ -113,12 +113,17 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
     """Render the odds page."""
     import streamlit as st
 
-    from mvp.analysis.dashboard.components import model_selector
+    from mvp.analysis.dashboard.components import consensus_selector, model_selector
 
     # --- Model filter ---
     model_version = model_selector(ds, key="odds", default_to_active=True)
     if model_version is not None:
         ds = ds.filter(pl.col("model_version") == model_version)
+
+    # --- Consensus filter ---
+    consensus = consensus_selector(ds, key="odds")
+    if consensus is not None:
+        ds = ds.filter(pl.col("consensus") == consensus)
 
     # Determine which odds columns are present in ds
     available_bases = [

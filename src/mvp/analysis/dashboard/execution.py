@@ -210,9 +210,21 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
     import streamlit as st
 
     from mvp.analysis.dashboard.components import (
+        consensus_selector,
         metric_card_data,
+        model_selector,
         render_metric_cards,
     )
+
+    # --- Model filter ---
+    model_version = model_selector(ds, key="execution", default_to_active=True)
+    if model_version is not None:
+        ds = ds.filter(pl.col("model_version") == model_version)
+
+    # --- Consensus filter ---
+    consensus = consensus_selector(ds, key="execution")
+    if consensus is not None:
+        ds = ds.filter(pl.col("consensus") == consensus)
 
     ex = execution_summary(ds)
     cards = [

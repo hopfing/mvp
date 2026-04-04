@@ -146,6 +146,7 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame, latest_run: dict | None = None)
     import streamlit as st
 
     from mvp.analysis.dashboard.components import (
+        consensus_selector,
         metric_card_data,
         model_selector,
         render_metric_cards,
@@ -171,6 +172,10 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame, latest_run: dict | None = None)
     model_version = model_selector(ds, key="overview", default_to_active=False)
     if model_version is not None:
         ds = ds.filter(pl.col("model_version") == model_version)
+
+    consensus = consensus_selector(ds, key="overview")
+    if consensus is not None:
+        ds = ds.filter(pl.col("consensus") == consensus)
 
     m = compute_model_performance(ds)
     b = compute_bet_performance(ds)

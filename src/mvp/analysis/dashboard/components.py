@@ -97,6 +97,35 @@ def model_selector(
     return None if selected == "All Models" else selected
 
 
+def consensus_selector(
+    ds: pl.DataFrame,
+    key: str,
+) -> float | None:
+    """Render a consensus level selectbox in the sidebar.
+
+    Returns the selected consensus value as a float, or None for 'All'.
+    """
+    import streamlit as st
+
+    if "consensus" not in ds.columns:
+        return None
+
+    vals = ds["consensus"].drop_nulls().unique().sort().to_list()
+    if not vals:
+        return None
+
+    str_vals = [str(v) for v in vals]
+    options = ["All"] + str_vals
+
+    selected = st.sidebar.selectbox(
+        "Consensus",
+        options=options,
+        key=f"consensus_sel_{key}",
+    )
+
+    return None if selected == "All" else float(selected)
+
+
 def metric_card_data(
     label: str,
     value: float | int | None,
