@@ -15,7 +15,23 @@ from mvp.common.base_job import get_data_root
 
 logger = logging.getLogger(__name__)
 
+_PROJECTION_MODEL_TYPES = {"xgb_regressor", "linear", "ridge"}
+
 DEFAULT_GRIDS: dict[str, dict[str, list[Any]]] = {
+    "xgb_regressor": {
+        "max_depth": [3, 4, 5, 6],
+        "learning_rate": [0.03, 0.05, 0.1, 0.15],
+        "n_estimators": [100, 200, 300, 500],
+        "min_child_weight": [3, 5, 10],
+        "subsample": [0.7, 0.8, 0.9],
+        "colsample_bytree": [0.7, 0.8, 0.9, 1.0],
+        "colsample_bylevel": [0.7, 0.8, 0.9, 1.0],
+        "colsample_bynode": [0.7, 0.8, 0.9, 1.0],
+        "gamma": [0, 0.1, 0.5, 1.0, 5.0],
+        "reg_alpha": [0, 0.01, 0.1, 1.0],
+        "reg_lambda": [0.1, 1.0, 5.0, 10.0],
+        "max_delta_step": [0, 1, 5],
+    },
     "xgboost": {
         "max_depth": [3, 4, 5, 6],
         "learning_rate": [0.03, 0.05, 0.1, 0.15],
@@ -229,9 +245,7 @@ class GridTuner:
             yield params
 
     def _run_one(self, params: dict[str, Any]) -> TuneResult:
-        """Run a single param combination through ExperimentRunner."""
-        from mvp.model.runner import ExperimentRunner
-
+        """Run a single param combination through the appropriate runner."""
         config = dict(self.base_config)
         config["model"] = dict(config["model"])
         base_params = dict(config["model"].get("params") or {})
@@ -249,22 +263,39 @@ class GridTuner:
             # Suppress per-fold logging during tuning
             runner_logger = logging.getLogger("mvp.model.runner")
             engine_logger = logging.getLogger("mvp.model.engine")
+            proj_logger = logging.getLogger("mvp.projection.runner")
             prev_runner = runner_logger.level
             prev_engine = engine_logger.level
+            prev_proj = proj_logger.level
             runner_logger.setLevel(logging.WARNING)
             engine_logger.setLevel(logging.WARNING)
+            proj_logger.setLevel(logging.WARNING)
             try:
-                runner = ExperimentRunner(
-                    config_path=temp_path,
-                    matches_path=self.matches_path,
-                    cache_dir=self.cache_dir,
-                    run_name=f"tune_{self.config_path.stem}",
-                    log_to_mlflow=True,
-                )
+                if self.model_type in _PROJECTION_MODEL_TYPES:
+                    from mvp.projection.runner import ProjectionRunner
+
+                    runner = ProjectionRunner(
+                        config_path=temp_path,
+                        matches_path=self.matches_path,
+                        cache_dir=self.cache_dir,
+                        run_name=f"tune_{self.config_path.stem}",
+                        log_to_mlflow=True,
+                    )
+                else:
+                    from mvp.model.runner import ExperimentRunner
+
+                    runner = ExperimentRunner(
+                        config_path=temp_path,
+                        matches_path=self.matches_path,
+                        cache_dir=self.cache_dir,
+                        run_name=f"tune_{self.config_path.stem}",
+                        log_to_mlflow=True,
+                    )
                 result = runner.run()
             finally:
                 runner_logger.setLevel(prev_runner)
                 engine_logger.setLevel(prev_engine)
+                proj_logger.setLevel(prev_proj)
             duration = time.perf_counter() - t0
 
             return TuneResult(

@@ -642,9 +642,17 @@ def cmd_tune(args: argparse.Namespace) -> int:
     """Run hyperparameter tuning."""
     config_path = resolve_config_path(args.config, MODEL_DIR)
     if not config_path.exists():
+        config_path = resolve_config_path(args.config, PROJECTION_DIR)
+    if not config_path.exists():
         raise FileNotFoundError(
-            f"Config not found: {args.config} (tried {config_path})"
+            f"Config not found: {args.config} "
+            f"(tried models/ and projections/)"
         )
+
+    # Auto-detect projection configs and default metric to mae
+    if _is_projection_discovery(config_path):
+        if args.metric == ["log_loss"]:
+            args.metric = ["mae"]
 
     param_overrides = _parse_param_overrides(args.param)
 
