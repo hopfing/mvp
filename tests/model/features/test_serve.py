@@ -191,6 +191,47 @@ class TestSvcRatingFeature:
         assert abs(result["svc_rating"][2] - 225.0) < 0.001
 
 
+class TestHoldPctFeature:
+    """Tests for hold_pct feature."""
+
+    def test_registered(self):
+        registry = get_registry()
+        feat = registry.get("hold_pct")
+        assert feat.params == ["days"]
+        assert feat.mirror is True
+
+    def test_computes_rolling_hold_percentage(self):
+        from mvp.model.features.serve import hold_pct
+
+        df = pl.DataFrame({
+            "player_id": ["A", "A", "A"],
+            "effective_match_date": [
+                date(2024, 1, 1),
+                date(2024, 1, 5),
+                date(2024, 1, 10),
+            ],
+            # Match 1: 10 svc games, faced 3 BP saved 1 -> 2 breaks -> 8 holds -> 80%
+            # Match 2: 12 svc games, faced 0 BP saved 0 -> 0 breaks -> 12 holds -> 100%
+            # Match 3: 11 svc games, faced 5 BP saved 3 -> 2 breaks -> 9 holds -> 81.8%
+            "svc_games_played": [10, 12, 11],
+            "svc_bp_faced": [3, 0, 5],
+            "svc_bp_saved": [1, 0, 3],
+        }).lazy()
+
+        result = df.with_columns(hold_pct(days=365).alias("val")).collect()
+        # Row 0: no prior -> null
+        assert result["val"][0] is None
+        # Row 1: prior=[8/10] -> 0.8
+        assert result["val"][1] == pytest.approx(0.8)
+        # Row 2: prior=[8+12 / 10+12] -> 20/22 = 0.909
+        assert result["val"][2] == pytest.approx(20 / 22, abs=0.001)
+
+    def test_diff_and_sum_registered(self):
+        registry = get_registry()
+        registry.get("hold_pct_diff")
+        registry.get("hold_pct_sum")
+
+
 class TestSvcDiffFeatures:
     """Tests for serve diff features."""
 

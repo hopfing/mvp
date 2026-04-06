@@ -90,6 +90,21 @@ def svc_rating(days: int | None = None) -> pl.Expr:
     return rolling_mean("svc_serve_rating", days=days, group_by="player_id")
 
 
+@feature(
+    name="hold_pct",
+    params=["days"],
+    description="Service games held percentage (windowed or all-time)",
+    mirror=True,
+)
+def hold_pct(days: int | None = None) -> pl.Expr:
+    """Percentage of service games held.
+
+    Holds = service games played minus games broken (bp_faced - bp_saved).
+    """
+    holds = pl.col("svc_games_played") - (pl.col("svc_bp_faced") - pl.col("svc_bp_saved"))
+    return ratio_feature(holds, "svc_games_played", days)
+
+
 # =============================================================================
 # Diff Features (player - opponent, same stat)
 # =============================================================================
@@ -97,12 +112,14 @@ def svc_rating(days: int | None = None) -> pl.Expr:
 for _base in [
     "svc_first_serve_win_pct", "svc_second_serve_win_pct", "svc_ace_pct",
     "svc_df_pct", "svc_bp_save_pct", "svc_first_serve_in_pct", "svc_rating",
+    "hold_pct",
 ]:
     register_diff(_base)
 
 for _base in [
     "svc_first_serve_win_pct", "svc_second_serve_win_pct",
     "svc_ace_pct", "svc_bp_save_pct", "svc_first_serve_in_pct",
+    "hold_pct",
 ]:
     register_sum(_base)
 
