@@ -147,14 +147,14 @@ class ProjectionDiagnostics:
             pl.Series("y_pred", y_pred),
         )
 
-        # Group by match: sum predictions and actuals
+        # Group by match: use first/last to preserve player identity
         grouped = match_df.group_by("match_uid").agg(
             pl.col("y_true").sum().alias("actual_total"),
             pl.col("y_pred").sum().alias("pred_total"),
-            pl.col("y_true").max().alias("winner_games"),
-            pl.col("y_true").min().alias("loser_games"),
-            pl.col("y_pred").max().alias("pred_winner_games"),
-            pl.col("y_pred").min().alias("pred_loser_games"),
+            pl.col("y_true").first().alias("p1_true"),
+            pl.col("y_true").last().alias("p2_true"),
+            pl.col("y_pred").first().alias("p1_pred"),
+            pl.col("y_pred").last().alias("p2_pred"),
             pl.col("y_true").count().alias("n_rows"),
         ).filter(pl.col("n_rows") == 2)  # Only complete pairs
 
@@ -165,15 +165,26 @@ class ProjectionDiagnostics:
         pred_total = grouped["pred_total"].to_numpy().astype(float)
         total_mae = float(np.mean(np.abs(actual_total - pred_total)))
 
-        # Spread: difference between players' games
-        actual_spread = grouped["winner_games"].to_numpy().astype(float) - grouped["loser_games"].to_numpy().astype(float)
-        pred_spread = grouped["pred_winner_games"].to_numpy().astype(float) - grouped["pred_loser_games"].to_numpy().astype(float)
-        spread_mae = float(np.mean(np.abs(actual_spread - pred_spread)))
+        # Spread: actual winner's games minus loser's games
+        p1_true = grouped["p1_true"].to_numpy().astype(float)
+        p2_true = grouped["p2_true"].to_numpy().astype(float)
+        p1_pred = grouped["p1_pred"].to_numpy().astype(float)
+        p2_pred = grouped["p2_pred"].to_numpy().astype(float)
 
-        # Directional accuracy: did predicted spread get the winner right?
-        # Winner is the player with more actual games
-        # If predicted spread sign matches actual, we got direction right
-        directional_correct = float(np.mean((pred_spread > 0) == (actual_spread > 0)))
+        actual_spread = p1_true - p2_true
+        pred_spread = p1_pred - p2_pred
+        spread_mae = float(np.mean(np.abs(np.abs(actual_spread) - np.abs(pred_spread))))
+
+        # Directional accuracy: did the model predict the right player
+        # wins more games? Compare sign of spreads (same player basis).
+        # Exclude ties in actual games (no correct direction to pick).
+        non_tie = actual_spread != 0
+        if non_tie.any():
+            directional_correct = float(np.mean(
+                np.sign(pred_spread[non_tie]) == np.sign(actual_spread[non_tie])
+            ))
+        else:
+            directional_correct = 0.0
 
         return {
             "n_matches": len(grouped),
