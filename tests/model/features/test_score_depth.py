@@ -185,6 +185,31 @@ class TestScoreDepthBaseFeatures:
         assert result["val"][3] == pytest.approx(78 / 3, abs=0.01)
 
 
+class TestRecentGamesLoad:
+    """Tests for recent_games_load feature."""
+
+    def test_registered(self):
+        registry = get_registry()
+        feat = registry.get("recent_games_load")
+        assert feat.params == ["days"]
+        assert feat.mirror is True
+        assert feat.impute == 0
+
+    def test_rolling_sum(self):
+        from mvp.model.features.score_depth import recent_games_load
+
+        df = _make_score_df()
+        result = df.with_columns(recent_games_load(days=365).alias("val"))
+        # Row 0: no prior -> 0 (rolling_sum fills null with 0)
+        assert result["val"][0] == pytest.approx(0.0)
+        # Row 1: prior games = (12+7) = 19
+        assert result["val"][1] == pytest.approx(19.0)
+        # Row 2: prior games = 19 + (16+15) = 50
+        assert result["val"][2] == pytest.approx(50.0)
+        # Row 3: prior games = 19 + 31 + (13+15) = 78
+        assert result["val"][3] == pytest.approx(78.0)
+
+
 class TestScoreDepthDiffFeatures:
     """Tests for score-depth diff features."""
 
@@ -195,7 +220,7 @@ class TestScoreDepthDiffFeatures:
             "games_won_per_set_diff", "games_lost_per_set_diff",
             "games_margin_per_set_diff", "games_per_set_diff",
             "total_games_won_diff", "total_games_lost_diff",
-            "total_games_diff",
+            "total_games_diff", "recent_games_load_diff",
         ]
         for name in diff_names:
             feat = registry.get(name)
@@ -232,20 +257,21 @@ class TestScoreDepthFeatureCount:
     def test_total_count(self):
         registry = get_registry()
         sd_names = [
-            # base (9)
+            # base (10)
             "sets_per_match", "straight_sets_win_pct",
             "games_won_per_set", "games_lost_per_set",
             "games_margin_per_set", "games_per_set",
             "total_games_won", "total_games_lost", "total_games",
-            # diffs (9)
+            "recent_games_load",
+            # diffs (10)
             "sets_per_match_diff", "straight_sets_win_pct_diff",
             "games_won_per_set_diff", "games_lost_per_set_diff",
             "games_margin_per_set_diff", "games_per_set_diff",
             "total_games_won_diff", "total_games_lost_diff",
-            "total_games_diff",
+            "total_games_diff", "recent_games_load_diff",
             # sums (3)
             "games_per_set_sum", "sets_per_match_sum", "total_games_sum",
         ]
         for name in sd_names:
             registry.get(name)  # Will raise KeyError if missing
-        assert len(sd_names) == 21
+        assert len(sd_names) == 23

@@ -12,7 +12,13 @@ from mvp.model.features._score_helpers import (
 from mvp.model.features._score_helpers import (
     total_games_won as _total_games_won,
 )
-from mvp.model.primitives import cumulative_mean, ratio_feature, rolling_mean
+from mvp.model.primitives import (
+    cumulative_mean,
+    cumulative_sum,
+    ratio_feature,
+    rolling_mean,
+    rolling_sum,
+)
 from mvp.model.registry import feature, register_diff, register_sum
 
 
@@ -160,12 +166,32 @@ def total_games(days: int | None = None) -> pl.Expr:
     return rolling_mean(expr, days=days, group_by="player_id")
 
 
+@feature(
+    name="recent_games_load",
+    params=["days"],
+    description="Total games played (won + lost) in window (physical load proxy)",
+    mirror=True,
+    impute=0,
+)
+def recent_games_load(days: int | None = None) -> pl.Expr:
+    """Total games played in the window — better fatigue proxy than match count.
+
+    A player who played three 5-set matches has more load than one
+    who played three straight-set wins.
+    """
+    expr = (_total_games_won() + _total_games_lost()).cast(pl.Float64)
+    if days is None:
+        return cumulative_sum(expr, group_by="player_id")
+    return rolling_sum(expr, days=days, group_by="player_id")
+
+
 # --- Derived diff features ---
 
 for _base in [
     "sets_per_match", "straight_sets_win_pct", "games_won_per_set",
     "games_lost_per_set", "games_margin_per_set", "games_per_set",
     "total_games_won", "total_games_lost", "total_games",
+    "recent_games_load",
 ]:
     register_diff(_base)
 
