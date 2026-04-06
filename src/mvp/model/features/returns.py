@@ -4,7 +4,7 @@
 import polars as pl
 
 from mvp.model.primitives import cumulative_mean, ratio_feature, rolling_mean
-from mvp.model.registry import feature, register_diff, register_matchup
+from mvp.model.registry import feature, register_diff, register_matchup, register_sum
 
 # =============================================================================
 # Single Stats
@@ -66,6 +66,9 @@ for _base in [
     "ret_bp_convert_pct", "ret_rating",
 ]:
     register_diff(_base)
+
+for _base in ["ret_bp_convert_pct"]:
+    register_sum(_base)
 
 
 # =============================================================================

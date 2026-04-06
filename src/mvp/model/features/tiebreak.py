@@ -13,7 +13,7 @@ from mvp.model.features._score_helpers import (
     tiebreaks_won as _tiebreaks_won,
 )
 from mvp.model.primitives import cumulative_sum, ratio_feature, rolling_sum
-from mvp.model.registry import feature, register_diff
+from mvp.model.registry import feature, register_diff, register_sum
 
 DATE_COL = "effective_match_date"
 
@@ -91,3 +91,6 @@ def deciding_set_win_pct(days: int | None = None) -> pl.Expr:
 
 
 register_diff("deciding_set_win_pct")
+
+for _base in ["tiebreak_pct", "deciding_set_pct"]:
+    register_sum(_base)

@@ -159,3 +159,31 @@ def register_matchup(
         if days is None:
             return pl.col(_pc) - pl.col(_oc)
         return pl.col(f"{_pc}_{days}d") - pl.col(f"{_oc}_{days}d")
+
+
+def register_sum(base_name: str, description: str = "") -> None:
+    """Register a sum feature (player + opponent) for a base feature.
+
+    Creates a match-level feature representing the combined value.
+    Useful for projection: combined serve dominance, combined tightness, etc.
+
+    Infers whether the sum is windowed from the base feature's params.
+    Must be called after the base feature is registered.
+    """
+    base = get_registry().get(base_name)
+    has_days = "days" in base.params
+    sum_name = f"{base_name}_sum"
+
+    @feature(
+        name=sum_name,
+        params=["days"] if has_days else [],
+        description=description or f"{base_name} sum (player + opponent)",
+        depends_on=[base_name],
+        mirror=False,
+        match_level=True,
+        impute="median",
+    )
+    def _sum(days: int | None = None, _bn: str = base_name) -> pl.Expr:
+        if days is None:
+            return pl.col(f"player_{_bn}") + pl.col(f"opp_{_bn}")
+        return pl.col(f"player_{_bn}_{days}d") + pl.col(f"opp_{_bn}_{days}d")

@@ -4,7 +4,7 @@
 import polars as pl
 
 from mvp.model.primitives import ratio_feature
-from mvp.model.registry import feature, register_diff, register_matchup
+from mvp.model.registry import feature, register_diff, register_matchup, register_sum
 
 # =============================================================================
 # Single Stats
@@ -50,6 +50,9 @@ def pts_return_won_pct(days: int | None = None) -> pl.Expr:
 
 for _base in ["pts_total_won_pct", "pts_service_won_pct", "pts_return_won_pct"]:
     register_diff(_base)
+
+for _base in ["pts_total_won_pct", "pts_service_won_pct", "pts_return_won_pct"]:
+    register_sum(_base)
 
 
 # =============================================================================
