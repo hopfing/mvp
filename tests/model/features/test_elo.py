@@ -137,9 +137,30 @@ class TestAbsoluteLevelFeatures:
         # Row 1: surface_diff = (1800+10) - (1600+15) = 195, rd_sum = 60+70 = 130 → 195 * 130 = 25350
         assert result["val"].to_list() == [pytest.approx(20700.0), pytest.approx(25350.0)]
 
+    def test_elo_surface_diff_abs(self):
+        from mvp.model.features.elo import elo_surface_diff_abs
+
+        df = self._base_df()
+        result = df.select(elo_surface_diff_abs().alias("val"))
+        # Row 0: |(1500+30) - (1400+15)| = 115
+        # Row 1: |(1800+10) - (1600+15)| = 195
+        assert result["val"].to_list() == [pytest.approx(115.0), pytest.approx(195.0)]
+
+    def test_elo_surface_diff_sq(self):
+        from mvp.model.features.elo import elo_surface_diff_sq
+
+        df = self._base_df()
+        result = df.select(elo_surface_diff_sq().alias("val"))
+        # Row 0: 115² = 13225
+        # Row 1: 195² = 38025
+        assert result["val"].to_list() == [pytest.approx(13225.0), pytest.approx(38025.0)]
+
     def test_all_registered(self):
         registry = get_registry()
-        for name in ["elo_avg", "elo_avg_sq", "elo_min", "elo_diff_x_elo_avg", "elo_diff_x_rd_sum"]:
+        for name in [
+            "elo_avg", "elo_avg_sq", "elo_min", "elo_diff_x_elo_avg",
+            "elo_diff_x_rd_sum", "elo_surface_diff_abs", "elo_surface_diff_sq",
+        ]:
             feat = registry.get(name)
             assert feat is not None, f"Feature {name} not registered"
             assert feat.mirror is False

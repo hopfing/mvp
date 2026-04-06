@@ -105,6 +105,31 @@ def glicko_surface_rd_sum() -> pl.Expr:
 
 
 @feature(
+    name="glicko_diff_abs",
+    description="Absolute Glicko-2 mu difference (match competitiveness)",
+    mirror=False,
+    match_level=True,
+    impute=0,
+)
+def glicko_diff_abs() -> pl.Expr:
+    """Absolute Glicko gap — larger means more lopsided match."""
+    return (pl.col("player_glicko_mu") - pl.col("opp_glicko_mu")).abs()
+
+
+@feature(
+    name="glicko_diff_sq",
+    description="Squared Glicko-2 mu difference (nonlinear competitiveness)",
+    mirror=False,
+    match_level=True,
+    impute=0,
+)
+def glicko_diff_sq() -> pl.Expr:
+    """Squared Glicko gap — captures diminishing marginal effect of skill gap."""
+    diff = pl.col("player_glicko_mu") - pl.col("opp_glicko_mu")
+    return diff ** 2
+
+
+@feature(
     name="glicko_diff_x_rd_sum",
     description="Glicko diff weighted by combined uncertainty",
     mirror=False,

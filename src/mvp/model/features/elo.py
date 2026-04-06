@@ -408,6 +408,33 @@ def ret_elo_matchup_rd() -> pl.Expr:
 
 
 @feature(
+    name="elo_surface_diff_abs",
+    params=[],
+    description="Absolute surface-adjusted Elo difference (match competitiveness)",
+    mirror=False,
+    match_level=True,
+    impute=0,
+)
+def elo_surface_diff_abs() -> pl.Expr:
+    """Absolute Elo gap — larger means more lopsided match, fewer games."""
+    return (surface_elo_expr("player") - surface_elo_expr("opp")).abs()
+
+
+@feature(
+    name="elo_surface_diff_sq",
+    params=[],
+    description="Squared surface-adjusted Elo difference (nonlinear competitiveness)",
+    mirror=False,
+    match_level=True,
+    impute=0,
+)
+def elo_surface_diff_sq() -> pl.Expr:
+    """Squared Elo gap — captures diminishing marginal effect of skill gap."""
+    diff = surface_elo_expr("player") - surface_elo_expr("opp")
+    return diff ** 2
+
+
+@feature(
     name="elo_clay_specialist",
     params=[],
     description="Clay adjustment minus hard adjustment (clay preference)",

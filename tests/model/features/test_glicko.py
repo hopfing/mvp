@@ -76,6 +76,37 @@ class TestGlickoSurfaceRdSum:
         assert result["val"][0] == pytest.approx(220.0)  # 100 + 120
 
 
+class TestGlickoDiffAbs:
+    def test_basic(self):
+        from mvp.model.features.glicko import glicko_diff_abs
+        df = _base_df()
+        result = df.select(glicko_diff_abs().alias("val"))
+        assert result["val"][0] == pytest.approx(100.0)
+
+    def test_symmetric(self):
+        """Abs diff is the same regardless of who is stronger."""
+        from mvp.model.features.glicko import glicko_diff_abs
+        df = pl.DataFrame({
+            "player_glicko_mu": [1400.0], "opp_glicko_mu": [1600.0],
+            **{c: [0.0] for c in [
+                "player_glicko_rd", "opp_glicko_rd",
+                "player_glicko_sigma", "opp_glicko_sigma",
+            ]},
+            "surface": ["Hard"],
+        })
+        result = df.select(glicko_diff_abs().alias("val"))
+        assert result["val"][0] == pytest.approx(200.0)
+
+
+class TestGlickoDiffSq:
+    def test_basic(self):
+        from mvp.model.features.glicko import glicko_diff_sq
+        df = _base_df()
+        result = df.select(glicko_diff_sq().alias("val"))
+        # diff = 100 → 100² = 10000
+        assert result["val"][0] == pytest.approx(10000.0)
+
+
 class TestGlickoDiffXRdSum:
     def test_basic(self):
         from mvp.model.features.glicko import glicko_diff_x_rd_sum
@@ -104,7 +135,7 @@ class TestGlickoFeaturesRegistered:
         registry = get_registry()
         expected = [
             "glicko_mu",
-            "glicko_diff",
+            "glicko_diff", "glicko_diff_abs", "glicko_diff_sq",
             "glicko_rd_sum", "glicko_rd_diff", "glicko_sigma_diff",
             "glicko_surface_rd_sum", "glicko_diff_x_rd_sum",
         ]
