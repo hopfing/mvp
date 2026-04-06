@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 import streamlit as st
 
-from mvp.analysis.dashboard import edge, execution, health, odds, overview, sharpness
+from mvp.analysis.dashboard import bets, edge, execution, health, odds, overview, sharpness
 from mvp.analysis.dashboard import insights as insights_page
 
 if TYPE_CHECKING:
@@ -15,6 +15,7 @@ if TYPE_CHECKING:
 
 PAGE_REGISTRY: list[dict] = [
     {"name": "Overview", "icon": "house", "render": overview.render},
+    {"name": "Bet Performance", "icon": "cash-coin", "render": bets.render},
     {"name": "Insights", "icon": "search", "render": insights_page.render},
     {"name": "Edge Analysis", "icon": "bar-chart", "render": edge.render},
     {"name": "Odds", "icon": "currency-dollar", "render": odds.render},
