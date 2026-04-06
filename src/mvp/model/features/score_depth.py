@@ -13,7 +13,7 @@ from mvp.model.features._score_helpers import (
     total_games_won as _total_games_won,
 )
 from mvp.model.primitives import cumulative_mean, ratio_feature, rolling_mean
-from mvp.model.registry import feature, register_diff
+from mvp.model.registry import feature, register_diff, register_sum
 
 
 def _games_won_per_set() -> pl.Expr:
@@ -118,10 +118,56 @@ def games_per_set(days: int | None = None) -> pl.Expr:
     return rolling_mean(_games_per_set(), days=days, group_by="player_id")
 
 
+@feature(
+    name="total_games_won",
+    params=["days"],
+    description="Avg total games won per match in window",
+    mirror=True,
+    impute="median",
+)
+def total_games_won(days: int | None = None) -> pl.Expr:
+    expr = _total_games_won().cast(pl.Float64)
+    if days is None:
+        return cumulative_mean(expr, group_by="player_id")
+    return rolling_mean(expr, days=days, group_by="player_id")
+
+
+@feature(
+    name="total_games_lost",
+    params=["days"],
+    description="Avg total games conceded per match in window",
+    mirror=True,
+    impute="median",
+)
+def total_games_lost(days: int | None = None) -> pl.Expr:
+    expr = _total_games_lost().cast(pl.Float64)
+    if days is None:
+        return cumulative_mean(expr, group_by="player_id")
+    return rolling_mean(expr, days=days, group_by="player_id")
+
+
+@feature(
+    name="total_games",
+    params=["days"],
+    description="Avg total games per match in window (match length tendency)",
+    mirror=True,
+    impute="median",
+)
+def total_games(days: int | None = None) -> pl.Expr:
+    expr = (_total_games_won() + _total_games_lost()).cast(pl.Float64)
+    if days is None:
+        return cumulative_mean(expr, group_by="player_id")
+    return rolling_mean(expr, days=days, group_by="player_id")
+
+
 # --- Derived diff features ---
 
 for _base in [
     "sets_per_match", "straight_sets_win_pct", "games_won_per_set",
     "games_lost_per_set", "games_margin_per_set", "games_per_set",
+    "total_games_won", "total_games_lost", "total_games",
 ]:
     register_diff(_base)
+
+for _base in ["games_per_set", "sets_per_match", "total_games"]:
+    register_sum(_base)

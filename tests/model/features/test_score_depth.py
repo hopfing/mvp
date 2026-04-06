@@ -55,6 +55,7 @@ class TestScoreDepthBaseFeatures:
             "sets_per_match", "straight_sets_win_pct",
             "games_won_per_set", "games_lost_per_set",
             "games_margin_per_set", "games_per_set",
+            "total_games_won", "total_games_lost", "total_games",
         ]
         for name in base_names:
             feat = registry.get(name)
@@ -143,6 +144,46 @@ class TestScoreDepthBaseFeatures:
         # Row 3: prior=[2,3,3] -> 8/3
         assert result["val"][3] == pytest.approx(8 / 3, abs=0.01)
 
+    def test_total_games_won_rolling(self):
+        from mvp.model.features.score_depth import total_games_won
+
+        df = _make_score_df()
+        result = df.with_columns(total_games_won(days=365).alias("val"))
+        # Row 0: no prior -> null
+        assert result["val"][0] is None
+        # Row 1: prior=[12] -> 12.0
+        assert result["val"][1] == pytest.approx(12.0)
+        # Row 2: prior=[12, 16] -> 14.0
+        assert result["val"][2] == pytest.approx(14.0)
+        # Row 3: prior=[12, 16, 13] -> 13.667
+        assert result["val"][3] == pytest.approx(41 / 3, abs=0.01)
+
+    def test_total_games_lost_rolling(self):
+        from mvp.model.features.score_depth import total_games_lost
+
+        df = _make_score_df()
+        result = df.with_columns(total_games_lost(days=365).alias("val"))
+        # Row 0: no prior -> null
+        assert result["val"][0] is None
+        # Row 1: prior=[7] -> 7.0
+        assert result["val"][1] == pytest.approx(7.0)
+        # Row 2: prior=[7, 15] -> 11.0
+        assert result["val"][2] == pytest.approx(11.0)
+
+    def test_total_games_rolling(self):
+        from mvp.model.features.score_depth import total_games
+
+        df = _make_score_df()
+        result = df.with_columns(total_games(days=365).alias("val"))
+        # Row 0: no prior -> null
+        assert result["val"][0] is None
+        # Row 1: prior=[12+7=19] -> 19.0
+        assert result["val"][1] == pytest.approx(19.0)
+        # Row 2: prior=[19, 16+15=31] -> 25.0
+        assert result["val"][2] == pytest.approx(25.0)
+        # Row 3: prior=[19, 31, 13+15=28] -> 26.0
+        assert result["val"][3] == pytest.approx(78 / 3, abs=0.01)
+
 
 class TestScoreDepthDiffFeatures:
     """Tests for score-depth diff features."""
@@ -153,6 +194,8 @@ class TestScoreDepthDiffFeatures:
             "sets_per_match_diff", "straight_sets_win_pct_diff",
             "games_won_per_set_diff", "games_lost_per_set_diff",
             "games_margin_per_set_diff", "games_per_set_diff",
+            "total_games_won_diff", "total_games_lost_diff",
+            "total_games_diff",
         ]
         for name in diff_names:
             feat = registry.get(name)
@@ -189,13 +232,20 @@ class TestScoreDepthFeatureCount:
     def test_total_count(self):
         registry = get_registry()
         sd_names = [
+            # base (9)
             "sets_per_match", "straight_sets_win_pct",
             "games_won_per_set", "games_lost_per_set",
             "games_margin_per_set", "games_per_set",
+            "total_games_won", "total_games_lost", "total_games",
+            # diffs (9)
             "sets_per_match_diff", "straight_sets_win_pct_diff",
             "games_won_per_set_diff", "games_lost_per_set_diff",
             "games_margin_per_set_diff", "games_per_set_diff",
+            "total_games_won_diff", "total_games_lost_diff",
+            "total_games_diff",
+            # sums (3)
+            "games_per_set_sum", "sets_per_match_sum", "total_games_sum",
         ]
         for name in sd_names:
             registry.get(name)  # Will raise KeyError if missing
-        assert len(sd_names) == 12
+        assert len(sd_names) == 21
