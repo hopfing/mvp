@@ -186,6 +186,17 @@ class ProjectionDiscovery:
             self.config.discovery.metric, 0.0
         )
 
+        # Round 1 feature ranking (if available)
+        if selection_result and selection_result.history:
+            round_1 = selection_result.history[0]
+            if round_1.get("action") == "add" and "round_ranking" in round_1:
+                ranking = round_1["round_ranking"]
+                self._log("")
+                self._log(f"ROUND 1 FEATURE RANKING ({len(ranking)} features)")
+                self._log("-" * 50)
+                for i, (feat, metric) in enumerate(ranking, 1):
+                    self._log(f"  {i:3}. {feat}: {metric:.4f}")
+
         self._log("")
         self._log("RESULTS")
         self._log("-" * 30)
