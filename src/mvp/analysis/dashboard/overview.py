@@ -50,7 +50,10 @@ def compute_bet_performance(ds: pl.DataFrame) -> dict:
             "accuracy": None, "stake": None, "pnl": None, "roi": None,
         }
 
-    bets = ds.filter(pl.col("bet_side").is_in(["P1", "P2"]))
+    bets = ds.filter(
+        pl.col("bet_side").is_in(["P1", "P2"])
+        & (pl.col("status") == "resolved")
+    )
     n = len(bets)
     if n == 0:
         return {
