@@ -13,6 +13,7 @@ def reload_all_feature_modules() -> None:
     import mvp.model.features.elo
     import mvp.model.features.form
     import mvp.model.features.h2h
+    import mvp.model.features.iid
     import mvp.model.features.points
     import mvp.model.features.ranking
     import mvp.model.features.returns
@@ -27,6 +28,7 @@ def reload_all_feature_modules() -> None:
     importlib.reload(mvp.model.features.elo)
     importlib.reload(mvp.model.features.form)
     importlib.reload(mvp.model.features.h2h)
+    importlib.reload(mvp.model.features.iid)
     importlib.reload(mvp.model.features.points)
     importlib.reload(mvp.model.features.ranking)
     importlib.reload(mvp.model.features.returns)
