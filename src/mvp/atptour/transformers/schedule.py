@@ -22,9 +22,9 @@ _MATCH_DURATION_ESTIMATE = timedelta(minutes=90)
 
 
 def _parse_snapshot_timestamp(stem: str) -> datetime:
-    """Parse 'schedule_YYYYMMDD_HHMMSS' into datetime."""
-    parts = stem.split("_", 1)
-    return datetime.strptime(parts[1], "%Y%m%d_%H%M%S")
+    """Parse 'schedule_YYYYMMDD_HHMMSS' or 'schedule_dN_YYYYMMDD_HHMMSS'."""
+    parts = stem.rsplit("_", 2)
+    return datetime.strptime(f"{parts[-2]}_{parts[-1]}", "%Y%m%d_%H%M%S")
 
 
 def _normalize_score(score_span: Tag) -> str | None:
