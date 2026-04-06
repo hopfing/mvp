@@ -37,6 +37,7 @@ def sample_matches(tmp_path: Path) -> Path:
     match_uids, player_ids, opp_ids = [], [], []
     won_values: list[bool | None] = []
     first_names, last_names, opp_fnames, opp_lnames = [], [], [], []
+    display_names, opp_display_names = [], []
     p_elo, o_elo, p_serve, o_serve, p_ret, o_ret = [], [], [], [], [], []
     dates, surfaces, circuits = [], [], []
     draw_p1_ids: list[str | None] = []
@@ -60,6 +61,8 @@ def sample_matches(tmp_path: Path) -> Path:
         last_names.append(f"Last{p1}")
         opp_fnames.append(f"First{p2}")
         opp_lnames.append(f"Last{p2}")
+        display_names.append(f"First{p1} Last{p1}")
+        opp_display_names.append(f"First{p2} Last{p2}")
         dates.append(d)
         surfaces.append(surf)
         circuits.append(circ)
@@ -80,6 +83,8 @@ def sample_matches(tmp_path: Path) -> Path:
         last_names.append(f"Last{p2}")
         opp_fnames.append(f"First{p1}")
         opp_lnames.append(f"Last{p1}")
+        display_names.append(f"First{p2} Last{p2}")
+        opp_display_names.append(f"First{p1} Last{p1}")
         dates.append(d)
         surfaces.append(surf)
         circuits.append(circ)
@@ -115,6 +120,8 @@ def sample_matches(tmp_path: Path) -> Path:
             "player_last_name": last_names,
             "opp_first_name": opp_fnames,
             "opp_last_name": opp_lnames,
+            "player_display_name": display_names,
+            "opp_display_name": opp_display_names,
             "player_elo": p_elo,
             "opp_elo": o_elo,
             "player_hard_adj": [10.0] * n,
@@ -393,6 +400,8 @@ class TestPredictMatches:
                     "player_last_name": f"Last{player_id}",
                     "opp_first_name": f"First{opp_id}",
                     "opp_last_name": f"Last{opp_id}",
+                    "player_display_name": f"First{player_id} Last{player_id}",
+                    "opp_display_name": f"First{opp_id} Last{opp_id}",
                     "player_elo": 1500.0 + m * elo_sign,
                     "opp_elo": 1500.0 - m * elo_sign,
                     "player_hard_adj": 10.0,
