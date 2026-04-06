@@ -508,8 +508,8 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         help="Number of top trials to show (default: 15)",
     )
     tune_review_parser.add_argument(
-        "--sort", type=str, nargs="+", default=["log_loss"],
-        help="Metric(s) to sort by (default: log_loss)",
+        "--sort", type=str, nargs="+", default=None,
+        help="Metric(s) to sort by (default: auto-detect from study)",
     )
     tune_review_parser.add_argument(
         "--dashboard", action="store_true",
@@ -706,6 +706,8 @@ def cmd_tune_review(args: argparse.Namespace) -> int:
     )
 
     config_path = resolve_config_path(args.config, MODEL_DIR)
+    if not config_path.exists():
+        config_path = resolve_config_path(args.config, PROJECTION_DIR)
     state_dir = get_data_root() / "tuning"
     db_path = state_dir / f"{config_path.stem}.db"
 

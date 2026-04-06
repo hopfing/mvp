@@ -16,11 +16,17 @@ def format_leaderboard(
 
     Returns a list of formatted lines.
     """
-    sort_by = sort_by or ["log_loss"]
     trials = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
 
     if not trials:
         return ["No completed trials found."]
+
+    # Detect projection vs classification from first trial's metrics
+    first_ua = trials[0].user_attrs
+    is_projection = "mae" in first_ua and "log_loss" not in first_ua
+
+    if sort_by is None:
+        sort_by = ["mae"] if is_projection else ["log_loss"]
 
     # Sort by the requested metrics (ascending for all — lower is better)
     def sort_key(t: optuna.trial.FrozenTrial) -> tuple:
@@ -36,17 +42,27 @@ def format_leaderboard(
 
     for i, trial in enumerate(trials):
         ua = trial.user_attrs
-        ll = ua.get("log_loss", float("nan"))
-        cal = ua.get("calibration_error", float("nan"))
-        scal = ua.get("signed_calibration")
-        err80 = ua.get("error_rate_80plus", float("nan"))
         duration = ua.get("duration_s", 0.0)
 
-        scal_str = f"  scal={scal * 100:+.2f}%" if scal is not None else ""
-        lines.append(
-            f"  {i + 1:>2}. LL={ll:.4f}  cal={cal * 100:.2f}%{scal_str}"
-            f"  err80={err80 * 100:.1f}%  ({duration:.0f}s)"
-        )
+        if is_projection:
+            mae = ua.get("mae", float("nan"))
+            rmse = ua.get("rmse", float("nan"))
+            r2 = ua.get("r_squared", float("nan"))
+            lines.append(
+                f"  {i + 1:>2}. MAE={mae:.4f}  RMSE={rmse:.4f}"
+                f"  R²={r2:.4f}  ({duration:.0f}s)"
+            )
+        else:
+            ll = ua.get("log_loss", float("nan"))
+            cal = ua.get("calibration_error", float("nan"))
+            scal = ua.get("signed_calibration")
+            err80 = ua.get("error_rate_80plus", float("nan"))
+
+            scal_str = f"  scal={scal * 100:+.2f}%" if scal is not None else ""
+            lines.append(
+                f"  {i + 1:>2}. LL={ll:.4f}  cal={cal * 100:.2f}%{scal_str}"
+                f"  err80={err80 * 100:.1f}%  ({duration:.0f}s)"
+            )
 
         params_str = ", ".join(
             f"{k}={v}" for k, v in sorted(trial.params.items())
