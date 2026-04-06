@@ -83,3 +83,29 @@ def tiebreaks_won() -> pl.Expr:
 def deciding_set_flag() -> pl.Expr:
     """1 if this match went to a deciding set, 0 otherwise."""
     return (pl.col("sets_played") == pl.col("best_of")).cast(pl.Int64)
+
+
+def tight_sets() -> pl.Expr:
+    """Count sets at 7-5 or 7-6 (close competitive sets)."""
+    total = pl.lit(0)
+    for i in range(1, 6):
+        p = pl.col(f"player_set{i}_games")
+        o = pl.col(f"opp_set{i}_games")
+        high = pl.max_horizontal(p, o)
+        low = pl.min_horizontal(p, o)
+        is_tight = ((high == 7) & (low >= 5)).fill_null(False).cast(pl.Int64)
+        total = total + is_tight
+    return total
+
+
+def blowout_sets() -> pl.Expr:
+    """Count sets at 6-0 or 6-1 (dominant/lopsided sets)."""
+    total = pl.lit(0)
+    for i in range(1, 6):
+        p = pl.col(f"player_set{i}_games")
+        o = pl.col(f"opp_set{i}_games")
+        high = pl.max_horizontal(p, o)
+        low = pl.min_horizontal(p, o)
+        is_blowout = ((high == 6) & (low <= 1)).fill_null(False).cast(pl.Int64)
+        total = total + is_blowout
+    return total

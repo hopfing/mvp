@@ -4,7 +4,13 @@
 import polars as pl
 
 from mvp.model.features._score_helpers import (
+    blowout_sets as _blowout_sets,
+)
+from mvp.model.features._score_helpers import (
     is_straight_set_win as _is_straight_set_win,
+)
+from mvp.model.features._score_helpers import (
+    tight_sets as _tight_sets,
 )
 from mvp.model.features._score_helpers import (
     total_games_lost as _total_games_lost,
@@ -185,15 +191,36 @@ def recent_games_load(days: int | None = None) -> pl.Expr:
     return rolling_sum(expr, days=days, group_by="player_id")
 
 
+@feature(
+    name="tight_set_pct",
+    params=["days"],
+    description="Fraction of sets at 7-5 or 7-6 (tight set tendency)",
+    mirror=True,
+)
+def tight_set_pct(days: int | None = None) -> pl.Expr:
+    return ratio_feature(_tight_sets(), pl.col("sets_played").cast(pl.Int64), days)
+
+
+@feature(
+    name="blowout_set_pct",
+    params=["days"],
+    description="Fraction of sets at 6-0 or 6-1 (blowout tendency)",
+    mirror=True,
+)
+def blowout_set_pct(days: int | None = None) -> pl.Expr:
+    return ratio_feature(_blowout_sets(), pl.col("sets_played").cast(pl.Int64), days)
+
+
 # --- Derived diff features ---
 
 for _base in [
     "sets_per_match", "straight_sets_win_pct", "games_won_per_set",
     "games_lost_per_set", "games_margin_per_set", "games_per_set",
     "total_games_won", "total_games_lost", "total_games",
-    "recent_games_load",
+    "recent_games_load", "tight_set_pct", "blowout_set_pct",
 ]:
     register_diff(_base)
 
-for _base in ["games_per_set", "sets_per_match", "total_games"]:
+for _base in ["games_per_set", "sets_per_match", "total_games",
+              "tight_set_pct", "blowout_set_pct"]:
     register_sum(_base)

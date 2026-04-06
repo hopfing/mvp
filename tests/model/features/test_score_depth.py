@@ -210,6 +210,57 @@ class TestRecentGamesLoad:
         assert result["val"][3] == pytest.approx(78.0)
 
 
+class TestSetScoreDistribution:
+    """Tests for tight_set_pct and blowout_set_pct features."""
+
+    def test_registered(self):
+        registry = get_registry()
+        for name in ["tight_set_pct", "blowout_set_pct"]:
+            feat = registry.get(name)
+            assert feat.params == ["days"]
+            assert feat.mirror is True
+
+    def test_tight_set_pct_rolling(self):
+        from mvp.model.features.score_depth import tight_set_pct
+
+        df = _make_score_df()
+        result = df.with_columns(tight_set_pct(days=365).alias("val"))
+        # Match 1: 6-3 6-4 → 0 tight / 2 sets
+        # Match 2: 7-6 3-6 6-3 → 1 tight / 3 sets
+        # Match 3: 4-6 6-3 3-6 → 0 tight / 3 sets
+        # Match 4: 6-1 6-2 → 0 tight / 2 sets
+        # Row 0: no prior -> null
+        assert result["val"][0] is None
+        # Row 1: prior=[0/2] -> 0.0
+        assert result["val"][1] == pytest.approx(0.0)
+        # Row 2: prior=[0+1 / 2+3] -> 1/5 = 0.2
+        assert result["val"][2] == pytest.approx(0.2)
+        # Row 3: prior=[0+1+0 / 2+3+3] -> 1/8 = 0.125
+        assert result["val"][3] == pytest.approx(0.125)
+
+    def test_blowout_set_pct_rolling(self):
+        from mvp.model.features.score_depth import blowout_set_pct
+
+        df = _make_score_df()
+        result = df.with_columns(blowout_set_pct(days=365).alias("val"))
+        # Match 1: 6-3 6-4 → 0 blowout
+        # Match 2: 7-6 3-6 6-3 → 0 blowout
+        # Match 3: 4-6 6-3 3-6 → 0 blowout
+        # Match 4: 6-1 6-2 → 1 blowout (6-1)
+        # Row 0: null
+        assert result["val"][0] is None
+        # Row 1: prior=[0/2] -> 0.0
+        assert result["val"][1] == pytest.approx(0.0)
+        # Row 3: prior=[0+0+0 / 2+3+3] -> 0.0
+        assert result["val"][3] == pytest.approx(0.0)
+
+    def test_diffs_and_sums_registered(self):
+        registry = get_registry()
+        for name in ["tight_set_pct_diff", "blowout_set_pct_diff",
+                     "tight_set_pct_sum", "blowout_set_pct_sum"]:
+            registry.get(name)
+
+
 class TestScoreDepthDiffFeatures:
     """Tests for score-depth diff features."""
 
@@ -221,6 +272,7 @@ class TestScoreDepthDiffFeatures:
             "games_margin_per_set_diff", "games_per_set_diff",
             "total_games_won_diff", "total_games_lost_diff",
             "total_games_diff", "recent_games_load_diff",
+            "tight_set_pct_diff", "blowout_set_pct_diff",
         ]
         for name in diff_names:
             feat = registry.get(name)
@@ -257,21 +309,23 @@ class TestScoreDepthFeatureCount:
     def test_total_count(self):
         registry = get_registry()
         sd_names = [
-            # base (10)
+            # base (12)
             "sets_per_match", "straight_sets_win_pct",
             "games_won_per_set", "games_lost_per_set",
             "games_margin_per_set", "games_per_set",
             "total_games_won", "total_games_lost", "total_games",
-            "recent_games_load",
-            # diffs (10)
+            "recent_games_load", "tight_set_pct", "blowout_set_pct",
+            # diffs (12)
             "sets_per_match_diff", "straight_sets_win_pct_diff",
             "games_won_per_set_diff", "games_lost_per_set_diff",
             "games_margin_per_set_diff", "games_per_set_diff",
             "total_games_won_diff", "total_games_lost_diff",
             "total_games_diff", "recent_games_load_diff",
-            # sums (3)
+            "tight_set_pct_diff", "blowout_set_pct_diff",
+            # sums (5)
             "games_per_set_sum", "sets_per_match_sum", "total_games_sum",
+            "tight_set_pct_sum", "blowout_set_pct_sum",
         ]
         for name in sd_names:
             registry.get(name)  # Will raise KeyError if missing
-        assert len(sd_names) == 23
+        assert len(sd_names) == 29
