@@ -238,9 +238,13 @@ def prepare_predictions(predictions: pl.DataFrame) -> pl.DataFrame:
             f"{len(uids)} predictions have null tournament_name: {uids}"
         )
 
-    # tournament_day = earliest CT date among matches sharing the same
-    # tournament session.  Prefer the ATP schedule_day number (immune to
-    # timezone edge-cases); fall back to venue-local match_date.
+    # tournament_day = venue-local date of the ATP session a match belongs to.
+    # Using venue date (rather than CT date) keeps Asian/Australian sessions
+    # that span midnight CT — e.g. a Wuning "Day 8" R16 block running 11pm CT
+    # 4/7 → 4am CT 4/8 — bucketed under their true ATP day (4/8) instead of
+    # collapsing onto the previous CT date alongside the prior session's matches.
+    # Group by (tournament, schedule_day || raw_match_date) so all matches in
+    # the same ATP day share a value even if raw_match_date is briefly stale.
     result = result.with_columns(
         pl.coalesce(
             pl.col("_schedule_day").cast(pl.Utf8),
@@ -248,7 +252,7 @@ def prepare_predictions(predictions: pl.DataFrame) -> pl.DataFrame:
         ).alias("_day_group"),
     )
     result = result.with_columns(
-        pl.col("date")
+        pl.col("_raw_match_date")
         .min()
         .over("_tournament_id", "_day_group")
         .alias("tournament_day"),

@@ -102,8 +102,8 @@ class TestPreparePredictions:
         assert df["time"][0] == ""
         assert df["date"][0] == "2024-03-10"
 
-    def test_tournament_day_uses_min_ct_date(self):
-        """Same tournament + venue date -> tournament_day = min CT date."""
+    def test_tournament_day_uses_venue_date(self):
+        """tournament_day = venue-local match_date for each ATP session."""
         row1 = {
             "match_uid": "2024-0001-MS001",
             "p1_id": "A", "p2_id": "B",
@@ -131,8 +131,14 @@ class TestPreparePredictions:
         assert df["tournament_day"][0] == "2024-01-15"
         assert df["tournament_day"][1] == "2024-01-16"
 
-    def test_tournament_day_cross_midnight_uses_earliest_ct(self):
-        """Matches on the same venue date but spanning CT midnight get the earlier CT date."""
+    def test_tournament_day_cross_midnight_anchors_to_venue_date(self):
+        """Asian session that spans CT midnight stays anchored to its venue date.
+
+        Regression test: previously the MIN(CT date) computation pulled these
+        matches onto the prior CT day, causing different ATP sessions
+        (e.g. Wuning Day 7 R32 vs Day 8 R16) to collide on the same
+        tournament_day even though their `schedule_day` values differed.
+        """
         base = {
             "p1_id": "A", "p2_id": "B",
             "p1_name": "A Player", "p2_name": "B Player",
@@ -160,9 +166,12 @@ class TestPreparePredictions:
             "scheduled_datetime": datetime(2024, 3, 26, 10, 0, 0),
         }
         df = prepare_predictions(pl.DataFrame([row1, row2]))
-        # Both should get tournament_day = 2024-03-25 (the earliest CT date)
-        assert df["tournament_day"][0] == "2024-03-25"
-        assert df["tournament_day"][1] == "2024-03-25"
+        # Per-row CT dates differ across midnight...
+        assert df["date"][0] == "2024-03-25"
+        assert df["date"][1] == "2024-03-26"
+        # ...but tournament_day stays anchored to the venue date for both.
+        assert df["tournament_day"][0] == "2024-03-26"
+        assert df["tournament_day"][1] == "2024-03-26"
 
     def test_tournament_day_falls_back_to_ct_date(self):
         df = prepare_predictions(
