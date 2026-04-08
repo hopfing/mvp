@@ -572,24 +572,6 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         "--refresh", action="store_true", help="Rebuild matches.parquet before running"
     )
 
-    # iid-discover subcommand - forward selection on the IID matchup serve model
-    iid_disc_parser = subparsers.add_parser(
-        "iid-discover",
-        help="Run forward selection on the IID matchup serve model "
-             "(looks in projections/discovery/ by default)",
-    )
-    iid_disc_parser.add_argument(
-        "config", type=str,
-        help="Config name or path (e.g., 'iid_discover_mae')",
-    )
-    iid_disc_parser.add_argument(
-        "--refresh", action="store_true",
-        help="Rebuild matches.parquet before running",
-    )
-    iid_disc_parser.add_argument(
-        "--verbose", "-v", action="store_true", help="Print FS progress",
-    )
-
     # analysis subcommand
     analysis_parser = subparsers.add_parser(
         "analysis", help="Build analysis dataset with odds, CLV, and simulations"
@@ -1247,6 +1229,20 @@ def _is_projection_discovery(config_path: Path) -> bool:
     return model_type in _PROJECTION_MODEL_TYPES
 
 
+def _is_iid_discovery(config_path: Path) -> bool:
+    """Detect whether a discovery config targets the IID matchup serve model.
+
+    IID discovery configs have a top-level `serve_model` key (instead of
+    `model`), since the thing being optimized is the serve win prob
+    estimator that feeds the tennis chain.
+    """
+    import yaml
+
+    with open(config_path) as f:
+        raw = yaml.safe_load(f)
+    return isinstance(raw.get("serve_model"), dict)
+
+
 def cmd_experiment(args: argparse.Namespace) -> int:
     """Run automated feature discovery."""
     config_path = resolve_config_path(args.config, EXPERIMENT_DIR)
@@ -1258,6 +1254,8 @@ def cmd_experiment(args: argparse.Namespace) -> int:
         logger.info("Rebuilding matches.parquet")
         MatchesAggregator().run()
 
+    if _is_iid_discovery(config_path):
+        return _cmd_experiment_iid(args, config_path)
     if _is_projection_discovery(config_path):
         return _cmd_experiment_projection(args, config_path)
     return _cmd_experiment_classification(args, config_path)
@@ -1312,6 +1310,44 @@ def _cmd_experiment_projection(args: argparse.Namespace, config_path: Path) -> i
         discovery.save_config(output_path, result)
         print(f"\nSaved config to: {output_path}")
         print(f"Run with: poetry run py -m mvp project {output_path.stem}")
+    else:
+        print("\nNo features selected - no config saved")
+
+    return 0
+
+
+def _cmd_experiment_iid(args: argparse.Namespace, config_path: Path) -> int:
+    """Run IID matchup serve model feature discovery."""
+    from mvp.projection.iid.discovery import IIDProjectionDiscovery
+
+    # Normalize output path: always in projections/, add .yaml if needed
+    output_name = args.output
+    if not output_name.endswith(".yaml"):
+        output_name = f"{output_name}.yaml"
+    output_path = PROJECTION_DIR / output_name
+
+    # Verbose is forced on for IID discovery — this is a multi-hour run and
+    # silent progress is worthless.
+    discovery = IIDProjectionDiscovery(
+        config_path=config_path,
+        verbose=True,
+    )
+    result = discovery.run()
+
+    print("\n" + "=" * 70)
+    print(f"{'IID DISCOVERY RESULTS':^70}")
+    print("=" * 70)
+    print(f"Selected ({len(result.selected_features)} features):")
+    for f in result.selected_features:
+        print(f"  - {f}")
+    print(f"\nFinal MAE: {result.final_metric:.4f}")
+    print(f"Total candidate evaluations: {result.n_experiments}")
+    print("=" * 70)
+
+    if result.selected_features:
+        discovery.save_config(output_path, result)
+        print(f"\nSaved config to: {output_path}")
+        print(f"Run with: poetry run py -m mvp iid-project {output_path.stem}")
     else:
         print("\nNo features selected - no config saved")
 
@@ -1492,43 +1528,6 @@ def cmd_iid_project(args: argparse.Namespace) -> int:
     results = runner.run()
 
     print_iid_projection_summary(results, name=runner.run_name)
-    return 0
-
-
-def cmd_iid_discover(args: argparse.Namespace) -> int:
-    """Run forward selection on the IID matchup serve model."""
-    from mvp.projection.iid.discovery import IIDProjectionDiscovery
-
-    # First try projections/discovery/, then projections/
-    disc_dir = PROJECTION_DIR / "discovery"
-    config_path = resolve_config_path(args.config, disc_dir)
-    if not config_path.exists():
-        config_path = resolve_config_path(args.config, PROJECTION_DIR)
-    if not config_path.exists():
-        raise FileNotFoundError(
-            f"Config file not found: {args.config} (tried {disc_dir / args.config} and {PROJECTION_DIR / args.config})"
-        )
-
-    if args.refresh:
-        from mvp.atptour.aggregators.matches import MatchesAggregator
-        logger.info("Rebuilding matches.parquet")
-        MatchesAggregator().run()
-
-    discovery = IIDProjectionDiscovery(
-        config_path=config_path,
-        verbose=args.verbose,
-    )
-    result = discovery.run()
-
-    print("\n" + "=" * 70)
-    print(f"{'IID DISCOVERY RESULTS':^70}")
-    print("=" * 70)
-    print(f"Selected ({len(result.selected_features)} features):")
-    for f in result.selected_features:
-        print(f"  - {f}")
-    print(f"\nFinal MAE: {result.final_metric:.4f}")
-    print(f"Total candidate evaluations: {result.n_experiments}")
-    print("=" * 70 + "\n")
     return 0
 
 
@@ -1934,8 +1933,6 @@ def main(args: list[str] | None = None) -> int:
         return cmd_project(parsed)
     elif parsed.command == "iid-project":
         return cmd_iid_project(parsed)
-    elif parsed.command == "iid-discover":
-        return cmd_iid_discover(parsed)
     elif parsed.command == "analysis":
         return cmd_analysis(parsed)
 

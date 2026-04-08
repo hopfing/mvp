@@ -88,6 +88,46 @@ class TestIIDDiscoveryConfig:
         with pytest.raises(Exception):  # pydantic ValidationError
             IIDDiscoveryConfig.from_yaml(yaml_str)
 
+    def test_to_iid_config_dict_includes_both_perspectives(self):
+        """Selected specs must produce features.include entries for BOTH
+        player_* and opp_* perspectives (MatchupServeModel's swap needs both)
+        and serve_model.feature_columns entries with resolved column names."""
+        yaml_str = textwrap.dedent(
+            """
+            data:
+              date_range:
+                start: "2024-01-01"
+                end: "2025-12-31"
+            serve_model:
+              type: matchup
+              regressor:
+                type: ridge
+                params:
+                  alpha: 1.0
+            """
+        )
+        cfg = IIDDiscoveryConfig.from_yaml(yaml_str)
+        out = cfg.to_iid_config_dict([
+            "player_pts_service_won_pct(days=90)",
+            "opp_serve_elo",
+        ])
+
+        # features.include has both perspectives of each selected spec
+        include = out["features"]["include"]
+        assert "player_pts_service_won_pct(days=90)" in include
+        assert "opp_pts_service_won_pct(days=90)" in include
+        assert "opp_serve_elo" in include
+        assert "player_serve_elo" in include
+
+        # serve_model.feature_columns has the resolved column names (row-player perspective)
+        fcols = out["serve_model"]["feature_columns"]
+        assert fcols == ["player_pts_service_won_pct_90d", "opp_serve_elo"]
+
+        # Carries through serve_model type + regressor config
+        assert out["serve_model"]["type"] == "matchup"
+        assert out["serve_model"]["regressor"]["type"] == "ridge"
+        assert out["serve_model"]["regressor"]["params"]["alpha"] == 1.0
+
 
 class TestSpecHelpers:
     def test_spec_to_column_with_window(self):

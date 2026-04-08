@@ -24,6 +24,7 @@ from pathlib import Path
 import mlflow
 import numpy as np
 import polars as pl
+import yaml
 
 from mvp.common.base_job import get_data_root, get_local_data_root
 from mvp.model.config import apply_filters, get_filter_feature_specs
@@ -37,6 +38,7 @@ from mvp.model.engine import (
 )
 from mvp.model.features._score_helpers import total_games_lost, total_games_won
 from mvp.model.mlflow_logger import ExperimentLogger
+from mvp.model.registry import get_registry
 from mvp.model.splitters import make_splitter
 from mvp.projection.iid.chain import (
     match_distribution,
@@ -121,7 +123,16 @@ class FastIIDDiscoverySelector:
         self.folds: list[tuple[np.ndarray, np.ndarray]] = []
 
     def precompute(self) -> None:
-        """Run the one-time expensive work: cache, load, collapse, extract."""
+        """Run the one-time expensive work: cache features batched to disk,
+        load a lightweight base DataFrame, join features from cache, collapse
+        to one row per match, extract X_wide and target arrays.
+
+        Mirrors the memory-bounded two-phase pattern of
+        `FastProjectionSelector.precompute` so this scales to thousands of
+        candidate features without OOM. `engine.compute()` in a single call
+        is NOT usable at this scale — it holds every computed feature in a
+        single DataFrame simultaneously.
+        """
         engine = FeatureEngine(
             matches_path=self.matches_path,
             cache_dir=self.cache_dir,
@@ -133,7 +144,7 @@ class FastIIDDiscoverySelector:
         ]
 
         extra_columns = [
-            "match_uid", "player_id", "opp_id", "won", "reason", "best_of",
+            "won", "reason", "best_of",
             "circuit", "surface", "round",
             "player_set1_games", "player_set2_games",
             "player_set3_games", "player_set4_games", "player_set5_games",
@@ -147,14 +158,41 @@ class FastIIDDiscoverySelector:
                 if col not in extra_columns:
                     extra_columns.append(col)
 
+        # Phase A: compute every candidate feature and cache to disk in
+        # batches. Memory stays bounded per batch; features are dropped from
+        # the in-memory DataFrame after being cached.
         t0 = time.perf_counter()
-        df = engine.compute(all_specs, extra_columns=extra_columns)
-        logger.info("Phase A: feature engine compute in %.1fs", time.perf_counter() - t0)
+        cache_key = engine.ensure_cached(all_specs, extra_columns=extra_columns)
+        logger.info("Phase A: features cached in %.1fs", time.perf_counter() - t0)
+        check_memory("iid discovery: after ensure_cached")
 
-        if self.config.data.filters:
-            df = apply_filters(df, self.config.data.filters)
+        # Phase B: load a lightweight base DataFrame with only the structural
+        # + extra columns (NOT features). Apply date range, target resolution,
+        # and walkover filters on this small df BEFORE joining features — this
+        # keeps the row count small when features are loaded.
+        structural_cols = list(dict.fromkeys(
+            ["match_uid", "player_id", "opp_id", "effective_match_date"]
+            + extra_columns
+        ))
+        available = set(
+            pl.scan_parquet(self.matches_path).collect_schema().names()
+        )
+        structural_cols = [c for c in structural_cols if c in available]
 
-        # Resolve targets and filter incomplete matches (mirrors IIDProjectionRunner)
+        t0 = time.perf_counter()
+        df = pl.read_parquet(self.matches_path, columns=structural_cols)
+        logger.info(
+            "Phase B: loaded base df (%d rows, %d structural cols) in %.1fs",
+            df.height, df.width, time.perf_counter() - t0,
+        )
+
+        # Date range filter
+        df = df.filter(
+            (pl.col("effective_match_date") >= self.config.data.date_range.start)
+            & (pl.col("effective_match_date") <= self.config.data.date_range.end)
+        )
+
+        # Walkover / incomplete match exclusion
         df = df.filter(
             pl.col("player_set1_games").is_not_null()
             & pl.col("player_set2_games").is_not_null()
@@ -163,6 +201,8 @@ class FastIIDDiscoverySelector:
             df = df.filter(
                 pl.col("reason").fill_null("").is_in(["W/O", "RET", "DEF", "UNP"]).not_()
             )
+
+        # Targets — needed per-row BEFORE collapse (targets differ per perspective)
         df = df.with_columns(
             total_games_won().cast(pl.Float64).alias("_target_games_a"),
             total_games_lost().cast(pl.Float64).alias("_target_games_b"),
@@ -171,11 +211,26 @@ class FastIIDDiscoverySelector:
             pl.col("_target_games_a").is_not_null()
             & pl.col("_target_games_b").is_not_null()
         )
-        df = df.filter(
-            (pl.col("effective_match_date") >= self.config.data.date_range.start)
-            & (pl.col("effective_match_date") <= self.config.data.date_range.end)
-        )
         df = df.filter(pl.col("best_of").is_in([3, 5]))
+
+        logger.info("Phase B: base df after filters: %d rows", df.height)
+        check_memory("iid discovery: after filters")
+
+        # Phase C: join computed features from cache onto the filtered base df.
+        # `load_features_numpy` streams features one at a time, avoiding ever
+        # holding all features in memory.
+        t0 = time.perf_counter()
+        df = engine.load_features_numpy(all_specs, df, cache_key)
+        logger.info(
+            "Phase C: loaded features onto base df in %.1fs",
+            time.perf_counter() - t0,
+        )
+        check_memory("iid discovery: after load_features_numpy")
+
+        # Apply domain filters AFTER features are loaded (some filters may
+        # depend on feature columns)
+        if self.config.data.filters:
+            df = apply_filters(df, self.config.data.filters)
 
         # Collapse mirrored rows: one row per match, lower player_id wins the "A" slot
         df = df.sort(["match_uid", "player_id"]).unique(
@@ -185,7 +240,7 @@ class FastIIDDiscoverySelector:
         n_matches = len(df)
         if n_matches == 0:
             raise ValueError("No matches remain after filtering")
-        logger.info("Phase B: collapsed to %d matches", n_matches)
+        logger.info("Phase D: collapsed to %d matches", n_matches)
         check_memory("iid discovery: after collapse")
 
         # Build the wide matrix from the candidate column names. Each candidate
@@ -204,17 +259,17 @@ class FastIIDDiscoverySelector:
                 "iid discovery: %d candidate columns not in DataFrame, dropping: %s",
                 len(missing), sorted(missing)[:5],
             )
-        candidate_cols = sorted(candidate_cols & available_cols)
+        candidate_cols_sorted = sorted(candidate_cols & available_cols)
 
-        self.col_to_idx = {c: i for i, c in enumerate(candidate_cols)}
+        self.col_to_idx = {c: i for i, c in enumerate(candidate_cols_sorted)}
 
         t0 = time.perf_counter()
         self.X_wide = (
-            df.select(pl.col(c).cast(pl.Float64) for c in candidate_cols)
+            df.select(pl.col(c).cast(pl.Float64) for c in candidate_cols_sorted)
             .to_numpy()
         )
         logger.info(
-            "Phase C: extracted X_wide shape=%s in %.1fs",
+            "Phase E: extracted X_wide shape=%s in %.1fs",
             self.X_wide.shape, time.perf_counter() - t0,
         )
 
@@ -364,7 +419,7 @@ class IIDProjectionDiscovery:
         matches_path: Path | str | None = None,
         cache_dir: Path | str | None = None,
         mlflow_dir: Path | str | None = None,
-        verbose: bool = False,
+        verbose: bool = True,
     ) -> None:
         self.config_path = Path(config_path)
         self.config = IIDDiscoveryConfig.from_file(self.config_path)
@@ -394,10 +449,35 @@ class IIDProjectionDiscovery:
             all_features = [f for f in all_features if f not in excluded]
             self._log(f"Excluding {len(excluded)} features")
 
-        # Drop any candidates whose swap-counterpart isn't a known column on the
-        # source schema (mirrors the FastIIDDiscoverySelector loose-end check).
-        # We can't know without precomputing, so the selector handles missing
-        # columns by returning float("inf"). Just log the candidate count here.
+        # Drop mirror=False features (diff/matchup/sum). These combine both
+        # players into one number (e.g. player_age_diff = age_a - age_b) and
+        # only exist with a player_ prefix in the registry, so there is no
+        # opp_ counterpart for the matchup serve model's two-perspective fit.
+        # Even if we kept them, the correct swap of player_age_diff = +5 is
+        # -5 (not the same value), which the current swap mechanism can't
+        # express. Ridge can recover any linear diff from the underlying
+        # player_/opp_ features anyway, so no signal is lost.
+        registry = get_registry()
+        non_mirror_dropped: list[str] = []
+        kept: list[str] = []
+        for spec in all_features:
+            _prefix, base_name, _full, _params = parse_feature_spec(spec)
+            try:
+                fdef = registry.get(base_name)
+            except KeyError:
+                kept.append(spec)
+                continue
+            if fdef.match_level or fdef.mirror:
+                kept.append(spec)
+            else:
+                non_mirror_dropped.append(spec)
+        if non_mirror_dropped:
+            self._log(
+                f"Dropped {len(non_mirror_dropped)} mirror=False specs "
+                f"(diff/matchup/sum features with no opp_ counterpart)"
+            )
+        all_features = kept
+
         self._log(f"Candidate pool: {len(all_features)} feature specs")
 
         # Precompute the fast scorer
@@ -464,6 +544,27 @@ class IIDProjectionDiscovery:
             for i, feat in enumerate(selected):
                 ml_logger.log_params({f"selected_feature_{i:02d}": feat})
 
+        # Round 1 feature ranking — which single features had signal on their own
+        if selection_result.history:
+            round_1 = next(
+                (h for h in selection_result.history if h.get("action") == "add"),
+                None,
+            )
+            if round_1 and "round_ranking" in round_1:
+                ranking = round_1["round_ranking"]
+                # "With signal" = finite metric (inf means the scorer rejected it,
+                # e.g. missing swap column or degenerate fit). Don't have a per-
+                # metric no-skill baseline here since MAE units depend on target.
+                with_signal = [(f, m) for f, m in ranking if np.isfinite(m)]
+                no_signal = len(ranking) - len(with_signal)
+                self._log("")
+                self._log(f"ROUND 1 FEATURE RANKING ({len(with_signal)} with signal)")
+                self._log("-" * 50)
+                for i, (feat, metric) in enumerate(with_signal, 1):
+                    self._log(f"  {i:3}. {feat}: {metric:.4f}")
+                if no_signal:
+                    self._log(f"  ({no_signal} features returned inf / rejected)")
+
         self._log("")
         self._log("RESULTS")
         self._log("-" * 30)
@@ -478,3 +579,16 @@ class IIDProjectionDiscovery:
             final_metric=final_metric,
             n_experiments=self._experiment_count,
         )
+
+    def save_config(
+        self,
+        output_path: Path | str,
+        result: IIDProjectionDiscoveryResult,
+    ) -> None:
+        """Write a runnable IID projection config from the discovered features."""
+        config_dict = self.config.to_iid_config_dict(result.selected_features)
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, "w") as f:
+            yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
+        self._log(f"Saved config to: {output_path}")
