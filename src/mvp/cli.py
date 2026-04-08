@@ -572,6 +572,24 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         "--refresh", action="store_true", help="Rebuild matches.parquet before running"
     )
 
+    # iid-discover subcommand - forward selection on the IID matchup serve model
+    iid_disc_parser = subparsers.add_parser(
+        "iid-discover",
+        help="Run forward selection on the IID matchup serve model "
+             "(looks in projections/discovery/ by default)",
+    )
+    iid_disc_parser.add_argument(
+        "config", type=str,
+        help="Config name or path (e.g., 'iid_discover_mae')",
+    )
+    iid_disc_parser.add_argument(
+        "--refresh", action="store_true",
+        help="Rebuild matches.parquet before running",
+    )
+    iid_disc_parser.add_argument(
+        "--verbose", "-v", action="store_true", help="Print FS progress",
+    )
+
     # analysis subcommand
     analysis_parser = subparsers.add_parser(
         "analysis", help="Build analysis dataset with odds, CLV, and simulations"
@@ -1477,6 +1495,42 @@ def cmd_iid_project(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_iid_discover(args: argparse.Namespace) -> int:
+    """Run forward selection on the IID matchup serve model."""
+    from mvp.projection.iid.discovery import IIDProjectionDiscovery
+
+    # First try projections/discovery/, then projections/
+    disc_dir = PROJECTION_DIR / "discovery"
+    config_path = resolve_config_path(args.config, disc_dir)
+    if not config_path.exists():
+        config_path = resolve_config_path(args.config, PROJECTION_DIR)
+    if not config_path.exists():
+        raise FileNotFoundError(
+            f"Config file not found: {args.config} (tried {disc_dir / args.config} and {PROJECTION_DIR / args.config})"
+        )
+
+    if args.refresh:
+        from mvp.atptour.aggregators.matches import MatchesAggregator
+        logger.info("Rebuilding matches.parquet")
+        MatchesAggregator().run()
+
+    discovery = IIDProjectionDiscovery(
+        config_path=config_path,
+        verbose=args.verbose,
+    )
+    result = discovery.run()
+
+    print("\n" + "=" * 70)
+    print(f"{'IID DISCOVERY RESULTS':^70}")
+    print("=" * 70)
+    print(f"Selected ({len(result.selected_features)} features):")
+    for f in result.selected_features:
+        print(f"  - {f}")
+    print(f"\nFinal MAE: {result.final_metric:.4f}")
+    print(f"Total candidate evaluations: {result.n_experiments}")
+    print("=" * 70 + "\n")
+    return 0
+
 
 def _fetch_book_quiet(book: BookConfig, run_at=None) -> int:
     """Run a book's odds fetch in background thread."""
@@ -1880,6 +1934,8 @@ def main(args: list[str] | None = None) -> int:
         return cmd_project(parsed)
     elif parsed.command == "iid-project":
         return cmd_iid_project(parsed)
+    elif parsed.command == "iid-discover":
+        return cmd_iid_discover(parsed)
     elif parsed.command == "analysis":
         return cmd_analysis(parsed)
 
