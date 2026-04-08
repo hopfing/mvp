@@ -313,12 +313,37 @@ def add_effective_match_date(df: pl.DataFrame) -> pl.DataFrame:
     - Otherwise, estimate by scaling round position across the tournament duration.
       Early rounds (Q1, R128) are placed near tournament_start_date, late rounds (F)
       near tournament_end_date. This handles both short Challengers and 2-week Slams.
+
+    Walkover rows have no real scheduled_datetime (match never played). They get
+    dated from the max scheduled_datetime of peer matches in the same
+    (tournament_id, year, draw_type, round), so they don't poison the group-level
+    passthrough gate and so they sort alongside their round.
     """
     group_keys = ["tournament_id", "year"]
 
-    # Per-group flag: True if every row in the group has a non-null scheduled_datetime
+    # Resolved schedule: fill walkover nulls from peers in the same round so
+    # the group-level gate isn't poisoned by walkovers that were never scheduled.
+    if "result_type" in df.columns:
+        peer_sched = pl.col("scheduled_datetime").max().over(
+            ["tournament_id", "year", "draw_type", "round"]
+        )
+        df = df.with_columns(
+            pl.when(
+                (pl.col("result_type") == "walkover")
+                & pl.col("scheduled_datetime").is_null()
+            )
+            .then(peer_sched)
+            .otherwise(pl.col("scheduled_datetime"))
+            .alias("_resolved_sched"),
+        )
+    else:
+        df = df.with_columns(
+            pl.col("scheduled_datetime").alias("_resolved_sched"),
+        )
+
+    # Per-group flag: True if every row in the group has a non-null resolved sched
     df = df.with_columns(
-        pl.col("scheduled_datetime")
+        pl.col("_resolved_sched")
         .is_not_null()
         .all()
         .over(group_keys)
@@ -383,7 +408,7 @@ def add_effective_match_date(df: pl.DataFrame) -> pl.DataFrame:
 
         df = df.with_columns(
             pl.when(pl.col("_all_scheduled"))
-            .then(pl.col("scheduled_datetime"))
+            .then(pl.col("_resolved_sched"))
             .when(is_gs_qualifying)
             .then(
                 pl.col("tournament_start_date").cast(pl.Datetime)
@@ -398,7 +423,7 @@ def add_effective_match_date(df: pl.DataFrame) -> pl.DataFrame:
     else:
         df = df.with_columns(
             pl.when(pl.col("_all_scheduled"))
-            .then(pl.col("scheduled_datetime"))
+            .then(pl.col("_resolved_sched"))
             .otherwise(
                 pl.col("tournament_start_date").cast(pl.Datetime)
                 + pl.duration(days=pl.col("_scaled_offset"))
