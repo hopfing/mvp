@@ -44,6 +44,9 @@ BOOK_REGISTRY: list[BookConfig] = [
     BookConfig("b365", "B365", "Bet365", "bet365", "b365_event_id",
                "stage/bet365/moneyline.parquet", "bet365/player_aliases.yaml",
                "Bet365OddsMatcher"),
+    BookConfig("fd", "FD", "FanDuel", "fanduel", "fd_event_id",
+               "stage/fanduel/moneyline.parquet", "fanduel/player_aliases.yaml",
+               "FanDuelOddsMatcher"),
 ]
 
 logger = logging.getLogger(__name__)

@@ -1,0 +1,4 @@
+# FD player name aliases: maps FanDuel display names to our player IDs.
+# Add entries when live pipeline logs unmatched players.
+# Format:
+#   "FanDuel Display Name": "PLAYER_ID"
