@@ -560,6 +560,18 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         "--refresh", action="store_true", help="Rebuild matches.parquet before running"
     )
 
+    # iid-project subcommand - structural IID/Markov tennis projection
+    iid_proj_parser = subparsers.add_parser(
+        "iid-project",
+        help="Run IID/Markov tennis projection (looks in projections/ by default)",
+    )
+    iid_proj_parser.add_argument(
+        "config", type=str, help="Config name or path (e.g., 'iid_projection_identity')"
+    )
+    iid_proj_parser.add_argument(
+        "--refresh", action="store_true", help="Rebuild matches.parquet before running"
+    )
+
     # analysis subcommand
     analysis_parser = subparsers.add_parser(
         "analysis", help="Build analysis dataset with odds, CLV, and simulations"
@@ -1380,6 +1392,91 @@ def cmd_project(args: argparse.Namespace) -> int:
     return 0
 
 
+def print_iid_projection_summary(results: dict[str, Any], name: str | None = None) -> None:
+    """Print formatted summary of IID projection results."""
+    metrics = results.get("metrics", {})
+
+    print("\n" + "=" * 70)
+    title = name or "IID PROJECTION RESULTS"
+    print(f"{title:^70}")
+    print("=" * 70)
+    print(f"Matches: {results.get('n_matches', 0):,} | Folds: {results.get('n_folds', 0)}")
+
+    # Classification family (match-win prob comparable to the production classifier)
+    print("\n[Classification — match win prob]")
+    print(
+        f"  log_loss={metrics.get('log_loss', 0):.4f}  "
+        f"brier={metrics.get('brier_score', 0):.4f}  "
+        f"acc={metrics.get('accuracy', 0):.3f}  "
+        f"roc_auc={metrics.get('roc_auc', 0):.3f}"
+    )
+    print(
+        f"  cal_err={metrics.get('calibration_error', 0):.4f}  "
+        f"signed_cal={metrics.get('signed_calibration', 0):+.4f}  "
+        f"err_80+={metrics.get('error_rate_80plus', 0):.3f}"
+    )
+
+    # Regression family (expected games for player A — comparable to per-player regression)
+    print("\n[Regression — expected games for player A]")
+    print(
+        f"  mae={metrics.get('mae', 0):.3f}  "
+        f"rmse={metrics.get('rmse', 0):.3f}  "
+        f"r²={metrics.get('r_squared', 0):.3f}  "
+        f"med_ae={metrics.get('median_ae', 0):.3f}"
+    )
+
+    # Distributional family
+    print("\n[Distributional]")
+    print(
+        f"  CRPS total games={metrics.get('iid_crps_total_games', 0):.3f}  "
+        f"CRPS spread={metrics.get('iid_crps_spread', 0):.3f}"
+    )
+
+    # Line calibration
+    total_keys = sorted(k for k in metrics if k.startswith("iid_line_total_") and k.endswith("_err"))
+    if total_keys:
+        print("\n  Total games line calibration (|pred - actual|):")
+        for k in total_keys:
+            line = k.replace("iid_line_total_", "").replace("_err", "")
+            pred = metrics.get(f"iid_line_total_{line}_pred", 0)
+            actual = metrics.get(f"iid_line_total_{line}_actual", 0)
+            err = metrics[k]
+            print(f"    O/U {line:>6}  pred={pred:.3f}  actual={actual:.3f}  err={err:.3f}")
+
+    spread_keys = sorted(k for k in metrics if k.startswith("iid_line_spread_") and k.endswith("_err"))
+    if spread_keys:
+        print("\n  Spread line calibration (|pred - actual|):")
+        for k in spread_keys:
+            line = k.replace("iid_line_spread_", "").replace("_err", "")
+            pred = metrics.get(f"iid_line_spread_{line}_pred", 0)
+            actual = metrics.get(f"iid_line_spread_{line}_actual", 0)
+            err = metrics[k]
+            print(f"    spread {line:>6}  pred={pred:.3f}  actual={actual:.3f}  err={err:.3f}")
+
+    print(f"\nMLflow run: {results.get('run_id', 'N/A')}")
+    print("=" * 70 + "\n")
+
+
+def cmd_iid_project(args: argparse.Namespace) -> int:
+    """Run IID/Markov tennis projection from config."""
+    from mvp.projection.iid.runner import IIDProjectionRunner
+
+    config_path = resolve_config_path(args.config, PROJECTION_DIR)
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config file not found: {args.config} (tried {config_path})")
+
+    if args.refresh:
+        from mvp.atptour.aggregators.matches import MatchesAggregator
+        logger.info("Rebuilding matches.parquet")
+        MatchesAggregator().run()
+
+    runner = IIDProjectionRunner(config_path=config_path)
+    results = runner.run()
+
+    print_iid_projection_summary(results, name=runner.run_name)
+    return 0
+
+
 
 def _fetch_book_quiet(book: BookConfig, run_at=None) -> int:
     """Run a book's odds fetch in background thread."""
@@ -1781,6 +1878,8 @@ def main(args: list[str] | None = None) -> int:
         return cmd_confidence(parsed)
     elif parsed.command == "project":
         return cmd_project(parsed)
+    elif parsed.command == "iid-project":
+        return cmd_iid_project(parsed)
     elif parsed.command == "analysis":
         return cmd_analysis(parsed)
 
