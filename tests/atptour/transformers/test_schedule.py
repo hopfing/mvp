@@ -353,13 +353,17 @@ class TestParseDoublesMatch:
         assert len(records) == 1
         r = records[0]
         assert r.draw_type == "doubles"
-        assert r.match_uid == "2026_339_DBL_SF_F09R_SY05"
+        # Uid contains all 4 player ids sorted alphabetically so it joins
+        # cleanly against Results/MatchStats which also produce 4-id uids.
+        assert r.match_uid == "2026_339_DBL_SF_F09R_H756_SY05_W0E2"
         assert r.p1_id == "F09R"
+        assert r.p1_partner_id == "H756"
         assert r.p1_name == "C. Frantzen / R. Haase"
         assert r.p1_country == "GER"
         assert r.p1_seed == 3
         assert r.p1_entry is None
         assert r.p2_id == "SY05"
+        assert r.p2_partner_id == "W0E2"
         assert r.p2_name == (
             "J. Schnaitter / M. Wallner"
         )

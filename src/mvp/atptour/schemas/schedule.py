@@ -37,12 +37,14 @@ class ScheduleRecord(BaseModel):
     p1_country: str
     p1_seed: int | None = None
     p1_entry: str | None = None
+    p1_partner_id: str | None = None
 
     p2_id: str
     p2_name: str
     p2_country: str
     p2_seed: int | None = None
     p2_entry: str | None = None
+    p2_partner_id: str | None = None
 
     status: str | None
     score: str | None
@@ -63,6 +65,13 @@ class ScheduleRecord(BaseModel):
     def _uppercase_player_id(cls, v: str) -> str:
         return map_player_id(v)
 
+    @field_validator("p1_partner_id", "p2_partner_id", mode="before")
+    @classmethod
+    def _normalize_partner_ids(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        return map_player_id(v)
+
     @field_validator("p1_country", "p2_country", mode="before")
     @classmethod
     def _uppercase_country(cls, v: str) -> str:
@@ -72,14 +81,17 @@ class ScheduleRecord(BaseModel):
     @property
     def match_uid(self) -> str | None:
         all_ids = [self.p1_id, self.p2_id]
-        if any(not pid or is_placeholder_id(pid) for pid in all_ids):
+        is_doubles = self.draw_type == DrawType.doubles
+        if is_doubles:
+            all_ids.extend([self.p1_partner_id, self.p2_partner_id])
+        if any(pid is None or not pid or is_placeholder_id(pid) for pid in all_ids):
             return None
         return create_match_uid(
             self.year,
             self.tournament_id,
             self.round,
             all_ids,
-            is_doubles=(self.draw_type == DrawType.doubles),
+            is_doubles=is_doubles,
         )
 
 

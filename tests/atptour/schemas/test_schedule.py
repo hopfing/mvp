@@ -135,7 +135,34 @@ class TestEmptyToNone:
 
 class TestFieldCount:
     def test_field_count(self):
-        assert len(ScheduleRecord.model_fields) == 27
+        assert len(ScheduleRecord.model_fields) == 30
+
+
+class TestDoublesMatchUid:
+    def test_singles_uid_uses_two_player_ids(self):
+        record = ScheduleRecord(**_base_record())
+        assert record.match_uid == "2026_339_SGL_SF_D0DT_ME82"
+
+    def test_doubles_uid_includes_partner_ids(self):
+        record = ScheduleRecord(**_base_record(
+            draw_type=DrawType.doubles,
+            p1_id="a853",
+            p1_partner_id="pf00",
+            p2_id="rc91",
+            p2_partner_id="xy42",
+        ))
+        # 4 ids sorted alphabetically
+        assert record.match_uid == "2026_339_DBL_SF_A853_PF00_RC91_XY42"
+
+    def test_doubles_uid_null_when_partner_missing(self):
+        record = ScheduleRecord(**_base_record(
+            draw_type=DrawType.doubles,
+            p1_id="a853",
+            p1_partner_id=None,
+            p2_id="rc91",
+            p2_partner_id="xy42",
+        ))
+        assert record.match_uid is None
 
 
 class TestSchemaHash:

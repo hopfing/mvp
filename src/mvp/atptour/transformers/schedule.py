@@ -53,11 +53,15 @@ def _normalize_score(score_span: Tag) -> str | None:
     return text
 
 
-def _extract_player_info(div: Tag) -> tuple[str, str, str, str | None, bool]:
-    """Extract player ID, name, country, seed/entry, and doubles flag.
+def _extract_player_info(
+    div: Tag,
+) -> tuple[str, str, str, str | None, bool, str | None]:
+    """Extract player ID, name, country, seed/entry, doubles flag, and partner ID.
 
-    Returns (player_id, display_name, country_code, seed_entry, is_doubles).
-    For doubles: multiple names joined with ' / ', first player's ID, first country.
+    Returns (player_id, display_name, country_code, seed_entry, is_doubles, partner_id).
+    For singles, partner_id is None.
+    For doubles: display_name joins both players with ' / '; player_id is the first
+    pair member, partner_id is the second.
     """
     # Check for doubles structure (multiple names in a "names" div)
     names_div = div.select_one("div.names")
@@ -65,15 +69,16 @@ def _extract_player_info(div: Tag) -> tuple[str, str, str, str | None, bool]:
         # Doubles
         name_links = names_div.select("div.name a")
         names = []
-        first_id = None
+        ids: list[str] = []
         for link in name_links:
             name_text = link.get_text(separator=" ", strip=True)
             names.append(name_text)
-            if first_id is None:
-                href = link.get("href", "")
-                parts = href.strip("/").split("/")
-                first_id = parts[-2] if len(parts) >= 2 else ""
+            href = link.get("href", "")
+            parts = href.strip("/").split("/")
+            ids.append(parts[-2] if len(parts) >= 2 else "")
         display_name = " / ".join(names)
+        first_id = ids[0] if ids else ""
+        partner_id = ids[1] if len(ids) >= 2 else None
 
         # Country: first flag in countries div
         countries_div = div.select_one("div.countries")
@@ -90,7 +95,7 @@ def _extract_player_info(div: Tag) -> tuple[str, str, str, str | None, bool]:
         seed_entry = rank_span.get_text(strip=True) if rank_span else ""
         seed_entry = seed_entry if seed_entry else None
 
-        return first_id, display_name, country, seed_entry, True
+        return first_id, display_name, country, seed_entry, True, partner_id
 
     # Singles
     name_div = div.select_one("div.name")
@@ -114,7 +119,7 @@ def _extract_player_info(div: Tag) -> tuple[str, str, str, str | None, bool]:
     seed_entry = rank_span.get_text(strip=True) if rank_span else ""
     seed_entry = seed_entry if seed_entry else None
 
-    return player_id, name_text, country, seed_entry, False
+    return player_id, name_text, country, seed_entry, False, None
 
 
 def _parse_schedule_html(
@@ -208,10 +213,10 @@ def _parse_schedule_html(
             if player_div is None or opponent_div is None:
                 continue
 
-            p1_id, p1_name, p1_country, p1_seed_entry, p1_is_dbl = (
+            p1_id, p1_name, p1_country, p1_seed_entry, p1_is_dbl, p1_partner_id = (
                 _extract_player_info(player_div)
             )
-            p2_id, p2_name, p2_country, p2_seed_entry, p2_is_dbl = (
+            p2_id, p2_name, p2_country, p2_seed_entry, p2_is_dbl, p2_partner_id = (
                 _extract_player_info(opponent_div)
             )
 
@@ -221,6 +226,12 @@ def _parse_schedule_html(
 
             is_doubles = p1_is_dbl or p2_is_dbl
             draw_type = DrawType.doubles if is_doubles else DrawType.singles
+
+            # Skip doubles matches where we couldn't extract both partner IDs:
+            # the resulting match_uid would only have 2 IDs and wouldn't join
+            # against the 4-ID uids built from results/match_stats.
+            if is_doubles and (p1_partner_id is None or p2_partner_id is None):
+                continue
 
             status_div = content.select_one("div.status")
             status = status_div.get_text(strip=True) if status_div else None
@@ -250,11 +261,13 @@ def _parse_schedule_html(
                     p1_country=p1_country,
                     p1_seed=parse_seed_entry(p1_seed_entry)[0],
                     p1_entry=parse_seed_entry(p1_seed_entry)[1],
+                    p1_partner_id=p1_partner_id,
                     p2_id=p2_id,
                     p2_name=p2_name,
                     p2_country=p2_country,
                     p2_seed=parse_seed_entry(p2_seed_entry)[0],
                     p2_entry=parse_seed_entry(p2_seed_entry)[1],
+                    p2_partner_id=p2_partner_id,
                     status=status,
                     score=score,
                     snapshot_timestamp=snapshot_timestamp,
