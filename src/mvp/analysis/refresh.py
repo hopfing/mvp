@@ -117,11 +117,22 @@ def refresh_analysis_data(
     predictions = pl.read_parquet(preds_path)
     print(f"Predictions: {len(predictions)}")
 
-    # Load results
+    # Load match aggregate — source of truth for per-match metadata AND results
     results_df = None
+    match_meta = None
     matches_path = data_root / "aggregate" / "atptour" / "matches.parquet"
     if matches_path.exists():
         matches = pl.read_parquet(matches_path)
+
+        # Per-match metadata (matches.parquet is player-level, so dedupe on match_uid)
+        META_COLS = [
+            "match_uid", "tournament_id", "tournament_name",
+            "circuit", "surface", "round",
+            "effective_match_date", "scheduled_datetime", "match_date",
+        ]
+        available_meta = [c for c in META_COLS if c in matches.columns]
+        match_meta = matches.select(available_meta).unique(subset=["match_uid"])
+
         if "won" in matches.columns:
             won = matches.filter(pl.col("won")).select(
                 "match_uid",
@@ -153,6 +164,7 @@ def refresh_analysis_data(
     print("Building analysis dataset...")
     ds = build_analysis_dataset(
         predictions=predictions,
+        match_meta=match_meta,
         results=results_df,
         sheet_data=sheet_data,
         odds_by_book=odds_by_book,

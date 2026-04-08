@@ -30,6 +30,7 @@ SHEET_COLUMNS = [
 
 def build_analysis_dataset(
     predictions: pl.DataFrame,
+    match_meta: pl.DataFrame | None = None,
     results: pl.DataFrame | None = None,
     sheet_data: pl.DataFrame | None = None,
     odds_by_book: pl.DataFrame | None = None,
@@ -43,6 +44,10 @@ def build_analysis_dataset(
 
     Args:
         predictions: Model predictions (required).
+        match_meta: Per-match metadata from matches.parquet (source of truth
+            for effective_match_date, scheduled_datetime, round, tournament
+            fields). Replaces the stale values baked into predictions.parquet
+            at initial prediction time.
         results: Match results with match_uid and result columns.
         sheet_data: Google Sheets data (circuit uses CH/ATP format).
         odds_by_book: Long-format per-book odds summaries.
@@ -55,6 +60,7 @@ def build_analysis_dataset(
     """
     ds = predictions.clone()
 
+    ds = _join_match_meta(ds, match_meta)
     ds = _join_results(ds, results)
     ds = _join_sheet_data(ds, sheet_data)
 
@@ -76,6 +82,27 @@ def build_analysis_dataset(
         ds = _compute_market_alignment(ds, all_snapshots)
 
     return ds
+
+
+def _join_match_meta(
+    ds: pl.DataFrame, match_meta: pl.DataFrame | None
+) -> pl.DataFrame:
+    """Replace stale match metadata from predictions with fresh values from matches.parquet.
+
+    Predictions.parquet bakes in match metadata at initial prediction time and is
+    never refreshed (save_predictions only appends new match_uids). matches.parquet
+    is the single source of truth for per-match metadata — drop the stale columns
+    from the predictions base and left-join the fresh ones on match_uid.
+    """
+    if match_meta is None:
+        return ds
+
+    replace_cols = [c for c in match_meta.columns if c != "match_uid"]
+    drop_cols = [c for c in replace_cols if c in ds.columns]
+    if drop_cols:
+        ds = ds.drop(drop_cols)
+
+    return ds.join(match_meta, on="match_uid", how="left")
 
 
 def _join_results(ds: pl.DataFrame, results: pl.DataFrame | None) -> pl.DataFrame:
