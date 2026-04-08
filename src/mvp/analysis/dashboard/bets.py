@@ -69,7 +69,14 @@ def _aggregate_periods(bets: pl.DataFrame, granularity: str) -> pl.DataFrame:
             "roi": pl.Float64,
         })
 
-    if granularity == "Weeks":
+    if granularity == "Days":
+        period_expr = (
+            pl.col("effective_match_date")
+            .dt.truncate("1d")
+            .cast(pl.Date)
+            .alias("period")
+        )
+    elif granularity == "Weeks":
         # truncate to Monday of each week
         period_expr = (
             pl.col("effective_match_date")
@@ -128,8 +135,14 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
     if model_version is not None:
         ds = ds.filter(pl.col("model_version") == model_version)
 
+    def _on_gran_change():
+        gran = st.session_state["bets_granularity"]
+        days = 7 if gran == "Days" else 90
+        st.session_state["bets_since"] = date.today() - timedelta(days=days)
+
     granularity = st.sidebar.radio(
-        "Granularity", ["Weeks", "Months"], key="bets_granularity",
+        "Granularity", ["Days", "Weeks", "Months"], index=1,
+        key="bets_granularity", on_change=_on_gran_change,
     )
 
     default_since = date.today() - timedelta(days=90)
@@ -230,17 +243,24 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
             .mark_text(dy=-18, fontSize=16, color="white")
             .encode(x=x_enc, y="roi_pct:Q", text=alt.Text("roi_pct:Q", format=".2f"))
         )
-        zero = alt.Chart(roi_data).mark_rule(strokeDash=[4, 4], color="gray").encode(y=alt.datum(0))
-        st.altair_chart(line + labels + zero, use_container_width=True)
+        layers = [line, labels]
+        if (y_min - margin) <= 0 <= (y_max + margin):
+            zero = (
+                alt.Chart(roi_data)
+                .mark_rule(strokeDash=[4, 4], color="gray")
+                .encode(y=alt.datum(0))
+            )
+            layers.append(zero)
+        st.altair_chart(alt.layer(*layers), use_container_width=True)
 
     # --- Breakdown Table ---
-    st.subheader(f"{'Weekly' if granularity == 'Weeks' else 'Monthly'} Breakdown")
+    breakdown_label = {"Days": "Daily", "Weeks": "Weekly", "Months": "Monthly"}[granularity]
+    period_col_label = {"Days": "Day", "Weeks": "Week", "Months": "Month"}[granularity]
+    st.subheader(f"{breakdown_label} Breakdown")
     display = (
         periods.sort("period", descending=True)
         .select(
-            pl.col("period").cast(pl.Utf8).alias(
-                "Week" if granularity == "Weeks" else "Month"
-            ),
+            pl.col("period").cast(pl.Utf8).alias(period_col_label),
             pl.col("bets").alias("Bets"),
             pl.col("W"),
             pl.col("L"),
