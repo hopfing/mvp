@@ -144,6 +144,10 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
         "Granularity", ["Days", "Weeks", "Months"], index=1,
         key="bets_granularity", on_change=_on_gran_change,
     )
+    scope = st.sidebar.radio(
+        "Scope", ["Cumulative", "Per Period"], index=0,
+        key="bets_scope",
+    )
 
     default_since = date.today() - timedelta(days=90)
     since = st.sidebar.date_input("Since", value=default_since, key="bets_since")
@@ -193,57 +197,95 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
         axis=alt.Axis(labelAngle=-45, labelFontSize=16),
     )
 
+    cumulative = scope == "Cumulative"
+
     with chart_cols[0]:
-        st.subheader("Cumulative P&L")
-        cum_pnl = periods.select(
-            pl.col("period_str"),
-            pl.col("pnl").cum_sum().alias("cum_pnl"),
-        ).to_pandas()
-        y_max = cum_pnl["cum_pnl"].max()
-        y_min = cum_pnl["cum_pnl"].min()
+        if cumulative:
+            st.subheader("Cumulative P&L")
+            pnl_data = periods.select(
+                pl.col("period_str"),
+                pl.col("pnl").cum_sum().alias("pnl_val"),
+            ).to_pandas()
+            y_title = "Cumulative P&L"
+        else:
+            st.subheader("P&L")
+            pnl_data = periods.select(
+                pl.col("period_str"),
+                pl.col("pnl").alias("pnl_val"),
+            ).to_pandas()
+            y_title = "P&L"
+        y_max = pnl_data["pnl_val"].max()
+        y_min = pnl_data["pnl_val"].min()
         margin = (y_max - y_min) * 0.15 if y_max != y_min else 10
-        line = (
-            alt.Chart(cum_pnl)
-            .mark_line(point=True)
-            .encode(
-                x=x_enc,
-                y=alt.Y("cum_pnl:Q", title="Cumulative P&L",
-                         axis=alt.Axis(labelFontSize=16),
-                         scale=alt.Scale(domain=[y_min - margin, y_max + margin])),
+        mark = alt.Chart(pnl_data).mark_line(point=True) if cumulative else alt.Chart(pnl_data).mark_bar()
+        enc = dict(
+            x=x_enc,
+            y=alt.Y("pnl_val:Q", title=y_title,
+                     axis=alt.Axis(labelFontSize=16),
+                     scale=alt.Scale(domain=[y_min - margin, y_max + margin])),
+        )
+        if not cumulative:
+            enc["color"] = alt.condition(
+                alt.datum.pnl_val >= 0,
+                alt.value("#2ecc71"),
+                alt.value("#e74c3c"),
             )
-        )
+        chart = mark.encode(**enc)
         labels = (
-            alt.Chart(cum_pnl)
+            alt.Chart(pnl_data)
             .mark_text(dy=-18, fontSize=16, color="white")
-            .encode(x=x_enc, y="cum_pnl:Q", text=alt.Text("cum_pnl:Q", format=",.2f"))
+            .encode(x=x_enc, y="pnl_val:Q", text=alt.Text("pnl_val:Q", format=",.2f"))
         )
-        st.altair_chart(line + labels, use_container_width=True)
+        pnl_layers = [chart, labels]
+        if not cumulative and (y_min - margin) <= 0 <= (y_max + margin):
+            zero = (
+                alt.Chart(pnl_data)
+                .mark_rule(strokeDash=[4, 4], color="gray")
+                .encode(y=alt.datum(0))
+            )
+            pnl_layers.append(zero)
+        st.altair_chart(alt.layer(*pnl_layers), use_container_width=True)
 
     with chart_cols[1]:
-        st.subheader("ROI %")
-        roi_data = periods.select(
-            pl.col("period_str"),
-            (pl.col("roi") * 100).round(1).alias("roi_pct"),
-        ).to_pandas()
+        if cumulative:
+            st.subheader("Cumulative ROI %")
+            roi_data = periods.select(
+                pl.col("period_str"),
+                (pl.col("pnl").cum_sum() / pl.col("stake").cum_sum() * 100)
+                .round(1)
+                .alias("roi_pct"),
+            ).to_pandas()
+            roi_title = "Cumulative ROI %"
+        else:
+            st.subheader("ROI %")
+            roi_data = periods.select(
+                pl.col("period_str"),
+                (pl.col("roi") * 100).round(1).alias("roi_pct"),
+            ).to_pandas()
+            roi_title = "ROI %"
         y_max = roi_data["roi_pct"].max()
         y_min = roi_data["roi_pct"].min()
         margin = (y_max - y_min) * 0.15 if y_max != y_min else 5
-        line = (
-            alt.Chart(roi_data)
-            .mark_line(point=True)
-            .encode(
-                x=x_enc,
-                y=alt.Y("roi_pct:Q", title="ROI %",
-                         axis=alt.Axis(labelFontSize=16),
-                         scale=alt.Scale(domain=[y_min - margin, y_max + margin])),
-            )
+        mark = alt.Chart(roi_data).mark_line(point=True) if cumulative else alt.Chart(roi_data).mark_bar()
+        enc = dict(
+            x=x_enc,
+            y=alt.Y("roi_pct:Q", title=roi_title,
+                     axis=alt.Axis(labelFontSize=16),
+                     scale=alt.Scale(domain=[y_min - margin, y_max + margin])),
         )
+        if not cumulative:
+            enc["color"] = alt.condition(
+                alt.datum.roi_pct >= 0,
+                alt.value("#2ecc71"),
+                alt.value("#e74c3c"),
+            )
+        chart = mark.encode(**enc)
         labels = (
             alt.Chart(roi_data)
             .mark_text(dy=-18, fontSize=16, color="white")
             .encode(x=x_enc, y="roi_pct:Q", text=alt.Text("roi_pct:Q", format=".2f"))
         )
-        layers = [line, labels]
+        layers = [chart, labels]
         if (y_min - margin) <= 0 <= (y_max + margin):
             zero = (
                 alt.Chart(roi_data)
