@@ -510,11 +510,11 @@ class TestMergePredictions:
         matches = _matches_df({"match_uid": [], "won": [], "player_id": [], "opp_id": []})
         odds_maps = {
             "DraftKings": {"M1": {"A": 2.00, "B": 1.80}},
-            "BetRivers": {"M1": {"A": 2.15, "B": 1.72}},
+            "Rivers": {"M1": {"A": 2.15, "B": 1.72}},
         }
         result = merge_predictions(existing, new, matches, odds_maps=odds_maps)
         m1 = result.filter(pl.col("match_uid") == "M1")
-        assert m1["book"][0] == "Rivers"  # BR has better p1 odds
+        assert m1["book"][0] == "Rivers"  # Rivers has better p1 odds
 
     def test_odds_updated_on_subsequent_runs(self):
         """Odds should update each run until a stake is placed."""

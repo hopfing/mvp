@@ -111,6 +111,15 @@ _TOURNAMENT_TYPE_CIRCUIT = {
 }
 
 
+BOOK_DISPLAY_NAMES: dict[str, str] = {
+    "b365": "Bet365",
+    "br": "Rivers",
+    "dk": "DraftKings",
+    "fd": "FanDuel",
+    "mgm": "MGM",
+}
+
+
 class ActivityEventType(StrEnum):
     """Event type from player activity data, mapping to circuits."""
 

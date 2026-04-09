@@ -15,6 +15,7 @@ warnings.filterwarnings("ignore", category=UserWarning, module="sklearn.utils.pa
 import polars as pl
 
 from mvp.common.base_job import get_data_root, get_local_data_root
+from mvp.common.enums import BOOK_DISPLAY_NAMES
 
 
 @dataclass
@@ -1832,7 +1833,7 @@ def cmd_live(args: argparse.Namespace) -> int:
 
             prepared = prepare_predictions(predictions)
             book_odds_for_sheets = {
-                book.display_name: all_odds_maps[book.code]
+                BOOK_DISPLAY_NAMES.get(book.code, book.display_name): all_odds_maps[book.code]
                 for book in BOOK_REGISTRY
                 if book.code in all_odds_maps
             }

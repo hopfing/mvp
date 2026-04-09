@@ -7,13 +7,9 @@ import re
 import polars as pl
 
 from mvp.analysis.simulations import EDGE_BANDS, STAKE
+from mvp.common.enums import BOOK_DISPLAY_NAMES
 
 _BAND_NAMES = [b["name"] for b in EDGE_BANDS]
-
-_BOOK_LABELS = {
-    "b365": "Bet365", "br": "BetRivers",
-    "dk": "DraftKings", "mgm": "MGM",
-}
 
 _CUT_LABELS = {
     "open": "Open", "close": "Close",
@@ -240,11 +236,11 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
         book_sel = st.selectbox(
             "Book",
             options=books,
-            format_func=lambda x: _BOOK_LABELS.get(x, x.upper()),
+            format_func=lambda x: BOOK_DISPLAY_NAMES.get(x, x.upper()),
         )
 
         st.subheader(
-            f"{_BOOK_LABELS.get(book_sel, book_sel.upper())} "
+            f"{BOOK_DISPLAY_NAMES.get(book_sel, book_sel.upper())} "
             f"— Edge Bands ({_CUT_LABELS[cut]})"
         )
 
@@ -295,7 +291,7 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
         else:
             display = comp.select([
                 pl.col("book")
-                .replace_strict(_BOOK_LABELS, default=pl.col("book"))
+                .replace_strict(BOOK_DISPLAY_NAMES, default=pl.col("book"))
                 .alias("Book"),
                 pl.col("n_bets").alias("N"),
                 (pl.col("accuracy") * 100).round(1).alias("Acc %"),
