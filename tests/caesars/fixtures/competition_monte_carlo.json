@@ -1,0 +1,155 @@
+{
+  "sportId": "tennis",
+  "competitions": [
+    {
+      "id": "atp-mc-uuid",
+      "name": "ATP Monte Carlo",
+      "collectionName": "ATP",
+      "events": [
+        {
+          "id": "event-alcaraz-uuid",
+          "name": "Carlos Alcaraz vs Tomas Martin Etcheverry",
+          "startTime": "2026-04-09T11:20:00Z",
+          "type": "MATCH",
+          "competitionId": "atp-mc-uuid",
+          "competitionName": "ATP Monte Carlo",
+          "started": false,
+          "active": true,
+          "tradedInPlay": true,
+          "keyMarketGroups": [
+            {
+              "markets": [
+                {
+                  "id": "market-ml-alcaraz",
+                  "name": "|Match Betting|",
+                  "templateId": "_7cMatch_20Betting_7c",
+                  "gtpMarketClass": "HEAD_TO_HEAD",
+                  "placeholder": false,
+                  "tradedInPlay": false,
+                  "selections": [
+                    {
+                      "id": "sel-alcaraz",
+                      "name": "|Carlos Alcaraz|",
+                      "type": "home",
+                      "active": true,
+                      "price": {"f": "1/35", "d": 1.02857, "a": -3500}
+                    },
+                    {
+                      "id": "sel-etcheverry",
+                      "name": "|Tomas Martin Etcheverry|",
+                      "type": "away",
+                      "active": true,
+                      "price": {"f": "10/1", "d": 11.0, "a": 1000}
+                    }
+                  ]
+                },
+                {
+                  "id": "market-spread-alcaraz",
+                  "name": "|Game Handicap Betting|",
+                  "templateId": "_7cGame_20Handicap_20Betting_7c",
+                  "gtpMarketClass": "HANDICAP",
+                  "placeholder": false,
+                  "line": -5.5,
+                  "selections": [
+                    {
+                      "id": "sel-alcaraz-sp",
+                      "name": "|Carlos Alcaraz|",
+                      "type": "home",
+                      "active": true,
+                      "price": {"f": "4/6", "d": 1.66667, "a": -150}
+                    },
+                    {
+                      "id": "sel-etcheverry-sp",
+                      "name": "|Tomas Martin Etcheverry|",
+                      "type": "away",
+                      "active": true,
+                      "price": {"f": "11/10", "d": 2.1, "a": 110}
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "metadata": {
+            "homeTeamName": "Carlos Alcaraz",
+            "awayTeamName": "Tomas Martin Etcheverry"
+          }
+        },
+        {
+          "id": "event-bergs-uuid",
+          "name": "Zizou Bergs vs Alexander Zverev",
+          "startTime": "2026-04-09T09:00:00Z",
+          "type": "MATCH",
+          "competitionId": "atp-mc-uuid",
+          "competitionName": "ATP Monte Carlo",
+          "started": true,
+          "active": true,
+          "tradedInPlay": true,
+          "keyMarketGroups": [
+            {
+              "markets": [
+                {
+                  "id": "market-ml-bergs",
+                  "name": "|Match Betting Live|",
+                  "templateId": "_7cMatch_20Betting_20Live_7c",
+                  "gtpMarketClass": "HEAD_TO_HEAD",
+                  "placeholder": false,
+                  "tradedInPlay": true,
+                  "selections": [
+                    {
+                      "id": "sel-bergs",
+                      "name": "|Zizou Bergs|",
+                      "type": "home",
+                      "active": true,
+                      "price": {"f": "3/1", "d": 4.0, "a": 300}
+                    },
+                    {
+                      "id": "sel-zverev",
+                      "name": "|Alexander Zverev|",
+                      "type": "away",
+                      "active": true,
+                      "price": {"f": "2/9", "d": 1.22222, "a": -450}
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "metadata": {
+            "homeTeamName": "Zizou Bergs",
+            "awayTeamName": "Alexander Zverev"
+          }
+        },
+        {
+          "id": "event-placeholder-uuid",
+          "name": "Placeholder Player A vs Placeholder Player B",
+          "startTime": "2026-04-09T15:00:00Z",
+          "type": "MATCH",
+          "competitionId": "atp-mc-uuid",
+          "competitionName": "ATP Monte Carlo",
+          "started": false,
+          "active": true,
+          "tradedInPlay": false,
+          "keyMarketGroups": [
+            {
+              "markets": [
+                {
+                  "id": "market-placeholder",
+                  "templateId": "_7cMatch_20Betting_7c",
+                  "gtpMarketClass": "NONE",
+                  "placeholder": true,
+                  "selections": []
+                }
+              ]
+            }
+          ],
+          "metadata": {
+            "homeTeamName": "Placeholder Player A",
+            "awayTeamName": "Placeholder Player B"
+          }
+        }
+      ]
+    }
+  ],
+  "eventCount": 3
+}

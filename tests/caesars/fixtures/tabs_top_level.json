@@ -1,0 +1,36 @@
+{
+  "sportId": "tennis",
+  "eventCount": 5,
+  "competitions": [
+    {
+      "id": "atp-mc-uuid",
+      "name": "ATP Monte Carlo",
+      "collectionName": "ATP",
+      "events": []
+    },
+    {
+      "id": "challenger-madrid-uuid",
+      "name": "ATP Challenger Madrid",
+      "collectionName": "Challenger",
+      "events": []
+    },
+    {
+      "id": "wta-madrid-uuid",
+      "name": "WTA Madrid",
+      "collectionName": "WTA",
+      "events": []
+    },
+    {
+      "id": "atp-mc-doubles-uuid",
+      "name": "ATP Monte Carlo Doubles",
+      "collectionName": "ATP Doubles",
+      "events": []
+    },
+    {
+      "id": "utr-uuid",
+      "name": "UTR Women's Singles",
+      "collectionName": "UTR",
+      "events": []
+    }
+  ]
+}
