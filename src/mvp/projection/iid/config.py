@@ -32,7 +32,6 @@ class ServeModelConfig(BaseModel):
 class IIDMetricsConfig(BaseModel):
     """Metric reporting configuration for the IID projector."""
 
-    primary: str = "log_loss"
     include_classification: bool = True
     include_regression: bool = True
     total_lines: list[float] = [20.5, 21.5, 22.5, 23.5]

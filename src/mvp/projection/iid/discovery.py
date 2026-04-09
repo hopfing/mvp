@@ -8,7 +8,8 @@ variant adds two pieces of inlined logic:
 1. The matchup serve model's two-perspective fit (stack player + opp rows
    targeting the actual per-row serve win pct from raw `pts_service_pts_*`).
 2. The chain step: convert predicted serve pcts to hold/tiebreak probs and
-   call `match_distribution` to derive `expected_games_a`, then MAE.
+   call `match_distribution` to derive distributions, then score by the
+   configured metric (mae, rmse, log_loss, or iid_crps_total_games).
 
 Per-candidate work is pure numpy. The wide matrix and folds are computed
 once via `FastIIDDiscoverySelector.precompute()`.
@@ -46,6 +47,7 @@ from mvp.projection.iid.chain import (
     p_tiebreak_game_win,
 )
 from mvp.projection.iid.config import IIDDiscoveryConfig
+from mvp.projection.iid.metrics import crps_discrete_pmf
 from mvp.projection.models import get_regression_model
 
 logger = logging.getLogger(__name__)
@@ -317,10 +319,13 @@ class FastIIDDiscoverySelector:
         X_wide = self.X_wide
         col_to_idx = self.col_to_idx
         y_games_a = self.y_games_a
+        y_games_b = self.y_games_b
+        y_won = self.y_won
         best_of = self.best_of
         actual_a = self.actual_serve_rate_a
         actual_b = self.actual_serve_rate_b
         folds = self.folds
+        metric = self.config.metric
 
         regressor_type = self.config.serve_model.regressor.type
         regressor_params = dict(self.config.serve_model.regressor.params)
@@ -342,7 +347,7 @@ class FastIIDDiscoverySelector:
             except KeyError:
                 return float("inf")
 
-            fold_maes: list[float] = []
+            fold_scores: list[float] = []
             for train_idx, test_idx in folds:
                 # ---- Build training matrix from BOTH perspectives ----
                 X_train_player = X_wide[np.ix_(train_idx, player_idx)]
@@ -389,18 +394,38 @@ class FastIIDDiscoverySelector:
                 p_a = np.clip(p_a, clip_min, clip_max)
                 p_b = np.clip(p_b, clip_min, clip_max)
 
-                # ---- Run chain → expected_games_a → MAE ----
+                # ---- Run chain → distribution → score by metric ----
                 h_a = p_service_game_win(p_a)
                 h_b = p_service_game_win(p_b)
                 t_ab = p_tiebreak_game_win(p_a, p_b)
                 bo_test = best_of[test_idx]
                 dist = match_distribution(h_a, h_b, t_ab, bo_test)
 
-                fold_maes.append(
-                    float(np.mean(np.abs(y_games_a[test_idx] - dist.expected_games_a)))
-                )
+                if metric == "mae":
+                    score = float(np.mean(np.abs(
+                        y_games_a[test_idx] - dist.expected_games_a
+                    )))
+                elif metric == "rmse":
+                    score = float(np.sqrt(np.mean(
+                        (y_games_a[test_idx] - dist.expected_games_a) ** 2
+                    )))
+                elif metric == "log_loss":
+                    p_win = np.clip(dist.p_match_win_a, 1e-15, 1 - 1e-15)
+                    y = y_won[test_idx].astype(np.float64)
+                    score = float(-np.mean(
+                        y * np.log(p_win) + (1 - y) * np.log(1 - p_win)
+                    ))
+                elif metric == "iid_crps_total_games":
+                    obs_total = (
+                        y_games_a[test_idx] + y_games_b[test_idx]
+                    ).astype(np.int64)
+                    score = crps_discrete_pmf(obs_total, dist.total_games_pmf)
+                else:
+                    raise ValueError(f"Unknown metric: {metric}")
 
-            return float(np.mean(fold_maes))
+                fold_scores.append(score)
+
+            return float(np.mean(fold_scores))
 
         return scorer
 
@@ -536,7 +561,7 @@ class IIDProjectionDiscovery:
 
             final_metric = selection_result.final_metric
             ml_logger.log_metrics({
-                "final_mae": final_metric,
+                f"final_{self.config.metric}": final_metric,
                 "n_selected_features": len(selected),
                 "n_iterations": len(selection_result.history),
                 "wall_seconds": elapsed,
