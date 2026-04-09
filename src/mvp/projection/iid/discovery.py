@@ -544,27 +544,6 @@ class IIDProjectionDiscovery:
             for i, feat in enumerate(selected):
                 ml_logger.log_params({f"selected_feature_{i:02d}": feat})
 
-        # Round 1 feature ranking — which single features had signal on their own
-        if selection_result.history:
-            round_1 = next(
-                (h for h in selection_result.history if h.get("action") == "add"),
-                None,
-            )
-            if round_1 and "round_ranking" in round_1:
-                ranking = round_1["round_ranking"]
-                # "With signal" = finite metric (inf means the scorer rejected it,
-                # e.g. missing swap column or degenerate fit). Don't have a per-
-                # metric no-skill baseline here since MAE units depend on target.
-                with_signal = [(f, m) for f, m in ranking if np.isfinite(m)]
-                no_signal = len(ranking) - len(with_signal)
-                self._log("")
-                self._log(f"ROUND 1 FEATURE RANKING ({len(with_signal)} with signal)")
-                self._log("-" * 50)
-                for i, (feat, metric) in enumerate(with_signal, 1):
-                    self._log(f"  {i:3}. {feat}: {metric:.4f}")
-                if no_signal:
-                    self._log(f"  ({no_signal} features returned inf / rejected)")
-
         self._log("")
         self._log("RESULTS")
         self._log("-" * 30)

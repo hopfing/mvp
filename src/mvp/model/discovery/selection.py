@@ -37,6 +37,7 @@ class FeatureSelector:
         importance_threshold: float = 0.05,
         importance_fn: Callable[[list[str]], dict[str, float]] | None = None,
         base_features: list[str] | None = None,
+        round1_baseline: float | None = None,
     ) -> None:
         """Initialize selector.
 
@@ -49,6 +50,10 @@ class FeatureSelector:
             max_features: Maximum features to select (None = no limit).
             importance_threshold: For threshold method, minimum importance to keep.
             importance_fn: For threshold/recursive, function to compute importance.
+            round1_baseline: Optional no-skill baseline used when logging the
+                round 1 ranking. Features not beating this baseline (given
+                ``direction``) are reported as "below baseline". If None,
+                only non-finite scores are filtered.
         """
         self.scorer = scorer
         self.all_features = list(all_features)
@@ -59,6 +64,7 @@ class FeatureSelector:
         self.importance_threshold = importance_threshold
         self.importance_fn = importance_fn
         self.base_features = list(base_features) if base_features else []
+        self.round1_baseline = round1_baseline
 
     def _is_better(self, new_val: float, old_val: float) -> bool:
         """Check if new value is better than old value."""
@@ -99,6 +105,8 @@ class FeatureSelector:
             })
         else:
             best_metric = self._worst_value()
+
+        first_round_logged = False
 
         while remaining and len(selected) < self.max_features:
             round_num = len(selected) + 1
@@ -163,6 +171,40 @@ class FeatureSelector:
                 "metric": best_metric,
                 "round_ranking": sorted_results,
             })
+
+            # Log round 1 rankings inline so interrupted runs still surface them
+            if not first_round_logged:
+                first_round_logged = True
+                baseline = self.round1_baseline
+                with_signal: list[tuple[str, float]] = []
+                for f, m in sorted_results:
+                    if not np.isfinite(m):
+                        continue
+                    if baseline is not None:
+                        if self.direction == "minimize" and m >= baseline:
+                            continue
+                        if self.direction == "maximize" and m <= baseline:
+                            continue
+                    with_signal.append((f, m))
+                n_dropped = len(sorted_results) - len(with_signal)
+                label = "with signal" if baseline is not None else "features"
+                sel_logger.info("")
+                sel_logger.info(
+                    "ROUND 1 FEATURE RANKING (%d %s)", len(with_signal), label,
+                )
+                sel_logger.info("-" * 50)
+                for i, (feat, metric) in enumerate(with_signal, 1):
+                    sel_logger.info("  %3d. %s: %.4f", i, feat, metric)
+                if n_dropped:
+                    if baseline is not None:
+                        sel_logger.info(
+                            "  (%d features below baseline %.4f or rejected)",
+                            n_dropped, baseline,
+                        )
+                    else:
+                        sel_logger.info(
+                            "  (%d features rejected / returned inf)", n_dropped,
+                        )
 
         return SelectionResult(
             selected_features=selected,

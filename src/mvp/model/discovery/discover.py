@@ -401,6 +401,16 @@ class FeatureDiscovery:
             scorer = self._create_scorer()
         importance_fn = self._create_importance_fn(all_features)
 
+        # No-skill baselines for the round 1 feature ranking filter
+        # (features that don't beat these are reported as "below baseline")
+        no_skill_baselines = {
+            "log_loss": 0.693,
+            "calibration_error": 0.50,
+            "accuracy": 0.50,
+            "roc_auc": 0.50,
+        }
+        round1_baseline = no_skill_baselines.get(self.config.discovery.metric)
+
         selector = FeatureSelector(
             scorer=scorer,
             all_features=all_features,
@@ -411,6 +421,7 @@ class FeatureDiscovery:
             max_features=feat_cfg.max,
             importance_threshold=self.config.discovery.importance_threshold,
             base_features=base,
+            round1_baseline=round1_baseline,
         )
 
         result = selector.run(verbose=True)
@@ -565,37 +576,6 @@ class FeatureDiscovery:
         final_metric = final_result["metrics"].get(
             self.config.discovery.metric, 0.0
         )
-
-        # Round 1 feature ranking (if available)
-        if selection_result and selection_result.history:
-            round_1 = selection_result.history[0]
-            if round_1.get("action") == "add" and "round_ranking" in round_1:
-                ranking = round_1["round_ranking"]
-                # Show all features that beat the no-model baseline
-                # (predicting 50/50 for every match)
-                no_skill_baselines = {
-                    "log_loss": 0.693,
-                    "calibration_error": 0.50,
-                    "accuracy": 0.50,
-                    "roc_auc": 0.50,
-                }
-                metric_name = self.config.discovery.metric
-                baseline = no_skill_baselines.get(metric_name)
-                if baseline is None:
-                    # Unknown metric — show all
-                    with_signal = ranking
-                elif self.config.discovery.direction == "minimize":
-                    with_signal = [(f, m) for f, m in ranking if m < baseline]
-                else:
-                    with_signal = [(f, m) for f, m in ranking if m > baseline]
-                no_signal = len(ranking) - len(with_signal)
-                self._log("")
-                self._log(f"ROUND 1 FEATURE RANKING ({len(with_signal)} with signal)")
-                self._log("-" * 50)
-                for i, (feat, metric) in enumerate(with_signal, 1):
-                    self._log(f"  {i:3}. {feat}: {metric:.4f}")
-                if no_signal:
-                    self._log(f"  ({no_signal} features showed no signal)")
 
         # Summary
         self._log("")
