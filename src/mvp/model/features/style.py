@@ -662,7 +662,7 @@ def is_clutch_player() -> pl.Expr:
     params=[],
     description="Player is power server AND opponent has strong return",
     depends_on=["is_power_server", "ret_first_serve_win_pct"],
-    mirror=False,
+    mirror=True,
 )
 def matchup_power_serve_vs_strong_return() -> pl.Expr:
     ret_p75 = pl.col("opp_ret_first_serve_win_pct").quantile(0.75)
@@ -677,7 +677,7 @@ def matchup_power_serve_vs_strong_return() -> pl.Expr:
     params=[],
     description="Player is placement server AND opponent has strong return",
     depends_on=["is_placement_server", "ret_first_serve_win_pct"],
-    mirror=False,
+    mirror=True,
 )
 def matchup_placement_serve_vs_strong_return() -> pl.Expr:
     ret_p75 = pl.col("opp_ret_first_serve_win_pct").quantile(0.75)
@@ -692,7 +692,7 @@ def matchup_placement_serve_vs_strong_return() -> pl.Expr:
     params=[],
     description="Player is aggressive baseliner AND opponent is counterpuncher",
     depends_on=["is_aggressive_baseliner", "is_counterpuncher"],
-    mirror=False,
+    mirror=True,
 )
 def matchup_aggressor_vs_counterpuncher() -> pl.Expr:
     return (
@@ -706,7 +706,7 @@ def matchup_aggressor_vs_counterpuncher() -> pl.Expr:
     params=[],
     description="Player is counterpuncher AND opponent is aggressive baseliner",
     depends_on=["is_counterpuncher", "is_aggressive_baseliner"],
-    mirror=False,
+    mirror=True,
 )
 def matchup_counterpuncher_vs_aggressor() -> pl.Expr:
     return (
@@ -721,6 +721,7 @@ def matchup_counterpuncher_vs_aggressor() -> pl.Expr:
     description="Both players are power servers",
     depends_on=["is_power_server"],
     mirror=False,
+    match_level=True,
 )
 def matchup_both_power_servers() -> pl.Expr:
     return (
@@ -735,6 +736,7 @@ def matchup_both_power_servers() -> pl.Expr:
     description="Both players are counterpunchers",
     depends_on=["is_counterpuncher"],
     mirror=False,
+    match_level=True,
 )
 def matchup_both_counterpunchers() -> pl.Expr:
     return (
@@ -748,7 +750,7 @@ def matchup_both_counterpunchers() -> pl.Expr:
     params=[],
     description="Player is net rusher AND opponent has high passing frequency",
     depends_on=["is_net_rusher", "style_passing_frequency"],
-    mirror=False,
+    mirror=True,
 )
 def matchup_net_rusher_vs_passer() -> pl.Expr:
     pass_p75 = pl.col("opp_style_passing_frequency").quantile(0.75)

@@ -336,7 +336,7 @@ def ret_elo_diff() -> pl.Expr:
     name="svc_elo_matchup",
     params=[],
     description="Player serve Elo vs opponent return Elo (direct matchup)",
-    mirror=False,
+    mirror=True,
     impute=0,
 )
 def svc_elo_matchup() -> pl.Expr:
@@ -351,7 +351,7 @@ def svc_elo_matchup() -> pl.Expr:
     name="ret_elo_matchup",
     params=[],
     description="Player return Elo vs opponent serve Elo (direct matchup)",
-    mirror=False,
+    mirror=True,
     impute=0,
 )
 def ret_elo_matchup() -> pl.Expr:
@@ -381,7 +381,7 @@ def elo_rd_sum() -> pl.Expr:
     name="svc_elo_matchup_rd",
     params=[],
     description="Uncertainty in serve vs return matchup",
-    mirror=False,
+    mirror=True,
     impute=0,
 )
 def svc_elo_matchup_rd() -> pl.Expr:
@@ -396,7 +396,7 @@ def svc_elo_matchup_rd() -> pl.Expr:
     name="ret_elo_matchup_rd",
     params=[],
     description="Uncertainty in return vs serve matchup",
-    mirror=False,
+    mirror=True,
     impute=0,
 )
 def ret_elo_matchup_rd() -> pl.Expr:
@@ -590,7 +590,7 @@ def elo_indoor_adj_diff() -> pl.Expr:
     name="svc_first_serve_power_matchup",
     params=[],
     description="Player first serve power vs opponent ace resistance",
-    mirror=False,
+    mirror=True,
     impute=0,
 )
 def svc_first_serve_power_matchup() -> pl.Expr:
@@ -605,7 +605,7 @@ def svc_first_serve_power_matchup() -> pl.Expr:
     name="svc_clutch_matchup",
     params=[],
     description="Player serve clutch vs opponent return clutch",
-    mirror=False,
+    mirror=True,
     impute=0,
 )
 def svc_clutch_matchup() -> pl.Expr:
@@ -620,7 +620,7 @@ def svc_clutch_matchup() -> pl.Expr:
     name="ret_clutch_matchup",
     params=[],
     description="Player return clutch vs opponent serve clutch",
-    mirror=False,
+    mirror=True,
     impute=0,
 )
 def ret_clutch_matchup() -> pl.Expr:

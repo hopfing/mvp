@@ -150,7 +150,7 @@ def register_matchup(
         params=["days"] if has_days else [],
         description=description,
         depends_on=[dep1, dep2],
-        mirror=False,
+        mirror=True,
         impute=0,
     )
     def _matchup(
