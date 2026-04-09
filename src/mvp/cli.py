@@ -48,6 +48,9 @@ BOOK_REGISTRY: list[BookConfig] = [
     BookConfig("fd", "FD", "FanDuel", "fanduel", "fd_event_id",
                "stage/fanduel/moneyline.parquet", "fanduel/player_aliases.yaml",
                "FanDuelOddsMatcher"),
+    BookConfig("czr", "CZR", "Caesars", "caesars", "czr_event_id",
+               "stage/caesars/moneyline.parquet", "caesars/player_aliases.yaml",
+               "CaesarsOddsMatcher"),
 ]
 
 logger = logging.getLogger(__name__)
