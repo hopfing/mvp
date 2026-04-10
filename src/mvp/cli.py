@@ -472,6 +472,15 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         "--memory-limit", type=int, default=None,
         help="Override memory limit %% (0 to disable, default 75)",
     )
+    resume_group = exp_parser.add_mutually_exclusive_group()
+    resume_group.add_argument(
+        "--resume", action="store_true",
+        help="Resume forward selection from existing checkpoint",
+    )
+    resume_group.add_argument(
+        "--fresh", action="store_true",
+        help="Discard existing checkpoint and start from scratch",
+    )
 
     # tune subcommand - hyperparameter optimization
     tune_parser = subparsers.add_parser(
@@ -1261,14 +1270,44 @@ def cmd_experiment(args: argparse.Namespace) -> int:
         logger.info("Rebuilding matches.parquet")
         MatchesAggregator().run()
 
+    # Checkpoint gate: determine checkpoint path from --output name,
+    # then enforce --resume / --fresh rules.
+    output_stem = args.output.removesuffix(".yaml")
+    checkpoint_path = Path(f"discovery_checkpoint_{output_stem}.json")
+
+    if checkpoint_path.exists() and not args.resume and not args.fresh:
+        from mvp.model.discovery.checkpoint import (
+            format_checkpoint_info,
+            load_checkpoint,
+        )
+
+        cp = load_checkpoint(checkpoint_path)
+        if cp is not None:
+            print(format_checkpoint_info(cp))
+            print("Use --resume to continue or --fresh to start over.")
+            return 1
+
+    if args.fresh and checkpoint_path.exists():
+        checkpoint_path.unlink()
+        logger.info("Deleted existing checkpoint: %s", checkpoint_path)
+
+    if args.resume and not checkpoint_path.exists():
+        print(
+            f"No checkpoint found for '{output_stem}'. "
+            "Run without --resume to start fresh."
+        )
+        return 1
+
     if _is_iid_discovery(config_path):
-        return _cmd_experiment_iid(args, config_path)
+        return _cmd_experiment_iid(args, config_path, checkpoint_path)
     if _is_projection_discovery(config_path):
-        return _cmd_experiment_projection(args, config_path)
-    return _cmd_experiment_classification(args, config_path)
+        return _cmd_experiment_projection(args, config_path, checkpoint_path)
+    return _cmd_experiment_classification(args, config_path, checkpoint_path)
 
 
-def _cmd_experiment_classification(args: argparse.Namespace, config_path: Path) -> int:
+def _cmd_experiment_classification(
+    args: argparse.Namespace, config_path: Path, checkpoint_path: Path,
+) -> int:
     """Run classification feature discovery."""
     from mvp.model.discovery import FeatureDiscovery
 
@@ -1283,7 +1322,7 @@ def _cmd_experiment_classification(args: argparse.Namespace, config_path: Path) 
         verbose=args.verbose,
     )
 
-    result = discovery.run()
+    result = discovery.run(checkpoint_path=checkpoint_path)
 
     if result.selected_features:
         discovery._last_result = result
@@ -1296,8 +1335,13 @@ def _cmd_experiment_classification(args: argparse.Namespace, config_path: Path) 
     return 0
 
 
-def _cmd_experiment_projection(args: argparse.Namespace, config_path: Path) -> int:
+def _cmd_experiment_projection(
+    args: argparse.Namespace, config_path: Path, checkpoint_path: Path,
+) -> int:
     """Run projection feature discovery."""
+    # checkpoint_path is reserved for future projection discovery checkpoint
+    # support; currently only classification forward selection uses it.
+    del checkpoint_path
     from mvp.projection.discovery import ProjectionDiscovery
 
     # Normalize output path: always in projections/, add .yaml if needed
@@ -1323,8 +1367,13 @@ def _cmd_experiment_projection(args: argparse.Namespace, config_path: Path) -> i
     return 0
 
 
-def _cmd_experiment_iid(args: argparse.Namespace, config_path: Path) -> int:
+def _cmd_experiment_iid(
+    args: argparse.Namespace, config_path: Path, checkpoint_path: Path,
+) -> int:
     """Run IID matchup serve model feature discovery."""
+    # checkpoint_path is reserved for future IID discovery checkpoint
+    # support; currently only classification forward selection uses it.
+    del checkpoint_path
     from mvp.projection.iid.discovery import IIDProjectionDiscovery
 
     # Normalize output path: always in projections/, add .yaml if needed

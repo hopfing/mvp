@@ -1,7 +1,10 @@
 """Tests for feature selection algorithms."""
 
+from datetime import datetime, timezone
+
 import pytest
 
+from mvp.model.discovery.checkpoint import SelectionCheckpoint, save_checkpoint
 from mvp.model.discovery.selection import FeatureSelector, SelectionResult
 
 
@@ -106,6 +109,175 @@ class TestForwardSelection:
         assert isinstance(result.excluded_features, list)
         assert isinstance(result.history, list)
         assert isinstance(result.final_metric, float)
+
+
+class TestForwardSelectionCheckpoint:
+    """Tests for checkpoint/resume in forward selection."""
+
+    @pytest.fixture
+    def mock_scorer(self):
+        """Scorer that prefers features a > b > c > d."""
+        def scorer(features: list[str]) -> float:
+            score = 1.0
+            if "a" in features:
+                score -= 0.3
+            if "b" in features:
+                score -= 0.2
+            if "c" in features:
+                score -= 0.1
+            if "d" in features:
+                score -= 0.05
+            return score
+
+        return scorer
+
+    def test_no_checkpoint_path_behaves_as_before(self, mock_scorer):
+        """Without checkpoint_path, behaves exactly as before."""
+        selector = FeatureSelector(
+            scorer=mock_scorer,
+            all_features=["a", "b", "c"],
+            method="forward",
+            direction="minimize",
+        )
+
+        result = selector.forward_selection(verbose=False)
+
+        assert result.selected_features[0] == "a"
+        assert isinstance(result, SelectionResult)
+
+    def test_resume_skips_completed_rounds(self, mock_scorer, tmp_path):
+        """Resuming from checkpoint skips already-selected features."""
+        cp_path = tmp_path / "checkpoint.json"
+        save_checkpoint(cp_path, SelectionCheckpoint(
+            run_name="test",
+            started_at=datetime(2026, 4, 9, tzinfo=timezone.utc),
+            updated_at=datetime(2026, 4, 9, tzinfo=timezone.utc),
+            completed_rounds=[{"feature": "a", "metric": 0.7}],
+            current_round=2,
+            total_candidates=3,
+            current_round_scores={},
+            best_metric=0.7,
+            direction="minimize",
+            max_features=10,
+        ))
+
+        selector = FeatureSelector(
+            scorer=mock_scorer,
+            all_features=["a", "b", "c", "d"],
+            method="forward",
+            direction="minimize",
+        )
+
+        result = selector.forward_selection(
+            verbose=False, checkpoint_path=cp_path,
+        )
+
+        # "a" was already selected via checkpoint
+        assert result.selected_features[0] == "a"
+        # "b" should be selected next (best remaining)
+        assert result.selected_features[1] == "b"
+        # Checkpoint file should be cleaned up on success
+        assert not cp_path.exists()
+
+    def test_resume_skips_evaluated_candidates(self, mock_scorer, tmp_path):
+        """Resuming mid-round skips already-evaluated candidates."""
+        call_log = []
+        original_scorer = mock_scorer
+
+        def tracking_scorer(features):
+            call_log.append(features[-1])  # log which candidate was evaluated
+            return original_scorer(features)
+
+        cp_path = tmp_path / "checkpoint.json"
+        # Checkpoint says: round 1, already evaluated "a" and "b"
+        save_checkpoint(cp_path, SelectionCheckpoint(
+            run_name="test",
+            started_at=datetime(2026, 4, 9, tzinfo=timezone.utc),
+            updated_at=datetime(2026, 4, 9, tzinfo=timezone.utc),
+            completed_rounds=[],
+            current_round=1,
+            total_candidates=4,
+            current_round_scores={"a": 0.7, "b": 0.8},
+            best_metric=float("inf"),
+            direction="minimize",
+            max_features=10,
+        ))
+
+        selector = FeatureSelector(
+            scorer=tracking_scorer,
+            all_features=["a", "b", "c", "d"],
+            method="forward",
+            direction="minimize",
+        )
+
+        result = selector.forward_selection(
+            verbose=False, checkpoint_path=cp_path,
+        )
+
+        # Round 1 should NOT have re-evaluated "a" or "b"
+        round1_calls = [c for c in call_log if len({"a", "b"} & {c}) > 0]
+        # First two calls should be only c, d (since a, b came from checkpoint)
+        assert "a" not in call_log[:2]
+        assert "b" not in call_log[:2]
+        # Result should still pick the best overall: a (score 0.7 from ckpt)
+        assert result.selected_features[0] == "a"
+
+    def test_checkpoint_deleted_on_completion(self, mock_scorer, tmp_path):
+        """Checkpoint file is deleted after successful forward selection."""
+        cp_path = tmp_path / "checkpoint.json"
+
+        selector = FeatureSelector(
+            scorer=mock_scorer,
+            all_features=["a", "b", "c", "d"],
+            method="forward",
+            direction="minimize",
+        )
+
+        result = selector.forward_selection(
+            verbose=False,
+            checkpoint_path=cp_path,
+            checkpoint_interval=1,
+        )
+
+        # Checkpoint should be deleted on successful completion
+        assert not cp_path.exists()
+        # Selection should have worked normally
+        assert result.selected_features[0] == "a"
+
+    def test_checkpoint_written_during_round(self, mock_scorer, tmp_path):
+        """Checkpoint file gets written while inside a round."""
+        cp_path = tmp_path / "checkpoint.json"
+
+        # Scorer that interrupts after 2 evaluations, simulating Ctrl+C.
+        # KeyboardInterrupt is not caught by `except Exception`, so it
+        # propagates out and leaves the checkpoint file behind.
+        call_count = {"n": 0}
+
+        def interrupting_scorer(features):
+            call_count["n"] += 1
+            if call_count["n"] >= 3:
+                raise KeyboardInterrupt("stop")
+            return mock_scorer(features)
+
+        selector = FeatureSelector(
+            scorer=interrupting_scorer,
+            all_features=["a", "b", "c", "d"],
+            method="forward",
+            direction="minimize",
+        )
+
+        with pytest.raises(KeyboardInterrupt):
+            selector.forward_selection(
+                verbose=False,
+                checkpoint_path=cp_path,
+                checkpoint_interval=1,
+            )
+
+        # Checkpoint should exist with at least one scored candidate
+        assert cp_path.exists()
+        from mvp.model.discovery.checkpoint import load_checkpoint
+        cp = load_checkpoint(cp_path)
+        assert len(cp.current_round_scores) >= 1
 
 
 class TestRecursiveElimination:

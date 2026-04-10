@@ -353,12 +353,16 @@ class FeatureDiscovery:
         return importance_fn
 
     def run_selection(
-        self, all_features: list[str] | None = None
+        self,
+        all_features: list[str] | None = None,
+        checkpoint_path: Path | None = None,
     ) -> SelectionResult:
         """Run feature selection phase.
 
         Args:
             all_features: Features to consider. If None, uses all registered.
+            checkpoint_path: Path to write/read forward selection checkpoint.
+                Only applies to the forward selection method.
 
         Returns:
             SelectionResult with selected features.
@@ -424,7 +428,7 @@ class FeatureDiscovery:
             round1_baseline=round1_baseline,
         )
 
-        result = selector.run(verbose=True)
+        result = selector.run(verbose=True, checkpoint_path=checkpoint_path)
 
         self._log(f"Selected {len(result.selected_features)} features")
         for step in result.history:
@@ -526,8 +530,11 @@ class FeatureDiscovery:
         finally:
             temp_path.unlink(missing_ok=True)
 
-    def run(self) -> DiscoveryResult:
+    def run(self, checkpoint_path: Path | None = None) -> DiscoveryResult:
         """Run complete discovery workflow.
+
+        Args:
+            checkpoint_path: Path to write/read forward selection checkpoint.
 
         Returns:
             DiscoveryResult with all findings.
@@ -536,7 +543,7 @@ class FeatureDiscovery:
         self._log("=" * 60)
 
         # Phase 1: Selection
-        selection_result = self.run_selection()
+        selection_result = self.run_selection(checkpoint_path=checkpoint_path)
         selected = selection_result.selected_features
 
         if not selected:

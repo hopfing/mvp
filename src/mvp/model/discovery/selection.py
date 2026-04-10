@@ -1,12 +1,22 @@
 """Feature selection algorithms."""
 
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
 import numpy as np
+
+from mvp.model.discovery.checkpoint import (
+    SelectionCheckpoint,
+    load_checkpoint,
+    save_checkpoint,
+)
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -78,65 +88,141 @@ class FeatureSelector:
             return float("inf")
         return float("-inf")
 
-    def forward_selection(self, verbose: bool = True) -> SelectionResult:
+    def forward_selection(
+        self,
+        verbose: bool = True,
+        checkpoint_path: Path | None = None,
+        checkpoint_interval: int = 50,
+    ) -> SelectionResult:
         """Select features by iteratively adding the best one.
 
         Starts with empty set, adds feature that improves metric most,
         repeats until no improvement.
-        """
-        import logging
 
+        Args:
+            verbose: Print progress.
+            checkpoint_path: Path to write/read checkpoint JSON. If the
+                file exists when this method is called, the run resumes
+                from the saved state. On successful completion the file
+                is deleted.
+            checkpoint_interval: Write checkpoint every N candidate
+                evaluations within a round.
+        """
         from tqdm import tqdm
 
-        sel_logger = logging.getLogger(__name__)
-
-        selected: list[str] = list(self.base_features)
-        remaining = set(self.all_features) - set(selected)
-        history: list[dict[str, Any]] = []
-
-        # Baseline: score the base features, or worst value if none
-        if selected:
-            best_metric = self.scorer(selected)
-            history.append({
-                "step": 0,
-                "action": "base",
-                "features": list(selected),
-                "metric": best_metric,
-            })
-        else:
-            best_metric = self._worst_value()
-
+        # --- Restore from checkpoint or start fresh ---
+        resumed_round_scores: dict[str, float] = {}
+        started_at = datetime.now(timezone.utc)
         first_round_logged = False
+
+        cp = load_checkpoint(checkpoint_path) if checkpoint_path else None
+        if cp is not None:
+            selected: list[str] = [r["feature"] for r in cp.completed_rounds]
+            remaining = set(self.all_features) - set(selected)
+            best_metric = cp.best_metric
+            history: list[dict[str, Any]] = []
+            if selected:
+                history.append({
+                    "step": 0,
+                    "action": "base",
+                    "features": list(selected),
+                    "metric": best_metric,
+                })
+            resumed_round_scores = dict(cp.current_round_scores)
+            started_at = cp.started_at
+            # If we already completed a round before checkpointing, round 1
+            # ranking has already been logged on the previous run.
+            first_round_logged = len(cp.completed_rounds) > 0
+            logger.info(
+                "Resumed from checkpoint: %d completed rounds, "
+                "%d candidates scored in round %d",
+                len(cp.completed_rounds),
+                len(resumed_round_scores),
+                cp.current_round,
+            )
+        else:
+            selected = list(self.base_features)
+            remaining = set(self.all_features) - set(selected)
+            history = []
+            if selected:
+                best_metric = self.scorer(selected)
+                history.append({
+                    "step": 0,
+                    "action": "base",
+                    "features": list(selected),
+                    "metric": best_metric,
+                })
+            else:
+                best_metric = self._worst_value()
 
         while remaining and len(selected) < self.max_features:
             round_num = len(selected) + 1
             best_feature = None
             best_feature_metric = best_metric
             round_results: list[tuple[str, float]] = []
+            scores_this_round: dict[str, float] = {}
 
-            # Try adding each remaining feature
+            # Seed with any prior scores from the checkpoint for this round
+            unevaluated = set(remaining)
+            if resumed_round_scores:
+                for feat, score in resumed_round_scores.items():
+                    if feat not in remaining:
+                        continue
+                    round_results.append((feat, score))
+                    scores_this_round[feat] = score
+                    if self._is_better(score, best_feature_metric):
+                        best_feature = feat
+                        best_feature_metric = score
+                unevaluated -= set(scores_this_round.keys())
+                logger.info(
+                    "  Restored %d/%d candidate scores from checkpoint",
+                    len(scores_this_round), len(remaining),
+                )
+                # Prior scores only apply to the first resumed round
+                resumed_round_scores = {}
+
             feature_iter = tqdm(
-                remaining,
+                sorted(unevaluated),
                 desc=f"Round {round_num}/{self.max_features}",
                 leave=False,
                 ncols=120,
             )
 
+            eval_count = 0
             for feature in feature_iter:
                 candidate = selected + [feature]
                 try:
                     metric = self.scorer(candidate)
                 except Exception as e:
-                    sel_logger.warning("Scorer failed for %s: %s", feature, e)
+                    logger.warning("Scorer failed for %s: %s", feature, e)
                     continue
 
                 round_results.append((feature, metric))
+                scores_this_round[feature] = metric
 
                 if self._is_better(metric, best_feature_metric):
                     best_feature = feature
                     best_feature_metric = metric
                     if hasattr(feature_iter, "set_postfix"):
-                        feature_iter.set_postfix(best=f"{best_feature_metric:.4f}", feat=best_feature)
+                        feature_iter.set_postfix(
+                            best=f"{best_feature_metric:.4f}", feat=best_feature,
+                        )
+
+                eval_count += 1
+                if (
+                    checkpoint_path is not None
+                    and checkpoint_interval > 0
+                    and eval_count % checkpoint_interval == 0
+                ):
+                    self._write_checkpoint(
+                        checkpoint_path,
+                        started_at=started_at,
+                        selected=selected,
+                        best_metric=best_metric,
+                        current_round=round_num,
+                        total_candidates=len(remaining),
+                        scores=scores_this_round,
+                    )
 
             # If no improvement, stop
             if best_feature is None or not self._is_better(
@@ -155,7 +241,7 @@ class FeatureSelector:
             remaining.remove(best_feature)
             best_metric = best_feature_metric
 
-            sel_logger.info("  + %s -> %.4f", best_feature, best_metric)
+            logger.info("  + %s -> %.4f", best_feature, best_metric)
             Path("discovery_progress.txt").write_text(
                 "\n".join(f"{i+1}. {f}" for i, f in enumerate(selected))
             )
@@ -171,6 +257,18 @@ class FeatureSelector:
                 "metric": best_metric,
                 "round_ranking": sorted_results,
             })
+
+            # Checkpoint at round boundary (current round advances, scores reset)
+            if checkpoint_path is not None:
+                self._write_checkpoint(
+                    checkpoint_path,
+                    started_at=started_at,
+                    selected=selected,
+                    best_metric=best_metric,
+                    current_round=round_num + 1,
+                    total_candidates=len(remaining),
+                    scores={},
+                )
 
             # Log round 1 rankings inline so interrupted runs still surface them
             if not first_round_logged:
@@ -188,23 +286,27 @@ class FeatureSelector:
                     with_signal.append((f, m))
                 n_dropped = len(sorted_results) - len(with_signal)
                 label = "with signal" if baseline is not None else "features"
-                sel_logger.info("")
-                sel_logger.info(
+                logger.info("")
+                logger.info(
                     "ROUND 1 FEATURE RANKING (%d %s)", len(with_signal), label,
                 )
-                sel_logger.info("-" * 50)
+                logger.info("-" * 50)
                 for i, (feat, metric) in enumerate(with_signal, 1):
-                    sel_logger.info("  %3d. %s: %.4f", i, feat, metric)
+                    logger.info("  %3d. %s: %.4f", i, feat, metric)
                 if n_dropped:
                     if baseline is not None:
-                        sel_logger.info(
+                        logger.info(
                             "  (%d features below baseline %.4f or rejected)",
                             n_dropped, baseline,
                         )
                     else:
-                        sel_logger.info(
+                        logger.info(
                             "  (%d features rejected / returned inf)", n_dropped,
                         )
+
+        # Clean up checkpoint on successful completion
+        if checkpoint_path is not None and checkpoint_path.exists():
+            checkpoint_path.unlink()
 
         return SelectionResult(
             selected_features=selected,
@@ -212,6 +314,38 @@ class FeatureSelector:
             history=history,
             final_metric=best_metric if best_metric != self._worst_value() else 0.0,
         )
+
+    def _write_checkpoint(
+        self,
+        path: Path,
+        *,
+        started_at: datetime,
+        selected: list[str],
+        best_metric: float,
+        current_round: int,
+        total_candidates: int,
+        scores: dict[str, float],
+    ) -> None:
+        """Write current selection state to checkpoint file."""
+        run_name = path.stem
+        # Strip the conventional prefix if present
+        prefix = "discovery_checkpoint_"
+        if run_name.startswith(prefix):
+            run_name = run_name[len(prefix):]
+
+        cp = SelectionCheckpoint(
+            run_name=run_name,
+            started_at=started_at,
+            updated_at=datetime.now(timezone.utc),
+            completed_rounds=[{"feature": f, "metric": 0.0} for f in selected],
+            current_round=current_round,
+            total_candidates=total_candidates,
+            current_round_scores=scores,
+            best_metric=best_metric,
+            direction=self.direction,
+            max_features=self.max_features,
+        )
+        save_checkpoint(path, cp)
 
     def recursive_elimination(self) -> SelectionResult:
         """Select features by iteratively removing the worst one.
@@ -337,14 +471,20 @@ class FeatureSelector:
             final_metric=final_metric,
         )
 
-    def run(self, verbose: bool = False) -> SelectionResult:
+    def run(
+        self,
+        verbose: bool = False,
+        checkpoint_path: Path | None = None,
+    ) -> SelectionResult:
         """Run feature selection using configured method.
 
         Returns:
             SelectionResult with selected features and history.
         """
         if self.method == "forward":
-            return self.forward_selection(verbose=verbose)
+            return self.forward_selection(
+                verbose=verbose, checkpoint_path=checkpoint_path,
+            )
         elif self.method == "recursive":
             return self.recursive_elimination()
         elif self.method == "threshold":
