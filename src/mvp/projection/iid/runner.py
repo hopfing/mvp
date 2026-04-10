@@ -29,7 +29,13 @@ from mvp.model.mlflow_logger import ExperimentLogger
 from mvp.model.splitters import make_splitter
 from mvp.projection.iid.config import IIDProjectionConfig, ServeModelConfig
 from mvp.projection.iid.diagnostics import IIDProjectionDiagnostics
-from mvp.projection.iid.metrics import compute_iid_metrics
+from mvp.projection.iid.metrics import (
+    compute_hold_diagnostics,
+    compute_iid_metrics,
+    compute_serve_diagnostics,
+    compute_set_score_diagnostics,
+    compute_tiebreak_diagnostics,
+)
 from mvp.projection.iid.projector import TennisProjector
 from mvp.projection.iid.serve_model import (
     IdentityServeModel,
@@ -161,6 +167,14 @@ class IIDProjectionRunner:
             # unprefixed parquet column; opp perspective has the opp_ prefix.
             "pts_service_pts_won", "pts_service_pts_played",
             "opp_pts_service_pts_won", "opp_pts_service_pts_played",
+            # Service game stats — for hold rate diagnostics.
+            "svc_games_played", "svc_bp_saved", "svc_bp_faced",
+            "opp_svc_games_played", "opp_svc_bp_saved", "opp_svc_bp_faced",
+            # Tiebreak scores — for tiebreak frequency diagnostics.
+            "player_set1_tiebreak", "player_set2_tiebreak",
+            "player_set3_tiebreak", "player_set4_tiebreak", "player_set5_tiebreak",
+            "opp_set1_tiebreak", "opp_set2_tiebreak",
+            "opp_set3_tiebreak", "opp_set4_tiebreak", "opp_set5_tiebreak",
         ]
         if self.config.data.filters:
             for col in self.config.data.filters:
@@ -252,6 +266,10 @@ class IIDProjectionRunner:
                     include_classification=self.config.metrics.include_classification,
                     include_regression=self.config.metrics.include_regression,
                 )
+                metrics.update(compute_serve_diagnostics(out, test_df))
+                metrics.update(compute_hold_diagnostics(out, test_df))
+                metrics.update(compute_set_score_diagnostics(out, test_df))
+                metrics.update(compute_tiebreak_diagnostics(out, test_df))
                 all_metrics.append(metrics)
                 all_predictions.append({
                     "df": test_df.select(["match_uid", "circuit", "surface", "round", "best_of"]),

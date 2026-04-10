@@ -5,8 +5,15 @@ import polars as pl
 import pytest
 
 from mvp.model.metrics import compute_metrics
-from mvp.projection.iid.metrics import compute_iid_metrics, crps_discrete_pmf
-from mvp.projection.iid.projector import TennisProjector
+from mvp.projection.iid.chain import p_service_game_win
+from mvp.projection.iid.metrics import (
+    compute_hold_diagnostics,
+    compute_iid_metrics,
+    compute_set_score_diagnostics,
+    compute_tiebreak_diagnostics,
+    crps_discrete_pmf,
+)
+from mvp.projection.iid.projector import ProjectionOutput, TennisProjector
 from mvp.projection.iid.serve_model import IdentityServeModel
 
 
@@ -155,3 +162,208 @@ class TestComputeIIDMetrics:
         # Regression and distributional are still present
         assert "mae" in m
         assert "iid_crps_total_games" in m
+
+
+def _make_projection_output(n, serve_prob=0.62):
+    """Build a ProjectionOutput with known serve probs for diagnostic tests."""
+    from mvp.projection.iid.chain import (
+        match_distribution,
+        p_tiebreak_game_win,
+    )
+
+    p_a = np.full(n, serve_prob)
+    p_b = np.full(n, serve_prob)
+    h_a = p_service_game_win(p_a)
+    h_b = p_service_game_win(p_b)
+    t_ab = p_tiebreak_game_win(p_a, p_b)
+    best_of = np.full(n, 3, dtype=np.int64)
+    dist = match_distribution(h_a, h_b, t_ab, best_of)
+    return ProjectionOutput(
+        distribution=dist,
+        match_uid=np.array([f"m{i}" for i in range(n)]),
+        best_of=best_of,
+        p_a_serve_win=p_a,
+        p_b_serve_win=p_b,
+        h_a=h_a,
+        h_b=h_b,
+        t_ab=t_ab,
+    )
+
+
+class TestHoldDiagnostics:
+    """Tests for compute_hold_diagnostics."""
+
+    def test_zero_bias_when_actual_matches_predicted(self):
+        n = 50
+        out = _make_projection_output(n)
+        # Construct actuals that match predicted hold rates.
+        # h = p_service_game_win(0.62) ≈ 0.8267
+        # If a player played 10 service games and held h*10, the actual rate ≈ h.
+        h = float(out.h_a[0])
+        games_played = 10
+        holds = round(h * games_played)
+        breaks = games_played - holds
+
+        df = pl.DataFrame({
+            "svc_games_played": [games_played] * n,
+            "svc_bp_faced": [breaks] * n,
+            "svc_bp_saved": [0] * n,
+            "opp_svc_games_played": [games_played] * n,
+            "opp_svc_bp_faced": [breaks] * n,
+            "opp_svc_bp_saved": [0] * n,
+        })
+        m = compute_hold_diagnostics(out, df)
+        assert "hold_bias" in m
+        assert abs(m["hold_bias"]) < 0.05  # close to zero given rounding
+
+    def test_positive_bias_when_predicted_exceeds_actual(self):
+        n = 20
+        out = _make_projection_output(n)
+        # Actual hold rate = 0.70, predicted ≈ 0.827 → positive bias.
+        df = pl.DataFrame({
+            "svc_games_played": [10] * n,
+            "svc_bp_faced": [3] * n,   # 3 breaks = 7 holds
+            "svc_bp_saved": [0] * n,
+            "opp_svc_games_played": [10] * n,
+            "opp_svc_bp_faced": [3] * n,
+            "opp_svc_bp_saved": [0] * n,
+        })
+        m = compute_hold_diagnostics(out, df)
+        assert m["hold_bias"] > 0.05
+
+    def test_nan_svc_games_handled(self):
+        n = 5
+        out = _make_projection_output(n)
+        df = pl.DataFrame({
+            "svc_games_played": [None, 10, 10, None, 10],
+            "svc_bp_faced": [None, 2, 2, None, 2],
+            "svc_bp_saved": [None, 0, 0, None, 0],
+            "opp_svc_games_played": [10, None, 10, 10, None],
+            "opp_svc_bp_faced": [2, None, 2, 2, None],
+            "opp_svc_bp_saved": [0, None, 0, 0, None],
+        })
+        m = compute_hold_diagnostics(out, df)
+        assert "hold_bias" in m
+        assert "hold_mae" in m
+
+
+class TestSetScoreDiagnostics:
+    """Tests for compute_set_score_diagnostics."""
+
+    def test_returns_bias_keys(self):
+        n = 30
+        out = _make_projection_output(n)
+        # All matches are 6-4, 6-4 (2 sets, player wins both).
+        df = pl.DataFrame({
+            "player_set1_games": [6] * n,
+            "opp_set1_games": [4] * n,
+            "player_set2_games": [6] * n,
+            "opp_set2_games": [4] * n,
+            "player_set3_games": [None] * n,
+            "opp_set3_games": [None] * n,
+            "player_set4_games": [None] * n,
+            "opp_set4_games": [None] * n,
+            "player_set5_games": [None] * n,
+            "opp_set5_games": [None] * n,
+        })
+        m = compute_set_score_diagnostics(out, df)
+        assert "set_score_bias_tight" in m
+        assert "set_score_bias_blowout" in m
+
+    def test_all_blowouts_negative_blowout_bias(self):
+        # If every set is 6-0, actual blowout freq = 1.0. Predicted blowout
+        # freq for equal-strength players (0.62) will be much less → negative bias.
+        n = 20
+        out = _make_projection_output(n)
+        df = pl.DataFrame({
+            "player_set1_games": [6] * n,
+            "opp_set1_games": [0] * n,
+            "player_set2_games": [6] * n,
+            "opp_set2_games": [0] * n,
+            "player_set3_games": [None] * n,
+            "opp_set3_games": [None] * n,
+            "player_set4_games": [None] * n,
+            "opp_set4_games": [None] * n,
+            "player_set5_games": [None] * n,
+            "opp_set5_games": [None] * n,
+        })
+        m = compute_set_score_diagnostics(out, df)
+        assert m["set_score_bias_blowout"] < 0
+
+    def test_empty_when_no_valid_sets(self):
+        n = 5
+        out = _make_projection_output(n)
+        df = pl.DataFrame({
+            "player_set1_games": [None] * n,
+            "opp_set1_games": [None] * n,
+            "player_set2_games": [None] * n,
+            "opp_set2_games": [None] * n,
+            "player_set3_games": [None] * n,
+            "opp_set3_games": [None] * n,
+            "player_set4_games": [None] * n,
+            "opp_set4_games": [None] * n,
+            "player_set5_games": [None] * n,
+            "opp_set5_games": [None] * n,
+        })
+        m = compute_set_score_diagnostics(out, df)
+        assert m == {}
+
+
+class TestTiebreakDiagnostics:
+    """Tests for compute_tiebreak_diagnostics."""
+
+    def test_no_tiebreaks(self):
+        n = 20
+        out = _make_projection_output(n)
+        df = pl.DataFrame({
+            "player_set1_games": [6] * n,
+            "player_set2_games": [6] * n,
+            "player_set3_games": [None] * n,
+            "player_set4_games": [None] * n,
+            "player_set5_games": [None] * n,
+            "player_set1_tiebreak": [None] * n,
+            "player_set2_tiebreak": [None] * n,
+            "player_set3_tiebreak": [None] * n,
+            "player_set4_tiebreak": [None] * n,
+            "player_set5_tiebreak": [None] * n,
+        })
+        m = compute_tiebreak_diagnostics(out, df)
+        assert m["tiebreak_rate_actual"] == 0.0
+        assert m["tiebreak_rate_pred"] > 0  # model predicts some tiebreaks
+
+    def test_all_tiebreaks(self):
+        n = 20
+        out = _make_projection_output(n)
+        df = pl.DataFrame({
+            "player_set1_games": [7] * n,
+            "player_set2_games": [7] * n,
+            "player_set3_games": [None] * n,
+            "player_set4_games": [None] * n,
+            "player_set5_games": [None] * n,
+            "player_set1_tiebreak": [7] * n,
+            "player_set2_tiebreak": [7] * n,
+            "player_set3_tiebreak": [None] * n,
+            "player_set4_tiebreak": [None] * n,
+            "player_set5_tiebreak": [None] * n,
+        })
+        m = compute_tiebreak_diagnostics(out, df)
+        assert m["tiebreak_rate_actual"] == 1.0
+        assert m["tiebreak_rate_bias"] < 0  # pred < 1.0
+
+    def test_empty_when_no_sets(self):
+        n = 5
+        out = _make_projection_output(n)
+        df = pl.DataFrame({
+            "player_set1_games": [None] * n,
+            "player_set2_games": [None] * n,
+            "player_set3_games": [None] * n,
+            "player_set4_games": [None] * n,
+            "player_set5_games": [None] * n,
+            "player_set1_tiebreak": [None] * n,
+            "player_set2_tiebreak": [None] * n,
+            "player_set3_tiebreak": [None] * n,
+            "player_set4_tiebreak": [None] * n,
+            "player_set5_tiebreak": [None] * n,
+        })
+        m = compute_tiebreak_diagnostics(out, df)
+        assert m == {}

@@ -8,9 +8,12 @@ directly comparable to:
 """
 
 import numpy as np
+import polars as pl
 
 from mvp.model.metrics import compute_metrics
+from mvp.projection.iid.chain import SET_SCORE_LABELS, set_score_distribution
 from mvp.projection.iid.projector import ProjectionOutput
+from mvp.projection.iid.serve_model import SERVE_PROB_MAX, SERVE_PROB_MIN
 from mvp.projection.metrics import compute_regression_metrics
 
 
@@ -98,5 +101,214 @@ def compute_iid_metrics(
             metrics[f"iid_line_spread_{line}_pred"] = mean_p
             metrics[f"iid_line_spread_{line}_actual"] = actual_rate
             metrics[f"iid_line_spread_{line}_err"] = abs(mean_p - actual_rate)
+
+    return metrics
+
+
+def compute_serve_diagnostics(
+    out: ProjectionOutput,
+    test_df: pl.DataFrame,
+    *,
+    clip_min: float = SERVE_PROB_MIN,
+    clip_max: float = SERVE_PROB_MAX,
+) -> dict[str, float]:
+    """Serve-level residual diagnostics: bias, MAE, and clipping rates.
+
+    Compares predicted serve point win probs (from the serve model) against
+    the actual per-match serve rates to diagnose whether systematic O/U bias
+    originates at the serve-probability level or in the chain math.
+    """
+    won_a = test_df["pts_service_pts_won"].to_numpy().astype(np.float64)
+    played_a = test_df["pts_service_pts_played"].to_numpy().astype(np.float64)
+    won_b = test_df["opp_pts_service_pts_won"].to_numpy().astype(np.float64)
+    played_b = test_df["opp_pts_service_pts_played"].to_numpy().astype(np.float64)
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        actual_a = np.where(played_a > 0, won_a / played_a, np.nan)
+        actual_b = np.where(played_b > 0, won_b / played_b, np.nan)
+
+    p_a = out.p_a_serve_win
+    p_b = out.p_b_serve_win
+
+    resid_a = p_a - actual_a
+    resid_b = p_b - actual_b
+    valid_a = np.isfinite(resid_a)
+    valid_b = np.isfinite(resid_b)
+
+    metrics: dict[str, float] = {}
+    resid_all = np.concatenate([resid_a[valid_a], resid_b[valid_b]])
+    if len(resid_all) > 0:
+        metrics["serve_bias"] = float(np.mean(resid_all))
+        metrics["serve_mae"] = float(np.mean(np.abs(resid_all)))
+
+    # Clipping: how many predictions sit exactly at the bounds?
+    n_predictions = len(p_a) + len(p_b)
+    n_clipped_low = int(np.sum(p_a == clip_min) + np.sum(p_b == clip_min))
+    n_clipped_high = int(np.sum(p_a == clip_max) + np.sum(p_b == clip_max))
+    metrics["serve_n_clipped_low"] = float(n_clipped_low)
+    metrics["serve_n_clipped_high"] = float(n_clipped_high)
+    metrics["serve_pct_clipped"] = (
+        float((n_clipped_low + n_clipped_high) / n_predictions)
+        if n_predictions > 0
+        else 0.0
+    )
+
+    return metrics
+
+
+# Map (player_games, opp_games) → index in SET_SCORE_LABELS.
+_SET_SCORE_INDEX: dict[tuple[int, int], int] = {
+    tuple(int(x) for x in label.split("-")): i
+    for i, label in enumerate(SET_SCORE_LABELS)
+}
+
+# Tight sets: 7-5, 5-7, 7-6, 6-7 (indices 5, 12, 6, 13)
+_TIGHT_INDICES = [
+    i for i, label in enumerate(SET_SCORE_LABELS)
+    if label in ("7-5", "5-7", "7-6", "6-7")
+]
+# Blowout sets: 6-0, 0-6, 6-1, 1-6 (indices 0, 7, 1, 8)
+_BLOWOUT_INDICES = [
+    i for i, label in enumerate(SET_SCORE_LABELS)
+    if label in ("6-0", "0-6", "6-1", "1-6")
+]
+
+
+def compute_hold_diagnostics(
+    out: ProjectionOutput,
+    test_df: pl.DataFrame,
+) -> dict[str, float]:
+    """Layer 1 chain diagnostics: predicted vs actual hold rates.
+
+    Compares the IID-derived hold probability ``h = p_service_game_win(p)``
+    against the actual per-match hold rate computed from service game stats.
+    """
+    gp_a = test_df["svc_games_played"].to_numpy().astype(np.float64)
+    bp_faced_a = test_df["svc_bp_faced"].to_numpy().astype(np.float64)
+    bp_saved_a = test_df["svc_bp_saved"].to_numpy().astype(np.float64)
+
+    gp_b = test_df["opp_svc_games_played"].to_numpy().astype(np.float64)
+    bp_faced_b = test_df["opp_svc_bp_faced"].to_numpy().astype(np.float64)
+    bp_saved_b = test_df["opp_svc_bp_saved"].to_numpy().astype(np.float64)
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        holds_a = gp_a - (bp_faced_a - bp_saved_a)
+        actual_hold_a = np.where(gp_a > 0, holds_a / gp_a, np.nan)
+        holds_b = gp_b - (bp_faced_b - bp_saved_b)
+        actual_hold_b = np.where(gp_b > 0, holds_b / gp_b, np.nan)
+
+    resid_a = out.h_a - actual_hold_a
+    resid_b = out.h_b - actual_hold_b
+    valid_a = np.isfinite(resid_a)
+    valid_b = np.isfinite(resid_b)
+
+    metrics: dict[str, float] = {}
+    resid_all = np.concatenate([resid_a[valid_a], resid_b[valid_b]])
+    if len(resid_all) > 0:
+        metrics["hold_bias"] = float(np.mean(resid_all))
+        metrics["hold_mae"] = float(np.mean(np.abs(resid_all)))
+
+    return metrics
+
+
+def compute_set_score_diagnostics(
+    out: ProjectionOutput,
+    test_df: pl.DataFrame,
+) -> dict[str, float]:
+    """Layer 2 chain diagnostics: predicted vs actual set score frequencies.
+
+    Recomputes the per-match set score PMF from the chain and compares
+    against actual set score frequencies extracted from set game columns.
+    Reports bias for tight sets (7-5, 5-7, 7-6, 6-7) and blowout sets
+    (6-0, 0-6, 6-1, 1-6).
+    """
+    n_scores = len(SET_SCORE_LABELS)
+
+    # Predicted: per-match (N, 14) set score PMF.
+    pred_pmf = set_score_distribution(out.h_a, out.h_b, out.t_ab)
+
+    # Actual: extract per-set scores and build a frequency histogram.
+    actual_counts = np.zeros(n_scores, dtype=np.float64)
+    total_sets = 0
+    for i in range(1, 6):
+        pg_col = f"player_set{i}_games"
+        og_col = f"opp_set{i}_games"
+        pg = test_df[pg_col].to_numpy().astype(np.float64)
+        og = test_df[og_col].to_numpy().astype(np.float64)
+        valid = np.isfinite(pg) & np.isfinite(og)
+        for j in np.where(valid)[0]:
+            pg_int, og_int = int(pg[j]), int(og[j])
+            idx = _SET_SCORE_INDEX.get((pg_int, og_int))
+            if idx is not None:
+                actual_counts[idx] += 1
+                total_sets += 1
+
+    if total_sets == 0:
+        return {}
+
+    actual_freq = actual_counts / total_sets
+
+    # Predicted frequency: average the per-match PMFs, weighted by
+    # number of sets each match actually played (so matches with more
+    # sets contribute proportionally).
+    sets_per_match = np.zeros(len(out.h_a), dtype=np.float64)
+    for i in range(1, 6):
+        pg = test_df[f"player_set{i}_games"].to_numpy().astype(np.float64)
+        sets_per_match += np.isfinite(pg).astype(np.float64)
+    weights = sets_per_match / sets_per_match.sum()
+    pred_freq = (pred_pmf * weights[:, None]).sum(axis=0)
+
+    metrics: dict[str, float] = {}
+    metrics["set_score_bias_tight"] = float(
+        pred_freq[_TIGHT_INDICES].sum() - actual_freq[_TIGHT_INDICES].sum()
+    )
+    metrics["set_score_bias_blowout"] = float(
+        pred_freq[_BLOWOUT_INDICES].sum() - actual_freq[_BLOWOUT_INDICES].sum()
+    )
+
+    return metrics
+
+
+def compute_tiebreak_diagnostics(
+    out: ProjectionOutput,
+    test_df: pl.DataFrame,
+) -> dict[str, float]:
+    """Layer 3 chain diagnostics: predicted vs actual tiebreak frequency.
+
+    Compares the predicted probability of a tiebreak set (from the set score
+    PMF) against the actual tiebreak rate observed in the data.
+    """
+    # Actual tiebreak count: a tiebreak occurred if the tiebreak score column
+    # is non-null for that set.
+    actual_tb = 0
+    total_sets = 0
+    for i in range(1, 6):
+        pg = test_df[f"player_set{i}_games"].to_numpy().astype(np.float64)
+        tb = test_df[f"player_set{i}_tiebreak"].to_numpy().astype(np.float64)
+        set_played = np.isfinite(pg)
+        total_sets += int(set_played.sum())
+        actual_tb += int((set_played & np.isfinite(tb)).sum())
+
+    if total_sets == 0:
+        return {}
+
+    actual_rate = actual_tb / total_sets
+
+    # Predicted tiebreak rate: indices 6 ("7-6") and 13 ("6-7") in the set PMF.
+    pred_pmf = set_score_distribution(out.h_a, out.h_b, out.t_ab)
+
+    sets_per_match = np.zeros(len(out.h_a), dtype=np.float64)
+    for i in range(1, 6):
+        pg = test_df[f"player_set{i}_games"].to_numpy().astype(np.float64)
+        sets_per_match += np.isfinite(pg).astype(np.float64)
+    weights = sets_per_match / sets_per_match.sum()
+
+    pred_freq = (pred_pmf * weights[:, None]).sum(axis=0)
+    pred_rate = float(pred_freq[6] + pred_freq[13])  # 7-6 + 6-7
+
+    metrics: dict[str, float] = {}
+    metrics["tiebreak_rate_pred"] = pred_rate
+    metrics["tiebreak_rate_actual"] = actual_rate
+    metrics["tiebreak_rate_bias"] = pred_rate - actual_rate
 
     return metrics

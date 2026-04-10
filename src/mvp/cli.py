@@ -1493,6 +1493,36 @@ def print_iid_projection_summary(results: dict[str, Any], name: str | None = Non
         f"CRPS spread={metrics.get('iid_crps_spread', 0):.3f}"
     )
 
+    # Serve diagnostics
+    if "serve_bias" in metrics:
+        print("\n[Serve model diagnostics]")
+        print(
+            f"  bias={metrics['serve_bias']:+.4f}  "
+            f"mae={metrics.get('serve_mae', 0):.4f}  "
+            f"clipped={metrics.get('serve_pct_clipped', 0):.1%} "
+            f"(low={metrics.get('serve_n_clipped_low', 0):.0f} "
+            f"high={metrics.get('serve_n_clipped_high', 0):.0f})"
+        )
+
+    # Chain layer diagnostics
+    if "hold_bias" in metrics:
+        print("\n[Chain diagnostics]")
+        print(
+            f"  hold: bias={metrics['hold_bias']:+.4f}  "
+            f"mae={metrics.get('hold_mae', 0):.4f}"
+        )
+    if "set_score_bias_tight" in metrics:
+        print(
+            f"  set_scores: tight_bias={metrics['set_score_bias_tight']:+.4f}  "
+            f"blowout_bias={metrics.get('set_score_bias_blowout', 0):+.4f}"
+        )
+    if "tiebreak_rate_bias" in metrics:
+        print(
+            f"  tiebreaks: pred={metrics.get('tiebreak_rate_pred', 0):.4f}  "
+            f"actual={metrics.get('tiebreak_rate_actual', 0):.4f}  "
+            f"bias={metrics['tiebreak_rate_bias']:+.4f}"
+        )
+
     # Line calibration
     total_keys = sorted(k for k in metrics if k.startswith("iid_line_total_") and k.endswith("_err"))
     if total_keys:
