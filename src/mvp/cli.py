@@ -1429,6 +1429,19 @@ def print_projection_summary(results: dict[str, Any], name: str | None = None) -
         print(f"  Spread: MAE={match.get('spread_mae', 0):.3f}")
         print(f"  Directional accuracy: {match.get('directional_accuracy', 0):.1%}")
 
+    # Quantile calibration
+    quantile_keys = sorted(
+        [k for k in metrics if k.startswith("quantile_") and k.endswith("_coverage")]
+    )
+    if quantile_keys:
+        print("\n  Quantile calibration:")
+        print(f"    {'Quantile':>10} {'Target':>10} {'Actual':>10} {'Error':>10}")
+        for k in quantile_keys:
+            alpha = float(k.split("_")[1])
+            actual = metrics[k]
+            err = actual - alpha
+            print(f"    {'q' + f'{alpha:.2f}':>10} {alpha:>9.0%} {actual:>9.1%} {err:>+9.1%}")
+
     print(f"\nMLflow run: {results.get('run_id', 'N/A')}")
     print("=" * 70 + "\n")
 
@@ -1503,7 +1516,6 @@ def print_iid_projection_summary(results: dict[str, Any], name: str | None = Non
             f"(low={metrics.get('serve_n_clipped_low', 0):.0f} "
             f"high={metrics.get('serve_n_clipped_high', 0):.0f})"
         )
-
     # Chain layer diagnostics
     if "hold_bias" in metrics:
         print("\n[Chain diagnostics]")

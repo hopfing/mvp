@@ -11,7 +11,7 @@ import polars as pl
 
 from mvp.model.config import apply_filters
 from mvp.model.engine import FeatureEngine, check_memory, get_feature_columns
-from mvp.model.features._score_helpers import total_games_won
+from mvp.model.features._score_helpers import total_games_lost, total_games_won
 from mvp.model.imputation import build_imputation
 from mvp.model.registry import get_registry
 from mvp.model.splitters import make_splitter
@@ -22,6 +22,22 @@ logger = logging.getLogger(__name__)
 
 warnings.filterwarnings("ignore", message="All-NaN slice encountered")
 warnings.filterwarnings("ignore", message="invalid value encountered", category=RuntimeWarning)
+
+
+def _crps_from_quantiles(
+    y_true: np.ndarray, q_preds: np.ndarray, alphas: list[float],
+) -> float:
+    """Compute CRPS from quantile predictions using the quantile-based approximation.
+
+    Uses the pinball loss (quantile score) averaged across all quantiles as a
+    consistent scoring rule that approximates CRPS when quantiles are dense.
+    """
+    total = 0.0
+    for i, alpha in enumerate(alphas):
+        residual = y_true - q_preds[:, i]
+        loss = np.where(residual >= 0, alpha * residual, (alpha - 1) * residual)
+        total += float(np.mean(loss))
+    return total / len(alphas)
 
 
 def _make_regression_metric_fn(metric: str) -> Callable[[np.ndarray, np.ndarray], float]:
@@ -98,9 +114,11 @@ class FastProjectionSelector:
 
         extra_columns = [
             "won", "reason", "sets_played", "best_of",
-            "circuit", "surface", "round", "match_uid",
+            "circuit", "surface", "round", "match_uid", "player_id",
             "player_set1_games", "player_set2_games",
             "player_set3_games", "player_set4_games", "player_set5_games",
+            "opp_set1_games", "opp_set2_games",
+            "opp_set3_games", "opp_set4_games", "opp_set5_games",
         ]
         if self.config.data.filters:
             for col in self.config.data.filters:
@@ -140,10 +158,22 @@ class FastProjectionSelector:
             )
 
         # Compute target
-        target_col = "_target_total_games"
-        df = df.with_columns(
-            total_games_won().cast(pl.Float64).alias(target_col)
-        )
+        target_mode = self.config.model.target
+        if target_mode == "match_games":
+            target_col = "_target_match_games"
+            df = df.with_columns(
+                (total_games_won() + total_games_lost())
+                .cast(pl.Float64)
+                .alias(target_col)
+            )
+            df = df.sort(["match_uid", "player_id"]).unique(
+                subset=["match_uid"], keep="first", maintain_order=True,
+            )
+        else:
+            target_col = "_target_total_games"
+            df = df.with_columns(
+                total_games_won().cast(pl.Float64).alias(target_col)
+            )
         df = df.filter(pl.col(target_col).is_not_null())
 
         logger.info("Filtered to %d rows, loading features from cache", len(df))
@@ -209,7 +239,12 @@ class FastProjectionSelector:
         model_type = self.config.model.type
         model_params = self.config.model.params or {}
 
-        metric_fn = _make_regression_metric_fn(metric)
+        is_crps = metric == "crps"
+        quantile_alphas = model_params.get("quantile_alpha", [])
+        if is_crps and not isinstance(quantile_alphas, list):
+            quantile_alphas = []
+
+        metric_fn = None if is_crps else _make_regression_metric_fn(metric)
 
         def scorer(features: list[str]) -> float:
             if not features:
@@ -241,7 +276,14 @@ class FastProjectionSelector:
                 model.fit(X_train, y_train)
                 y_pred = model.predict(X_test)
 
-                fold_metrics.append(metric_fn(y_test, y_pred))
+                if is_crps and y_pred.ndim == 2 and quantile_alphas:
+                    fold_metrics.append(
+                        _crps_from_quantiles(y_test, y_pred, quantile_alphas)
+                    )
+                else:
+                    if y_pred.ndim == 2:
+                        y_pred = y_pred[:, y_pred.shape[1] // 2]
+                    fold_metrics.append(metric_fn(y_test, y_pred))
 
             return float(np.mean(fold_metrics))
 

@@ -15,6 +15,7 @@ class ProjectionModelConfig(BaseModel):
 
     type: Literal["xgb_regressor", "linear", "ridge"] = "xgb_regressor"
     params: dict[str, Any] | None = None
+    target: Literal["player_games", "match_games"] = "player_games"
 
 
 class ProjectionMetricsConfig(BaseModel):

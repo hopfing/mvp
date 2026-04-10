@@ -13,7 +13,7 @@ import polars as pl
 
 from mvp.model.config import apply_filters, get_filter_feature_specs
 from mvp.model.engine import FeatureEngine, check_memory, get_feature_columns
-from mvp.model.features._score_helpers import total_games_won
+from mvp.model.features._score_helpers import total_games_lost, total_games_won
 from mvp.model.imputation import apply_imputation, build_imputation, fit_imputation
 from mvp.model.registry import get_registry
 from mvp.model.splitters import make_splitter
@@ -59,16 +59,13 @@ class ProjectionRunner:
         )
 
     def _resolve_target(self, df: pl.DataFrame) -> tuple[pl.DataFrame, str]:
-        """Add total games target column and filter invalid matches.
+        """Add target column and filter invalid matches.
 
-        Excludes:
-        - Walkovers (W/O)
-        - Retirements (RET)
-        - Defaults (DEF)
-        - Unplayed (UNP)
-        - Rows without set score data
+        Excludes walkovers, retirements, defaults, unplayed, and rows
+        missing set score data. For match_games target, collapses to one
+        row per match after filtering.
         """
-        target_col = "_target_total_games"
+        target_mode = self.config.model.target
 
         # Require at least set 1 and set 2 scores
         df = df.filter(
@@ -82,14 +79,24 @@ class ProjectionRunner:
                 pl.col("reason").fill_null("").is_in(["W/O", "RET", "DEF", "UNP"]).not_()
             )
 
-        # Compute target: total games won by this player
-        df = df.with_columns(
-            total_games_won().cast(pl.Float64).alias(target_col)
-        )
+        if target_mode == "match_games":
+            target_col = "_target_match_games"
+            df = df.with_columns(
+                (total_games_won() + total_games_lost())
+                .cast(pl.Float64)
+                .alias(target_col)
+            )
+            # Collapse to one row per match
+            df = df.sort(["match_uid", "player_id"]).unique(
+                subset=["match_uid"], keep="first", maintain_order=True,
+            )
+        else:
+            target_col = "_target_total_games"
+            df = df.with_columns(
+                total_games_won().cast(pl.Float64).alias(target_col)
+            )
 
-        # Drop rows where target is null
         df = df.filter(pl.col(target_col).is_not_null())
-
         return df, target_col
 
     def run(self) -> dict[str, Any]:
@@ -122,9 +129,11 @@ class ProjectionRunner:
         # Columns needed for target resolution, diagnostics, and filtering
         runner_columns = [
             "won", "reason", "sets_played", "best_of",
-            "circuit", "surface", "round", "match_uid",
+            "circuit", "surface", "round", "match_uid", "player_id",
             "player_set1_games", "player_set2_games",
             "player_set3_games", "player_set4_games", "player_set5_games",
+            "opp_set1_games", "opp_set2_games",
+            "opp_set3_games", "opp_set4_games", "opp_set5_games",
         ]
         if self.config.data.filters:
             for col in self.config.data.filters:
@@ -247,8 +256,18 @@ class ProjectionRunner:
                 model.fit(X_train, y_train)
 
                 # Predict
-                y_pred = model.predict(X_test)
-                y_pred_train = model.predict(X_train)
+                y_pred_raw = model.predict(X_test)
+                y_pred_train_raw = model.predict(X_train)
+
+                # Multi-quantile: predict() returns (n, n_quantiles).
+                # Use median (middle column) for standard metrics.
+                if y_pred_raw.ndim == 2:
+                    mid = y_pred_raw.shape[1] // 2
+                    y_pred = y_pred_raw[:, mid]
+                    y_pred_train = y_pred_train_raw[:, mid]
+                else:
+                    y_pred = y_pred_raw
+                    y_pred_train = y_pred_train_raw
 
                 metrics = compute_regression_metrics(y_test, y_pred)
                 all_metrics.append(metrics)
@@ -256,11 +275,14 @@ class ProjectionRunner:
                 train_metrics = compute_regression_metrics(y_train, y_pred_train)
                 all_train_metrics.append(train_metrics)
 
-                all_predictions.append({
+                pred_entry: dict[str, Any] = {
                     "df": test_df,
                     "y_true": y_test,
                     "y_pred": y_pred,
-                })
+                }
+                if y_pred_raw.ndim == 2:
+                    pred_entry["y_pred_quantiles"] = y_pred_raw
+                all_predictions.append(pred_entry)
 
                 run_logger.info(
                     "Fold %d: mae=%.3f, rmse=%.3f, r2=%.3f (%.1fs)",
@@ -289,6 +311,29 @@ class ProjectionRunner:
             diagnostic_results = diagnostics.compute_all(all_predictions)
 
             avg_metrics.update(diagnostic_results.metrics)
+
+            # Quantile calibration: check coverage for each quantile
+            if all_predictions and "y_pred_quantiles" in all_predictions[0]:
+                quantile_alphas = (self.config.model.params or {}).get(
+                    "quantile_alpha", []
+                )
+                if isinstance(quantile_alphas, list) and len(quantile_alphas) > 0:
+                    all_y_true = np.concatenate(
+                        [p["y_true"] for p in all_predictions]
+                    )
+                    all_q_preds = np.vstack(
+                        [p["y_pred_quantiles"] for p in all_predictions]
+                    )
+                    run_logger.info("Quantile calibration:")
+                    for i, alpha in enumerate(quantile_alphas):
+                        coverage = float(
+                            np.mean(all_y_true <= all_q_preds[:, i])
+                        )
+                        avg_metrics[f"quantile_{alpha}_coverage"] = coverage
+                        run_logger.info(
+                            "  q%.2f: target=%.0f%%, actual=%.1f%%",
+                            alpha, alpha * 100, coverage * 100,
+                        )
 
             run_id = None
             if logger:
