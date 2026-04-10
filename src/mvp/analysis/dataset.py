@@ -17,6 +17,8 @@ SHEET_COLUMNS = [
     "p2_odds",
     "p1_pin",
     "p2_pin",
+    "fav_edge",
+    "dog_edge",
     "bet_side",
     "bet_odds",
     "stake",
@@ -147,6 +149,15 @@ def _join_sheet_data(ds: pl.DataFrame, sheet_data: pl.DataFrame | None) -> pl.Da
 
     available = [c for c in SHEET_COLUMNS if c in sheet_data.columns]
     sheet_subset = sheet_data.select(available)
+
+    # fav_edge/dog_edge come from sheet formulas as Utf8 strings — cast to Float64
+    edge_casts = [
+        pl.col(c).cast(pl.Float64, strict=False).alias(c)
+        for c in ("fav_edge", "dog_edge")
+        if c in sheet_subset.columns
+    ]
+    if edge_casts:
+        sheet_subset = sheet_subset.with_columns(edge_casts)
 
     ds = ds.join(sheet_subset, on="match_uid", how="left")
 

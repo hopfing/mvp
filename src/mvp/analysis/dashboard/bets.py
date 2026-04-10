@@ -162,6 +162,92 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
         st.info("No bets found for the selected filters.")
         return
 
+    # --- Bet edge filter ---
+    # bet_edge = fav_edge when betting the model's predicted side, else dog_edge.
+    if "fav_edge" in bets.columns and "dog_edge" in bets.columns and "pred_side" in bets.columns:
+        bets = bets.with_columns(
+            pl.when(pl.col("bet_side") == pl.col("pred_side"))
+            .then(pl.col("fav_edge"))
+            .otherwise(pl.col("dog_edge"))
+            .alias("bet_edge")
+        )
+        edge_vals = bets["bet_edge"].drop_nulls()
+        if len(edge_vals) > 0:
+            edge_min_pct = round(float(edge_vals.min()) * 100 - 0.5, 1)
+            edge_max_pct = round(float(edge_vals.max()) * 100 + 0.5, 1)
+            if edge_max_pct - edge_min_pct < 0.2:
+                edge_min_pct -= 0.1
+                edge_max_pct += 0.1
+
+            # Initialize (or clamp, if bounds shifted since last rerun) session state
+            def _clamp(v: float) -> float:
+                return max(edge_min_pct, min(v, edge_max_pct))
+
+            if "bets_edge_slider" not in st.session_state:
+                st.session_state.bets_edge_slider = (edge_min_pct, edge_max_pct)
+                st.session_state.bets_edge_lo = edge_min_pct
+                st.session_state.bets_edge_hi = edge_max_pct
+            else:
+                cur_lo, cur_hi = st.session_state.bets_edge_slider
+                cur_lo, cur_hi = _clamp(cur_lo), _clamp(cur_hi)
+                st.session_state.bets_edge_slider = (cur_lo, cur_hi)
+                st.session_state.bets_edge_lo = cur_lo
+                st.session_state.bets_edge_hi = cur_hi
+
+            def _sync_from_slider():
+                lo, hi = st.session_state.bets_edge_slider
+                st.session_state.bets_edge_lo = lo
+                st.session_state.bets_edge_hi = hi
+
+            def _sync_from_inputs():
+                lo = st.session_state.bets_edge_lo
+                hi = st.session_state.bets_edge_hi
+                if lo > hi:
+                    lo, hi = hi, lo
+                st.session_state.bets_edge_slider = (lo, hi)
+
+            st.sidebar.slider(
+                "Bet edge",
+                min_value=edge_min_pct,
+                max_value=edge_max_pct,
+                step=0.1,
+                format="%.1f%%",
+                key="bets_edge_slider",
+                on_change=_sync_from_slider,
+            )
+            col_lo, col_hi = st.sidebar.columns(2)
+            with col_lo:
+                st.number_input(
+                    "Min %",
+                    min_value=edge_min_pct,
+                    max_value=edge_max_pct,
+                    step=0.1,
+                    format="%.1f",
+                    key="bets_edge_lo",
+                    on_change=_sync_from_inputs,
+                )
+            with col_hi:
+                st.number_input(
+                    "Max %",
+                    min_value=edge_min_pct,
+                    max_value=edge_max_pct,
+                    step=0.1,
+                    format="%.1f",
+                    key="bets_edge_hi",
+                    on_change=_sync_from_inputs,
+                )
+
+            edge_range = st.session_state.bets_edge_slider
+            bets = bets.filter(
+                pl.col("bet_edge").is_between(
+                    edge_range[0] / 100, edge_range[1] / 100
+                )
+            )
+
+    if len(bets) == 0:
+        st.info("No bets found for the selected filters.")
+        return
+
     # --- Headline Stats ---
     stats = _headline_stats(bets)
     record = f"{stats['wins']}-{stats['losses']}-{stats['void']}"
