@@ -64,10 +64,8 @@ def format_leaderboard(
                 f"  err80={err80 * 100:.1f}%  ({duration:.0f}s)"
             )
 
-        params_str = ", ".join(
-            f"{k}={v}" for k, v in sorted(trial.params.items())
-        )
-        lines.append(f"      {params_str}")
+        for k, v in sorted(trial.params.items()):
+            lines.append(f"      {k}: {v}")
 
     return lines
 
