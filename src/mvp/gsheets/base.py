@@ -496,16 +496,14 @@ def merge_predictions(
 
     merged = merged.with_columns(
         pl.col("round").replace_strict(ROUND_ORDER, default=99).alias("_round_order"),
-        pl.when(pl.col("date") == pl.col("tournament_day"))
-        .then(pl.col("time"))
-        .otherwise(None)
+        (pl.col("date") + " " + pl.col("time"))
         .min()
         .over("tournament_day", "tournament")
-        .alias("_min_time"),
+        .alias("_session_start"),
     )
     merged = merged.sort(
-        ["tournament_day", "circuit", "_min_time", "tournament", "date", "time", "_round_order"]
-    ).drop("_round_order", "_min_time")
+        ["_session_start", "tournament", "date", "time", "_round_order", "circuit"]
+    ).drop("_round_order", "_session_start")
 
     return merged
 

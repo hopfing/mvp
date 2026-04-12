@@ -345,15 +345,17 @@ class TestMergePredictions:
     def test_sort_order(self):
         row1 = _make_sheet_row(
             match_uid="M1",
+            date="2024-01-16",
             tournament_day="2024-01-16",
             tournament="B Open",
-            match_time="10:00",
+            time="10:00",
         )
         row2 = _make_sheet_row(
             match_uid="M2",
+            date="2024-01-15",
             tournament_day="2024-01-15",
             tournament="A Open",
-            match_time="14:00",
+            time="14:00",
         )
         existing = _sheet_df([row1, row2])
         new = prepare_predictions(_make_predictions(match_uid="OTHER"))
