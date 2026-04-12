@@ -16,28 +16,13 @@ from mvp.model.imputation import build_imputation
 from mvp.model.registry import get_registry
 from mvp.model.splitters import make_splitter
 from mvp.projection.config import ProjectionDiscoveryConfig
+from mvp.projection.metrics import crps_from_quantiles
 from mvp.projection.models import get_regression_model
 
 logger = logging.getLogger(__name__)
 
 warnings.filterwarnings("ignore", message="All-NaN slice encountered")
 warnings.filterwarnings("ignore", message="invalid value encountered", category=RuntimeWarning)
-
-
-def _crps_from_quantiles(
-    y_true: np.ndarray, q_preds: np.ndarray, alphas: list[float],
-) -> float:
-    """Compute CRPS from quantile predictions using the quantile-based approximation.
-
-    Uses the pinball loss (quantile score) averaged across all quantiles as a
-    consistent scoring rule that approximates CRPS when quantiles are dense.
-    """
-    total = 0.0
-    for i, alpha in enumerate(alphas):
-        residual = y_true - q_preds[:, i]
-        loss = np.where(residual >= 0, alpha * residual, (alpha - 1) * residual)
-        total += float(np.mean(loss))
-    return total / len(alphas)
 
 
 def _make_regression_metric_fn(metric: str) -> Callable[[np.ndarray, np.ndarray], float]:
@@ -278,7 +263,7 @@ class FastProjectionSelector:
 
                 if is_crps and y_pred.ndim == 2 and quantile_alphas:
                     fold_metrics.append(
-                        _crps_from_quantiles(y_test, y_pred, quantile_alphas)
+                        crps_from_quantiles(y_test, y_pred, quantile_alphas)
                     )
                 else:
                     if y_pred.ndim == 2:

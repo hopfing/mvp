@@ -48,9 +48,11 @@ def format_leaderboard(
             mae = ua.get("mae", float("nan"))
             rmse = ua.get("rmse", float("nan"))
             r2 = ua.get("r_squared", float("nan"))
+            crps = ua.get("crps")
+            crps_str = f"  CRPS={crps:.4f}" if crps is not None else ""
             lines.append(
                 f"  {i + 1:>2}. MAE={mae:.4f}  RMSE={rmse:.4f}"
-                f"  R²={r2:.4f}  ({duration:.0f}s)"
+                f"  R²={r2:.4f}{crps_str}  ({duration:.0f}s)"
             )
         else:
             ll = ua.get("log_loss", float("nan"))

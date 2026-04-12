@@ -25,3 +25,19 @@ def compute_regression_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict[s
         "r_squared": r_squared,
         "median_ae": median_ae,
     }
+
+
+def crps_from_quantiles(
+    y_true: np.ndarray, q_preds: np.ndarray, alphas: list[float],
+) -> float:
+    """Compute CRPS from quantile predictions using the pinball loss approximation.
+
+    Uses the pinball loss (quantile score) averaged across all quantiles as a
+    consistent scoring rule that approximates CRPS when quantiles are dense.
+    """
+    total = 0.0
+    for i, alpha in enumerate(alphas):
+        residual = y_true - q_preds[:, i]
+        loss = np.where(residual >= 0, alpha * residual, (alpha - 1) * residual)
+        total += float(np.mean(loss))
+    return total / len(alphas)

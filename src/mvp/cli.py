@@ -1434,6 +1434,9 @@ def print_projection_summary(results: dict[str, Any], name: str | None = None) -
     else:
         print(f"\nTest: {test_mae:.3f} MAE | {test_rmse:.3f} RMSE | {test_r2:.3f} R² | {test_med:.3f} MedAE")
 
+    if "crps" in metrics:
+        print(f"\nCRPS: {metrics['crps']:.4f}")
+
     if not diagnostics:
         print(f"\nMLflow run: {results.get('run_id', 'N/A')}")
         print("=" * 70 + "\n")

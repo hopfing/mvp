@@ -19,7 +19,7 @@ from mvp.model.registry import get_registry
 from mvp.model.splitters import make_splitter
 from mvp.projection.config import ProjectionConfig
 from mvp.projection.diagnostics import ProjectionDiagnostics
-from mvp.projection.metrics import compute_regression_metrics
+from mvp.projection.metrics import compute_regression_metrics, crps_from_quantiles
 from mvp.projection.models import get_regression_model
 
 run_logger = logging.getLogger(__name__)
@@ -324,6 +324,10 @@ class ProjectionRunner:
                     all_q_preds = np.vstack(
                         [p["y_pred_quantiles"] for p in all_predictions]
                     )
+                    avg_metrics["crps"] = crps_from_quantiles(
+                        all_y_true, all_q_preds, quantile_alphas,
+                    )
+                    run_logger.info("CRPS: %.4f", avg_metrics["crps"])
                     run_logger.info("Quantile calibration:")
                     for i, alpha in enumerate(quantile_alphas):
                         coverage = float(
