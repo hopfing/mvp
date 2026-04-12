@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+
 import yaml
 
 from mvp.model.discovery.discover import get_all_feature_specs
@@ -124,8 +125,13 @@ class ProjectionDiscovery:
 
         return scorer
 
-    def run(self) -> ProjectionDiscoveryResult:
+    def run(
+        self, checkpoint_path: Path | None = None,
+    ) -> ProjectionDiscoveryResult:
         """Run projection feature discovery.
+
+        Args:
+            checkpoint_path: Path to write/read forward selection checkpoint.
 
         Returns:
             ProjectionDiscoveryResult with selected features.
@@ -169,7 +175,7 @@ class ProjectionDiscovery:
             base_features=base,
         )
 
-        selection_result = selector.run(verbose=True)
+        selection_result = selector.run(verbose=True, checkpoint_path=checkpoint_path)
         selected = selection_result.selected_features
 
         if not selected:

@@ -1339,9 +1339,6 @@ def _cmd_experiment_projection(
     args: argparse.Namespace, config_path: Path, checkpoint_path: Path,
 ) -> int:
     """Run projection feature discovery."""
-    # checkpoint_path is reserved for future projection discovery checkpoint
-    # support; currently only classification forward selection uses it.
-    del checkpoint_path
     from mvp.projection.discovery import ProjectionDiscovery
 
     # Normalize output path: always in projections/, add .yaml if needed
@@ -1355,7 +1352,7 @@ def _cmd_experiment_projection(
         verbose=args.verbose,
     )
 
-    result = discovery.run()
+    result = discovery.run(checkpoint_path=checkpoint_path)
 
     if result.selected_features:
         discovery.save_config(output_path, result)
