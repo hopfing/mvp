@@ -188,6 +188,12 @@ class FeatureSelector:
                 ncols=120,
             )
 
+            if best_feature is not None and hasattr(feature_iter, "set_postfix"):
+                feature_iter.set_postfix(
+                    best=f"{best_feature_metric:.4f}", feat=best_feature,
+                    refresh=False,
+                )
+
             eval_count = 0
             for feature in feature_iter:
                 candidate = selected + [feature]
