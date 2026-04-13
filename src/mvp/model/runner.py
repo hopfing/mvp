@@ -417,6 +417,8 @@ class ExperimentRunner:
                 X_test = X_test[:, :n_model]
                 X_train = (X_train - train_mean) / train_std
                 X_test = (X_test - train_mean) / train_std
+                X_train = np.nan_to_num(X_train, nan=0.0, posinf=0.0, neginf=0.0)
+                X_test = np.nan_to_num(X_test, nan=0.0, posinf=0.0, neginf=0.0)
 
                 # Append embedding column (integer-encoded, not scaled)
                 if embedding_col and embedding_col in train_df.columns:
@@ -743,6 +745,9 @@ class ExperimentRunner:
 
         run_logger.info("Run complete in %.1fs", time.perf_counter() - t_run)
 
+        # Save predictions to parquet
+        predictions_path = self._save_predictions(all_predictions)
+
         return {
             "metrics": avg_metrics,
             "train_metrics": avg_train_metrics,
@@ -757,4 +762,27 @@ class ExperimentRunner:
             "last_fold_y_test": y_test,
             "all_predictions": all_predictions,
             "per_model_oof": all_per_model_predictions if is_ensemble else [],
+            "predictions_path": predictions_path,
         }
+
+    def _save_predictions(self, all_predictions: list[dict]) -> Path | None:
+        """Persist out-of-sample predictions to parquet."""
+        if not all_predictions:
+            return None
+
+        frames = []
+        for fold in all_predictions:
+            fold_df = fold["df"].select(["match_uid"])
+            frames.append(fold_df.with_columns([
+                pl.Series(name="y_prob", values=fold["y_prob"]),
+                pl.Series(name="y_true", values=fold["y_true"]),
+            ]))
+
+        combined = pl.concat(frames)
+        from mvp.common.base_job import get_local_data_root
+        out_dir = get_local_data_root() / "models" / self.run_name
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / "predictions.parquet"
+        combined.write_parquet(out_path)
+        run_logger.info("Saved %d predictions to %s", len(combined), out_path)
+        return out_path

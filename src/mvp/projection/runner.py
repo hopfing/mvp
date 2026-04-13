@@ -247,6 +247,8 @@ class ProjectionRunner:
                 X_test = X_test[:, :n_model]
                 X_train = (X_train - train_mean) / train_std
                 X_test = (X_test - train_mean) / train_std
+                X_train = np.nan_to_num(X_train, nan=0.0, posinf=0.0, neginf=0.0)
+                X_test = np.nan_to_num(X_test, nan=0.0, posinf=0.0, neginf=0.0)
 
                 # Train
                 model = get_regression_model(
@@ -351,6 +353,9 @@ class ProjectionRunner:
 
         run_logger.info("Projection run complete in %.1fs", time.perf_counter() - t_run)
 
+        # Save predictions to parquet
+        predictions_path = self._save_predictions(all_predictions)
+
         return {
             "metrics": avg_metrics,
             "train_metrics": avg_train_metrics,
@@ -360,5 +365,33 @@ class ProjectionRunner:
             "run_id": run_id,
             "diagnostics": diagnostic_results,
             "all_predictions": all_predictions,
+            "predictions_path": predictions_path,
             "_config": self.config,
         }
+
+    def _save_predictions(self, all_predictions: list[dict]) -> Path | None:
+        """Persist out-of-sample predictions to parquet."""
+        if not all_predictions:
+            return None
+
+        quantile_alphas = (self.config.model.params or {}).get("quantile_alpha", [])
+        frames = []
+        for fold in all_predictions:
+            fold_df = fold["df"].select(["match_uid"])
+            pred_data = {"y_pred": fold["y_pred"]}
+            if "y_pred_quantiles" in fold and isinstance(quantile_alphas, list):
+                for i, alpha in enumerate(quantile_alphas):
+                    pred_data[f"q_{alpha}"] = fold["y_pred_quantiles"][:, i]
+            pred_data["y_true"] = fold["y_true"]
+            frames.append(fold_df.with_columns([
+                pl.Series(name=k, values=v) for k, v in pred_data.items()
+            ]))
+
+        combined = pl.concat(frames)
+        from mvp.common.base_job import get_local_data_root
+        out_dir = get_local_data_root() / "projections" / self.run_name
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / "predictions.parquet"
+        combined.write_parquet(out_path)
+        run_logger.info("Saved %d predictions to %s", len(combined), out_path)
+        return out_path
