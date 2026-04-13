@@ -96,6 +96,16 @@ _MONEYLINE_TEMPLATE_IDS = frozenset({
     "_7cMatch_20Betting_20Live_7c", # in-play moneyline
 })
 
+_TOTAL_GAMES_TEMPLATE_IDS = frozenset({
+    "_7cTotal_20Match_20Games_7c",
+    "_7cTotal_20Match_20Games_7c_20_7cLive_7c",
+})
+
+_GAME_HANDICAP_TEMPLATE_IDS = frozenset({
+    "_7cGame_20Handicap_20Betting_7c",
+    "_7cGame_20Handicap_20Betting_7c_20_7cLive_7c",
+})
+
 _IN_PLAY_TEMPLATE_ID = "_7cMatch_20Betting_20Live_7c"
 
 
@@ -308,6 +318,127 @@ def _parse_competition_response(
 
 
 SPORTSBOOK_URL = "https://sportsbook.caesars.com/us/il/bet/tennis"
+
+_GAMES_MARKETS = ["total_games", "game_spread"]
+
+
+def _parse_all_markets(
+    data: dict,
+    fetched_at: datetime,
+) -> list[OddsEntry]:
+    """Parse all market types from a competition response."""
+    entries = _parse_competition_response(data, fetched_at)
+    competitions = (data or {}).get("competitions") or []
+
+    for comp in competitions:
+        if not isinstance(comp, dict):
+            continue
+        comp_id = str(comp.get("id") or "")
+        comp_name = comp.get("name") or ""
+
+        for event in comp.get("events") or []:
+            if not isinstance(event, dict):
+                continue
+            if event.get("type") != "MATCH":
+                continue
+
+            event_id = str(event.get("id") or "")
+            if not event_id:
+                continue
+
+            all_markets: list[dict] = []
+            for group in event.get("keyMarketGroups") or []:
+                if not isinstance(group, dict):
+                    continue
+                for market in group.get("markets") or []:
+                    if isinstance(market, dict):
+                        all_markets.append(market)
+
+            event_status = _derive_event_status(event, [
+                m for m in all_markets
+                if m.get("templateId") in _MONEYLINE_TEMPLATE_IDS
+            ])
+
+            for mkt in all_markets:
+                tid = mkt.get("templateId", "")
+                if mkt.get("placeholder", False):
+                    continue
+                sels = mkt.get("selections") or []
+                if len(sels) < 2:
+                    continue
+
+                if tid in _TOTAL_GAMES_TEMPLATE_IDS:
+                    line = mkt.get("line")
+                    if line is None:
+                        continue
+                    try:
+                        line = float(line)
+                    except (ValueError, TypeError):
+                        continue
+                    for sel in sels:
+                        price_d = (sel.get("price") or {}).get("d")
+                        try:
+                            odds_val = float(price_d)
+                        except (TypeError, ValueError):
+                            continue
+                        sel_name = _strip_pipes(sel.get("name"))
+                        side = (sel.get("type") or "").lower()
+                        entries.append(OddsEntry(
+                            book="czr",
+                            czr_event_id=event_id,
+                            market="total_games",
+                            czr_selection_id=str(sel.get("id") or ""),
+                            player_name=sel_name,
+                            country_code="",
+                            side=side,
+                            odds=odds_val,
+                            points=line,
+                            tournament=comp_name,
+                            czr_tournament_id=comp_id,
+                            opponent_name="",
+                            event_status=event_status,
+                            fetched_at=fetched_at,
+                        ))
+
+                elif tid in _GAME_HANDICAP_TEMPLATE_IDS:
+                    line = mkt.get("line")
+                    if line is None:
+                        continue
+                    try:
+                        line_val = float(line)
+                    except (ValueError, TypeError):
+                        continue
+                    runner_names = [_strip_pipes(s.get("name")) for s in sels]
+                    for sel in sels:
+                        price_d = (sel.get("price") or {}).get("d")
+                        try:
+                            odds_val = float(price_d)
+                        except (TypeError, ValueError):
+                            continue
+                        sel_name = _strip_pipes(sel.get("name"))
+                        side = (sel.get("type") or "").lower()
+                        points = -line_val if side == "home" else line_val
+                        opponent = next(
+                            (n for n in runner_names if n != sel_name), "",
+                        )
+                        entries.append(OddsEntry(
+                            book="czr",
+                            czr_event_id=event_id,
+                            market="game_spread",
+                            czr_selection_id=str(sel.get("id") or ""),
+                            player_name=sel_name,
+                            country_code="",
+                            side=side,
+                            odds=odds_val,
+                            points=points,
+                            tournament=comp_name,
+                            czr_tournament_id=comp_id,
+                            opponent_name=opponent,
+                            event_status=event_status,
+                            fetched_at=fetched_at,
+                        ))
+
+    return entries
 
 
 class CaesarsOddsScraper(BaseExtractor):
@@ -596,13 +727,113 @@ class CaesarsOddsScraper(BaseExtractor):
         out_path = self.build_path("stage", "moneyline.parquet")
         return self.save_parquet(df, out_path)
 
+    def _stage_all_markets(self) -> list[Path]:
+        """Stage all market types from raw JSON into per-market parquets."""
+        raw_dir = self.build_path("raw", "moneyline")
+        raw_files = self.list_files(raw_dir, "odds_*.json")
+        if not raw_files:
+            return []
+
+        existing_by_market = {}
+        for market in _GAMES_MARKETS:
+            stage_dir = self.build_path("stage", market)
+            existing_by_market[market] = {
+                p.stem for p in self.list_files(stage_dir, "*.parquet")
+            }
+
+        staged: list[Path] = []
+        for raw_path in raw_files:
+            if all(raw_path.stem in existing_by_market[m] for m in _GAMES_MARKETS):
+                continue
+
+            try:
+                data_list = self.read_json(raw_path)
+            except Exception:
+                continue
+
+            parts = raw_path.stem.replace("odds_", "")
+            try:
+                file_ts = datetime.strptime(parts, "%Y%m%d_%H%M%S")
+            except ValueError:
+                continue
+
+            all_entries: list[OddsEntry] = []
+            for item in data_list:
+                resp = item.get("response", item) if isinstance(item, dict) else item
+                all_entries.extend(_parse_all_markets(resp, file_ts))
+
+            if not all_entries:
+                continue
+
+            for market in _GAMES_MARKETS:
+                if raw_path.stem in existing_by_market[market]:
+                    continue
+                market_entries = [e for e in all_entries if e.market == market]
+                if not market_entries:
+                    continue
+                df = pl.DataFrame([
+                    {
+                        "book": e.book,
+                        "czr_event_id": e.czr_event_id,
+                        "market": e.market,
+                        "czr_selection_id": e.czr_selection_id,
+                        "player_name": e.player_name,
+                        "country_code": e.country_code,
+                        "side": e.side,
+                        "odds": e.odds,
+                        "points": e.points,
+                        "tournament": e.tournament,
+                        "czr_tournament_id": e.czr_tournament_id,
+                        "opponent_name": e.opponent_name,
+                        "event_status": e.event_status,
+                        "fetched_at": e.fetched_at,
+                        "run_at": file_ts,
+                    }
+                    for e in market_entries
+                ])
+                stage_dir = self.build_path("stage", market)
+                out_path = stage_dir / f"{raw_path.stem}.parquet"
+                result = self.save_parquet(df, out_path)
+                if result:
+                    staged.append(result)
+
+        if staged:
+            logger.info("CZR staged %d per-market snapshots", len(staged))
+        return staged
+
+    def _consolidate_market(self, market: str) -> Path | None:
+        """Merge per-snapshot parquets into {market}.parquet."""
+        stage_dir = self.build_path("stage", market)
+        snapshots = self.list_files(stage_dir, "*.parquet")
+        if not snapshots:
+            return None
+
+        dfs = []
+        for f in snapshots:
+            _df = pl.read_parquet(f)
+            tz_cols = [
+                c for c, dt in _df.schema.items()
+                if isinstance(dt, pl.Datetime) and dt.time_zone is not None
+            ]
+            if tz_cols:
+                _df = _df.with_columns(
+                    pl.col(c).dt.replace_time_zone(None) for c in tz_cols
+                )
+            dfs.append(_df)
+        df = pl.concat(dfs, how="diagonal_relaxed")
+
+        out_path = self.build_path("stage", f"{market}.parquet")
+        return self.save_parquet(df, out_path)
+
     def run(self) -> int:
-        """Full flow: fetch raw, stage, consolidate."""
+        """Full flow: fetch raw, stage moneyline + all markets."""
         n = self.fetch_and_save_raw()
         self.stage()
         self.consolidate()
+        self._stage_all_markets()
+        for market in _GAMES_MARKETS:
+            self._consolidate_market(market)
         return n
-
 
 
 def _summarize_raw_file(raw_path: Path) -> None:
@@ -699,4 +930,19 @@ if __name__ == "__main__":
         sys.exit(1)
 
     _summarize_raw_file(raw_files[0])
+
+    # Also show all-market counts
+    from collections import Counter
+    with raw_files[0].open() as f:
+        raw_responses = json.load(f)
+    all_entries: list[OddsEntry] = []
+    for item in raw_responses:
+        resp = item.get("response") or {}
+        all_entries.extend(_parse_all_markets(resp, datetime.now(UTC)))
+    print(f"\nAll markets: {len(all_entries)} entries", file=sys.stdout)
+    market_counts = Counter(e.market for e in all_entries)
+    for market, count in market_counts.most_common():
+        sample = next(e for e in all_entries if e.market == market)
+        print(f"  {market:20s}: {count:4d}  e.g. {sample.player_name} pts={sample.points} @ {sample.odds}",
+              file=sys.stdout)
     sys.exit(0)
