@@ -442,24 +442,31 @@ class BetRiversOddsScraper(BaseExtractor):
             logger.info("No BR all-market entries found")
             return 0
 
-        raw_path = self.build_path("raw", "all_markets", "odds.json",
+        # Save one raw file (site API returns all markets per call)
+        raw_path = self.build_path("raw", "site_markets", "odds.json",
                                    version="datetime")
         self.save_json(raw_responses, raw_path)
         return len(entries)
 
-    def stage_all(self) -> list[Path]:
-        """Stage raw all-market JSON files to parquet."""
-        raw_dir = self.build_path("raw", "all_markets")
-        stage_dir = self.build_path("stage", "all_markets")
+    def _stage_site_markets(self) -> list[Path]:
+        """Stage raw site-API JSON into per-market parquets."""
+        raw_dir = self.build_path("raw", "site_markets")
         raw_files = self.list_files(raw_dir, "odds_*.json")
         if not raw_files:
             return []
 
-        existing = {p.stem for p in self.list_files(stage_dir, "*.parquet")}
+        markets = list(_OFFER_TYPE_MAP.values())
+        existing_by_market = {}
+        for market in markets:
+            stage_dir = self.build_path("stage", market)
+            existing_by_market[market] = {
+                p.stem for p in self.list_files(stage_dir, "*.parquet")
+            }
 
         staged: list[Path] = []
         for raw_path in raw_files:
-            if raw_path.stem in existing:
+            # Skip if already staged for all markets
+            if all(raw_path.stem in existing_by_market[m] for m in markets):
                 continue
 
             try:
@@ -483,22 +490,29 @@ class BetRiversOddsScraper(BaseExtractor):
             if not all_entries:
                 continue
 
-            df = _entries_to_df(all_entries, file_ts)
-            out_path = stage_dir / f"{raw_path.stem}.parquet"
-            result = self.save_parquet(df, out_path)
-            if result:
-                staged.append(result)
+            # Split by market and stage separately
+            for market in markets:
+                if raw_path.stem in existing_by_market[market]:
+                    continue
+                market_entries = [e for e in all_entries if e.market == market]
+                if not market_entries:
+                    continue
+                df = _entries_to_df(market_entries, file_ts)
+                stage_dir = self.build_path("stage", market)
+                out_path = stage_dir / f"{raw_path.stem}.parquet"
+                result = self.save_parquet(df, out_path)
+                if result:
+                    staged.append(result)
 
         if staged:
-            logger.info("BR staged %d all-market snapshots", len(staged))
+            logger.info("BR staged %d per-market snapshots", len(staged))
         return staged
 
-    def consolidate_all(self) -> Path | None:
-        """Merge all-market snapshots into all_markets.parquet."""
-        stage_dir = self.build_path("stage", "all_markets")
+    def _consolidate_market(self, market: str) -> Path | None:
+        """Merge per-snapshot parquets into {market}.parquet."""
+        stage_dir = self.build_path("stage", market)
         snapshots = self.list_files(stage_dir, "*.parquet")
         if not snapshots:
-            logger.info("No BR all-market snapshots to consolidate")
             return None
 
         dfs = []
@@ -515,21 +529,22 @@ class BetRiversOddsScraper(BaseExtractor):
             dfs.append(_df)
         df = pl.concat(dfs, how="diagonal_relaxed")
 
-        out_path = self.build_path("stage", "all_markets.parquet")
+        out_path = self.build_path("stage", f"{market}.parquet")
         return self.save_parquet(df, out_path)
 
-    def _run_all_markets(self) -> int:
-        """All markets via site API."""
+    def _run_site_markets(self) -> int:
+        """All markets via site API, staged per-market."""
         n = self.fetch_and_save_all_raw()
-        self.stage_all()
-        self.consolidate_all()
+        self._stage_site_markets()
+        for market in _OFFER_TYPE_MAP.values():
+            self._consolidate_market(market)
         return n
 
     def run(self) -> int:
-        """Full flow: moneyline + all markets."""
+        """Full flow: moneyline (Kambi) + all markets (site API)."""
         n_ml = self._run_moneyline()
-        n_all = self._run_all_markets()
-        return n_ml + n_all
+        n_site = self._run_site_markets()
+        return n_ml + n_site
 
 
 if __name__ == "__main__":
