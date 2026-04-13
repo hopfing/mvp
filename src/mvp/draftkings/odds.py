@@ -16,7 +16,8 @@ logger = logging.getLogger(__name__)
 
 TENNIS_URL = "https://sportsbook.draftkings.com/sports/tennis"
 LEAGUE_API_BASE = (
-    "https://sportsbook-nash.draftkings.com/api/sportscontent/dkusnj/v1/leagues"
+    "https://sportsbook-nash.draftkings.com/sites/US-IL-SB/api/sportscontent"
+    "/controldata/league/leagueSubcategory/v1/markets"
 )
 
 SUBCATEGORIES = {
@@ -24,6 +25,8 @@ SUBCATEGORIES = {
     "game_spread": 16089,
     "total_games": 16090,
     "total_sets": 5369,
+    "first_set_moneyline": 15949,
+    "player_games_won": 8433,
 }
 
 _INCLUDE_PATTERNS = [
@@ -102,8 +105,14 @@ def _parse_odds_response(
         league_map[str(lg.get("id", ""))] = lg
 
     for mkt in data.get("markets", []):
-        if subcategory_id is not None and mkt.get("subcategoryId") != subcategory_id:
-            continue
+        if subcategory_id is not None:
+            # New endpoint returns subcategoryId as str, old as int.
+            try:
+                mkt_subcat = int(mkt.get("subcategoryId", 0))
+            except (ValueError, TypeError):
+                mkt_subcat = 0
+            if mkt_subcat != subcategory_id:
+                continue
 
         event_id = str(mkt.get("eventId", ""))
         ev = event_map.get(event_id, {})
@@ -198,8 +207,26 @@ class DraftKingsOddsScraper(BaseExtractor):
         dk_tournament_id: str,
         market: str = "moneyline",
     ) -> tuple[list[OddsEntry], dict]:
-        """Fetch odds for one league. Returns (entries, raw_response)."""
-        url = f"{LEAGUE_API_BASE}/{dk_tournament_id}"
+        """Fetch odds for one league + market. Returns (entries, raw_response)."""
+        subcat_id = SUBCATEGORIES[market]
+        from urllib.parse import quote
+        events_q = quote(
+            f"$filter=leagueId eq '{dk_tournament_id}' AND "
+            f"clientMetadata/Subcategories/any(s: s/Id eq '{subcat_id}')"
+        )
+        markets_q = quote(
+            f"$filter=clientMetadata/subCategoryId eq '{subcat_id}' "
+            f"AND tags/all(t: t ne 'SportcastBetBuilder')"
+        )
+        url = (
+            f"{LEAGUE_API_BASE}"
+            f"?isBatchable=false"
+            f"&templateVars={dk_tournament_id}%2C{subcat_id}"
+            f"&eventsQuery={events_q}"
+            f"&marketsQuery={markets_q}"
+            f"&include=Events"
+            f"&entity=events"
+        )
         resp = self._fetch(url, headers=_API_HEADERS)
         data = resp.json()
 
@@ -317,7 +344,7 @@ class DraftKingsOddsScraper(BaseExtractor):
         return staged
 
     def consolidate(self, market: str = "moneyline") -> Path | None:
-        """Merge all per-snapshot parquets into moneyline.parquet."""
+        """Merge all per-snapshot parquets into {market}.parquet."""
         stage_dir = self.build_path("stage", market)
         snapshots = self.list_files(stage_dir, "*.parquet")
         if not snapshots:
@@ -348,9 +375,42 @@ class DraftKingsOddsScraper(BaseExtractor):
         self.consolidate(market=market)
         return n
 
+    def run_all(self) -> int:
+        """Fetch all market types."""
+        total = 0
+        for market in SUBCATEGORIES:
+            total += self.run(market=market)
+        return total
+
 
 # Module-level convenience for CLI
 def fetch_and_save(market: str = "moneyline", run_at=None) -> int:
     """Full flow: fetch, stage, consolidate."""
     scraper = DraftKingsOddsScraper(run_at=run_at)
     return scraper.run(market=market)
+
+
+def fetch_and_save_all(run_at=None) -> int:
+    """Full flow for all market types."""
+    scraper = DraftKingsOddsScraper(run_at=run_at)
+    return scraper.run_all()
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    scraper = DraftKingsOddsScraper()
+    leagues = scraper.fetch_tennis_leagues()
+    print(f"Found {len(leagues)} leagues")
+    for league in leagues:
+        print(f"  {league['name']} ({league['dk_tournament_id']})")
+    if not leagues:
+        raise SystemExit(0)
+    league = leagues[0]
+    print(f"\nTesting {league['name']}:")
+    for market in SUBCATEGORIES:
+        entries, _ = scraper.fetch_league_odds(league["dk_tournament_id"], market)
+        sample = ""
+        if entries:
+            e = entries[0]
+            sample = f"  e.g. {e.player_name} pts={e.points} @ {e.odds}"
+        print(f"  {market:25s}: {len(entries):4d} entries{sample}")
