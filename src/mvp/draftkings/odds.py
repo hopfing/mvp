@@ -384,14 +384,8 @@ class DraftKingsOddsScraper(BaseExtractor):
 
 
 # Module-level convenience for CLI
-def fetch_and_save(market: str = "moneyline", run_at=None) -> int:
-    """Full flow: fetch, stage, consolidate."""
-    scraper = DraftKingsOddsScraper(run_at=run_at)
-    return scraper.run(market=market)
-
-
-def fetch_and_save_all(run_at=None) -> int:
-    """Full flow for all market types."""
+def fetch_and_save(run_at=None) -> int:
+    """Full flow: fetch, stage, consolidate all market types."""
     scraper = DraftKingsOddsScraper(run_at=run_at)
     return scraper.run_all()
 

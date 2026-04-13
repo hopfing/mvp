@@ -528,15 +528,11 @@ class BetRiversOddsScraper(BaseExtractor):
 
 # Module-level convenience for CLI
 def fetch_and_save(run_at=None) -> int:
-    """Full flow: fetch, stage, consolidate (moneyline only)."""
+    """Full flow: fetch, stage, consolidate all market types."""
     scraper = BetRiversOddsScraper(run_at=run_at)
-    return scraper.run()
-
-
-def fetch_and_save_all(run_at=None) -> int:
-    """Full flow for all market types."""
-    scraper = BetRiversOddsScraper(run_at=run_at)
-    return scraper.run_all()
+    n_ml = scraper.run()
+    n_all = scraper.run_all()
+    return n_ml + n_all
 
 
 if __name__ == "__main__":
