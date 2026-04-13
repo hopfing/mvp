@@ -441,6 +441,17 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
             )
             _style_breakdown(table, "Surface", st)
 
+    # By Round
+    if "round" in resolved.columns:
+        round_order = ["Q1", "Q2", "R128", "R64", "R32", "R16", "QF", "SF", "F"]
+        st.subheader("By Round")
+        for val, label in circuits:
+            st.markdown(f"**{label}**")
+            table = _aggregate_by(
+                circuit_dfs[val], "round", sort_order=round_order
+            ).rename({"round": "Round"})
+            _style_breakdown(table, "Round", st)
+
     # By Book (per-book closing odds)
     if books:
         st.subheader("By Book")
