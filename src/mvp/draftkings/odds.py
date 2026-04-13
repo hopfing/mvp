@@ -398,19 +398,19 @@ def fetch_and_save_all(run_at=None) -> int:
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    from collections import Counter
     scraper = DraftKingsOddsScraper()
-    leagues = scraper.fetch_tennis_leagues()
-    print(f"Found {len(leagues)} leagues")
-    for league in leagues:
-        print(f"  {league['name']} ({league['dk_tournament_id']})")
-    if not leagues:
-        raise SystemExit(0)
-    league = leagues[0]
-    print(f"\nTesting {league['name']}:")
+    all_entries: list[OddsEntry] = []
     for market in SUBCATEGORIES:
-        entries, _ = scraper.fetch_league_odds(league["dk_tournament_id"], market)
-        sample = ""
-        if entries:
-            e = entries[0]
-            sample = f"  e.g. {e.player_name} pts={e.points} @ {e.odds}"
-        print(f"  {market:25s}: {len(entries):4d} entries{sample}")
+        entries, _ = scraper.fetch_all_odds(market=market)
+        all_entries.extend(entries)
+    print(f"\nTotal: {len(all_entries)} entries")
+    market_counts = Counter(e.market for e in all_entries)
+    for market, count in market_counts.most_common():
+        sample = next(e for e in all_entries if e.market == market)
+        print(f"  {market:25s}: {count:4d} entries"
+              f"  e.g. {sample.player_name} pts={sample.points} @ {sample.odds}")
+    tournament_counts = Counter(e.tournament for e in all_entries)
+    print(f"\nTournaments: {len(tournament_counts)}")
+    for tourn, count in tournament_counts.most_common():
+        print(f"  {tourn:30s}: {count:4d}")
