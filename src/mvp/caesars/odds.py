@@ -604,16 +604,6 @@ class CaesarsOddsScraper(BaseExtractor):
         return n
 
 
-def fetch_and_save(run_at=None) -> int:
-    """Module-level entry point invoked by the live pipeline.
-
-    `_fetch_book_quiet` in src/mvp/cli.py dynamically imports this
-    function and calls it. Signature MUST stay (run_at=None) -> int
-    to match BOOK_REGISTRY expectations.
-    """
-    scraper = CaesarsOddsScraper(run_at=run_at)
-    return scraper.run()
-
 
 def _summarize_raw_file(raw_path: Path) -> None:
     """Read the most recently written raw JSON and print a human-readable

@@ -339,7 +339,3 @@ class BetMGMOddsScraper(BaseExtractor):
         return n
 
 
-def fetch_and_save(run_at=None) -> int:
-    """Full flow: fetch, stage, consolidate."""
-    scraper = BetMGMOddsScraper(run_at=run_at)
-    return scraper.run()

@@ -30,27 +30,28 @@ class BookConfig:
     stage_rel: str      # "stage/draftkings/moneyline.parquet"
     aliases_rel: str    # "draftkings/player_aliases.yaml"
     matcher_class: str  # "DraftKingsOddsMatcher"
+    scraper_class: str  # "DraftKingsOddsScraper"
 
 
 BOOK_REGISTRY: list[BookConfig] = [
     BookConfig("dk", "DK", "DraftKings", "draftkings", "dk_event_id",
                "stage/draftkings/moneyline.parquet", "draftkings/player_aliases.yaml",
-               "DraftKingsOddsMatcher"),
+               "DraftKingsOddsMatcher", "DraftKingsOddsScraper"),
     BookConfig("br", "BR", "BetRivers", "betrivers", "br_event_id",
                "stage/betrivers/moneyline.parquet", "betrivers/player_aliases.yaml",
-               "BetRiversOddsMatcher"),
+               "BetRiversOddsMatcher", "BetRiversOddsScraper"),
     BookConfig("mgm", "MGM", "BetMGM", "betmgm", "mgm_event_id",
                "stage/betmgm/moneyline.parquet", "betmgm/player_aliases.yaml",
-               "BetMGMOddsMatcher"),
+               "BetMGMOddsMatcher", "BetMGMOddsScraper"),
     BookConfig("b365", "B365", "Bet365", "bet365", "b365_event_id",
                "stage/bet365/moneyline.parquet", "bet365/player_aliases.yaml",
-               "Bet365OddsMatcher"),
+               "Bet365OddsMatcher", "Bet365OddsScraper"),
     BookConfig("fd", "FD", "FanDuel", "fanduel", "fd_event_id",
                "stage/fanduel/moneyline.parquet", "fanduel/player_aliases.yaml",
-               "FanDuelOddsMatcher"),
+               "FanDuelOddsMatcher", "FanDuelOddsScraper"),
     BookConfig("czr", "CZR", "Caesars", "caesars", "czr_event_id",
                "stage/caesars/moneyline.parquet", "caesars/player_aliases.yaml",
-               "CaesarsOddsMatcher"),
+               "CaesarsOddsMatcher", "CaesarsOddsScraper"),
 ]
 
 logger = logging.getLogger(__name__)
@@ -1634,7 +1635,8 @@ def _fetch_book_quiet(book: BookConfig, run_at=None) -> int:
     import importlib
 
     mod = importlib.import_module(f"mvp.{book.domain}.odds")
-    return mod.fetch_and_save(run_at=run_at)
+    scraper = getattr(mod, book.scraper_class)(run_at=run_at)
+    return scraper.run()
 
 
 def cmd_live(args: argparse.Namespace) -> int:

@@ -539,7 +539,3 @@ class Bet365OddsScraper(BaseJob):
         return n
 
 
-def fetch_and_save(run_at=None) -> int:
-    """Full flow: fetch, stage, consolidate."""
-    scraper = Bet365OddsScraper(run_at=run_at)
-    return scraper.run()

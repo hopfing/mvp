@@ -493,7 +493,3 @@ class FanDuelOddsScraper(BaseExtractor):
         return n
 
 
-def fetch_and_save(run_at=None) -> int:
-    """Module-level entry point invoked by the live pipeline."""
-    scraper = FanDuelOddsScraper(run_at=run_at)
-    return scraper.run()

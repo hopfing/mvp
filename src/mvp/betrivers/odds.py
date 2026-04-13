@@ -338,8 +338,8 @@ class BetRiversOddsScraper(BaseExtractor):
         out_path = self.build_path("stage", "moneyline.parquet")
         return self.save_parquet(df, out_path)
 
-    def run(self) -> int:
-        """Full flow: fetch raw, stage, consolidate."""
+    def _run_moneyline(self) -> int:
+        """Moneyline via Kambi (existing pipeline)."""
         n = self.fetch_and_save_raw()
         self.stage()
         self.consolidate()
@@ -518,21 +518,18 @@ class BetRiversOddsScraper(BaseExtractor):
         out_path = self.build_path("stage", "all_markets.parquet")
         return self.save_parquet(df, out_path)
 
-    def run_all(self) -> int:
-        """Fetch all market types via site API."""
+    def _run_all_markets(self) -> int:
+        """All markets via site API."""
         n = self.fetch_and_save_all_raw()
         self.stage_all()
         self.consolidate_all()
         return n
 
-
-# Module-level convenience for CLI
-def fetch_and_save(run_at=None) -> int:
-    """Full flow: fetch, stage, consolidate all market types."""
-    scraper = BetRiversOddsScraper(run_at=run_at)
-    n_ml = scraper.run()
-    n_all = scraper.run_all()
-    return n_ml + n_all
+    def run(self) -> int:
+        """Full flow: moneyline + all markets."""
+        n_ml = self._run_moneyline()
+        n_all = self._run_all_markets()
+        return n_ml + n_all
 
 
 if __name__ == "__main__":

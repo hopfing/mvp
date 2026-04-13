@@ -368,26 +368,19 @@ class DraftKingsOddsScraper(BaseExtractor):
         out_path = self.build_path("stage", f"{market}.parquet")
         return self.save_parquet(df, out_path)
 
-    def run(self, market: str = "moneyline") -> int:
-        """Full flow: fetch raw, stage, consolidate."""
+    def _run_market(self, market: str) -> int:
+        """Full flow for a single market type."""
         n = self.fetch_and_save_raw(market=market)
         self.stage(market=market)
         self.consolidate(market=market)
         return n
 
-    def run_all(self) -> int:
+    def run(self) -> int:
         """Fetch all market types."""
         total = 0
         for market in SUBCATEGORIES:
-            total += self.run(market=market)
+            total += self._run_market(market)
         return total
-
-
-# Module-level convenience for CLI
-def fetch_and_save(run_at=None) -> int:
-    """Full flow: fetch, stage, consolidate all market types."""
-    scraper = DraftKingsOddsScraper(run_at=run_at)
-    return scraper.run_all()
 
 
 if __name__ == "__main__":
