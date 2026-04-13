@@ -158,9 +158,16 @@ def _style_breakdown(df: pl.DataFrame, label_col: str, st) -> None:
             return "color: #e74c3c"
         return ""
 
+    pdf = display.to_pandas()
+
+    def _bold_all_row(row):
+        if row[label_col] == "All":
+            return ["font-weight: bold; background-color: rgba(255,255,255,0.08)"] * len(row)
+        return [""] * len(row)
+
     styled = (
-        display.to_pandas()
-        .style
+        pdf.style
+        .apply(_bold_all_row, axis=1)
         .applymap(_color_negative, subset=["P&L", "ROI %"])
         .format({
             "Stake": "${:,.2f}", "P&L": "${:+,.2f}",
@@ -173,6 +180,7 @@ def _style_breakdown(df: pl.DataFrame, label_col: str, st) -> None:
 def _render_breakdown(
     bets: pl.DataFrame, col: str, label: str, st,
     sort_order: list[str] | None = None,
+    all_row: bool = False,
 ) -> None:
     """Aggregate by col, optionally sort by a fixed order, and render."""
     agg = _aggregate_by(bets, col).rename({col: label})
@@ -183,6 +191,11 @@ def _render_breakdown(
         ).sort("_sort").drop("_sort")
     else:
         agg = agg.sort(label)
+    if all_row:
+        totals = _aggregate_by(
+            bets.with_columns(pl.lit("All").alias(col)), col,
+        ).rename({col: label})
+        agg = pl.concat([totals, agg])
     _style_breakdown(agg, label, st)
 
 
@@ -509,14 +522,16 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
     st.dataframe(styled, use_container_width=True, hide_index=True)
 
     # --- Performance Breakdowns ---
-    st.subheader("By Circuit")
-    _render_breakdown(bets, "circuit", "Circuit", st)
-
-    st.subheader("By Round")
-    _render_breakdown(
-        bets, "round", "Round", st,
-        sort_order=["Q1", "Q2", "R128", "R64", "R32", "R16", "QF", "SF", "F"],
-    )
+    round_order = ["Q1", "Q2", "R128", "R64", "R32", "R16", "QF", "SF", "F"]
+    for circuit_val, circuit_label in [("tour", "Tour"), ("chal", "Challenger")]:
+        circuit_bets = bets.filter(pl.col("circuit") == circuit_val)
+        if len(circuit_bets) == 0:
+            continue
+        st.subheader(circuit_label)
+        _render_breakdown(
+            circuit_bets, "round", "Round", st,
+            sort_order=round_order, all_row=True,
+        )
 
     st.subheader("By Book")
     _render_breakdown(bets, "book", "Book", st)
