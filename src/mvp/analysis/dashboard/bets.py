@@ -120,6 +120,102 @@ def _aggregate_periods(bets: pl.DataFrame, granularity: str) -> pl.DataFrame:
     return grouped
 
 
+def _aggregate_by(bets: pl.DataFrame, col: str) -> pl.DataFrame:
+    """Group bets by a categorical column and compute stats."""
+    return (
+        bets.group_by(col)
+        .agg(
+            pl.len().alias("Bets"),
+            (pl.col("bet_result") == "W").sum().cast(pl.Int64).alias("W"),
+            (pl.col("bet_result") == "L").sum().cast(pl.Int64).alias("L"),
+            (pl.col("bet_result") == "V").sum().cast(pl.Int64).alias("V"),
+            pl.col("stake").cast(pl.Float64, strict=False).sum().alias("Stake"),
+            pl.col("net").cast(pl.Float64, strict=False).sum().alias("P&L"),
+        )
+        .with_columns(
+            pl.when(pl.col("W") + pl.col("L") > 0)
+            .then((pl.col("W") / (pl.col("W") + pl.col("L")) * 100).round(1))
+            .otherwise(None)
+            .alias("Win %"),
+            pl.when(pl.col("Stake") > 0)
+            .then((pl.col("P&L") / pl.col("Stake") * 100).round(1))
+            .otherwise(None)
+            .alias("ROI %"),
+        )
+        .with_columns(pl.col("Stake").round(2), pl.col("P&L").round(2))
+    )
+
+
+def _style_breakdown(df: pl.DataFrame, label_col: str, st) -> None:
+    """Apply standard styling and render a breakdown table."""
+    display = df.select(
+        pl.col(label_col),
+        "Bets", "W", "L", "V", "Win %", "Stake", "P&L", "ROI %",
+    )
+
+    def _color_negative(val):
+        if isinstance(val, (int, float)) and val < 0:
+            return "color: #e74c3c"
+        return ""
+
+    styled = (
+        display.to_pandas()
+        .style
+        .applymap(_color_negative, subset=["P&L", "ROI %"])
+        .format({
+            "Stake": "${:,.2f}", "P&L": "${:+,.2f}",
+            "Win %": "{:.1f}%", "ROI %": "{:+.1f}%",
+        })
+    )
+    st.dataframe(styled, use_container_width=True, hide_index=True)
+
+
+def _render_breakdown(
+    bets: pl.DataFrame, col: str, label: str, st,
+    sort_order: list[str] | None = None,
+) -> None:
+    """Aggregate by col, optionally sort by a fixed order, and render."""
+    agg = _aggregate_by(bets, col).rename({col: label})
+    if sort_order:
+        order_map = {v: i for i, v in enumerate(sort_order)}
+        agg = agg.with_columns(
+            pl.col(label).replace_strict(order_map, default=999).alias("_sort")
+        ).sort("_sort").drop("_sort")
+    else:
+        agg = agg.sort(label)
+    _style_breakdown(agg, label, st)
+
+
+def _render_odds_breakdown(bets: pl.DataFrame, st) -> None:
+    """Bucket bet_odds into bands and render breakdown."""
+    from mvp.analysis.scanner import ODDS_BREAKS, ODDS_LABELS
+
+    odds = bets.with_columns(
+        pl.col("bet_odds").cast(pl.Float64, strict=False).alias("_odds_f")
+    ).filter(pl.col("_odds_f").is_not_null())
+
+    if len(odds) == 0:
+        st.info("No odds data available.")
+        return
+
+    # Build chained when/then from scanner's ODDS_BREAKS and ODDS_LABELS
+    expr = pl.when(pl.col("_odds_f") < ODDS_BREAKS[1]).then(pl.lit(ODDS_LABELS[0]))
+    for i in range(1, len(ODDS_BREAKS) - 1):
+        expr = expr.when(pl.col("_odds_f") < ODDS_BREAKS[i + 1]).then(
+            pl.lit(ODDS_LABELS[i])
+        )
+    expr = expr.otherwise(pl.lit(ODDS_LABELS[-1]))
+
+    odds = odds.with_columns(expr.alias("odds_band"))
+
+    agg = _aggregate_by(odds, "odds_band").rename({"odds_band": "Odds Band"})
+    order_map = {v: i for i, v in enumerate(ODDS_LABELS)}
+    agg = agg.with_columns(
+        pl.col("Odds Band").replace_strict(order_map, default=999).alias("_sort")
+    ).sort("_sort").drop("_sort")
+    _style_breakdown(agg, "Odds Band", st)
+
+
 def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
     """Render the Bet Performance page."""
     import streamlit as st
@@ -411,3 +507,19 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
         .format({"Stake": "${:,.2f}", "P&L": "${:+,.2f}", "Win %": "{:.1f}%", "ROI %": "{:+.1f}%"})
     )
     st.dataframe(styled, use_container_width=True, hide_index=True)
+
+    # --- Performance Breakdowns ---
+    st.subheader("By Circuit")
+    _render_breakdown(bets, "circuit", "Circuit", st)
+
+    st.subheader("By Round")
+    _render_breakdown(
+        bets, "round", "Round", st,
+        sort_order=["Q1", "Q2", "R128", "R64", "R32", "R16", "QF", "SF", "F"],
+    )
+
+    st.subheader("By Book")
+    _render_breakdown(bets, "book", "Book", st)
+
+    st.subheader("By Odds Band")
+    _render_odds_breakdown(bets, st)
