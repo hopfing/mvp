@@ -589,6 +589,14 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         "--refresh", action="store_true", help="Rebuild matches.parquet before running"
     )
 
+    serve_train_parser = subparsers.add_parser(
+        "serve-train",
+        help="Train a score-state-dependent serve model from a ScoreStateConfig (looks in projections/)",
+    )
+    serve_train_parser.add_argument(
+        "config", type=str, help="Config name or path (e.g., 'score_state_baseline')"
+    )
+
     # analysis subcommand
     analysis_parser = subparsers.add_parser(
         "analysis", help="Build analysis dataset with odds, CLV, and simulations"
@@ -1260,6 +1268,25 @@ def _is_iid_discovery(config_path: Path) -> bool:
     return isinstance(raw.get("serve_model"), dict)
 
 
+def _is_serve_discovery(config_path: Path) -> bool:
+    """Detect whether a discovery config targets the score-state serve model.
+
+    Score-state discovery configs carry `features.candidate_point_level_features`
+    (or `features.base_point_level_features`) — unique to this config type, no
+    collision with classification / projection / IID discovery.
+    """
+    import yaml
+
+    with open(config_path) as f:
+        raw = yaml.safe_load(f)
+    features = raw.get("features") or {}
+    if isinstance(features.get("candidate_point_level_features"), list):
+        return True
+    if isinstance(features.get("base_point_level_features"), list):
+        return True
+    return False
+
+
 def cmd_experiment(args: argparse.Namespace) -> int:
     """Run automated feature discovery."""
     config_path = resolve_config_path(args.config, EXPERIMENT_DIR)
@@ -1301,6 +1328,8 @@ def cmd_experiment(args: argparse.Namespace) -> int:
 
     if _is_iid_discovery(config_path):
         return _cmd_experiment_iid(args, config_path, checkpoint_path)
+    if _is_serve_discovery(config_path):
+        return _cmd_experiment_serve(args, config_path, checkpoint_path)
     if _is_projection_discovery(config_path):
         return _cmd_experiment_projection(args, config_path, checkpoint_path)
     return _cmd_experiment_classification(args, config_path, checkpoint_path)
@@ -1404,6 +1433,71 @@ def _cmd_experiment_iid(
         print(f"Run with: poetry run py -m mvp iid-project {output_path.stem}")
     else:
         print("\nNo features selected - no config saved")
+
+    return 0
+
+
+def _cmd_experiment_serve(
+    args: argparse.Namespace, config_path: Path, checkpoint_path: Path,
+) -> int:
+    """Run score-state serve model forward selection."""
+    import yaml as _yaml
+
+    from mvp.projection.iid.serve_discovery import ServeDiscoverySelector
+
+    output_name = args.output
+    if not output_name.endswith(".yaml"):
+        output_name = f"{output_name}.yaml"
+    output_path = PROJECTION_DIR / output_name
+
+    selector = ServeDiscoverySelector(
+        config_path=config_path,
+        checkpoint_path=checkpoint_path,
+        run_name=output_path.stem,
+    )
+    result = selector.run()
+
+    print("\n" + "=" * 70)
+    print(f"{'SCORE-STATE SERVE DISCOVERY':^70}")
+    print("=" * 70)
+    print(f"Selected match-level ({len(result.selected_match_level)}):")
+    for f in result.selected_match_level:
+        print(f"  - {f}")
+    print(f"\nSelected point-level ({len(result.selected_point_level)}):")
+    for f in result.selected_point_level:
+        print(f"  - {f}")
+    print("\nFS progression:")
+    for r in result.rounds:
+        if r.round_idx == 0:
+            print(f"  [base]            score={r.score:.6f}")
+        else:
+            print(f"  +{r.feature_added:30s} [{r.grain}]  score={r.score:.6f}  Δ={r.delta:+.6f}")
+
+    print("\nFinal metric comparison across model forms:")
+    for ff in result.final_forms:
+        metric_line = ", ".join(f"{k}={v:.4f}" for k, v in ff.metrics.items())
+        print(f"  {ff.form:10s}  {metric_line}")
+
+    # Emit ScoreStateConfig using the best-performing form by scorer's metric.
+    best_ff = min(
+        result.final_forms,
+        key=lambda ff: ff.metrics.get(selector.config.metric, float("inf"))
+        if selector.config.metric in ("log_loss", "brier_score")
+        else -ff.metrics.get(selector.config.metric, float("-inf")),
+    )
+    promoted_params = selector.config.model_params.get(best_ff.form, {})
+    emitted = selector.config.to_score_state_config_dict(
+        selected_match_level=result.selected_match_level,
+        selected_point_level=result.selected_point_level,
+        model_type=best_ff.form,
+        model_params=promoted_params,
+    )
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "w") as f:
+        _yaml.safe_dump(emitted, f, sort_keys=False)
+    print(f"\nSaved config to: {output_path}")
+    print(f"Run with: poetry run py -m mvp serve-train {output_path.stem}")
 
     return 0
 
@@ -1627,6 +1721,37 @@ def cmd_iid_project(args: argparse.Namespace) -> int:
     results = runner.run()
 
     print_iid_projection_summary(results, name=runner.run_name)
+    return 0
+
+
+def cmd_serve_train(args: argparse.Namespace) -> int:
+    """Train a score-state-dependent serve model."""
+    from mvp.projection.iid.score_state_runner import ScoreStateRunner
+
+    config_path = resolve_config_path(args.config, PROJECTION_DIR)
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config file not found: {args.config} (tried {config_path})")
+
+    runner = ScoreStateRunner(config_path=config_path)
+    results = runner.run()
+
+    agg = results["aggregate_metrics"]
+    print(f"\n=== Score-state serve model ({config_path.stem}) ===")
+    print(f"Training rows: {results['n_train_rows']:,}")
+    print(f"Features ({len(results['feature_cols'])}): {', '.join(results['feature_cols'])}")
+    print("\nAggregate metrics across folds:")
+    for k in sorted(agg.keys()):
+        print(f"  {k:20s} {agg[k]:.4f}")
+    coefs = results["coef_summary"]
+    if coefs:
+        if "coefs" in coefs:
+            print(f"\nFinal-fit logistic coefficients (intercept={coefs['intercept']:.4f}):")
+            for name, c in sorted(coefs["coefs"].items(), key=lambda kv: abs(kv[1]), reverse=True):
+                print(f"  {name:40s} {c:+.4f}")
+        elif "feature_importances" in coefs:
+            print("\nFinal-fit XGBoost feature importances:")
+            for name, imp in sorted(coefs["feature_importances"].items(), key=lambda kv: kv[1], reverse=True):
+                print(f"  {name:40s} {imp:.4f}")
     return 0
 
 
@@ -2033,6 +2158,8 @@ def main(args: list[str] | None = None) -> int:
         return cmd_project(parsed)
     elif parsed.command == "iid-project":
         return cmd_iid_project(parsed)
+    elif parsed.command == "serve-train":
+        return cmd_serve_train(parsed)
     elif parsed.command == "analysis":
         return cmd_analysis(parsed)
 

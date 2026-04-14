@@ -60,6 +60,113 @@ class IIDProjectionConfig(BaseModel):
             return cls.from_yaml(f.read())
 
 
+class ScoreStateModelConfig(BaseModel):
+    """Score-state-dependent serve model configuration.
+
+    Operates at point grain rather than match grain. Feature inputs mix
+    match-level (broadcast to every point via server/returner perspective)
+    and point-level (varying per point). Output: P(point_won_by_server | features).
+    """
+
+    type: Literal["logistic", "xgboost"] = "logistic"
+    match_level_features: list[str] = []  # FeatureEngine specs, server-perspective
+    point_level_features: list[str] = []  # columns from match_beats_points.parquet
+    params: dict[str, Any] = {}
+
+
+class ScoreStateConfig(BaseModel):
+    """Training config for a standalone score-state serve model.
+
+    Data selection, feature set, model form, validation. Used by
+    `ScoreStateRunner` for training runs (not chain integration — that comes
+    in Phase 3).
+    """
+
+    description: str | None = None
+    data: DataConfig
+    model: ScoreStateModelConfig = ScoreStateModelConfig()
+    validation: ValidationConfig = ValidationConfig()
+
+    @classmethod
+    def from_yaml(cls, yaml_str: str) -> "ScoreStateConfig":
+        data: dict[str, Any] = yaml.safe_load(yaml_str)
+        data.pop("name", None)
+        return cls.model_validate(data)
+
+    @classmethod
+    def from_file(cls, path: str | Path) -> "ScoreStateConfig":
+        with open(path) as f:
+            return cls.from_yaml(f.read())
+
+
+class ServeDiscoveryFeaturesConfig(BaseModel):
+    """Candidate pool + base set for score-state serve forward selection."""
+
+    # Base sets: always included in every candidate model
+    base_match_level_features: list[str] = []
+    base_point_level_features: list[str] = []
+    # Candidate pools: FS iterates over these looking for additions that improve the score
+    candidate_match_level_features: list[str] = []
+    candidate_point_level_features: list[str] = []
+    max_features: int | None = None  # cap on total features selected
+
+
+class ServeDiscoveryConfig(BaseModel):
+    """Forward-selection discovery for the score-state serve model.
+
+    Scores candidates using a single model form (default: logistic for speed).
+    Optionally re-trains all `model_forms` on the selected feature set at the
+    end to compare forms.
+    """
+
+    description: str | None = None
+    data: DataConfig
+    validation: ValidationConfig = ValidationConfig()
+    features: ServeDiscoveryFeaturesConfig = ServeDiscoveryFeaturesConfig()
+    # Model form used to score candidates during FS (kept simple/fast).
+    scoring_model: ScoreStateModelConfig = ScoreStateModelConfig(type="logistic")
+    # All forms to compare on the final selected feature set (inherits params from model_params
+    # if present, else library defaults).
+    model_forms: list[Literal["logistic", "xgboost"]] = ["logistic", "xgboost"]
+    model_params: dict[str, dict[str, Any]] = {}  # per-form params overrides
+    metric: Literal["log_loss", "brier_score", "roc_auc"] = "log_loss"
+    selection_method: Literal["forward"] = "forward"
+    min_delta: float = 0.0001  # minimum fractional improvement to accept a candidate
+
+    @classmethod
+    def from_yaml(cls, yaml_str: str) -> "ServeDiscoveryConfig":
+        data: dict[str, Any] = yaml.safe_load(yaml_str)
+        data.pop("name", None)
+        return cls.model_validate(data)
+
+    @classmethod
+    def from_file(cls, path: str | Path) -> "ServeDiscoveryConfig":
+        with open(path) as f:
+            return cls.from_yaml(f.read())
+
+    def to_score_state_config_dict(
+        self,
+        selected_match_level: list[str],
+        selected_point_level: list[str],
+        model_type: str = "logistic",
+        model_params: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Emit a runnable ScoreStateConfig-compatible dict from FS output."""
+        return {
+            "description": (
+                self.description or "Score-state serve model from forward-selected features"
+            ),
+            "data": self.data.model_dump(),
+            "model": {
+                "type": model_type,
+                "match_level_features": selected_match_level,
+                "point_level_features": selected_point_level,
+                "params": model_params or {},
+            },
+            "validation": self.validation.model_dump(),
+        }
+
+
 class IIDDiscoveryFeaturesConfig(BaseModel):
     """Forward-selection candidate pool configuration."""
 
