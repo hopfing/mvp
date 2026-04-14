@@ -5,6 +5,7 @@ import argparse
 import logging
 from datetime import datetime
 
+from mvp.atptour.aggregators.match_beats_points import MatchBeatsPointsAggregator
 from mvp.atptour.discovery import TournamentDiscovery
 from mvp.atptour.pipeline import (
     PlayerDataResult,
@@ -43,6 +44,12 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
     backfill_parser.add_argument("--tid", nargs="+", type=str, metavar="TID")
     backfill_parser.add_argument("--circuit", choices=["tour", "chal"])
 
+    # aggregate-points
+    subparsers.add_parser(
+        "aggregate-points",
+        help="Aggregate match_beats point-level data with reconstructed score state",
+    )
+
     parsed = parser.parse_args(args)
 
     if parsed.command == "backfill":
@@ -63,6 +70,8 @@ def main() -> None:
 
     if args.command == "backfill":
         cmd_backfill(args)
+    elif args.command == "aggregate-points":
+        cmd_aggregate_points()
 
 
 def _resolve_backfill_tournaments(
@@ -87,6 +96,15 @@ def _resolve_backfill_tournaments(
         return [(t, y, True, c) for t, y, c in triples]
     active_tids = {t for t, _ in discovery.get_active_tournaments()}
     return [(t, y, t not in active_tids, c) for t, y, c in triples]
+
+
+def cmd_aggregate_points() -> None:
+    """Aggregate match_beats to point-level with reconstructed score state."""
+    result = MatchBeatsPointsAggregator().run()
+    if result is None:
+        logger.info("Points aggregation produced no output")
+        return
+    logger.info("Points aggregation complete: %d rows", len(result))
 
 
 def cmd_backfill(args) -> None:
