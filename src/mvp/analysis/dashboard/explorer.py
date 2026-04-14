@@ -20,6 +20,9 @@ _CROSS_BOOK_CLOSE = {
 
 _EDGE_SLICES = [("All", None), ("Edge", True), ("No Edge", False)]
 
+_PROB_BREAKS = [0.6, 0.7, 0.8, 0.9]
+_PROB_LABELS = ["50-60%", "60-70%", "70-80%", "80-90%", "90-100%"]
+
 
 def _filter_resolved(ds: pl.DataFrame) -> pl.DataFrame:
     """Filter to resolved predictions with available close odds."""
@@ -421,6 +424,17 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
     odds_expr = odds_expr.otherwise(pl.lit(ODDS_LABELS[-1]))
     resolved = resolved.with_columns(odds_expr.alias("odds_band"))
 
+    # Pre-compute probability band column
+    if "pred_prob" in resolved.columns:
+        p = pl.col("pred_prob")
+        prob_expr = pl.when(p < _PROB_BREAKS[0]).then(pl.lit(_PROB_LABELS[0]))
+        for i in range(len(_PROB_BREAKS) - 1):
+            prob_expr = prob_expr.when(p < _PROB_BREAKS[i + 1]).then(
+                pl.lit(_PROB_LABELS[i + 1])
+            )
+        prob_expr = prob_expr.otherwise(pl.lit(_PROB_LABELS[-1]))
+        resolved = resolved.with_columns(prob_expr.alias("prob_band"))
+
     circuits = [
         (val, label)
         for val, label in [("tour", "Tour"), ("chal", "Challenger")]
@@ -431,15 +445,24 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
         val: resolved.filter(pl.col("circuit") == val) for val, _ in circuits
     }
 
-    # By Surface
-    if "surface" in resolved.columns:
-        st.subheader("By Surface")
+    # By Probability Band
+    if "prob_band" in resolved.columns:
+        st.subheader("By Probability Band")
         for val, label in circuits:
             st.markdown(f"**{label}**")
-            table = _aggregate_by(circuit_dfs[val], "surface").rename(
-                {"surface": "Surface"}
-            )
-            _style_breakdown(table, "Surface", st)
+            table = _aggregate_by(
+                circuit_dfs[val], "prob_band", sort_order=_PROB_LABELS
+            ).rename({"prob_band": "Probability"})
+            _style_breakdown(table, "Probability", st)
+
+    # By Odds Band
+    st.subheader("By Odds Band")
+    for val, label in circuits:
+        st.markdown(f"**{label}**")
+        table = _aggregate_by(
+            circuit_dfs[val], "odds_band", sort_order=ODDS_LABELS
+        ).rename({"odds_band": "Odds Band"})
+        _style_breakdown(table, "Odds Band", st)
 
     # By Round
     if "round" in resolved.columns:
@@ -452,6 +475,16 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
             ).rename({"round": "Round"})
             _style_breakdown(table, "Round", st)
 
+    # By Surface
+    if "surface" in resolved.columns:
+        st.subheader("By Surface")
+        for val, label in circuits:
+            st.markdown(f"**{label}**")
+            table = _aggregate_by(circuit_dfs[val], "surface").rename(
+                {"surface": "Surface"}
+            )
+            _style_breakdown(table, "Surface", st)
+
     # By Book (per-book closing odds)
     if books:
         st.subheader("By Book")
@@ -459,12 +492,3 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
             st.markdown(f"**{label}**")
             table = _aggregate_books(circuit_dfs[val], books)
             _style_breakdown(table, "Book", st)
-
-    # By Odds Band
-    st.subheader("By Odds Band")
-    for val, label in circuits:
-        st.markdown(f"**{label}**")
-        table = _aggregate_by(
-            circuit_dfs[val], "odds_band", sort_order=ODDS_LABELS
-        ).rename({"odds_band": "Odds Band"})
-        _style_breakdown(table, "Odds Band", st)
