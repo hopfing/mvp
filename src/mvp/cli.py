@@ -1271,14 +1271,20 @@ def _is_iid_discovery(config_path: Path) -> bool:
 def _is_serve_discovery(config_path: Path) -> bool:
     """Detect whether a discovery config targets the score-state serve model.
 
-    Score-state discovery configs carry `features.candidate_point_level_features`
-    (or `features.base_point_level_features`) — unique to this config type, no
-    collision with classification / projection / IID discovery.
+    Score-state discovery configs carry a top-level `scoring_model` or
+    `model_forms` key — both unique to this config type, no collision with
+    classification / projection / IID discovery. Also detects the per-feature
+    configuration keys (`candidate_point_level_features`,
+    `base_point_level_features`) as a fallback.
     """
     import yaml
 
     with open(config_path) as f:
         raw = yaml.safe_load(f)
+    if isinstance(raw.get("scoring_model"), dict):
+        return True
+    if isinstance(raw.get("model_forms"), list):
+        return True
     features = raw.get("features") or {}
     if isinstance(features.get("candidate_point_level_features"), list):
         return True

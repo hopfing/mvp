@@ -100,14 +100,26 @@ class ScoreStateConfig(BaseModel):
 
 
 class ServeDiscoveryFeaturesConfig(BaseModel):
-    """Candidate pool + base set for score-state serve forward selection."""
+    """Candidate pool + base set for score-state serve forward selection.
+
+    Empty candidate lists default to the full pool — match-level candidates
+    come from the registered feature engine (matching classification /
+    projection / IID FS behavior); point-level candidates come from the
+    `match_beats_points.parquet` raw columns plus the registered derived
+    features in `score_state_features.DERIVED_POINT_FEATURES`.
+    """
 
     # Base sets: always included in every candidate model
     base_match_level_features: list[str] = []
     base_point_level_features: list[str] = []
-    # Candidate pools: FS iterates over these looking for additions that improve the score
+    # Candidate pools: FS iterates over these looking for additions that improve the score.
+    # Empty list → expand to full pool.
     candidate_match_level_features: list[str] = []
     candidate_point_level_features: list[str] = []
+    # Window sizes passed through to get_all_feature_specs when expanding the
+    # default match-level pool. None = use the shared DEFAULT_day_windows
+    # ([0, 7, 14, 30, 60, 90, 180, 365]) from model.discovery.discover.
+    window_sizes: list[int] | None = None
     max_features: int | None = None  # cap on total features selected
 
 

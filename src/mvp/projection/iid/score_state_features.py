@@ -141,6 +141,34 @@ DERIVED_POINT_FEATURES: dict[str, Callable[[], pl.Expr]] = {
 }
 
 
+# Raw point-level columns from match_beats_points.parquet that are usable as
+# model features directly (boolean or numeric). Exposed here so the default
+# "full pool" expansion in serve_discovery can pick them up without hard-coding.
+RAW_POINT_FEATURES: tuple[str, ...] = (
+    "is_break_point",
+    "is_set_point",
+    "is_match_point",
+    "is_tiebreak",
+    "set_score_server_games",
+    "set_score_returner_games",
+    "sets_won_server",
+    "sets_won_returner",
+    "serve",
+    "set_num",
+    "game_num",
+    "point_num",
+)
+
+
+def default_point_level_candidate_pool() -> list[str]:
+    """Full pool of point-level candidate features (raw + derived).
+
+    Mirrors the "empty include → iterate registered features" convention
+    used by classification / projection FS.
+    """
+    return list(RAW_POINT_FEATURES) + list(DERIVED_POINT_FEATURES.keys())
+
+
 def add_derived_point_features(df: pl.DataFrame, feature_names: list[str]) -> pl.DataFrame:
     """Add the requested derived columns to `df`. Unknown names raise ValueError.
 
