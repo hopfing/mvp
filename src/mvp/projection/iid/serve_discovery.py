@@ -1,10 +1,12 @@
 """Forward-selection discovery for the score-state serve model.
 
-Precomputes the full feature matrix once (match-level from FeatureEngine +
-point-level from match_beats_points + derived), then iteratively adds the
-candidate feature whose inclusion most improves the CV metric. After FS
-terminates, optionally re-trains all configured `model_forms` on the final
-feature set for comparison.
+Caches all match-level candidate features to disk once, then iteratively adds
+the candidate feature whose inclusion most improves the CV metric. Match-level
+candidates are loaded lazily from cache one at a time — only the
+currently-evaluated feature is joined to the base point-grain matrix, keeping
+peak memory proportional to (rows × |selected| + |point_features|) rather than
+(rows × |pool|). After FS terminates, optionally re-trains all configured
+`model_forms` on the final feature set for comparison.
 """
 
 import logging
@@ -99,14 +101,18 @@ class ServeDiscoverySelector:
             point_pool = default_point_level_candidate_pool()
             logger.info("candidate_point_level_features empty → using full default pool (%d specs)", len(point_pool))
 
-        df = self._build_full_matrix(
-            base_match=selected_match, candidate_match=match_pool,
-            base_point=selected_point, candidate_point=point_pool,
+        # Phase A: cache all match-level specs to disk (memory-bounded batches).
+        # Phase B: build the point-grain base matrix with only base match features.
+        # Match-level candidates are loaded lazily one at a time during FS.
+        engine, cache_key = self._pre_cache_all(base_match=selected_match, candidate_match=match_pool)
+        base_df, slim_matches = self._build_base_matrix(
+            engine, cache_key,
+            base_match=selected_match, base_point=selected_point, candidate_point=point_pool,
         )
-        logger.info("FS matrix: %d rows, %d columns", len(df), len(df.columns))
+        logger.info("Base matrix: %d rows, %d columns", len(base_df), len(base_df.columns))
 
         splitter = self._make_splitter()
-        splits = list(splitter.split(df))
+        splits = list(splitter.split(base_df))
         logger.info("FS splits: %d folds", len(splits))
 
         candidate_match = [c for c in match_pool if c not in selected_match]
@@ -118,7 +124,7 @@ class ServeDiscoverySelector:
         partial_round_scores: dict[str, float] = {}
 
         if cp is not None:
-            # Replay completed rounds
+            # Replay completed rounds — extend base_df with any restored match features.
             for entry in cp.completed_rounds:
                 feat = entry["feature"]
                 grain = entry["grain"]
@@ -127,6 +133,7 @@ class ServeDiscoverySelector:
                     selected_match.append(feat)
                     if feat in candidate_match:
                         candidate_match.remove(feat)
+                    base_df = self._extend_df_with_match_feature(base_df, slim_matches, engine, cache_key, feat)
                 else:
                     selected_point.append(feat)
                     if feat in candidate_point:
@@ -150,8 +157,12 @@ class ServeDiscoverySelector:
                 len(rounds), current_score, len(partial_round_scores),
             )
         else:
-            current_score = self._score_cv(df, splits, selected_match, selected_point)
-            logger.info("Base-only CV %s = %.6f (%d features)", self.config.metric, current_score, len(selected_match) + len(selected_point))
+            if selected_match or selected_point:
+                current_score = self._score_cv(base_df, splits, selected_match, selected_point)
+                logger.info("Base-only CV %s = %.6f (%d features)", self.config.metric, current_score, len(selected_match) + len(selected_point))
+            else:
+                current_score = float("inf") if self.config.metric in ("log_loss", "brier_score") else float("-inf")
+                logger.info("No base features — starting from worst-case score")
             rounds.append(
                 FSRoundResult(
                     round_idx=0,
@@ -210,9 +221,10 @@ class ServeDiscoverySelector:
                     score = this_round_scores[cand]
                 else:
                     if grain == "match":
-                        score = self._score_cv(df, splits, selected_match + [cand], selected_point)
+                        extended = self._extend_df_with_match_feature(base_df, slim_matches, engine, cache_key, cand)
+                        score = self._score_cv(extended, splits, selected_match + [cand], selected_point)
                     else:
-                        score = self._score_cv(df, splits, selected_match, selected_point + [cand])
+                        score = self._score_cv(base_df, splits, selected_match, selected_point + [cand])
                     this_round_scores[cand] = score
                     if self.checkpoint_path:
                         self._save_checkpoint(
@@ -242,6 +254,7 @@ class ServeDiscoverySelector:
             if best_grain == "match":
                 selected_match.append(best_cand)
                 candidate_match.remove(best_cand)
+                base_df = self._extend_df_with_match_feature(base_df, slim_matches, engine, cache_key, best_cand)
             else:
                 selected_point.append(best_cand)
                 candidate_point.remove(best_cand)
@@ -280,11 +293,12 @@ class ServeDiscoverySelector:
         if self.checkpoint_path and self.checkpoint_path.exists():
             self.checkpoint_path.unlink()
 
-        # Final: train all configured forms on the selected feature set, report metrics
+        # Final: train all configured forms on the selected feature set, report metrics.
+        # base_df now contains all selected match features (added permanently during FS).
         final_forms: list[FinalFormResult] = []
         for form in self.config.model_forms:
             params = self.config.model_params.get(form, {})
-            metrics, coefs = self._final_train_eval(df, splits, selected_match, selected_point, form, params)
+            metrics, coefs = self._final_train_eval(base_df, splits, selected_match, selected_point, form, params)
             final_forms.append(FinalFormResult(form=form, metrics=metrics, coef_summary=coefs))
             logger.info("Final form %s: %s=%.6f", form, self.config.metric, metrics.get(self.config.metric, float("nan")))
 
@@ -293,7 +307,7 @@ class ServeDiscoverySelector:
             selected_point_level=selected_point,
             rounds=rounds,
             final_forms=final_forms,
-            n_train_rows=len(df),
+            n_train_rows=len(base_df),
         )
 
     def _load_checkpoint(self) -> SelectionCheckpoint | None:
@@ -424,25 +438,13 @@ class ServeDiscoverySelector:
             test_start=getattr(val, "test_start", None),
         )
 
-    def _build_full_matrix(
+    def _pre_cache_all(
         self,
         *,
         base_match: list[str],
         candidate_match: list[str],
-        base_point: list[str],
-        candidate_point: list[str],
-    ) -> pl.DataFrame:
-        """Build the point-grain training matrix.
-
-        Mirrors the classification / IID FS pattern:
-          1. ensure_cached(match_level_specs) — pre-cache match features.
-          2. Load a lightweight base df (matches) for filter application.
-          3. load_features_numpy — add feature columns from the cache.
-          4. Rename player_/opp_ → server_/returner_ and join to points.
-          5. Add derived point-level features.
-          6. Apply filters.
-        """
-        # All match-level specs needed: base + candidates + filter-referenced
+    ) -> tuple[FeatureEngine, str]:
+        """Cache all match-level specs to disk without loading them into memory."""
         all_match_specs: list[str] = []
         for spec in base_match + candidate_match:
             if spec not in all_match_specs:
@@ -451,22 +453,40 @@ class ServeDiscoverySelector:
             if spec not in all_match_specs:
                 all_match_specs.append(spec)
 
-        engine = FeatureEngine(matches_path=self.matches_path, cache_dir=self.cache_dir)
-
-        # Phase A: pre-cache match-level features (engine handles dependency resolution per-feature).
         extra_columns = ["circuit", "surface", "round", "best_of"]
         for col in self.config.data.filters:
             if col not in extra_columns:
                 extra_columns.append(col)
-        cache_key = engine.ensure_cached(all_match_specs, extra_columns=extra_columns)
 
-        # Phase B: lightweight base DataFrame for matches — just structural cols.
+        engine = FeatureEngine(matches_path=self.matches_path, cache_dir=self.cache_dir)
+        cache_key = engine.ensure_cached(all_match_specs, extra_columns=extra_columns)
+        return engine, cache_key
+
+    def _build_base_matrix(
+        self,
+        engine: FeatureEngine,
+        cache_key: str,
+        *,
+        base_match: list[str],
+        base_point: list[str],
+        candidate_point: list[str],
+    ) -> tuple[pl.DataFrame, pl.DataFrame]:
+        """Build the point-grain training matrix with only base match features loaded.
+
+        Returns:
+            (base_df, slim_matches) where slim_matches carries
+            (match_uid, player_id, opp_id) for per-candidate lazy loading.
+        """
+        extra_columns = ["circuit", "surface", "round", "best_of"]
+        for col in self.config.data.filters:
+            if col not in extra_columns:
+                extra_columns.append(col)
+
         structural_cols = ["match_uid", "player_id", "opp_id", "effective_match_date"] + extra_columns
         available = set(pl.scan_parquet(self.matches_path).collect_schema().names())
         structural_cols = [c for c in structural_cols if c in available]
         matches_df = pl.read_parquet(self.matches_path, columns=structural_cols)
 
-        # Date filter (applied here so we load features for only the relevant matches).
         dr = self.config.data.date_range
         if dr is not None:
             if dr.start is not None:
@@ -474,10 +494,15 @@ class ServeDiscoverySelector:
             if dr.end is not None:
                 matches_df = matches_df.filter(pl.col("effective_match_date") <= dr.end)
 
-        # Phase C: load match-level features from cache onto filtered matches df.
-        matches_df = engine.load_features_numpy(all_match_specs, matches_df, cache_key)
+        # Retain a slim copy (with player_id / opp_id) for per-candidate loading.
+        # Must be captured before the rename below.
+        slim_cols = [c for c in ["match_uid", "player_id", "opp_id"] if c in matches_df.columns]
+        slim_matches = matches_df.select(slim_cols)
 
-        # Rename player_*/opp_* → server_*/returner_* so the join matches point grain.
+        # Load only base match features from cache onto matches_df.
+        matches_df = engine.load_features_numpy(base_match, matches_df, cache_key)
+
+        # Rename player_*/opp_* → server_*/returner_* to align with point grain.
         renames = {"player_id": "server_id", "opp_id": "returner_id"}
         for col in matches_df.columns:
             if col.startswith("player_") and col != "player_id":
@@ -486,21 +511,15 @@ class ServeDiscoverySelector:
                 renames[col] = "returner_" + col[len("opp_"):]
         matches_df = matches_df.rename(renames)
 
-        # Phase D: load points and join match-level features on (match_uid, server_id, returner_id).
+        # Join match-level features to points.
         points = pl.read_parquet(self.points_path)
         logger.info("Loaded %d point rows", len(points))
-        # Drop any overlap so the join is clean; points and matches_df share match_uid and
-        # effective_match_date, among others.
         overlap = set(points.columns) & set(matches_df.columns) - {"match_uid", "server_id", "returner_id"}
         if overlap:
             matches_df = matches_df.drop(list(overlap))
-        joined = points.join(
-            matches_df,
-            on=["match_uid", "server_id", "returner_id"],
-            how="inner",
-        )
+        joined = points.join(matches_df, on=["match_uid", "server_id", "returner_id"], how="inner")
 
-        # Phase E: add draw_type literal (all points are singles by construction) + derived point features.
+        # Add draw_type literal + all point-level features (base + candidates).
         if "draw_type" not in joined.columns:
             joined = joined.with_columns(pl.lit("singles").alias("draw_type"))
         all_point_names: list[str] = list(base_point)
@@ -509,8 +528,52 @@ class ServeDiscoverySelector:
                 all_point_names.append(f)
         joined = add_derived_point_features(joined, all_point_names)
 
-        # Phase F: apply filters after features are loaded.
+        # Apply domain filters and target filter.
         joined = apply_filters(joined, self.config.data.filters)
         joined = joined.filter(pl.col("point_won_by_server").is_not_null())
 
-        return joined
+        return joined, slim_matches
+
+    def _extend_df_with_match_feature(
+        self,
+        df: pl.DataFrame,
+        slim_matches: pl.DataFrame,
+        engine: FeatureEngine,
+        cache_key: str,
+        spec: str,
+    ) -> pl.DataFrame:
+        """Load one match-level spec from cache and join its column(s) to df.
+
+        slim_matches carries (match_uid, player_id[, opp_id]) so that
+        load_features_numpy can join from cache. The result is renamed to the
+        server_/returner_ convention used in the point-grain df, then joined on
+        (match_uid, server_id, returner_id).
+        """
+        cand_df = engine.load_features_numpy([spec], slim_matches, cache_key)
+
+        renames: dict[str, str] = {}
+        for col in cand_df.columns:
+            if col == "player_id":
+                renames[col] = "server_id"
+            elif col == "opp_id":
+                renames[col] = "returner_id"
+            elif col.startswith("player_"):
+                renames[col] = "server_" + col[len("player_"):]
+            elif col.startswith("opp_"):
+                renames[col] = "returner_" + col[len("opp_"):]
+        if renames:
+            cand_df = cand_df.rename(renames)
+
+        join_key_list = [k for k in ["match_uid", "server_id", "returner_id"] if k in cand_df.columns]
+        extra_cols = [c for c in cand_df.columns if c not in set(join_key_list)]
+
+        # Drop any column that already exists in df (shouldn't happen, but guard).
+        to_drop = [c for c in extra_cols if c in df.columns]
+        if to_drop:
+            df = df.drop(to_drop)
+
+        return df.join(
+            cand_df.select(join_key_list + extra_cols),
+            on=["match_uid", "server_id", "returner_id"],
+            how="left",
+        )
