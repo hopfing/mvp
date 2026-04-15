@@ -120,7 +120,7 @@ class ServeDiscoveryFeaturesConfig(BaseModel):
     # default match-level pool. None = use the shared DEFAULT_day_windows
     # ([0, 7, 14, 30, 60, 90, 180, 365]) from model.discovery.discover.
     window_sizes: list[int] | None = None
-    max_features: int | None = None  # cap on total features selected
+    max_features: int | None = None  # cap on total selected features (base + FS additions)
 
 
 class ServeDiscoveryConfig(BaseModel):

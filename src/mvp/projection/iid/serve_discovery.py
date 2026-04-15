@@ -169,8 +169,8 @@ class ServeDiscoverySelector:
 
         while True:
             if self.config.features.max_features is not None:
-                n_added = len([r for r in rounds if r.feature_added is not None])
-                if n_added >= self.config.features.max_features:
+                n_total = len(selected_match) + len(selected_point)
+                if n_total >= self.config.features.max_features:
                     break
             if not candidate_match and not candidate_point:
                 break
@@ -185,7 +185,10 @@ class ServeDiscoverySelector:
             tagged = [("match", c) for c in candidate_match] + [("point", c) for c in candidate_point]
             total_cands = len(tagged)
             cap = self.config.features.max_features
-            desc = f"Round {round_idx}" + (f"/{cap}" if cap else "")
+            # Each round adds at most one feature — show the target count
+            # this round is aiming for.
+            target_total = len(selected_match) + len(selected_point) + 1
+            desc = f"Round {round_idx}" + (f" ({target_total}/{cap})" if cap else "")
             bar = tqdm(tagged, desc=desc, leave=False, ncols=120)
 
             this_round_scores: dict[str, float] = dict(partial_round_scores)
