@@ -39,6 +39,8 @@ from mvp.projection.iid.score_state_model import build_score_state_model
 
 logger = logging.getLogger(__name__)
 
+_MINIMIZE_METRICS = {"log_loss", "brier_score", "calibration_error"}
+
 
 @dataclass
 class FSRoundResult:
@@ -161,7 +163,7 @@ class ServeDiscoverySelector:
                 current_score = self._score_cv(base_df, splits, selected_match, selected_point)
                 logger.info("Base-only CV %s = %.6f (%d features)", self.config.metric, current_score, len(selected_match) + len(selected_point))
             else:
-                current_score = float("inf") if self.config.metric in ("log_loss", "brier_score") else float("-inf")
+                current_score = float("inf") if self.config.metric in _MINIMIZE_METRICS else float("-inf")
                 logger.info("No base features — starting from worst-case score")
             rounds.append(
                 FSRoundResult(
@@ -207,7 +209,7 @@ class ServeDiscoverySelector:
 
             # Seed bar postfix from partial scores if any
             if this_round_scores:
-                best_prev_cand = min(this_round_scores, key=this_round_scores.get) if self.config.metric in ("log_loss", "brier_score") else max(this_round_scores, key=this_round_scores.get)
+                best_prev_cand = min(this_round_scores, key=this_round_scores.get) if self.config.metric in _MINIMIZE_METRICS else max(this_round_scores, key=this_round_scores.get)
                 cand_score = this_round_scores[best_prev_cand]
                 cand_delta = self._improvement(current_score, cand_score)
                 if cand_delta > best_delta:
@@ -326,7 +328,7 @@ class ServeDiscoverySelector:
         best_metric: float,
     ) -> None:
         assert self.checkpoint_path is not None
-        direction = "minimize" if self.config.metric in ("log_loss", "brier_score") else "maximize"
+        direction = "minimize" if self.config.metric in _MINIMIZE_METRICS else "maximize"
         cp = SelectionCheckpoint(
             run_name=self.run_name,
             started_at=started_at,
@@ -342,8 +344,8 @@ class ServeDiscoverySelector:
         save_checkpoint(self.checkpoint_path, cp)
 
     def _improvement(self, current: float, new: float) -> float:
-        """Positive = better. For lower-is-better metrics (log_loss, brier), flip sign."""
-        if self.config.metric in ("log_loss", "brier_score"):
+        """Positive = better. For lower-is-better metrics, flip sign."""
+        if self.config.metric in _MINIMIZE_METRICS:
             return current - new
         # roc_auc: higher is better
         return new - current

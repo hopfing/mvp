@@ -126,7 +126,7 @@ class ServeDiscoveryConfig(BaseModel):
     # if present, else library defaults).
     model_forms: list[Literal["logistic", "xgboost"]] = ["logistic", "xgboost"]
     model_params: dict[str, dict[str, Any]] = {}  # per-form params overrides
-    metric: Literal["log_loss", "brier_score", "roc_auc"] = "log_loss"
+    metric: Literal["log_loss", "brier_score", "roc_auc", "calibration_error"] = "log_loss"
     selection_method: Literal["forward"] = "forward"
     min_delta: float = 0.0001  # minimum fractional improvement to accept a candidate
 
