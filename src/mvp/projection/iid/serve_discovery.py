@@ -412,7 +412,7 @@ class ServeDiscoverySelector:
         return cols
 
     def _make_splitter(self) -> Any:
-        val = self.config.validation
+        val = self.config.point_validation
         return make_splitter(
             val_type=val.type,
             n_splits=val.n_splits,

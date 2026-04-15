@@ -6,7 +6,8 @@ Operates at point grain (one row per point). Features mix:
 
 The output is a calibrated per-point probability. Chain integration (feeding
 this into `p_service_game_win` as a score-state-aware callable) happens in
-Phase 3; this module only trains and evaluates the point-grain classifier.
+`ScoreStateChainServeModel` (see `serve_model.py`); this module is the pure
+point-grain classifier.
 """
 
 from abc import ABC, abstractmethod
@@ -18,7 +19,16 @@ from xgboost import XGBClassifier
 
 
 class ScoreStateServeModel(ABC):
-    """Point-grain serve-win classifier. Trains/predicts on feature matrices."""
+    """Point-grain serve-win classifier. Trains/predicts on feature matrices.
+
+    Stores `match_feature_names` and `point_feature_names` separately so the
+    chain-inference wrapper can route columns correctly between match-level
+    DataFrame lookups and ScoreState-derived values.
+    """
+
+    feature_names: list[str]
+    match_feature_names: list[str]
+    point_feature_names: list[str]
 
     @abstractmethod
     def fit(self, X: np.ndarray, y: np.ndarray) -> None: ...
@@ -42,10 +52,19 @@ class LogisticScoreStateModel(ScoreStateServeModel):
     and std-normalization follow the same contract as MatchupServeModel.
     """
 
-    def __init__(self, feature_names: list[str], params: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        feature_names: list[str],
+        params: dict[str, Any] | None = None,
+        *,
+        match_feature_names: list[str] | None = None,
+        point_feature_names: list[str] | None = None,
+    ) -> None:
         if not feature_names:
             raise ValueError("feature_names must be non-empty")
         self.feature_names = list(feature_names)
+        self.match_feature_names = list(match_feature_names) if match_feature_names is not None else []
+        self.point_feature_names = list(point_feature_names) if point_feature_names is not None else []
         # sklearn defaults work reasonably; allow override via config.
         base_params: dict[str, Any] = {
             "max_iter": 1000,
@@ -103,10 +122,19 @@ class XGBoostScoreStateModel(ScoreStateServeModel):
     No standardization (XGBoost is scale-invariant). NaN handled natively.
     """
 
-    def __init__(self, feature_names: list[str], params: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        feature_names: list[str],
+        params: dict[str, Any] | None = None,
+        *,
+        match_feature_names: list[str] | None = None,
+        point_feature_names: list[str] | None = None,
+    ) -> None:
         if not feature_names:
             raise ValueError("feature_names must be non-empty")
         self.feature_names = list(feature_names)
+        self.match_feature_names = list(match_feature_names) if match_feature_names is not None else []
+        self.point_feature_names = list(point_feature_names) if point_feature_names is not None else []
         base_params: dict[str, Any] = {
             "n_estimators": 200,
             "max_depth": 4,
@@ -152,9 +180,21 @@ def build_score_state_model(
     type_: str,
     feature_names: list[str],
     params: dict[str, Any] | None = None,
+    match_feature_names: list[str] | None = None,
+    point_feature_names: list[str] | None = None,
 ) -> ScoreStateServeModel:
     if type_ == "logistic":
-        return LogisticScoreStateModel(feature_names=feature_names, params=params)
+        return LogisticScoreStateModel(
+            feature_names=feature_names,
+            params=params,
+            match_feature_names=match_feature_names,
+            point_feature_names=point_feature_names,
+        )
     if type_ == "xgboost":
-        return XGBoostScoreStateModel(feature_names=feature_names, params=params)
+        return XGBoostScoreStateModel(
+            feature_names=feature_names,
+            params=params,
+            match_feature_names=match_feature_names,
+            point_feature_names=point_feature_names,
+        )
     raise ValueError(f"unknown score-state model type: {type_}")

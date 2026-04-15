@@ -19,7 +19,7 @@ class MatchupServeRegressorConfig(BaseModel):
 class ServeModelConfig(BaseModel):
     """Serve win prob estimator configuration."""
 
-    type: Literal["identity", "matchup"] = "identity"
+    type: Literal["identity", "matchup", "score_state"] = "identity"
     window: int | None = 90
     clip_min: float = 0.30
     clip_max: float = 0.90
@@ -27,6 +27,11 @@ class ServeModelConfig(BaseModel):
     feature_columns: list[str] = []
     match_level_columns: list[str] = []
     regressor: MatchupServeRegressorConfig = MatchupServeRegressorConfig()
+    # Used only when type == "score_state"
+    model_type: Literal["logistic", "xgboost"] = "logistic"
+    match_level_features: list[str] = []
+    point_level_features: list[str] = []
+    params: dict[str, Any] = {}
 
 
 class IIDMetricsConfig(BaseModel):
@@ -74,31 +79,6 @@ class ScoreStateModelConfig(BaseModel):
     params: dict[str, Any] = {}
 
 
-class ScoreStateConfig(BaseModel):
-    """Training config for a standalone score-state serve model.
-
-    Data selection, feature set, model form, validation. Used by
-    `ScoreStateRunner` for training runs (not chain integration — that comes
-    in Phase 3).
-    """
-
-    description: str | None = None
-    data: DataConfig
-    model: ScoreStateModelConfig = ScoreStateModelConfig()
-    validation: ValidationConfig = ValidationConfig()
-
-    @classmethod
-    def from_yaml(cls, yaml_str: str) -> "ScoreStateConfig":
-        data: dict[str, Any] = yaml.safe_load(yaml_str)
-        data.pop("name", None)
-        return cls.model_validate(data)
-
-    @classmethod
-    def from_file(cls, path: str | Path) -> "ScoreStateConfig":
-        with open(path) as f:
-            return cls.from_yaml(f.read())
-
-
 class ServeDiscoveryFeaturesConfig(BaseModel):
     """Candidate pool + base set for score-state serve forward selection.
 
@@ -133,6 +113,11 @@ class ServeDiscoveryConfig(BaseModel):
 
     description: str | None = None
     data: DataConfig
+    # FS runs at point-grain; sizes here are row counts in
+    # match_beats_points.parquet (millions of rows).
+    point_validation: ValidationConfig = ValidationConfig()
+    # Match-grain validation, emitted verbatim into the promoted IID projection
+    # config. The projection runner operates on one row per match.
     validation: ValidationConfig = ValidationConfig()
     features: ServeDiscoveryFeaturesConfig = ServeDiscoveryFeaturesConfig()
     # Model form used to score candidates during FS (kept simple/fast).
@@ -156,21 +141,57 @@ class ServeDiscoveryConfig(BaseModel):
         with open(path) as f:
             return cls.from_yaml(f.read())
 
-    def to_score_state_config_dict(
+    def to_iid_projection_config_dict(
         self,
         selected_match_level: list[str],
         selected_point_level: list[str],
         model_type: str = "logistic",
         model_params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Emit a runnable ScoreStateConfig-compatible dict from FS output."""
+        """Emit a runnable IIDProjectionConfig-compatible dict from FS output.
+
+        `features.include` gets both player_/opp_ versions of each selected
+        match-level spec — match-constant point features are pulled directly
+        from `match_beats_points.parquet` at fit time and don't need to be
+        engine-computed.
+        """
+        from mvp.model.engine import parse_feature_spec
+
+        include_specs: list[str] = []
+        seen: set[str] = set()
+
+        for spec in selected_match_level:
+            prefix, base_name, full_name, params = parse_feature_spec(spec)
+            if prefix == "player":
+                swap_full = f"opp_{base_name}"
+            elif prefix == "opp":
+                swap_full = f"player_{base_name}"
+            else:
+                swap_full = full_name
+
+            if params:
+                param_str = ", ".join(f"{k}={v}" for k, v in params.items())
+                own_spec = f"{full_name}({param_str})"
+                swap_spec = f"{swap_full}({param_str})"
+            else:
+                own_spec = full_name
+                swap_spec = swap_full
+
+            for s in (own_spec, swap_spec):
+                if s not in seen:
+                    include_specs.append(s)
+                    seen.add(s)
+
         return {
             "description": (
-                self.description or "Score-state serve model from forward-selected features"
+                self.description
+                or "IID score-state projection from forward-selected features"
             ),
             "data": self.data.model_dump(),
-            "model": {
-                "type": model_type,
+            "features": {"include": include_specs},
+            "serve_model": {
+                "type": "score_state",
+                "model_type": model_type,
                 "match_level_features": selected_match_level,
                 "point_level_features": selected_point_level,
                 "params": model_params or {},

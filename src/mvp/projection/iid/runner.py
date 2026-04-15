@@ -40,6 +40,7 @@ from mvp.projection.iid.projector import TennisProjector
 from mvp.projection.iid.serve_model import (
     IdentityServeModel,
     MatchupServeModel,
+    ScoreStateChainServeModel,
     ServeWinProbEstimator,
 )
 
@@ -65,6 +66,18 @@ def _build_serve_model(cfg: ServeModelConfig) -> ServeWinProbEstimator:
             regressor_params=dict(cfg.regressor.params),
             clip_min=cfg.clip_min,
             clip_max=cfg.clip_max,
+        )
+    if cfg.type == "score_state":
+        if not cfg.match_level_features and not cfg.point_level_features:
+            raise ValueError(
+                "serve_model.match_level_features and/or point_level_features "
+                "must be non-empty for type=score_state"
+            )
+        return ScoreStateChainServeModel(
+            model_type=cfg.model_type,
+            match_level_features=cfg.match_level_features,
+            point_level_features=cfg.point_level_features,
+            params=dict(cfg.params),
         )
     raise ValueError(f"Unknown serve model type: {cfg.type}")
 

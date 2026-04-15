@@ -20,6 +20,7 @@ from mvp.projection.iid.chain import (
     p_tiebreak_game_win,
 )
 from mvp.projection.iid.serve_model import ServeWinProbEstimator
+from mvp.projection.iid.stateful_chain import match_distribution_from_state_fn
 
 
 @dataclass
@@ -77,15 +78,27 @@ class TennisProjector:
                     f"DataFrame missing serve-model column: {col}"
                 )
 
-        p_a, p_b = self.serve_model.predict(df)
-        h_a = p_service_game_win(p_a)
-        h_b = p_service_game_win(p_b)
-        t_ab = p_tiebreak_game_win(p_a, p_b)
-
         best_of = df[best_of_col].to_numpy().astype(np.int64)
         match_uid: np.ndarray = df[match_uid_col].to_numpy()
 
-        dist = match_distribution(h_a, h_b, t_ab, best_of)
+        if self.serve_model.is_state_aware:
+            p_a_fn, p_b_fn = self.serve_model.predict_state_fn(df)
+            # predict_state_fn caches per-df match feature matrices; predict()
+            # uses those caches to evaluate at a neutral state (for the
+            # tiebreak approximation + diagnostics).
+            p_a, p_b = self.serve_model.predict(df)
+            h_a = p_service_game_win(p_a)
+            h_b = p_service_game_win(p_b)
+            t_ab = p_tiebreak_game_win(p_a, p_b)
+            dist = match_distribution_from_state_fn(
+                p_a_fn, p_b_fn, p_a, p_b, best_of,
+            )
+        else:
+            p_a, p_b = self.serve_model.predict(df)
+            h_a = p_service_game_win(p_a)
+            h_b = p_service_game_win(p_b)
+            t_ab = p_tiebreak_game_win(p_a, p_b)
+            dist = match_distribution(h_a, h_b, t_ab, best_of)
 
         return ProjectionOutput(
             distribution=dist,
