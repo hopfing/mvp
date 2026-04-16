@@ -123,6 +123,7 @@ class ServeDiscoverySelector:
 
         candidate_match = [c for c in match_pool if c not in selected_match]
         candidate_point = [c for c in point_pool if c not in selected_point]
+        first_round_logged = False
 
         # Attempt to restore from checkpoint
         cp = self._load_checkpoint() if self.checkpoint_path else None
@@ -298,6 +299,23 @@ class ServeDiscoverySelector:
                     selected_point_level=list(selected_point),
                 )
             )
+
+            if not first_round_logged and round_idx == 1:
+                first_round_logged = True
+                reverse = self.config.metric not in _MINIMIZE_METRICS
+                ranked = [
+                    (f, m) for f, m in this_round_scores.items() if math.isfinite(m)
+                ]
+                ranked.sort(key=lambda x: x[1], reverse=reverse)
+                n_dropped = len(this_round_scores) - len(ranked)
+                logger.info("")
+                logger.info("ROUND 1 FEATURE RANKING (%d candidates)", len(ranked))
+                logger.info("-" * 50)
+                for i, (feat, metric) in enumerate(ranked, 1):
+                    logger.info("  %3d. %s: %.6f", i, feat, metric)
+                if n_dropped:
+                    logger.info("  (%d features rejected / returned non-finite)", n_dropped)
+
             round_idx += 1
             # Commit round to checkpoint (with empty current_round_scores)
             if self.checkpoint_path:
