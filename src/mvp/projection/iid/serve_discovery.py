@@ -195,10 +195,10 @@ class ServeDiscoverySelector:
 
             from tqdm import tqdm
 
-            best_delta = -math.inf
+            worst_score = float("inf") if self.config.metric in _MINIMIZE_METRICS else float("-inf")
+            best_new_score = worst_score
             best_cand: str | None = None
             best_grain: str | None = None
-            best_new_score = current_score
 
             tagged = [("match", c) for c in candidate_match] + [("point", c) for c in candidate_point]
             total_cands = len(tagged)
@@ -216,12 +216,10 @@ class ServeDiscoverySelector:
             if this_round_scores:
                 best_prev_cand = min(this_round_scores, key=this_round_scores.get) if self.config.metric in _MINIMIZE_METRICS else max(this_round_scores, key=this_round_scores.get)
                 cand_score = this_round_scores[best_prev_cand]
-                cand_delta = self._improvement(current_score, cand_score)
-                if cand_delta > best_delta:
-                    best_delta = cand_delta
+                if self._is_better(cand_score, best_new_score):
+                    best_new_score = cand_score
                     best_cand = best_prev_cand
                     best_grain = "match" if best_prev_cand in candidate_match else "point"
-                    best_new_score = cand_score
                 logger.info(
                     "  Restored %d/%d candidate scores from checkpoint",
                     len(this_round_scores), total_cands,
@@ -263,15 +261,18 @@ class ServeDiscoverySelector:
                             current_round_scores=this_round_scores,
                             best_metric=current_score,
                         )
-                delta = self._improvement(current_score, score)
-                if delta > best_delta:
-                    best_delta = delta
+                if self._is_better(score, best_new_score):
+                    best_new_score = score
                     best_cand = cand
                     best_grain = grain
-                    best_new_score = score
                     if hasattr(bar, "set_postfix"):
                         bar.set_postfix(best=f"{best_new_score:.6f}", feat=f"{cand}[{grain}]", refresh=False)
 
+            best_delta = (
+                self._improvement(current_score, best_new_score)
+                if best_cand is not None
+                else -math.inf
+            )
             if best_cand is None or best_delta < self.config.min_delta:
                 logger.info("FS halting: no candidate exceeds min_delta=%.6f (best=%.6f)", self.config.min_delta, best_delta)
                 break
@@ -389,6 +390,21 @@ class ServeDiscoverySelector:
             return current - new
         # roc_auc: higher is better
         return new - current
+
+    def _is_better(self, a: float, b: float) -> bool:
+        """True if score `a` is strictly better than `b` under the configured metric.
+
+        Non-finite `a` is never better; non-finite `b` is always worse than a
+        finite `a`. This ensures round 1 with no baseline (current_score=±inf)
+        picks by raw score rather than tying all candidates at delta=inf.
+        """
+        if not math.isfinite(a):
+            return False
+        if not math.isfinite(b):
+            return True
+        if self.config.metric in _MINIMIZE_METRICS:
+            return a < b
+        return a > b
 
     def _score_cv(
         self,
