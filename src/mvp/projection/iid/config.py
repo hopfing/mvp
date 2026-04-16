@@ -129,6 +129,10 @@ class ServeDiscoveryConfig(BaseModel):
     metric: Literal["log_loss", "brier_score", "roc_auc", "calibration_error"] = "log_loss"
     selection_method: Literal["forward"] = "forward"
     min_delta: float = 0.0001  # minimum fractional improvement to accept a candidate
+    # Cap on training rows per fold during candidate scoring. None = use full training slice.
+    # Final-form re-eval always runs on the full slice so reported metrics are honest.
+    fs_train_subsample: int | None = None
+    fs_subsample_seed: int = 42
 
     @classmethod
     def from_yaml(cls, yaml_str: str) -> "ServeDiscoveryConfig":

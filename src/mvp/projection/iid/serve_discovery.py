@@ -119,6 +119,8 @@ class ServeDiscoverySelector:
         splits = list(splitter.split(base_df))
         logger.info("FS splits: %d folds", len(splits))
 
+        fs_splits = self._maybe_subsample_splits(splits)
+
         candidate_match = [c for c in match_pool if c not in selected_match]
         candidate_point = [c for c in point_pool if c not in selected_point]
 
@@ -162,7 +164,7 @@ class ServeDiscoverySelector:
             )
         else:
             if selected_match or selected_point:
-                current_score = self._score_cv(base_df, splits, selected_match, selected_point)
+                current_score = self._score_cv(base_df, fs_splits, selected_match, selected_point)
                 logger.info("Base-only CV %s = %.6f (%d features)", self.config.metric, current_score, len(selected_match) + len(selected_point))
             else:
                 current_score = float("inf") if self.config.metric in _MINIMIZE_METRICS else float("-inf")
@@ -239,9 +241,9 @@ class ServeDiscoverySelector:
                 else:
                     if grain == "match":
                         extended = self._extend_df_with_match_feature(base_df, slim_matches, engine, cache_key, cand)
-                        score = self._score_cv(extended, splits, selected_match + [cand], selected_point)
+                        score = self._score_cv(extended, fs_splits, selected_match + [cand], selected_point)
                     else:
-                        score = self._score_cv(base_df, splits, selected_match, selected_point + [cand])
+                        score = self._score_cv(base_df, fs_splits, selected_match, selected_point + [cand])
                     this_round_scores[cand] = score
                     eval_count += 1
                     if (
@@ -446,6 +448,37 @@ class ServeDiscoverySelector:
             cols.append(col)
         cols.extend(point_level)
         return cols
+
+    def _maybe_subsample_splits(
+        self,
+        splits: list[tuple[list[int], list[int]]],
+    ) -> list[tuple[list[int], list[int]]]:
+        """Subsample train indices per fold for fast candidate scoring.
+
+        Test indices are kept at full size so held-out metric values stay
+        comparable across candidates. Sampled indices are sorted to preserve
+        the walk-forward time order within train.
+        """
+        cap = self.config.fs_train_subsample
+        if cap is None:
+            return splits
+        rng = np.random.default_rng(self.config.fs_subsample_seed)
+        sampled: list[tuple[list[int], list[int]]] = []
+        for train_idx, test_idx in splits:
+            if len(train_idx) > cap:
+                idx_arr = np.asarray(train_idx)
+                picked = rng.choice(idx_arr, size=cap, replace=False)
+                picked.sort()
+                sampled.append((picked.tolist(), test_idx))
+            else:
+                sampled.append((train_idx, test_idx))
+        original_sizes = [len(t) for t, _ in splits]
+        sampled_sizes = [len(t) for t, _ in sampled]
+        logger.info(
+            "FS train subsample: cap=%d, train sizes %s → %s",
+            cap, original_sizes, sampled_sizes,
+        )
+        return sampled
 
     def _make_splitter(self) -> Any:
         val = self.config.point_validation
