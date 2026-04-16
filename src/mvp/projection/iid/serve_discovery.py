@@ -202,12 +202,12 @@ class ServeDiscoverySelector:
             # this round is aiming for.
             target_total = len(selected_match) + len(selected_point) + 1
             desc = f"Round {round_idx}" + (f" ({target_total}/{cap})" if cap else "")
-            bar = tqdm(tagged, desc=desc, leave=False, ncols=120)
 
             this_round_scores: dict[str, float] = dict(partial_round_scores)
             partial_round_scores = {}
 
-            # Seed bar postfix from partial scores if any
+            # Seed best from partial scores if any (before creating tqdm so log
+            # lines don't interleave with the progress bar).
             if this_round_scores:
                 best_prev_cand = min(this_round_scores, key=this_round_scores.get) if self.config.metric in _MINIMIZE_METRICS else max(this_round_scores, key=this_round_scores.get)
                 cand_score = this_round_scores[best_prev_cand]
@@ -217,6 +217,18 @@ class ServeDiscoverySelector:
                     best_cand = best_prev_cand
                     best_grain = "match" if best_prev_cand in candidate_match else "point"
                     best_new_score = cand_score
+                logger.info(
+                    "  Restored %d/%d candidate scores from checkpoint",
+                    len(this_round_scores), total_cands,
+                )
+
+            bar = tqdm(tagged, desc=desc, leave=False, ncols=120)
+            if best_cand is not None and hasattr(bar, "set_postfix"):
+                bar.set_postfix(
+                    best=f"{best_new_score:.6f}",
+                    feat=f"{best_cand}[{best_grain}]",
+                    refresh=False,
+                )
 
             for grain, cand in bar:
                 if cand in this_round_scores:
