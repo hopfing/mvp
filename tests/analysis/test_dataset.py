@@ -1,5 +1,7 @@
 """Tests for unified analysis dataset."""
 
+from datetime import datetime, timezone
+
 import polars as pl
 import pytest
 
@@ -232,3 +234,54 @@ class TestUnifiedDataset:
         m1 = ds.filter(pl.col("match_uid") == "m1")
         assert m1["pred_side"][0] == "P1"
         assert m1["pred_odds_best_close"][0] == pytest.approx(2.10)
+
+    def test_first_live_fetched_at_from_snapshots(self, sample_predictions):
+        """first_live_fetched_at = first non-NS snapshot strictly after the last
+        NOT_STARTED snapshot across all books."""
+        from mvp.analysis.dataset import build_analysis_dataset
+
+        snapshots = pl.DataFrame({
+            "match_uid": [
+                # m1: dk flips STARTED at 10:15 but mgm still NOT_STARTED at 10:30
+                # → first_live should be AFTER 10:30, not 10:15
+                "m1", "m1", "m1", "m1", "m1", "m1",
+                # m2: only NOT_STARTED snapshots → first_live null
+                "m2", "m2",
+            ],
+            "book": ["dk", "dk", "dk", "mgm", "mgm", "mgm", "dk", "mgm"],
+            "player_id": ["A001"] * 8,
+            "side": ["p1"] * 8,
+            "odds": [2.10, 2.12, 2.08, 2.11, 2.10, 2.09, 1.75, 1.76],
+            "fetched_at": [
+                datetime(2026, 3, 10, 10, 0, tzinfo=timezone.utc),
+                datetime(2026, 3, 10, 10, 15, tzinfo=timezone.utc),
+                datetime(2026, 3, 10, 10, 45, tzinfo=timezone.utc),
+                datetime(2026, 3, 10, 10, 0, tzinfo=timezone.utc),
+                datetime(2026, 3, 10, 10, 30, tzinfo=timezone.utc),
+                datetime(2026, 3, 10, 10, 45, tzinfo=timezone.utc),
+                datetime(2026, 3, 11, 9, 0, tzinfo=timezone.utc),
+                datetime(2026, 3, 11, 9, 30, tzinfo=timezone.utc),
+            ],
+            "event_status": [
+                "NOT_STARTED", "STARTED", "IN_PLAY",
+                "NOT_STARTED", "NOT_STARTED", "STARTED",
+                "NOT_STARTED", "NOT_STARTED",
+            ],
+        })
+
+        ds = build_analysis_dataset(
+            predictions=sample_predictions,
+            all_snapshots=snapshots,
+        )
+
+        assert "first_live_fetched_at" in ds.columns
+        m1 = ds.filter(pl.col("match_uid") == "m1")
+        # Last NS across all books = mgm @ 10:30. First non-NS strictly after
+        # that is dk IN_PLAY @ 10:45 (mgm STARTED is also @ 10:45). Tie →
+        # 10:45 is the answer.
+        assert m1["first_live_fetched_at"][0] == datetime(
+            2026, 3, 10, 10, 45, tzinfo=timezone.utc
+        )
+        # m2 has no live snapshots — should be null
+        m2 = ds.filter(pl.col("match_uid") == "m2")
+        assert m2["first_live_fetched_at"][0] is None

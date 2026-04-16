@@ -538,3 +538,17 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
 
     st.subheader("By Odds Band")
     _render_odds_breakdown(bets, st)
+
+    if "net" in bets.columns:
+        st.subheader("Cumulative P&L by Bet #")
+        net_vals = (
+            bets.sort("effective_match_date")
+            ["net"].cast(pl.Float64, strict=False).drop_nulls()
+        )
+        if len(net_vals) > 0:
+            cumulative = net_vals.cum_sum()
+            chart_data = pl.DataFrame({
+                "Bet #": range(1, len(cumulative) + 1),
+                "Cumulative P&L": cumulative,
+            })
+            st.line_chart(chart_data.to_pandas(), x="Bet #", y="Cumulative P&L")

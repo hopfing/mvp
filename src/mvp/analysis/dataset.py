@@ -81,9 +81,49 @@ def build_analysis_dataset(
     ds = _compute_clv(ds)
 
     if all_snapshots is not None:
+        ds = _join_first_live_ts(ds, all_snapshots)
         ds = _compute_market_alignment(ds, all_snapshots)
 
     return ds
+
+
+def _join_first_live_ts(
+    ds: pl.DataFrame, all_snapshots: pl.DataFrame
+) -> pl.DataFrame:
+    """Attach first_live_fetched_at per match.
+
+    Defined as: first snapshot with event_status != NOT_STARTED whose fetched_at
+    is strictly after the last NOT_STARTED snapshot seen across any book. This
+    guards against books that flip STARTED at the scheduled time while other
+    books still correctly report NOT_STARTED (common on rescheduled matches).
+    """
+    if (
+        len(all_snapshots) == 0
+        or "event_status" not in all_snapshots.columns
+        or "fetched_at" not in all_snapshots.columns
+    ):
+        return ds
+
+    live = all_snapshots.filter(pl.col("event_status") != "NOT_STARTED")
+    if len(live) == 0:
+        return ds
+
+    last_ns = (
+        all_snapshots.filter(pl.col("event_status") == "NOT_STARTED")
+        .group_by("match_uid")
+        .agg(pl.col("fetched_at").max().alias("_last_ns"))
+    )
+
+    first_live = (
+        live.join(last_ns, on="match_uid", how="left")
+        .filter(
+            pl.col("_last_ns").is_null() | (pl.col("fetched_at") > pl.col("_last_ns"))
+        )
+        .group_by("match_uid")
+        .agg(pl.col("fetched_at").min().alias("first_live_fetched_at"))
+    )
+
+    return ds.join(first_live, on="match_uid", how="left")
 
 
 def _join_match_meta(
