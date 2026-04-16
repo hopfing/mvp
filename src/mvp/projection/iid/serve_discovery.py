@@ -81,6 +81,7 @@ class ServeDiscoverySelector:
         cache_dir: Path | str | None = None,
         checkpoint_path: Path | str | None = None,
         run_name: str | None = None,
+        checkpoint_interval: int = 50,
     ) -> None:
         self.config_path = Path(config_path)
         self.config = ServeDiscoveryConfig.from_file(config_path)
@@ -89,6 +90,7 @@ class ServeDiscoverySelector:
         self.cache_dir = Path(cache_dir) if cache_dir else get_local_data_root() / "features" / "cache"
         self.checkpoint_path = Path(checkpoint_path) if checkpoint_path else None
         self.run_name = run_name or self.config_path.stem
+        self.checkpoint_interval = checkpoint_interval
 
     def run(self) -> DiscoveryResult:
         selected_match = list(self.config.features.base_match_level_features)
@@ -230,6 +232,7 @@ class ServeDiscoverySelector:
                     refresh=False,
                 )
 
+            eval_count = 0
             for grain, cand in bar:
                 if cand in this_round_scores:
                     score = this_round_scores[cand]
@@ -240,7 +243,12 @@ class ServeDiscoverySelector:
                     else:
                         score = self._score_cv(base_df, splits, selected_match, selected_point + [cand])
                     this_round_scores[cand] = score
-                    if self.checkpoint_path:
+                    eval_count += 1
+                    if (
+                        self.checkpoint_path
+                        and self.checkpoint_interval > 0
+                        and eval_count % self.checkpoint_interval == 0
+                    ):
                         self._save_checkpoint(
                             started_at=started_at,
                             completed_rounds=[
