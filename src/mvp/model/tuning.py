@@ -15,6 +15,8 @@ logger = logging.getLogger(__name__)
 
 _PROJECTION_MODEL_TYPES = {"xgb_regressor", "linear", "ridge"}
 
+_MAXIMIZE_METRICS = {"accuracy", "roc_auc", "r_squared"}
+
 def _is_iid_config(raw: dict) -> bool:
     return isinstance(raw.get("serve_model"), dict)
 
@@ -179,7 +181,10 @@ class HyperparamTuner:
         storage = f"sqlite:///{self.db_path}"
 
         # Create or load study
-        directions = ["minimize"] * len(self.metrics)
+        directions = [
+            "maximize" if m in _MAXIMIZE_METRICS else "minimize"
+            for m in self.metrics
+        ]
 
         self.study = optuna.create_study(
             study_name=self.config_path.stem,

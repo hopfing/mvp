@@ -4,6 +4,8 @@ import logging
 
 import optuna
 
+from mvp.model.tuning import _MAXIMIZE_METRICS
+
 logger = logging.getLogger(__name__)
 
 
@@ -34,9 +36,14 @@ def format_leaderboard(
         else:
             sort_by = ["log_loss"]
 
-    # Sort by the requested metrics (ascending for all — lower is better)
+    # Sort by the requested metrics — flip sign for maximize-direction metrics
+    # so ascending sort puts the best trial first.
     def sort_key(t: optuna.trial.FrozenTrial) -> tuple:
-        return tuple(t.user_attrs.get(m, float("inf")) for m in sort_by)
+        return tuple(
+            -t.user_attrs.get(m, float("-inf")) if m in _MAXIMIZE_METRICS
+            else t.user_attrs.get(m, float("inf"))
+            for m in sort_by
+        )
 
     trials.sort(key=sort_key)
     trials = trials[:top_n]
