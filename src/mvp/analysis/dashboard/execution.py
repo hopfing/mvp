@@ -186,30 +186,23 @@ _TIMING_EMPTY_SCHEMA = {
 }
 
 
-def clv_by_timing(ds: pl.DataFrame) -> pl.DataFrame:
-    """Bucket bets by hours before match start and report CLV W/L/D counts.
-
-    Reference: first_live_fetched_at (first snapshot where event_status leaves
-    NOT_STARTED) — the closest proxy for actual match start. Rows without it
-    (pending matches / uncovered markets) are excluded.
-    """
-    empty = pl.DataFrame(schema=_TIMING_EMPTY_SCHEMA)
-
+def _prep_timing_df(ds: pl.DataFrame) -> pl.DataFrame | None:
+    """Shared prep for timing-based CLV tables: filter, parse, tag WLD, compute hours."""
     if (
         "bet_placed_at" not in ds.columns
         or "first_live_fetched_at" not in ds.columns
     ):
-        return empty
+        return None
 
     bets = _get_bets(ds)
     if len(bets) == 0 or _CLOSE_COL not in bets.columns or "bet_odds" not in bets.columns:
-        return empty
+        return None
 
     bets = bets.filter(
         pl.col("bet_placed_at").cast(pl.Utf8) > _BET_PLACED_AT_RELIABLE_AFTER
     )
     if len(bets) == 0:
-        return empty
+        return None
 
     df = bets.with_columns(
         pl.col("bet_placed_at")
@@ -221,18 +214,51 @@ def clv_by_timing(ds: pl.DataFrame) -> pl.DataFrame:
         pl.col("first_live_fetched_at").is_not_null() & pl.col("_bet_ts").is_not_null()
     )
     if len(df) == 0:
-        return empty
+        return None
 
     df = _with_wld(df, _CLOSE_COL)
     if len(df) == 0:
-        return empty
+        return None
 
-    df = df.with_columns(
+    return df.with_columns(
         (
             (pl.col("first_live_fetched_at").cast(pl.Int64) - pl.col("_bet_ts").cast(pl.Int64))
             / 3_600_000_000
         ).alias("_hours_before")
     )
+
+
+def _assign_bucket(df: pl.DataFrame) -> pl.DataFrame:
+    """Add a _bucket column based on _hours_before."""
+    bucket_expr = pl.when(pl.col("_hours_before") < 0).then(pl.lit("Live"))
+    for label, lo, hi in _TIMING_BUCKETS:
+        if hi is not None:
+            bucket_expr = bucket_expr.when(
+                (pl.col("_hours_before") >= lo) & (pl.col("_hours_before") < hi)
+            ).then(pl.lit(label))
+        else:
+            bucket_expr = bucket_expr.when(
+                pl.col("_hours_before") >= lo
+            ).then(pl.lit(label))
+    return df.with_columns(bucket_expr.otherwise(pl.lit(None)).alias("_bucket")).filter(
+        pl.col("_bucket").is_not_null()
+    )
+
+
+_BUCKET_ORDER = [label for label, _, _ in _TIMING_BUCKETS] + ["Live"]
+
+
+def clv_by_timing(ds: pl.DataFrame) -> pl.DataFrame:
+    """Bucket bets by hours before match start and report CLV W/L/D counts."""
+    empty = pl.DataFrame(schema=_TIMING_EMPTY_SCHEMA)
+
+    df = _prep_timing_df(ds)
+    if df is None or len(df) == 0:
+        return empty
+
+    df = _assign_bucket(df)
+    if len(df) == 0:
+        return empty
 
     def _counts(subset: pl.DataFrame, label: str) -> dict | None:
         if len(subset) == 0:
@@ -252,25 +278,53 @@ def clv_by_timing(ds: pl.DataFrame) -> pl.DataFrame:
         }
 
     rows = []
-    for label, lo, hi in _TIMING_BUCKETS:
-        if hi is not None:
-            subset = df.filter(
-                (pl.col("_hours_before") >= lo) & (pl.col("_hours_before") < hi)
-            )
-        else:
-            subset = df.filter(pl.col("_hours_before") >= lo)
-        r = _counts(subset, label)
+    for label in _BUCKET_ORDER:
+        r = _counts(df.filter(pl.col("_bucket") == label), label)
         if r is not None:
             rows.append(r)
-
-    live_row = _counts(df.filter(pl.col("_hours_before") < 0), "Live")
-    if live_row is not None:
-        rows.append(live_row)
 
     if not rows:
         return empty
 
     return pl.DataFrame(rows, schema=_TIMING_EMPTY_SCHEMA)
+
+
+def clv_by_book_timing(ds: pl.DataFrame) -> pl.DataFrame | None:
+    """Cross-slice CLV W/L/D by book x timing bucket."""
+    df = _prep_timing_df(ds)
+    if df is None or len(df) == 0 or "book" not in df.columns:
+        return None
+
+    df = _assign_bucket(df)
+    if len(df) == 0:
+        return None
+
+    result = (
+        df.group_by("book", "_bucket")
+        .agg(
+            pl.len().alias("n"),
+            (pl.col("_bet_r") > pl.col("_close_r")).sum().cast(pl.UInt32).alias("positive"),
+            (pl.col("_bet_r") < pl.col("_close_r")).sum().cast(pl.UInt32).alias("negative"),
+            (pl.col("_bet_r") == pl.col("_close_r")).sum().cast(pl.UInt32).alias("even"),
+        )
+        .with_columns(
+            pl.when(pl.col("n") > 0)
+            .then(pl.col("positive") / pl.col("n"))
+            .otherwise(None)
+            .alias("pos_pct"),
+            pl.when((pl.col("positive") + pl.col("negative")) > 0)
+            .then(pl.col("positive") / (pl.col("positive") + pl.col("negative")))
+            .otherwise(None)
+            .alias("pos_neg_pct"),
+        )
+    )
+
+    bucket_order = {label: i for i, label in enumerate(_BUCKET_ORDER)}
+    result = result.with_columns(
+        pl.col("_bucket").replace_strict(bucket_order, default=999).alias("_sort")
+    ).sort("book", "_sort").drop("_sort").rename({"_bucket": "bucket"})
+
+    return result if len(result) > 0 else None
 
 
 def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
@@ -345,4 +399,20 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
             st.dataframe(display.to_pandas(), use_container_width=True, hide_index=True)
         else:
             st.info("No timing data available (bet tracking started 2026-03-21).")
+
+    if "book" in ds.columns and "bet_placed_at" in ds.columns:
+        st.subheader("CLV vs Best Close by Book x Timing")
+        clv_bt = clv_by_book_timing(ds)
+        if clv_bt is not None:
+            display = clv_bt.select(
+                pl.col("book").alias("Book"),
+                pl.col("bucket").alias("Timing"),
+                pl.col("n").alias("Settled"),
+                pl.col("positive").alias("Positive"),
+                pl.col("negative").alias("Negative"),
+                pl.col("even").alias("Even"),
+                (pl.col("pos_pct") * 100).round(1).alias("Pos %"),
+                (pl.col("pos_neg_pct") * 100).round(1).alias("Pos/Neg %"),
+            )
+            st.dataframe(display.to_pandas(), use_container_width=True, hide_index=True)
 
