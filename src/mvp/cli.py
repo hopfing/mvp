@@ -1596,6 +1596,12 @@ def cmd_project(args: argparse.Namespace) -> int:
     if not config_path.exists():
         raise FileNotFoundError(f"Config file not found: {args.config} (tried {config_path})")
 
+    if _is_iid_discovery(config_path):
+        raise ValueError(
+            f"{config_path.name} is an IID config (has serve_model). "
+            f"Use 'mvp iid-project' instead."
+        )
+
     if args.refresh:
         from mvp.atptour.aggregators.matches import MatchesAggregator
         logger.info("Rebuilding matches.parquet")
@@ -1709,6 +1715,12 @@ def cmd_iid_project(args: argparse.Namespace) -> int:
     config_path = resolve_config_path(args.config, PROJECTION_DIR)
     if not config_path.exists():
         raise FileNotFoundError(f"Config file not found: {args.config} (tried {config_path})")
+
+    if not _is_iid_discovery(config_path):
+        raise ValueError(
+            f"{config_path.name} is not an IID config (no serve_model). "
+            f"Use 'mvp project' instead."
+        )
 
     if args.refresh:
         from mvp.atptour.aggregators.matches import MatchesAggregator

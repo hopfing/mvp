@@ -21,12 +21,18 @@ def format_leaderboard(
     if not trials:
         return ["No completed trials found."]
 
-    # Detect projection vs classification from first trial's metrics
+    # Detect config type from first trial's metrics
     first_ua = trials[0].user_attrs
+    is_iid = "iid_crps_total_games" in first_ua
     is_projection = "mae" in first_ua and "log_loss" not in first_ua
 
     if sort_by is None:
-        sort_by = ["mae"] if is_projection else ["log_loss"]
+        if is_iid:
+            sort_by = ["iid_crps_total_games"]
+        elif is_projection:
+            sort_by = ["mae"]
+        else:
+            sort_by = ["log_loss"]
 
     # Sort by the requested metrics (ascending for all — lower is better)
     def sort_key(t: optuna.trial.FrozenTrial) -> tuple:
@@ -44,7 +50,17 @@ def format_leaderboard(
         ua = trial.user_attrs
         duration = ua.get("duration_s", 0.0)
 
-        if is_projection:
+        if is_iid:
+            crps_total = ua.get("iid_crps_total_games", float("nan"))
+            crps_spread = ua.get("iid_crps_spread", float("nan"))
+            ll = ua.get("log_loss", float("nan"))
+            mae = ua.get("mae", float("nan"))
+            lines.append(
+                f"  {i + 1:>2}. CRPS_total={crps_total:.4f}"
+                f"  CRPS_spread={crps_spread:.4f}"
+                f"  MAE={mae:.4f}  LL={ll:.4f}  ({duration:.0f}s)"
+            )
+        elif is_projection:
             mae = ua.get("mae", float("nan"))
             rmse = ua.get("rmse", float("nan"))
             r2 = ua.get("r_squared", float("nan"))

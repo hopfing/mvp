@@ -17,6 +17,9 @@ logger = logging.getLogger(__name__)
 
 _PROJECTION_MODEL_TYPES = {"xgb_regressor", "linear", "ridge"}
 
+def _is_iid_config(raw: dict) -> bool:
+    return isinstance(raw.get("serve_model"), dict)
+
 DEFAULT_GRIDS: dict[str, dict[str, list[Any]]] = {
     "xgb_regressor": {
         "max_depth": [3, 4, 5, 6],
@@ -173,7 +176,11 @@ class GridTuner:
         with open(self.config_path) as f:
             self.base_config = yaml.safe_load(f)
 
-        self.model_type = self.base_config["model"]["type"]
+        self.is_iid = _is_iid_config(self.base_config)
+        if self.is_iid:
+            self.model_type = self.base_config["serve_model"].get("model_type", "xgboost")
+        else:
+            self.model_type = self.base_config["model"]["type"]
 
         if param_grid is not None:
             self.param_grid = param_grid
@@ -224,7 +231,10 @@ class GridTuner:
         values = [self.param_grid[k] for k in keys]
 
         # Extract current params from the base config as baseline
-        base_params = self.base_config.get("model", {}).get("params", {})
+        if self.is_iid:
+            base_params = self.base_config.get("serve_model", {}).get("params", {})
+        else:
+            base_params = self.base_config.get("model", {}).get("params", {})
         baseline = {k: base_params[k] for k in keys if k in base_params}
 
         baseline_in_grid = all(
@@ -247,10 +257,16 @@ class GridTuner:
     def _run_one(self, params: dict[str, Any]) -> TuneResult:
         """Run a single param combination through the appropriate runner."""
         config = dict(self.base_config)
-        config["model"] = dict(config["model"])
-        base_params = dict(config["model"].get("params") or {})
-        base_params.update(params)
-        config["model"]["params"] = base_params
+        if self.is_iid:
+            config["serve_model"] = dict(config["serve_model"])
+            base_params = dict(config["serve_model"].get("params") or {})
+            base_params.update(params)
+            config["serve_model"]["params"] = base_params
+        else:
+            config["model"] = dict(config["model"])
+            base_params = dict(config["model"].get("params") or {})
+            base_params.update(params)
+            config["model"]["params"] = base_params
 
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".yaml", delete=False,
@@ -264,14 +280,27 @@ class GridTuner:
             runner_logger = logging.getLogger("mvp.model.runner")
             engine_logger = logging.getLogger("mvp.model.engine")
             proj_logger = logging.getLogger("mvp.projection.runner")
+            iid_logger = logging.getLogger("mvp.projection.iid.runner")
             prev_runner = runner_logger.level
             prev_engine = engine_logger.level
             prev_proj = proj_logger.level
+            prev_iid = iid_logger.level
             runner_logger.setLevel(logging.WARNING)
             engine_logger.setLevel(logging.WARNING)
             proj_logger.setLevel(logging.WARNING)
+            iid_logger.setLevel(logging.WARNING)
             try:
-                if self.model_type in _PROJECTION_MODEL_TYPES:
+                if self.is_iid:
+                    from mvp.projection.iid.runner import IIDProjectionRunner
+
+                    runner = IIDProjectionRunner(
+                        config_path=temp_path,
+                        matches_path=self.matches_path,
+                        cache_dir=self.cache_dir,
+                        run_name=f"tune_{self.config_path.stem}",
+                        log_to_mlflow=True,
+                    )
+                elif self.model_type in _PROJECTION_MODEL_TYPES:
                     from mvp.projection.runner import ProjectionRunner
 
                     runner = ProjectionRunner(
@@ -296,6 +325,7 @@ class GridTuner:
                 runner_logger.setLevel(prev_runner)
                 engine_logger.setLevel(prev_engine)
                 proj_logger.setLevel(prev_proj)
+                iid_logger.setLevel(prev_iid)
             duration = time.perf_counter() - t0
 
             return TuneResult(
