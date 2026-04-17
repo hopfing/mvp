@@ -22,42 +22,37 @@ _CLV_EMPTY_SCHEMA = {
 }
 
 
-def _close_col_for(ds: pl.DataFrame, clv_col: str) -> str | None:
-    """Closing-odds column paired with a CLV column."""
-    if clv_col == "clv_vs_best":
-        return "bet_closing_best" if "bet_closing_best" in ds.columns else None
-    return "bet_closing_avg" if "bet_closing_avg" in ds.columns else None
+_CLV_COL = "clv_vs_best"
+_CLOSE_COL = "bet_closing_best"
 
 
 def _with_wld(df: pl.DataFrame, close_col: str) -> pl.DataFrame:
-    """Tag each row as positive / negative / even via 2dp-rounded comparison."""
-    bet_r = pl.col("bet_odds").cast(pl.Float64, strict=False).round(2)
-    close_r = pl.col(close_col).cast(pl.Float64, strict=False).round(2)
+    """Tag each row as positive / negative / even."""
+    bet_f = pl.col("bet_odds").cast(pl.Float64, strict=False)
+    close_f = pl.col(close_col).cast(pl.Float64, strict=False)
     return df.with_columns(
-        bet_r.alias("_bet_r"),
-        close_r.alias("_close_r"),
+        bet_f.alias("_bet_r"),
+        close_f.alias("_close_r"),
     ).filter(pl.col("_bet_r").is_not_null() & pl.col("_close_r").is_not_null())
 
 
 def clv_by_group(
     ds: pl.DataFrame,
     group_col: str,
-    clv_col: str = "clv_vs_avg",
 ) -> pl.DataFrame:
     """Count CLV positive/negative/even (2dp-rounded) per group."""
     bets = _get_bets(ds)
-    close_col = _close_col_for(bets, clv_col)
     if (
         len(bets) == 0
         or group_col not in bets.columns
-        or close_col is None
+        or _CLOSE_COL not in bets.columns
         or "bet_odds" not in bets.columns
     ):
         return pl.DataFrame(schema=_CLV_EMPTY_SCHEMA)
 
     tagged = _with_wld(
         bets.filter(pl.col(group_col).is_not_null()),
-        close_col,
+        _CLOSE_COL,
     )
     if len(tagged) == 0:
         return pl.DataFrame(schema=_CLV_EMPTY_SCHEMA)
@@ -77,7 +72,11 @@ def clv_by_group(
             pl.when(pl.col("n") > 0)
             .then(pl.col("positive") / pl.col("n"))
             .otherwise(None)
-            .alias("pos_pct")
+            .alias("pos_pct"),
+            pl.when((pl.col("positive") + pl.col("negative")) > 0)
+            .then(pl.col("positive") / (pl.col("positive") + pl.col("negative")))
+            .otherwise(None)
+            .alias("pos_neg_pct"),
         )
         .rename({group_col: "group"})
         .with_columns(pl.col("group").cast(pl.Utf8))
@@ -88,8 +87,8 @@ def clv_by_group(
 def execution_summary(ds: pl.DataFrame) -> dict:
     """Compute execution quality headline metrics.
 
-    CLV W/L/D is determined by comparing bet_odds vs closing odds rounded to
-    2 decimal places. Settled = rows with both odds present = Pos + Neg + Even.
+    CLV W/L/D is determined by comparing bet_odds vs closing odds.
+    Settled = rows with both odds present = Pos + Neg + Even.
     """
     bets = _get_bets(ds)
     n_bets = len(bets)
@@ -101,17 +100,13 @@ def execution_summary(ds: pl.DataFrame) -> dict:
         "n_negative": 0,
         "n_even": 0,
         "pos_pct": None,
+        "pos_neg_pct": None,
         "avg_bet_odds": None,
         "avg_closing_odds": None,
     }
 
     if n_bets == 0:
         return empty
-
-    close_col = next(
-        (c for c in ["bet_closing_avg", "bet_closing_best"] if c in bets.columns),
-        None,
-    )
 
     avg_bet_odds = None
     if "bet_odds" in bets.columns:
@@ -120,17 +115,17 @@ def execution_summary(ds: pl.DataFrame) -> dict:
             avg_bet_odds = odds_f.mean()
 
     avg_closing_odds = None
-    if close_col is not None:
-        close_vals = bets[close_col].drop_nulls()
+    if _CLOSE_COL in bets.columns:
+        close_vals = bets[_CLOSE_COL].drop_nulls()
         if len(close_vals) > 0:
             avg_closing_odds = close_vals.mean()
 
     n_settled = n_positive = n_negative = n_even = 0
-    pos_pct = None
-    if close_col is not None and "bet_odds" in bets.columns:
+    pos_pct = pos_neg_pct = None
+    if _CLOSE_COL in bets.columns and "bet_odds" in bets.columns:
         pair = bets.select(
-            pl.col("bet_odds").cast(pl.Float64, strict=False).round(2).alias("_bet"),
-            pl.col(close_col).cast(pl.Float64, strict=False).round(2).alias("_close"),
+            pl.col("bet_odds").cast(pl.Float64, strict=False).alias("_bet"),
+            pl.col(_CLOSE_COL).cast(pl.Float64, strict=False).alias("_close"),
         ).filter(pl.col("_bet").is_not_null() & pl.col("_close").is_not_null())
         n_settled = len(pair)
         if n_settled > 0:
@@ -138,6 +133,8 @@ def execution_summary(ds: pl.DataFrame) -> dict:
             n_negative = int(pair.filter(pl.col("_bet") < pl.col("_close")).height)
             n_even = int(pair.filter(pl.col("_bet") == pl.col("_close")).height)
             pos_pct = n_positive / n_settled
+            if n_positive + n_negative > 0:
+                pos_neg_pct = n_positive / (n_positive + n_negative)
 
     return {
         "n_bets": n_bets,
@@ -146,6 +143,7 @@ def execution_summary(ds: pl.DataFrame) -> dict:
         "n_negative": n_negative,
         "n_even": n_even,
         "pos_pct": pos_pct,
+        "pos_neg_pct": pos_neg_pct,
         "avg_bet_odds": avg_bet_odds,
         "avg_closing_odds": avg_closing_odds,
     }
@@ -154,11 +152,11 @@ def execution_summary(ds: pl.DataFrame) -> dict:
 _BET_PLACED_AT_RELIABLE_AFTER = "2026-03-21 09:15"
 
 _TIMING_BUCKETS = [
-    ("<1h", 0, 1),
-    ("1-3h", 1, 3),
-    ("3-6h", 3, 6),
-    ("6-12h", 6, 12),
     ("12h+", 12, None),
+    ("6-12h", 6, 12),
+    ("3-6h", 3, 6),
+    ("1-3h", 1, 3),
+    ("<1h", 0, 1),
 ]
 
 
@@ -184,13 +182,11 @@ _TIMING_EMPTY_SCHEMA = {
     "bucket": pl.Utf8, "n": pl.UInt32,
     "positive": pl.UInt32, "negative": pl.UInt32, "even": pl.UInt32,
     "pos_pct": pl.Float64,
+    "pos_neg_pct": pl.Float64,
 }
 
 
-def clv_by_timing(
-    ds: pl.DataFrame,
-    clv_col: str = "clv_vs_avg",
-) -> pl.DataFrame:
+def clv_by_timing(ds: pl.DataFrame) -> pl.DataFrame:
     """Bucket bets by hours before match start and report CLV W/L/D counts.
 
     Reference: first_live_fetched_at (first snapshot where event_status leaves
@@ -206,8 +202,7 @@ def clv_by_timing(
         return empty
 
     bets = _get_bets(ds)
-    close_col = _close_col_for(bets, clv_col)
-    if len(bets) == 0 or close_col is None or "bet_odds" not in bets.columns:
+    if len(bets) == 0 or _CLOSE_COL not in bets.columns or "bet_odds" not in bets.columns:
         return empty
 
     bets = bets.filter(
@@ -228,7 +223,7 @@ def clv_by_timing(
     if len(df) == 0:
         return empty
 
-    df = _with_wld(df, close_col)
+    df = _with_wld(df, _CLOSE_COL)
     if len(df) == 0:
         return empty
 
@@ -253,6 +248,7 @@ def clv_by_timing(
             "negative": neg,
             "even": even,
             "pos_pct": pos / n if n else None,
+            "pos_neg_pct": pos / (pos + neg) if (pos + neg) > 0 else None,
         }
 
     rows = []
@@ -267,9 +263,9 @@ def clv_by_timing(
         if r is not None:
             rows.append(r)
 
-    after_row = _counts(df.filter(pl.col("_hours_before") < 0), "(post-start)")
-    if after_row is not None:
-        rows.append(after_row)
+    live_row = _counts(df.filter(pl.col("_hours_before") < 0), "Live")
+    if live_row is not None:
+        rows.append(live_row)
 
     if not rows:
         return empty
@@ -305,17 +301,15 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
         metric_card_data("Negative", ex["n_negative"], fmt="d"),
         metric_card_data("Even", ex["n_even"], fmt="d"),
         metric_card_data("Pos %", ex["pos_pct"], fmt=".1%"),
+        metric_card_data("Pos/Neg %", ex["pos_neg_pct"], fmt=".1%"),
         metric_card_data("Avg Bet Odds", ex["avg_bet_odds"], fmt=".3f"),
         metric_card_data("Avg Close Odds", ex["avg_closing_odds"], fmt=".3f"),
     ]
     render_metric_cards(cards)
 
-    clv_col = next((c for c in ["clv_vs_avg", "clv_vs_best"] if c in ds.columns), None)
-    if clv_col is None:
+    if _CLV_COL not in ds.columns:
         st.info("No CLV data available.")
         return
-
-    clv_label = "CLV vs Avg Close" if clv_col == "clv_vs_avg" else "CLV vs Best Close"
 
     def _wld_display(df: pl.DataFrame, label_col: str, label: str) -> pl.DataFrame:
         return df.select(
@@ -325,18 +319,19 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
             pl.col("negative").alias("Negative"),
             pl.col("even").alias("Even"),
             (pl.col("pos_pct") * 100).round(1).alias("Pos %"),
+            (pl.col("pos_neg_pct") * 100).round(1).alias("Pos/Neg %"),
         )
 
     if "book" in ds.columns:
-        st.subheader(f"{clv_label} by Book")
-        clv_book = clv_by_group(ds, group_col="book", clv_col=clv_col)
+        st.subheader("CLV vs Best Close by Book")
+        clv_book = clv_by_group(ds, group_col="book")
         if len(clv_book) > 0:
             display = _wld_display(clv_book, "group", "Book")
             st.dataframe(display.to_pandas(), use_container_width=True, hide_index=True)
 
     if "bet_placed_at" in ds.columns:
-        st.subheader(f"{clv_label} by Timing")
-        clv_timing = clv_by_timing(ds, clv_col=clv_col)
+        st.subheader("CLV vs Best Close by Timing")
+        clv_timing = clv_by_timing(ds)
         if len(clv_timing) > 0:
             display = clv_timing.select(
                 pl.col("bucket").alias("Hours Before Match Start"),
@@ -345,6 +340,7 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
                 pl.col("negative").alias("Negative"),
                 pl.col("even").alias("Even"),
                 (pl.col("pos_pct") * 100).round(1).alias("Pos %"),
+                (pl.col("pos_neg_pct") * 100).round(1).alias("Pos/Neg %"),
             )
             st.dataframe(display.to_pandas(), use_container_width=True, hide_index=True)
         else:

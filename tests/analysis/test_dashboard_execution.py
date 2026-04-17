@@ -28,7 +28,7 @@ def test_clv_by_book_wld_counts():
     from mvp.analysis.dashboard.execution import clv_by_group
 
     ds = _make_bet_ds()
-    result = clv_by_group(ds, group_col="book", clv_col="clv_vs_best")
+    result = clv_by_group(ds, group_col="book")
 
     expected_cols = {"group", "n", "positive", "negative", "even", "pos_pct"}
     assert expected_cols.issubset(set(result.columns))
@@ -62,7 +62,7 @@ def test_clv_by_group_filters_to_bets():
         "bet_closing_best": [None],
     })
     ds_ext = pl.concat([ds, extra], how="diagonal_relaxed")
-    result = clv_by_group(ds_ext, group_col="book", clv_col="clv_vs_best")
+    result = clv_by_group(ds_ext, group_col="book")
 
     total_n = int(result["n"].sum())
     assert total_n == 5
@@ -87,8 +87,8 @@ def test_execution_summary():
     assert result["pos_pct"] == 3 / 5
 
 
-def test_execution_summary_even_at_two_decimals():
-    """Bets that round to the same 2dp are counted as Even."""
+def test_execution_summary_even_exact_match():
+    """Even requires exact float match, no rounding."""
     from mvp.analysis.dashboard.execution import execution_summary
 
     ds = pl.DataFrame({
@@ -100,7 +100,8 @@ def test_execution_summary_even_at_two_decimals():
     })
     result = execution_summary(ds)
     assert result["n_settled"] == 2
-    assert result["n_even"] == 2
+    assert result["n_positive"] == 1
+    assert result["n_even"] == 1
 
 
 def test_execution_summary_no_bets():
@@ -128,8 +129,8 @@ def _make_bet_ds_with_timing():
         "stake": ["10", "15", "10", "10"],
         "net": ["11.00", "-15.00", "-10.00", "13.00"],
         "book": ["DraftKings", "Bet365", "DraftKings", "MGM"],
-        "clv_vs_avg": [0.03, 0.01, -0.02, 0.05],
-        "bet_closing_avg": [2.05, 1.74, 1.96, 2.21],
+        "clv_vs_best": [0.03, 0.01, -0.02, 0.05],
+        "bet_closing_best": [2.05, 1.74, 1.96, 2.21],
         "bet_placed_at": [
             "2026-03-25 08:00",
             "2026-03-25 10:00",
@@ -149,7 +150,7 @@ def test_clv_by_timing():
     from mvp.analysis.dashboard.execution import clv_by_timing
 
     ds = _make_bet_ds_with_timing()
-    result = clv_by_timing(ds, clv_col="clv_vs_avg")
+    result = clv_by_timing(ds)
 
     expected_cols = {"bucket", "n", "positive", "negative", "even", "pos_pct"}
     assert expected_cols.issubset(set(result.columns))
@@ -162,5 +163,5 @@ def test_clv_by_timing_no_timestamps():
     from mvp.analysis.dashboard.execution import clv_by_timing
 
     ds = _make_bet_ds()  # existing fixture - no bet_placed_at column
-    result = clv_by_timing(ds, clv_col="clv_vs_avg")
+    result = clv_by_timing(ds)
     assert len(result) == 0
