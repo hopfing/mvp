@@ -589,6 +589,19 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         "--refresh", action="store_true", help="Rebuild matches.parquet before running"
     )
 
+    # iid-backtest subcommand - backtest IID projector against 2026 totals/spread book lines
+    iid_bt_parser = subparsers.add_parser(
+        "iid-backtest",
+        help="Backtest IID projector vs 2026 totals/spread book lines (lazy-trains artifact)",
+    )
+    iid_bt_parser.add_argument(
+        "config", type=str, help="Config name or path (resolved under projections/)"
+    )
+    iid_bt_parser.add_argument(
+        "--retrain", action="store_true",
+        help="Force retrain even if a saved artifact exists",
+    )
+
     # analysis subcommand
     analysis_parser = subparsers.add_parser(
         "analysis", help="Build analysis dataset with odds, CLV, and simulations"
@@ -1734,6 +1747,29 @@ def cmd_iid_project(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_iid_backtest(args: argparse.Namespace) -> int:
+    """Backtest the IID projector against captured 2026 totals/spread book lines."""
+    from mvp.projection.iid.backtest import (
+        print_backtest_summary,
+        run_backtest,
+    )
+
+    config_path = resolve_config_path(args.config, PROJECTION_DIR)
+    if not config_path.exists():
+        raise FileNotFoundError(
+            f"Config file not found: {args.config} (tried {config_path})"
+        )
+
+    if not _is_iid_discovery(config_path):
+        raise ValueError(
+            f"{config_path.name} is not an IID config (no serve_model)."
+        )
+
+    out_path = run_backtest(config_path, retrain=args.retrain)
+    print_backtest_summary(out_path)
+    return 0
+
+
 def _fetch_book_quiet(book: BookConfig, run_at=None) -> int:
     """Run a book's odds fetch in background thread."""
     import importlib
@@ -2137,6 +2173,8 @@ def main(args: list[str] | None = None) -> int:
         return cmd_project(parsed)
     elif parsed.command == "iid-project":
         return cmd_iid_project(parsed)
+    elif parsed.command == "iid-backtest":
+        return cmd_iid_backtest(parsed)
     elif parsed.command == "analysis":
         return cmd_analysis(parsed)
 
