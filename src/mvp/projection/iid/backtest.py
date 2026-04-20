@@ -471,9 +471,9 @@ def _settle_spreads(preds: pl.DataFrame, spreads: pl.DataFrame, dist) -> pl.Data
         if r["p1_id"] == a_id:
             p_p1_model = float(_p_a_cover_at(pmf[idx:idx+1], offset, -p1_points)[0])
         else:
-            # p1 is B; P(B margin > -p1_points) = P(a_margin < p1_points)
-            # Since lines are typically half-integer, this is 1 - P(a_margin > p1_points - 1).
-            p_p1_model = 1.0 - float(_p_a_cover_at(pmf[idx:idx+1], offset, p1_points - 1.0)[0])
+            # p1 is B; bet wins iff B's margin > -p1_points, i.e. a_margin < p1_points.
+            # For half-integer p1_points: P(a_margin < p1_points) = 1 - P(a_margin > p1_points).
+            p_p1_model = 1.0 - float(_p_a_cover_at(pmf[idx:idx+1], offset, p1_points)[0])
         p_p2_model = 1.0 - p_p1_model
 
         a_margin = r["actual_a_margin"]
