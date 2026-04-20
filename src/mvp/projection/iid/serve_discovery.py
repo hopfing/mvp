@@ -565,12 +565,11 @@ class ServeDiscoverySelector:
         )
 
         # Materialize all candidate match-level features from cache.
-        # Note: ScoreStateChainServeModel.predict_state_fn reads both
-        # `player_X` and `opp_X` columns for every selected match feature (to
-        # evaluate server = A vs. server = B via column swap). If you select
-        # a `player_X` spec you must also list `opp_X` in the candidate pool
-        # (and vice versa), otherwise predict_state_fn will raise
-        # ColumnNotFoundError on the missing side.
+        # ScoreStateChainServeModel.predict_state_fn reads `player_X` for
+        # the server-side value and either `opp_X` (mirror=True features)
+        # or the negated `player_X` (mirror=False / diff features) for the
+        # swap-side. load_features_numpy materializes the opp_ column only
+        # when the base feature mirrors, which matches that contract.
         df = engine.load_features_numpy(match_pool, df, cache_key)
 
         val = self.config.validation

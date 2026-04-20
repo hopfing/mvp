@@ -153,6 +153,11 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
         self._model: "ScoreStateServeModel | None" = None
         # server_/returner_ column names built from match_level_features specs.
         self._match_feature_cols: list[str] = []
+        # Parallel to _match_feature_cols: True for diff-style features
+        # (registry mirror=False) whose swapped-perspective value is the
+        # negation of the server-side column, rather than a separate opp_
+        # column read.
+        self._match_feature_is_diff: list[bool] = []
 
         # Cached per-df state — populated by predict_state_fn().
         self._X_match_A: np.ndarray | None = None   # server=A perspective
@@ -166,15 +171,22 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
     @property
     def required_columns(self) -> list[str]:
         # self._match_feature_cols uses server_/returner_; at inference the
-        # DataFrame has player_/opp_ — translate both.
+        # DataFrame has player_/opp_ — translate both. Diff-style features
+        # have no opp_ column; the swap-side value is the negation of the
+        # player_ column, so we only require the player_ side.
         cols: set[str] = set()
-        for name in self._match_feature_cols:
+        for name, is_diff in zip(
+            self._match_feature_cols,
+            self._match_feature_is_diff or [False] * len(self._match_feature_cols),
+        ):
             if name.startswith("server_"):
                 cols.add("player_" + name[len("server_"):])
-                cols.add("opp_" + name[len("server_"):])
+                if not is_diff:
+                    cols.add("opp_" + name[len("server_"):])
             elif name.startswith("returner_"):
                 cols.add("player_" + name[len("returner_"):])
-                cols.add("opp_" + name[len("returner_"):])
+                if not is_diff:
+                    cols.add("opp_" + name[len("returner_"):])
             else:
                 cols.add(name)
         for name in self.point_level_features:
@@ -186,18 +198,35 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
     def _resolve_match_feature_cols(self) -> list[str]:
         """Map config feature specs to the server_/returner_ column names used
         at inference. `player_*` specs become `server_*`; `opp_*` become
-        `returner_*`; unprefixed specs are passed through as match-level."""
-        from mvp.model.engine import build_column_name, parse_feature_spec
+        `returner_*`; unprefixed specs are passed through as match-level.
 
+        Also populates `self._match_feature_is_diff`: True for registered
+        diff-style features (mirror=False) — these have only a `player_`
+        column in the raw frame, and the swap-side value is the negation
+        of the server-side value (handled in `_match_feature_values`).
+        """
+        from mvp.model.engine import build_column_name, parse_feature_spec
+        from mvp.model.registry import get_registry
+
+        registry = get_registry()
         cols: list[str] = []
+        is_diff_flags: list[bool] = []
         for spec in self.match_level_features:
-            _, _, full_name, params = parse_feature_spec(spec)
+            prefix, base_name, full_name, params = parse_feature_spec(spec)
             col = build_column_name(full_name, params)
             if col.startswith("player_"):
                 col = "server_" + col[len("player_"):]
             elif col.startswith("opp_"):
                 col = "returner_" + col[len("opp_"):]
+            is_diff = False
+            if prefix is not None:
+                try:
+                    is_diff = not registry.get(base_name).mirror
+                except KeyError:
+                    is_diff = False
             cols.append(col)
+            is_diff_flags.append(is_diff)
+        self._match_feature_is_diff = is_diff_flags
         return cols
 
     def fit(self, df: pl.DataFrame) -> None:
@@ -247,10 +276,20 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
                 feature_specs=self.match_level_features,
                 extra_columns=["player_id", "opp_id", "match_uid"],
             )
+            matches_features = matches_features.rename(
+                {"player_id": "server_id", "opp_id": "returner_id"}
+            )
+            # Drop any non-key column that already exists in points to avoid
+            # `_right` collisions (same pattern as ServeDiscoverySelector
+            # ._build_base_matrix). points carries match-grain fields like
+            # best_of / surface / round that engine.compute can surface via
+            # source-column pruning.
+            keys = {"match_uid", "server_id", "returner_id"}
+            overlap = (set(points.columns) & set(matches_features.columns)) - keys
+            if overlap:
+                matches_features = matches_features.drop(list(overlap))
             joined = points.join(
-                matches_features.rename(
-                    {"player_id": "server_id", "opp_id": "returner_id"}
-                ),
+                matches_features,
                 on=["match_uid", "server_id", "returner_id"],
                 how="inner",
             )
@@ -290,19 +329,38 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
         """Build the match-level feature matrix in server-perspective.
 
         `swap=False` → player A is server; `swap=True` → player B is server
-        (columns read via the player_/opp_ swap).
+        (columns read via the player_/opp_ swap). Diff-style features
+        (mirror=False) have no opp_ counterpart; the swap-side value is the
+        negation of the player_ column.
         """
         cols: list[np.ndarray] = []
-        for name in self._match_feature_cols:
+        is_diff_flags = self._match_feature_is_diff or [False] * len(self._match_feature_cols)
+        for name, is_diff in zip(self._match_feature_cols, is_diff_flags):
+            sign = 1.0
             if name.startswith("server_"):
-                src_prefix = "opp_" if swap else "player_"
-                col = src_prefix + name[len("server_"):]
+                if is_diff:
+                    col = "player_" + name[len("server_"):]
+                    if swap:
+                        sign = -1.0
+                else:
+                    src_prefix = "opp_" if swap else "player_"
+                    col = src_prefix + name[len("server_"):]
             elif name.startswith("returner_"):
-                src_prefix = "player_" if swap else "opp_"
-                col = src_prefix + name[len("returner_"):]
+                if is_diff:
+                    # Only the player_ diff column exists in the df.
+                    # returner = non-server: equals -player_diff when A serves,
+                    # +player_diff when B serves (swap=True).
+                    col = "player_" + name[len("returner_"):]
+                    sign = 1.0 if swap else -1.0
+                else:
+                    src_prefix = "player_" if swap else "opp_"
+                    col = src_prefix + name[len("returner_"):]
             else:
                 col = name
-            cols.append(df[col].to_numpy().astype(np.float64))
+            arr = df[col].to_numpy().astype(np.float64)
+            if sign != 1.0:
+                arr = arr * sign
+            cols.append(arr)
         if not cols:
             return np.zeros((len(df), 0), dtype=np.float64)
         return np.column_stack(cols)
