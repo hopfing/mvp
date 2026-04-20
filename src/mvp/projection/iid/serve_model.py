@@ -129,6 +129,7 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
         points_path: Path | str | None = None,
         matches_path: Path | str | None = None,
         cache_dir: Path | str | None = None,
+        engine: Any = None,
     ) -> None:
         if not match_level_features and not point_level_features:
             raise ValueError(
@@ -143,6 +144,11 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
         self._points_path = Path(points_path) if points_path is not None else None
         self._matches_path = Path(matches_path) if matches_path is not None else None
         self._cache_dir = Path(cache_dir) if cache_dir is not None else None
+        # Optional pre-built FeatureEngine. Passing one skips building a fresh
+        # engine per fit() — the fresh build re-hashes matches.parquet and
+        # invalidates the cache if the file is touched mid-run (e.g., by a
+        # live pipeline). Callers doing many fits in one process should share.
+        self._engine = engine
 
         self._model: "ScoreStateServeModel | None" = None
         # server_/returner_ column names built from match_level_features specs.
@@ -234,7 +240,9 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
         self._match_feature_cols = self._resolve_match_feature_cols()
 
         if self.match_level_features:
-            engine = FeatureEngine(matches_path=matches_path, cache_dir=cache_dir)
+            engine = self._engine if self._engine is not None else FeatureEngine(
+                matches_path=matches_path, cache_dir=cache_dir,
+            )
             matches_features = engine.compute(
                 feature_specs=self.match_level_features,
                 extra_columns=["player_id", "opp_id", "match_uid"],

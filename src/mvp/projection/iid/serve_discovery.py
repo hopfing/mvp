@@ -27,19 +27,50 @@ from mvp.model.discovery.checkpoint import (
     save_checkpoint,
 )
 from mvp.model.engine import FeatureEngine, build_column_name, parse_feature_spec
+from mvp.model.features._score_helpers import total_games_lost, total_games_won
 from mvp.model.metrics import compute_metrics
 from mvp.model.splitters import make_splitter
 from mvp.model.discovery.discover import get_all_feature_specs
 from mvp.projection.iid.config import ServeDiscoveryConfig
+from mvp.projection.iid.metrics import crps_discrete_pmf
 from mvp.projection.iid.score_state_features import (
     add_derived_point_features,
     default_point_level_candidate_pool,
 )
 from mvp.projection.iid.score_state_model import build_score_state_model
+from mvp.projection.iid.serve_model import ScoreStateChainServeModel
+from mvp.projection.iid.stateful_chain import match_distribution_from_state_fn
 
 logger = logging.getLogger(__name__)
 
-_MINIMIZE_METRICS = {"log_loss", "brier_score", "calibration_error"}
+_POINT_METRICS = {"log_loss", "brier_score", "roc_auc", "calibration_error"}
+_CHAIN_METRICS = {"iid_crps_total_games", "iid_crps_spread", "mae", "rmse"}
+_MINIMIZE_METRICS = {
+    "log_loss", "brier_score", "calibration_error",
+    "iid_crps_total_games", "iid_crps_spread", "mae", "rmse",
+}
+
+
+def _score_dist_metric(
+    metric: str,
+    dist: Any,
+    y_games_a: np.ndarray,
+    y_games_b: np.ndarray,
+) -> float:
+    """Score a MatchDistribution against observed games for a chain-grain metric."""
+    if metric == "mae":
+        return float(np.mean(np.abs(y_games_a - dist.expected_games_a)))
+    if metric == "rmse":
+        return float(np.sqrt(np.mean((y_games_a - dist.expected_games_a) ** 2)))
+    if metric == "iid_crps_total_games":
+        obs_total = (y_games_a + y_games_b).astype(np.int64)
+        return crps_discrete_pmf(obs_total, dist.total_games_pmf)
+    if metric == "iid_crps_spread":
+        obs_spread = (y_games_a - y_games_b).astype(np.int64)
+        obs_idx = obs_spread + dist.spread_offset
+        obs_idx = np.clip(obs_idx, 0, dist.spread_pmf.shape[1] - 1)
+        return crps_discrete_pmf(obs_idx, dist.spread_pmf)
+    raise ValueError(f"Unknown chain metric: {metric}")
 
 
 @dataclass
@@ -92,6 +123,14 @@ class ServeDiscoverySelector:
         self.run_name = run_name or self.config_path.stem
         self.checkpoint_interval = checkpoint_interval
 
+        # Match-grain cache for chain-metric path (lazily populated).
+        self._match_df: pl.DataFrame | None = None
+        self._match_splits: list[tuple[list[int], list[int]]] | None = None
+        # FeatureEngine shared across chain-path fits — set in run() after
+        # _pre_cache_all. Reusing one instance keeps cache_key stable even if
+        # matches.parquet is touched mid-run.
+        self._engine: FeatureEngine | None = None
+
     def run(self) -> DiscoveryResult:
         selected_match = list(self.config.features.base_match_level_features)
         selected_point = list(self.config.features.base_point_level_features)
@@ -109,6 +148,7 @@ class ServeDiscoverySelector:
         # Phase B: build the point-grain base matrix with only base match features.
         # Match-level candidates are loaded lazily one at a time during FS.
         engine, cache_key = self._pre_cache_all(base_match=selected_match, candidate_match=match_pool)
+        self._engine = engine
         base_df, slim_matches = self._build_base_matrix(
             engine, cache_key,
             base_match=selected_match, base_point=selected_point, candidate_point=point_pool,
@@ -120,6 +160,11 @@ class ServeDiscoverySelector:
         logger.info("FS splits: %d folds", len(splits))
 
         fs_splits = self._maybe_subsample_splits(splits)
+
+        # Chain-metric path needs a match-grain df with all candidate match features
+        # materialized, plus match-grain folds from config.validation.
+        if self.config.metric in _CHAIN_METRICS:
+            self._prepare_match_data(match_pool=match_pool, engine=engine, cache_key=cache_key)
 
         candidate_match = [c for c in match_pool if c not in selected_match]
         candidate_point = [c for c in point_pool if c not in selected_point]
@@ -140,7 +185,8 @@ class ServeDiscoverySelector:
                     selected_match.append(feat)
                     if feat in candidate_match:
                         candidate_match.remove(feat)
-                    base_df = self._extend_df_with_match_feature(base_df, slim_matches, engine, cache_key, feat)
+                    if self.config.metric not in _CHAIN_METRICS:
+                        base_df = self._extend_df_with_match_feature(base_df, slim_matches, engine, cache_key, feat)
                 else:
                     selected_point.append(feat)
                     if feat in candidate_point:
@@ -184,6 +230,17 @@ class ServeDiscoverySelector:
             round_idx = 1
 
         started_at = cp.started_at if cp else datetime.now()
+
+        # Silence per-candidate engine / serve-model chatter during the FS
+        # loop — it clobbers the tqdm bar and dwarfs the useful round-level
+        # lines this module emits.
+        noisy_loggers = [
+            logging.getLogger("mvp.model.engine"),
+            logging.getLogger("mvp.projection.iid.serve_model"),
+        ]
+        prev_levels = [(lg, lg.level) for lg in noisy_loggers]
+        for lg in noisy_loggers:
+            lg.setLevel(logging.WARNING)
 
         while True:
             if self.config.features.max_features is not None:
@@ -234,13 +291,20 @@ class ServeDiscoverySelector:
                 )
 
             eval_count = 0
+            chain_mode = self.config.metric in _CHAIN_METRICS
             for grain, cand in bar:
                 if cand in this_round_scores:
                     score = this_round_scores[cand]
                 else:
                     if grain == "match":
-                        extended = self._extend_df_with_match_feature(base_df, slim_matches, engine, cache_key, cand)
-                        score = self._score_cv(extended, fs_splits, selected_match + [cand], selected_point)
+                        # Chain path ignores the extended point-grain df — it
+                        # scores off self._match_df which already has every
+                        # candidate match feature materialized. Skip the extend.
+                        if chain_mode:
+                            score = self._score_cv(base_df, fs_splits, selected_match + [cand], selected_point)
+                        else:
+                            extended = self._extend_df_with_match_feature(base_df, slim_matches, engine, cache_key, cand)
+                            score = self._score_cv(extended, fs_splits, selected_match + [cand], selected_point)
                     else:
                         score = self._score_cv(base_df, fs_splits, selected_match, selected_point + [cand])
                     this_round_scores[cand] = score
@@ -280,7 +344,9 @@ class ServeDiscoverySelector:
             if best_grain == "match":
                 selected_match.append(best_cand)
                 candidate_match.remove(best_cand)
-                base_df = self._extend_df_with_match_feature(base_df, slim_matches, engine, cache_key, best_cand)
+                # Chain path doesn't use base_df for scoring — skip the extend.
+                if not chain_mode:
+                    base_df = self._extend_df_with_match_feature(base_df, slim_matches, engine, cache_key, best_cand)
             else:
                 selected_point.append(best_cand)
                 candidate_point.remove(best_cand)
@@ -344,6 +410,10 @@ class ServeDiscoverySelector:
             metrics, coefs = self._final_train_eval(base_df, splits, selected_match, selected_point, form, params)
             final_forms.append(FinalFormResult(form=form, metrics=metrics, coef_summary=coefs))
             logger.info("Final form %s: %s=%.6f", form, self.config.metric, metrics.get(self.config.metric, float("nan")))
+
+        # Restore log levels silenced around the FS + final-form eval.
+        for lg, lvl in prev_levels:
+            lg.setLevel(lvl)
 
         return DiscoveryResult(
             selected_match_level=selected_match,
@@ -413,6 +483,8 @@ class ServeDiscoverySelector:
         match_level: list[str],
         point_level: list[str],
     ) -> float:
+        if self.config.metric in _CHAIN_METRICS:
+            return self._score_cv_chain(match_level, point_level)
         feature_cols = self._resolve_cols(match_level, point_level)
         fold_scores: list[float] = []
         for train_idx, test_idx in splits:
@@ -434,6 +506,129 @@ class ServeDiscoverySelector:
             fold_scores.append(metrics[self.config.metric])
         return float(np.mean(fold_scores))
 
+    def _prepare_match_data(
+        self,
+        *,
+        match_pool: list[str],
+        engine: FeatureEngine,
+        cache_key: str,
+    ) -> None:
+        """Build match-grain df + splits for chain-metric scoring. Idempotent."""
+        if self._match_df is not None:
+            return
+
+        # Columns needed for target resolution, filtering, chain eval.
+        cols = [
+            "match_uid", "player_id", "opp_id", "best_of", "won",
+            "effective_match_date", "reason",
+            "player_set1_games", "player_set2_games",
+            "player_set3_games", "player_set4_games", "player_set5_games",
+            "opp_set1_games", "opp_set2_games",
+            "opp_set3_games", "opp_set4_games", "opp_set5_games",
+        ]
+        for c in self.config.data.filters:
+            if c not in cols:
+                cols.append(c)
+        available = set(pl.scan_parquet(self.matches_path).collect_schema().names())
+        cols = [c for c in cols if c in available]
+        df = pl.read_parquet(self.matches_path, columns=cols)
+
+        dr = self.config.data.date_range
+        if dr is not None:
+            if dr.start is not None:
+                df = df.filter(pl.col("effective_match_date") >= dr.start)
+            if dr.end is not None:
+                df = df.filter(pl.col("effective_match_date") <= dr.end)
+
+        df = apply_filters(df, self.config.data.filters)
+
+        # Mirror IIDProjectionRunner._resolve_targets / _collapse_to_match_rows.
+        df = df.filter(
+            pl.col("player_set1_games").is_not_null()
+            & pl.col("player_set2_games").is_not_null()
+        )
+        if "reason" in df.columns:
+            df = df.filter(
+                pl.col("reason").fill_null("").is_in(["W/O", "RET", "DEF", "UNP"]).not_()
+            )
+        df = df.with_columns(
+            total_games_won().cast(pl.Float64).alias("_target_games_a"),
+            total_games_lost().cast(pl.Float64).alias("_target_games_b"),
+        )
+        df = df.filter(
+            pl.col("_target_games_a").is_not_null()
+            & pl.col("_target_games_b").is_not_null()
+            & pl.col("best_of").is_in([3, 5])
+        )
+        df = df.sort(["match_uid", "player_id"]).unique(
+            subset=["match_uid"], keep="first", maintain_order=True,
+        )
+
+        # Materialize all candidate match-level features from cache.
+        # Note: ScoreStateChainServeModel.predict_state_fn reads both
+        # `player_X` and `opp_X` columns for every selected match feature (to
+        # evaluate server = A vs. server = B via column swap). If you select
+        # a `player_X` spec you must also list `opp_X` in the candidate pool
+        # (and vice versa), otherwise predict_state_fn will raise
+        # ColumnNotFoundError on the missing side.
+        df = engine.load_features_numpy(match_pool, df, cache_key)
+
+        val = self.config.validation
+        splitter = make_splitter(
+            val_type=val.type,
+            n_splits=val.n_splits,
+            min_train_size=val.min_train_size,
+            test_size=val.test_size,
+            initial_train_size=val.initial_train_size,
+            step_size=val.step_size,
+            train_size=val.train_size,
+            test_start=getattr(val, "test_start", None),
+        )
+        splits = list(splitter.split(df))
+
+        self._match_df = df
+        self._match_splits = splits
+        logger.info(
+            "Chain-metric path: match-grain df=%d matches, %d folds, %d candidate match feats materialized",
+            len(df), len(splits), len(match_pool),
+        )
+
+    def _score_cv_chain(
+        self, match_level: list[str], point_level: list[str],
+    ) -> float:
+        assert self._match_df is not None and self._match_splits is not None, (
+            "_score_cv_chain called before _prepare_match_data"
+        )
+        if not match_level and not point_level:
+            return float("inf")
+        fold_scores: list[float] = []
+        for train_idx, test_idx in self._match_splits:
+            train_df = self._match_df[train_idx]
+            test_df = self._match_df[test_idx]
+
+            model = ScoreStateChainServeModel(
+                model_type=self.config.scoring_model.type,
+                match_level_features=list(match_level),
+                point_level_features=list(point_level),
+                params=dict(self.config.scoring_model.params),
+                points_path=self.points_path,
+                matches_path=self.matches_path,
+                cache_dir=self.cache_dir,
+                engine=self._engine,
+            )
+            model.fit(train_df)
+            p_a_fn, p_b_fn = model.predict_state_fn(test_df)
+            p_a, p_b = model.predict(test_df)
+            best_of = test_df["best_of"].to_numpy().astype(np.int64)
+            dist = match_distribution_from_state_fn(p_a_fn, p_b_fn, p_a, p_b, best_of)
+
+            y_games_a = test_df["_target_games_a"].to_numpy().astype(np.float64)
+            y_games_b = test_df["_target_games_b"].to_numpy().astype(np.float64)
+            fold_scores.append(
+                _score_dist_metric(self.config.metric, dist, y_games_a, y_games_b)
+            )
+        return float(np.mean(fold_scores))
+
     def _final_train_eval(
         self,
         df: pl.DataFrame,
@@ -443,6 +638,8 @@ class ServeDiscoverySelector:
         form: str,
         params: dict[str, Any],
     ) -> tuple[dict[str, float], dict[str, Any] | None]:
+        if self.config.metric in _CHAIN_METRICS:
+            return self._final_train_eval_chain(match_level, point_level, form, params)
         feature_cols = self._resolve_cols(match_level, point_level)
         fold_metrics: list[dict[str, float]] = []
         for train_idx, test_idx in splits:
@@ -469,6 +666,50 @@ class ServeDiscoverySelector:
         model = build_score_state_model(type_=form, feature_names=feature_cols, params=params)
         model.fit(X_full, y_full)
         return agg, model.coef_summary()
+
+    def _final_train_eval_chain(
+        self,
+        match_level: list[str],
+        point_level: list[str],
+        form: str,
+        params: dict[str, Any],
+    ) -> tuple[dict[str, float], dict[str, Any] | None]:
+        """Chain-grain final eval: emits all four chain metrics per fold."""
+        assert self._match_df is not None and self._match_splits is not None, (
+            "_final_train_eval_chain called before _prepare_match_data"
+        )
+        fold_metrics: list[dict[str, float]] = []
+        for train_idx, test_idx in self._match_splits:
+            train_df = self._match_df[train_idx]
+            test_df = self._match_df[test_idx]
+
+            model = ScoreStateChainServeModel(
+                model_type=form,
+                match_level_features=list(match_level),
+                point_level_features=list(point_level),
+                params=dict(params),
+                points_path=self.points_path,
+                matches_path=self.matches_path,
+                cache_dir=self.cache_dir,
+                engine=self._engine,
+            )
+            model.fit(train_df)
+            p_a_fn, p_b_fn = model.predict_state_fn(test_df)
+            p_a, p_b = model.predict(test_df)
+            best_of = test_df["best_of"].to_numpy().astype(np.int64)
+            dist = match_distribution_from_state_fn(p_a_fn, p_b_fn, p_a, p_b, best_of)
+            y_games_a = test_df["_target_games_a"].to_numpy().astype(np.float64)
+            y_games_b = test_df["_target_games_b"].to_numpy().astype(np.float64)
+            fold_metrics.append({
+                m: _score_dist_metric(m, dist, y_games_a, y_games_b)
+                for m in _CHAIN_METRICS
+            })
+
+        agg: dict[str, float] = {}
+        if fold_metrics:
+            for k in fold_metrics[0]:
+                agg[k] = float(np.mean([m[k] for m in fold_metrics]))
+        return agg, None
 
     def _resolve_cols(self, match_level: list[str], point_level: list[str]) -> list[str]:
         cols: list[str] = []

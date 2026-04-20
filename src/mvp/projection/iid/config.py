@@ -126,7 +126,16 @@ class ServeDiscoveryConfig(BaseModel):
     # if present, else library defaults).
     model_forms: list[Literal["logistic", "xgboost"]] = ["logistic", "xgboost"]
     model_params: dict[str, dict[str, Any]] = {}  # per-form params overrides
-    metric: Literal["log_loss", "brier_score", "roc_auc", "calibration_error"] = "log_loss"
+    metric: Literal[
+        "log_loss",
+        "brier_score",
+        "roc_auc",
+        "calibration_error",
+        "iid_crps_total_games",
+        "iid_crps_spread",
+        "mae",
+        "rmse",
+    ] = "log_loss"
     selection_method: Literal["forward"] = "forward"
     min_delta: float = 0.0001  # minimum fractional improvement to accept a candidate
     # Cap on training rows per fold during candidate scoring. None = use full training slice.
