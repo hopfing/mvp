@@ -75,11 +75,17 @@ def compute_iid_metrics(
 
     obs_total = (y_games_a + y_games_b).astype(np.int64)
     metrics["iid_crps_total_games"] = crps_discrete_pmf(obs_total, dist.total_games_pmf)
+    metrics["signed_total_bias"] = float(
+        dist.expected_total_games.mean() - obs_total.mean()
+    )
 
     obs_spread_int = (y_games_a - y_games_b).astype(np.int64)
     obs_spread_idx = obs_spread_int + dist.spread_offset
     obs_spread_idx = np.clip(obs_spread_idx, 0, dist.spread_pmf.shape[1] - 1)
     metrics["iid_crps_spread"] = crps_discrete_pmf(obs_spread_idx, dist.spread_pmf)
+    metrics["signed_spread_bias"] = float(
+        dist.expected_spread.mean() - obs_spread_int.mean()
+    )
 
     if total_lines:
         for line in total_lines:
@@ -89,7 +95,7 @@ def compute_iid_metrics(
             actual_rate = float(actual_over.mean())
             metrics[f"iid_line_total_{line}_pred"] = mean_p
             metrics[f"iid_line_total_{line}_actual"] = actual_rate
-            metrics[f"iid_line_total_{line}_err"] = abs(mean_p - actual_rate)
+            metrics[f"iid_line_total_{line}_signed"] = mean_p - actual_rate
 
     if spread_lines:
         obs_spread = obs_spread_int.astype(np.float64)
@@ -100,7 +106,7 @@ def compute_iid_metrics(
             actual_rate = float(actual_cover.mean())
             metrics[f"iid_line_spread_{line}_pred"] = mean_p
             metrics[f"iid_line_spread_{line}_actual"] = actual_rate
-            metrics[f"iid_line_spread_{line}_err"] = abs(mean_p - actual_rate)
+            metrics[f"iid_line_spread_{line}_signed"] = mean_p - actual_rate
 
     return metrics
 

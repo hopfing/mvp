@@ -109,9 +109,9 @@ class TestComputeIIDMetrics:
         assert "iid_crps_spread" in m
         assert "iid_line_total_20.5_pred" in m
         assert "iid_line_total_20.5_actual" in m
-        assert "iid_line_total_20.5_err" in m
-        assert "iid_line_spread_-2.5_err" in m
-        assert "iid_line_spread_2.5_err" in m
+        assert "iid_line_total_20.5_signed" in m
+        assert "iid_line_spread_-2.5_signed" in m
+        assert "iid_line_spread_2.5_signed" in m
 
     def test_classification_bridge_matches_direct(self):
         # The classification metrics from compute_iid_metrics should match
@@ -149,7 +149,7 @@ class TestComputeIIDMetrics:
             include_classification=False,
         )
         # Predicted vs actual for the line should match closely
-        assert m["iid_line_total_21.5_err"] < 0.01
+        assert abs(m["iid_line_total_21.5_signed"]) < 0.01
 
     def test_disable_classification(self):
         out = self._make_synthetic_projection(n=20)

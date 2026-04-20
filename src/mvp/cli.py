@@ -1666,6 +1666,11 @@ def print_iid_projection_summary(results: dict[str, Any], name: str | None = Non
         f"  CRPS total games={metrics.get('iid_crps_total_games', 0):.3f}  "
         f"CRPS spread={metrics.get('iid_crps_spread', 0):.3f}"
     )
+    if "signed_total_bias" in metrics or "signed_spread_bias" in metrics:
+        print(
+            f"  signed_total_bias={metrics.get('signed_total_bias', 0):+.3f} games  "
+            f"signed_spread_bias={metrics.get('signed_spread_bias', 0):+.3f} games"
+        )
 
     # Serve diagnostics
     if "serve_bias" in metrics:
@@ -1696,26 +1701,38 @@ def print_iid_projection_summary(results: dict[str, Any], name: str | None = Non
             f"bias={metrics['tiebreak_rate_bias']:+.4f}"
         )
 
-    # Line calibration
-    total_keys = sorted(k for k in metrics if k.startswith("iid_line_total_") and k.endswith("_err"))
+    # Line calibration (signed: pred - actual; positive = model over-predicts this side)
+    total_keys = sorted(
+        k for k in metrics
+        if k.startswith("iid_line_total_") and k.endswith("_signed")
+    )
     if total_keys:
-        print("\n  Total games line calibration (|pred - actual|):")
+        print("\n  Total games line calibration (signed = pred - actual):")
         for k in total_keys:
-            line = k.replace("iid_line_total_", "").replace("_err", "")
+            line = k.replace("iid_line_total_", "").replace("_signed", "")
             pred = metrics.get(f"iid_line_total_{line}_pred", 0)
             actual = metrics.get(f"iid_line_total_{line}_actual", 0)
-            err = metrics[k]
-            print(f"    O/U {line:>6}  pred={pred:.3f}  actual={actual:.3f}  err={err:.3f}")
+            signed = metrics[k]
+            print(
+                f"    O/U {line:>6}  pred={pred:.3f}  actual={actual:.3f}  "
+                f"signed={signed:+.3f}"
+            )
 
-    spread_keys = sorted(k for k in metrics if k.startswith("iid_line_spread_") and k.endswith("_err"))
+    spread_keys = sorted(
+        k for k in metrics
+        if k.startswith("iid_line_spread_") and k.endswith("_signed")
+    )
     if spread_keys:
-        print("\n  Spread line calibration (|pred - actual|):")
+        print("\n  Spread line calibration (signed = pred - actual):")
         for k in spread_keys:
-            line = k.replace("iid_line_spread_", "").replace("_err", "")
+            line = k.replace("iid_line_spread_", "").replace("_signed", "")
             pred = metrics.get(f"iid_line_spread_{line}_pred", 0)
             actual = metrics.get(f"iid_line_spread_{line}_actual", 0)
-            err = metrics[k]
-            print(f"    spread {line:>6}  pred={pred:.3f}  actual={actual:.3f}  err={err:.3f}")
+            signed = metrics[k]
+            print(
+                f"    spread {line:>6}  pred={pred:.3f}  actual={actual:.3f}  "
+                f"signed={signed:+.3f}"
+            )
 
     print(f"\nMLflow run: {results.get('run_id', 'N/A')}")
     print("=" * 70 + "\n")
