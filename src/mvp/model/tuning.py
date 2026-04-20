@@ -1,5 +1,6 @@
 """Model hyperparameter tuning via Optuna Bayesian optimization."""
 
+import gc
 import logging
 import tempfile
 import time
@@ -276,7 +277,7 @@ class HyperparamTuner:
                         matches_path=self.matches_path,
                         cache_dir=self.cache_dir,
                         run_name=f"tune_{self.config_path.stem}",
-                        log_to_mlflow=True,
+                        log_to_mlflow=False,
                     )
                 elif self.model_type in _PROJECTION_MODEL_TYPES:
                     from mvp.projection.runner import ProjectionRunner
@@ -286,7 +287,7 @@ class HyperparamTuner:
                         matches_path=self.matches_path,
                         cache_dir=self.cache_dir,
                         run_name=f"tune_{self.config_path.stem}",
-                        log_to_mlflow=True,
+                        log_to_mlflow=False,
                     )
                 else:
                     from mvp.model.runner import ExperimentRunner
@@ -296,9 +297,10 @@ class HyperparamTuner:
                         matches_path=self.matches_path,
                         cache_dir=self.cache_dir,
                         run_name=f"tune_{self.config_path.stem}",
-                        log_to_mlflow=True,
+                        log_to_mlflow=False,
                     )
                 result = runner.run()
+                metrics = dict(result["metrics"])
             finally:
                 runner_logger.setLevel(prev_runner)
                 engine_logger.setLevel(prev_engine)
@@ -306,9 +308,16 @@ class HyperparamTuner:
                 iid_logger.setLevel(prev_iid)
             duration = time.perf_counter() - t0
 
+            # Drop large per-trial state (fold predictions, diagnostics, mlflow
+            # buffers via runner) before returning so memory doesn't accumulate
+            # across Optuna trials.
+            del result
+            del runner
+            gc.collect()
+
             return {
                 "params": params,
-                "metrics": result["metrics"],
+                "metrics": metrics,
                 "duration_s": round(duration, 1),
             }
         finally:
