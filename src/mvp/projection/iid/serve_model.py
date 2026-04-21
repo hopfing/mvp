@@ -130,6 +130,8 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
         matches_path: Path | str | None = None,
         cache_dir: Path | str | None = None,
         engine: Any = None,
+        clip_min: float = SERVE_PROB_MIN,
+        clip_max: float = SERVE_PROB_MAX,
     ) -> None:
         if not match_level_features and not point_level_features:
             raise ValueError(
@@ -140,6 +142,8 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
         self.match_level_features = list(match_level_features)
         self.point_level_features = list(point_level_features)
         self.params = dict(params or {})
+        self.clip_min = clip_min
+        self.clip_max = clip_max
         # Paths default to the standard data locations; tests can override.
         self._points_path = Path(points_path) if points_path is not None else None
         self._matches_path = Path(matches_path) if matches_path is not None else None
@@ -453,11 +457,13 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
 
         def p_a_fn(state: Any) -> np.ndarray:
             X = _X_for(self._X_match_A, state)  # type: ignore[arg-type]
-            return self._model.predict_proba(X)  # type: ignore[union-attr]
+            p = self._model.predict_proba(X)  # type: ignore[union-attr]
+            return np.clip(p, self.clip_min, self.clip_max)
 
         def p_b_fn(state: Any) -> np.ndarray:
             X = _X_for(self._X_match_B, state)  # type: ignore[arg-type]
-            return self._model.predict_proba(X)  # type: ignore[union-attr]
+            p = self._model.predict_proba(X)  # type: ignore[union-attr]
+            return np.clip(p, self.clip_min, self.clip_max)
 
         return p_a_fn, p_b_fn
 

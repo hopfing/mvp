@@ -82,6 +82,8 @@ def _build_serve_model(cfg: ServeModelConfig) -> ServeWinProbEstimator:
             match_level_features=cfg.match_level_features,
             point_level_features=cfg.point_level_features,
             params=dict(cfg.params),
+            clip_min=cfg.clip_min,
+            clip_max=cfg.clip_max,
         )
     raise ValueError(f"Unknown serve model type: {cfg.type}")
 
