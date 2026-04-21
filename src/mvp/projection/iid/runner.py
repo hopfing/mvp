@@ -281,7 +281,11 @@ class IIDProjectionRunner:
                     include_classification=self.config.metrics.include_classification,
                     include_regression=self.config.metrics.include_regression,
                 )
-                metrics.update(compute_serve_diagnostics(out, test_df))
+                metrics.update(compute_serve_diagnostics(
+                    out, test_df,
+                    clip_min=self.config.serve_model.clip_min,
+                    clip_max=self.config.serve_model.clip_max,
+                ))
                 metrics.update(compute_hold_diagnostics(out, test_df))
                 metrics.update(compute_set_score_diagnostics(out, test_df))
                 metrics.update(compute_tiebreak_diagnostics(out, test_df))

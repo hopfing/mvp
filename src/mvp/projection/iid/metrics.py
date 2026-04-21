@@ -151,6 +151,8 @@ def compute_serve_diagnostics(
     n_predictions = len(p_a) + len(p_b)
     n_clipped_low = int(np.sum(p_a == clip_min) + np.sum(p_b == clip_min))
     n_clipped_high = int(np.sum(p_a == clip_max) + np.sum(p_b == clip_max))
+    metrics["serve_clip_min"] = float(clip_min)
+    metrics["serve_clip_max"] = float(clip_max)
     metrics["serve_n_clipped_low"] = float(n_clipped_low)
     metrics["serve_n_clipped_high"] = float(n_clipped_high)
     metrics["serve_pct_clipped"] = (
@@ -158,6 +160,12 @@ def compute_serve_diagnostics(
         if n_predictions > 0
         else 0.0
     )
+    # Raw prediction extrema (pre any external post-processing) — useful for
+    # telling whether the chosen bounds are active or merely vestigial.
+    if len(p_a) > 0 or len(p_b) > 0:
+        all_p = np.concatenate([p_a, p_b])
+        metrics["serve_p_min"] = float(np.min(all_p))
+        metrics["serve_p_max"] = float(np.max(all_p))
 
     return metrics
 

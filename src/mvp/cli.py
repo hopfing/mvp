@@ -1682,6 +1682,16 @@ def print_iid_projection_summary(results: dict[str, Any], name: str | None = Non
             f"(low={metrics.get('serve_n_clipped_low', 0):.0f} "
             f"high={metrics.get('serve_n_clipped_high', 0):.0f})"
         )
+        if "serve_clip_min" in metrics and "serve_clip_max" in metrics:
+            p_min = metrics.get("serve_p_min")
+            p_max = metrics.get("serve_p_max")
+            extras = ""
+            if p_min is not None and p_max is not None:
+                extras = f"  raw p range=[{p_min:.4f}, {p_max:.4f}]"
+            print(
+                f"  clip bounds=[{metrics['serve_clip_min']:.2f}, "
+                f"{metrics['serve_clip_max']:.2f}]{extras}"
+            )
     # Chain layer diagnostics
     if "hold_bias" in metrics:
         print("\n[Chain diagnostics]")
