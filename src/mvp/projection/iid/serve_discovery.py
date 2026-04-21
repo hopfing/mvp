@@ -540,6 +540,13 @@ class ServeDiscoverySelector:
             if dr.end is not None:
                 df = df.filter(pl.col("effective_match_date") <= dr.end)
 
+        # Load any computed-feature filter columns onto df before apply_filters
+        # (e.g. `player_svc_elo_matchup: {abs_min: X}`). apply_filters references
+        # the raw filter key, so the column must exist on df at filter time.
+        filter_specs = get_filter_feature_specs(self.config.data.filters)
+        if filter_specs:
+            df = engine.load_features_numpy(filter_specs, df, cache_key)
+
         df = apply_filters(df, self.config.data.filters)
 
         # Mirror IIDProjectionRunner._resolve_targets / _collapse_to_match_rows.
@@ -828,6 +835,20 @@ class ServeDiscoverySelector:
         slim_cols = [c for c in ["match_uid", "player_id", "opp_id"] if c in matches_df.columns]
         slim_matches = matches_df.select(slim_cols)
 
+        # Computed-feature filters (e.g. `player_svc_elo_matchup: {abs_min: X}`)
+        # reference player_/opp_ column names. Load + apply them at match grain,
+        # before the server_/returner_ rename and the points join. Remaining
+        # (raw-column) filters are applied post-join below.
+        filter_specs = get_filter_feature_specs(self.config.data.filters)
+        computed_filter_keys = set(filter_specs)
+        if filter_specs:
+            matches_df = engine.load_features_numpy(filter_specs, matches_df, cache_key)
+            match_grain_filters = {
+                k: v for k, v in self.config.data.filters.items()
+                if k in computed_filter_keys
+            }
+            matches_df = apply_filters(matches_df, match_grain_filters)
+
         # Load only base match features from cache onto matches_df.
         matches_df = engine.load_features_numpy(base_match, matches_df, cache_key)
 
@@ -857,8 +878,13 @@ class ServeDiscoverySelector:
                 all_point_names.append(f)
         joined = add_derived_point_features(joined, all_point_names)
 
-        # Apply domain filters and target filter.
-        joined = apply_filters(joined, self.config.data.filters)
+        # Apply remaining (non-computed) domain filters at point grain.
+        # Computed-feature filters were already applied at match grain above.
+        point_grain_filters = {
+            k: v for k, v in self.config.data.filters.items()
+            if k not in computed_filter_keys
+        }
+        joined = apply_filters(joined, point_grain_filters)
         joined = joined.filter(pl.col("point_won_by_server").is_not_null())
 
         return joined, slim_matches
