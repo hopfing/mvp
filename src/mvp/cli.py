@@ -34,24 +34,24 @@ class BookConfig:
 
 
 BOOK_REGISTRY: list[BookConfig] = [
-    BookConfig("dk", "DK", "DraftKings", "draftkings", "dk_event_id",
-               "stage/draftkings/moneyline.parquet", "draftkings/player_aliases.yaml",
-               "DraftKingsOddsMatcher", "DraftKingsOddsScraper"),
     BookConfig("br", "BR", "BetRivers", "betrivers", "br_event_id",
                "stage/betrivers/moneyline.parquet", "betrivers/player_aliases.yaml",
                "BetRiversOddsMatcher", "BetRiversOddsScraper"),
+    BookConfig("dk", "DK", "DraftKings", "draftkings", "dk_event_id",
+               "stage/draftkings/moneyline.parquet", "draftkings/player_aliases.yaml",
+               "DraftKingsOddsMatcher", "DraftKingsOddsScraper"),
     BookConfig("mgm", "MGM", "BetMGM", "betmgm", "mgm_event_id",
                "stage/betmgm/moneyline.parquet", "betmgm/player_aliases.yaml",
                "BetMGMOddsMatcher", "BetMGMOddsScraper"),
-    BookConfig("b365", "B365", "Bet365", "bet365", "b365_event_id",
-               "stage/bet365/moneyline.parquet", "bet365/player_aliases.yaml",
-               "Bet365OddsMatcher", "Bet365OddsScraper"),
     BookConfig("fd", "FD", "FanDuel", "fanduel", "fd_event_id",
                "stage/fanduel/moneyline.parquet", "fanduel/player_aliases.yaml",
                "FanDuelOddsMatcher", "FanDuelOddsScraper"),
     BookConfig("czr", "CZR", "Caesars", "caesars", "czr_event_id",
                "stage/caesars/moneyline.parquet", "caesars/player_aliases.yaml",
                "CaesarsOddsMatcher", "CaesarsOddsScraper"),
+    BookConfig("b365", "B365", "Bet365", "bet365", "b365_event_id",
+               "stage/bet365/moneyline.parquet", "bet365/player_aliases.yaml",
+               "Bet365OddsMatcher", "Bet365OddsScraper"),
 ]
 
 logger = logging.getLogger(__name__)
