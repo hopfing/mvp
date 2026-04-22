@@ -432,7 +432,10 @@ class TestScoreStateChainServeModel:
         )
         cols = set(chain_model.required_columns)
         assert "is_break_point" not in cols
-        assert "is_surface_hard" in cols
+        # is_surface_hard is a derivation — the model requires its source
+        # column (`surface`) and materializes the flag internally.
+        assert "is_surface_hard" not in cols
+        assert "surface" in cols
 
     def test_required_columns_includes_best_of(self):
         stub = _ConstStubScoreStateModel(

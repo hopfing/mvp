@@ -112,11 +112,22 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
             "game_score_numeric_server", "game_score_numeric_returner",
             "game_score_diff",
             "serve", "is_second_serve",
+            "set_num", "game_num",
         }
     )
 
     _GAME_SCORE_NUMERIC: Final[dict[str, int]] = {
         "0": 0, "15": 15, "30": 30, "40": 40, "D": 45, "AD": 50,
+    }
+
+    # Source columns for known match-constant derivations. Used by
+    # required_columns + _point_constant_values: if a configured point feature
+    # is a derivation, the caller must supply its source column; the model
+    # materializes the derived column on demand.
+    _POINT_FEATURE_SOURCES: Final[dict[str, tuple[str, ...]]] = {
+        "is_surface_hard": ("surface",),
+        "is_surface_clay": ("surface",),
+        "is_surface_grass": ("surface",),
     }
 
     def __init__(
@@ -194,7 +205,14 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
             else:
                 cols.add(name)
         for name in self.point_level_features:
-            if name not in self._STATE_DERIVABLE:
+            if name in self._STATE_DERIVABLE:
+                continue
+            # For derivations (e.g. surface one-hots) require the source
+            # column. _point_constant_values materializes the derived column.
+            sources = self._POINT_FEATURE_SOURCES.get(name)
+            if sources:
+                cols.update(sources)
+            else:
                 cols.add(name)
         cols.add("best_of")
         return sorted(cols)
@@ -371,10 +389,35 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
 
     def _point_constant_values(self, df: pl.DataFrame) -> dict[str, np.ndarray]:
         """Broadcast-constant point features (surface flags, etc.) from df."""
+        from mvp.projection.iid.score_state_features import (
+            DERIVED_POINT_FEATURES,
+            add_derived_point_features,
+        )
+
+        needed = [
+            name for name in self.point_level_features
+            if name not in self._STATE_DERIVABLE
+        ]
+        to_derive = [
+            name for name in needed
+            if name not in df.columns and name in DERIVED_POINT_FEATURES
+        ]
+        if to_derive:
+            missing_sources = {
+                src
+                for name in to_derive
+                for src in self._POINT_FEATURE_SOURCES.get(name, ())
+                if src not in df.columns
+            }
+            if missing_sources:
+                raise KeyError(
+                    f"ScoreStateChainServeModel: cannot derive point features "
+                    f"{to_derive} — df missing source column(s) {sorted(missing_sources)}"
+                )
+            df = add_derived_point_features(df, to_derive)
+
         out: dict[str, np.ndarray] = {}
-        for name in self.point_level_features:
-            if name in self._STATE_DERIVABLE:
-                continue
+        for name in needed:
             if name not in df.columns:
                 raise KeyError(
                     f"ScoreStateChainServeModel: required match-constant point "
@@ -402,6 +445,10 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
             "sets_won_returner": float(state.sets_won_returner),
             "serve": float(state.serve_num),
             "is_second_serve": float(state.serve_num == 2),
+            "set_num": float(state.sets_won_server + state.sets_won_returner + 1),
+            "game_num": float(
+                state.set_score_server_games + state.set_score_returner_games + 1
+            ),
         }
         gs_s = self._GAME_SCORE_NUMERIC.get(state.game_score_server, 0)
         gs_r = self._GAME_SCORE_NUMERIC.get(state.game_score_returner, 0)

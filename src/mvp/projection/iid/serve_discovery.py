@@ -45,6 +45,12 @@ logger = logging.getLogger(__name__)
 
 _POINT_METRICS = {"log_loss", "brier_score", "roc_auc", "calibration_error"}
 _CHAIN_METRICS = {"iid_crps_total_games", "iid_crps_spread", "mae", "rmse"}
+# Point features that cannot be represented in the chain DP: the deuce
+# closed-form in stateful_chain.hold_from_state_fn treats ("D","D") as a
+# single absorbing node, so features that distinguish deuce iterations
+# (point_num resets per game but advances through deuce cycles) would
+# invalidate the closed form. Excluded from the chain-path candidate pool.
+_CHAIN_INCOMPATIBLE_POINT_FEATURES = frozenset({"point_num"})
 _MINIMIZE_METRICS = {
     "log_loss", "brier_score", "calibration_error",
     "iid_crps_total_games", "iid_crps_spread", "mae", "rmse",
@@ -143,6 +149,14 @@ class ServeDiscoverySelector:
         if not point_pool:
             point_pool = default_point_level_candidate_pool()
             logger.info("candidate_point_level_features empty → using full default pool (%d specs)", len(point_pool))
+        if self.config.metric in _CHAIN_METRICS:
+            dropped = [f for f in point_pool if f in _CHAIN_INCOMPATIBLE_POINT_FEATURES]
+            if dropped:
+                point_pool = [f for f in point_pool if f not in _CHAIN_INCOMPATIBLE_POINT_FEATURES]
+                logger.info(
+                    "Chain metric %s: excluding point features incompatible with deuce closed-form: %s",
+                    self.config.metric, dropped,
+                )
 
         # Phase A: cache all match-level specs to disk (memory-bounded batches).
         # Phase B: build the point-grain base matrix with only base match features.
@@ -518,9 +532,11 @@ class ServeDiscoverySelector:
             return
 
         # Columns needed for target resolution, filtering, chain eval.
+        # `surface` is required so the chain serve model can materialize
+        # surface one-hots (`is_surface_hard`/etc.) when those are candidates.
         cols = [
             "match_uid", "player_id", "opp_id", "best_of", "won",
-            "effective_match_date", "reason",
+            "effective_match_date", "reason", "surface",
             "player_set1_games", "player_set2_games",
             "player_set3_games", "player_set4_games", "player_set5_games",
             "opp_set1_games", "opp_set2_games",
