@@ -29,7 +29,7 @@ class TestEventMap:
         assert df["source"].unique().to_list() == ["auto"]
 
     def test_append_without_duplicates(self, tmp_path):
-        """Appending should skip existing (match_uid, book) pairs."""
+        """Appending should skip existing (book, event_id) pairs."""
         from mvp.analysis.event_map import save_event_mappings
 
         path = tmp_path / "event_map.parquet"
@@ -45,6 +45,26 @@ class TestEventMap:
 
         df = pl.read_parquet(path)
         assert len(df) == 2
+
+    def test_upsert_replaces_prior_match_uid_for_same_event_id(self, tmp_path):
+        """Re-mapping an event_id to a different match_uid should replace, not append."""
+        from mvp.analysis.event_map import save_event_mappings
+
+        path = tmp_path / "event_map.parquet"
+
+        # Initial (poisoned) mapping
+        save_event_mappings(
+            [EventMatch("m_old", "dk_e1", "A", "B")], book="dk", path=path,
+        )
+        # Re-mapped to a new match_uid for the same (book, event_id)
+        save_event_mappings(
+            [EventMatch("m_new", "dk_e1", "A", "B")], book="dk", path=path,
+        )
+
+        df = pl.read_parquet(path)
+        assert len(df) == 1
+        assert df["match_uid"][0] == "m_new"
+        assert df["event_id"][0] == "dk_e1"
 
     def test_different_books_coexist(self, tmp_path):
         """DK and BR mappings for the same match should both be stored."""

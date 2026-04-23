@@ -12,6 +12,7 @@ from mvp.common.event_mapper import (
     map_book_events,
     _strip_circuit_prefix,
     _match_tournament,
+    _parse_book_round,
 )
 
 
@@ -148,6 +149,35 @@ class TestBuildMatchCatalog:
             build_match_catalog(df)
         assert "collision" in caplog.text.lower()
 
+    def test_excludes_completed_matches(self):
+        """Matches with a non-null result_type are excluded from the catalog."""
+        df = pl.DataFrame({
+            "match_uid": ["m_done", "m_ret", "m_wo", "m_open"],
+            "player_id": ["A001", "A001", "A001", "A001"],
+            "opp_id": ["B002", "B002", "B002", "B002"],
+            "tournament_id": ["403", "580", "605", "1536"],
+            "year": [2026, 2026, 2026, 2026],
+            "result_type": ["completed", "retirement", "walkover", None],
+        })
+        catalog = build_match_catalog(df)
+        pair = frozenset({"A001", "B002"})
+        assert len(catalog[pair]) == 1
+        assert catalog[pair][0]["match_uid"] == "m_open"
+
+    def test_carries_round(self):
+        """Round is included in catalog entries when available."""
+        df = pl.DataFrame({
+            "match_uid": ["m1", "m2"],
+            "player_id": ["A001", "A001"],
+            "opp_id": ["B002", "B002"],
+            "tournament_id": ["1536", "1536"],
+            "year": [2026, 2026],
+            "round": ["Q2", "R128"],
+        })
+        catalog = build_match_catalog(df)
+        rounds = {e["round"] for e in catalog[frozenset({"A001", "B002"})]}
+        assert rounds == {"Q2", "R128"}
+
 
 # ---------------------------------------------------------------------------
 # Tournament name matching
@@ -165,6 +195,28 @@ class TestStripCircuitPrefix:
 
     def test_no_prefix(self):
         assert _strip_circuit_prefix("Miami Open") == "Miami Open"
+
+
+class TestParseBookRound:
+    def test_main_draw_numbered_round(self):
+        assert _parse_book_round("ATP Madrid - Round 1") == "main"
+        assert _parse_book_round("ATP Madrid - Round 2") == "main"
+
+    def test_main_draw_final_variants(self):
+        assert _parse_book_round("ATP Houston - Final") == "main"
+        assert _parse_book_round("ATP Houston - Semifinales") == "main"
+        assert _parse_book_round("Challenger Mexico City - 1/4 Final") == "main"
+
+    def test_qualifier_forms(self):
+        assert _parse_book_round("ATP Challenger Busan - Qualification - Hard") == "qual"
+        assert _parse_book_round("Challenger Quals. - Madrid") == "qual"
+        assert _parse_book_round("ATP Madrid - Qualifying") == "qual"
+
+    def test_no_round_signal(self):
+        assert _parse_book_round("ATP - Madrid") is None
+        assert _parse_book_round("ATP Madrid 2026") is None
+        assert _parse_book_round("Madrid") is None
+        assert _parse_book_round("") is None
 
 
 class TestMatchTournament:
@@ -305,6 +357,68 @@ class TestMapBookEvents:
                  "tournament_name": "Miami Open"},
                 {"match_uid": "m2", "tournament_id": "580", "year": 2026,
                  "tournament_name": "Indian Wells Masters"},
+            ],
+        }
+        result = map_book_events(
+            odds, "dk_event_id", "dk",
+            self._player_lookup(), catalog,
+        )
+        assert len(result.event_matches) == 1
+        assert result.event_matches[0].match_uid == "m1"
+
+    def test_round_gate_rejects_single_qualifier_when_book_main(self):
+        """Single candidate must be rejected if book says main draw but catalog has Q*."""
+        odds = pl.DataFrame({
+            "b365_event_id": ["e1", "e1"],
+            "player_name": ["Roger Federer", "Rafael Nadal"],
+            "tournament": ["ATP Madrid - Round 1", "ATP Madrid - Round 1"],
+        })
+        catalog = {
+            frozenset({"A001", "B002"}): [
+                {"match_uid": "q_match", "tournament_id": "1536", "year": 2026,
+                 "tournament_name": "Madrid 1", "round": "Q2"},
+            ],
+        }
+        result = map_book_events(
+            odds, "b365_event_id", "b365",
+            self._player_lookup(), catalog,
+        )
+        assert result.event_matches == []
+        assert len(result.no_match_found) == 1
+
+    def test_round_gate_resolves_quals_vs_main_ambiguity(self):
+        """Same-tournament Q2 + R128 pair — book 'Round 1' picks R128."""
+        odds = pl.DataFrame({
+            "b365_event_id": ["e1", "e1"],
+            "player_name": ["Roger Federer", "Rafael Nadal"],
+            "tournament": ["ATP Madrid - Round 1", "ATP Madrid - Round 1"],
+        })
+        catalog = {
+            frozenset({"A001", "B002"}): [
+                {"match_uid": "q_match", "tournament_id": "1536", "year": 2026,
+                 "tournament_name": "Madrid 1", "round": "Q2"},
+                {"match_uid": "r128_match", "tournament_id": "1536", "year": 2026,
+                 "tournament_name": "Madrid 1", "round": "R128"},
+            ],
+        }
+        result = map_book_events(
+            odds, "b365_event_id", "b365",
+            self._player_lookup(), catalog,
+        )
+        assert len(result.event_matches) == 1
+        assert result.event_matches[0].match_uid == "r128_match"
+
+    def test_round_gate_is_noop_when_book_has_no_round_signal(self):
+        """DK-style tournament text without round info leaves all candidates in play."""
+        odds = pl.DataFrame({
+            "dk_event_id": ["e1", "e1"],
+            "player_name": ["Roger Federer", "Rafael Nadal"],
+            "tournament": ["ATP - Madrid", "ATP - Madrid"],
+        })
+        catalog = {
+            frozenset({"A001", "B002"}): [
+                {"match_uid": "m1", "tournament_id": "1536", "year": 2026,
+                 "tournament_name": "Madrid 1", "round": "R128"},
             ],
         }
         result = map_book_events(

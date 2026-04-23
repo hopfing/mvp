@@ -40,7 +40,14 @@ def save_event_mappings(
     book: str,
     path: Path = DEFAULT_PATH,
 ) -> None:
-    """Append new event mappings, skipping duplicates on (match_uid, book)."""
+    """Upsert event mappings, replacing any prior row for the same (book, event_id).
+
+    Replacement (not just skip) is required because a re-evaluated event may
+    resolve to a different match_uid than it did originally (e.g. when an
+    earlier mapping landed against a then-only candidate that has since been
+    completed). The (book, event_id) tuple is the natural primary key from the
+    book's side.
+    """
     if not matches:
         return
 
@@ -63,17 +70,23 @@ def save_event_mappings(
     existing = load_event_map(path)
 
     if len(existing) > 0:
-        existing_keys = existing.select("match_uid", "book")
-        new_df = new_df.join(existing_keys, on=["match_uid", "book"], how="anti")
-        if len(new_df) == 0:
-            return
-        combined = pl.concat([existing, new_df], how="diagonal_relaxed")
+        # Drop any prior rows for the (book, event_id) tuples we're about to
+        # write. This handles both pure duplicates and re-evaluated events that
+        # resolve to a new match_uid.
+        new_keys = new_df.select("book", "event_id").unique()
+        retained = existing.join(new_keys, on=["book", "event_id"], how="anti")
+        replaced = len(existing) - len(retained)
+        combined = pl.concat([retained, new_df], how="diagonal_relaxed")
     else:
+        replaced = 0
         combined = new_df
 
     path.parent.mkdir(parents=True, exist_ok=True)
     combined.write_parquet(path)
-    logger.info("Event map: %d total mappings (%d new)", len(combined), len(new_df))
+    logger.info(
+        "Event map: %d total mappings (%d new, %d replaced)",
+        len(combined), len(new_df) - replaced, replaced,
+    )
 
 
 def load_event_map_with_overrides(

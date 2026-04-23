@@ -1982,16 +1982,41 @@ def cmd_live(args: argparse.Namespace) -> int:
         existing_map = load_event_map_with_overrides()
         data_root = get_data_root()
 
+        # Preload matches.parquet once: used both for scoping existing_eids
+        # (to the set of uncompleted match_uids — so previously-mapped events
+        # pointing at completed matches self-heal on re-evaluation) and for
+        # building the match catalog below.
+        matches_path = data_root / "aggregate" / "atptour" / "matches.parquet"
+        uncompleted_uids: set[str] | None = None
+        catalog_df_all: pl.DataFrame | None = None
+        if matches_path.exists():
+            catalog_df_all = pl.read_parquet(
+                matches_path,
+                columns=["match_uid", "player_id", "opp_id", "tournament_id",
+                         "year", "tournament_name", "draw_type", "draw_p1_id",
+                         "round", "result_type"],
+            )
+            uncompleted_uids = set(
+                catalog_df_all.filter(pl.col("result_type").is_null())["match_uid"]
+                .unique().to_list()
+            )
+
         unmapped_odds: list[tuple[str, str, Path, pl.DataFrame]] = []
         for book, eid_col, odds_rel, aliases_path in _book_mapping_config:
             odds_path = data_root / odds_rel
             if not odds_path.exists():
                 continue
             staged = pl.read_parquet(odds_path)
+            # Only consider prematch events for mapping: live/completed book
+            # events must not be re-mapped, and downstream odds read paths
+            # already restrict to NOT_STARTED.
+            if "event_status" in staged.columns:
+                staged = staged.filter(pl.col("event_status") == "NOT_STARTED")
             staged_latest = staged.sort("fetched_at").group_by([eid_col, "player_name"]).last()
-            existing_eids = set(
-                existing_map.filter(pl.col("book") == book)["event_id"].to_list()
-            )
+            book_map = existing_map.filter(pl.col("book") == book)
+            if uncompleted_uids is not None:
+                book_map = book_map.filter(pl.col("match_uid").is_in(uncompleted_uids))
+            existing_eids = set(book_map["event_id"].to_list())
             unmapped = staged_latest.filter(~pl.col(eid_col).is_in(existing_eids))
             if len(unmapped) > 0:
                 unmapped_odds.append((book, eid_col, aliases_path, unmapped))
@@ -2001,14 +2026,10 @@ def cmd_live(args: argparse.Namespace) -> int:
                 df["fetched_at"].min().year for _, _, _, df in unmapped_odds
             )
 
-            matches_path = data_root / "aggregate" / "atptour" / "matches.parquet"
-            if matches_path.exists():
-                catalog_df = pl.read_parquet(
-                    matches_path,
-                    columns=["match_uid", "player_id", "opp_id", "tournament_id",
-                             "year", "tournament_name", "draw_type", "draw_p1_id"],
-                ).filter(pl.col("year") >= min_year)
-                match_catalog = build_match_catalog(catalog_df)
+            if catalog_df_all is not None:
+                match_catalog = build_match_catalog(
+                    catalog_df_all.filter(pl.col("year") >= min_year)
+                )
             else:
                 match_catalog = {}
 

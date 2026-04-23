@@ -156,11 +156,14 @@ def build_match_catalog(
     Args:
         matches_df: DataFrame with at minimum: match_uid, player_id, opp_id,
                     tournament_id, year. Should also have draw_p1_id for correct
-                    p1/p2 assignment. May also have tournament_name and draw_type.
+                    p1/p2 assignment. May also have tournament_name, draw_type,
+                    round, and result_type.
 
     Returns:
         Dict mapping frozenset({player_id, opp_id}) to list of
-        {match_uid, tournament_id, year, p1_id, tournament_name?} dicts.
+        {match_uid, tournament_id, year, p1_id, tournament_name?, round?} dicts.
+        Completed matches (result_type non-null) are excluded when result_type
+        is present.
     """
     catalog: dict[frozenset, list[dict]] = {}
 
@@ -175,13 +178,25 @@ def build_match_catalog(
         matches_df = matches_df.filter(pl.col("draw_type") == "singles")
         logger.info("Match catalog: filtered to singles (%d -> %d)", before, len(matches_df))
 
+    # Exclude completed matches (result_type is set for completed/retirement/walkover).
+    # A book's live prematch event must never map to a finished match.
+    if "result_type" in matches_df.columns:
+        before = len(matches_df)
+        matches_df = matches_df.filter(pl.col("result_type").is_null())
+        logger.info(
+            "Match catalog: filtered to uncompleted (%d -> %d)", before, len(matches_df),
+        )
+
     has_name = "tournament_name" in matches_df.columns
     has_p1 = "draw_p1_id" in matches_df.columns
+    has_round = "round" in matches_df.columns
     optional = []
     if has_name:
         optional.append("tournament_name")
     if has_p1:
         optional.append("draw_p1_id")
+    if has_round:
+        optional.append("round")
     cols = list(required) + optional
 
     # Deduplicate: same match_uid can appear twice (player + opp perspective)
@@ -199,6 +214,8 @@ def build_match_catalog(
         }
         if has_name:
             entry["tournament_name"] = row.get("tournament_name")
+        if has_round:
+            entry["round"] = row.get("round")
         catalog.setdefault(pair, []).append(entry)
 
     # Log collision warnings (same pair, same tournament+year)
@@ -231,6 +248,46 @@ def _strip_circuit_prefix(book_tournament: str) -> str:
     # Strip suffixes (country codes, surface, qualification)
     result = _SUFFIX_PATTERNS.sub("", book_tournament)
     return result.strip()
+
+
+# Book-round classification: "main" = main draw, "qual" = qualifying round.
+# Used as a defensive gate against qualifier vs main-draw ambiguity for books
+# that surface round info in their tournament string (bet365 primarily; betmgm
+# has the "Qualification" suffix). Books without any round signal (DK/FD/BR)
+# produce None and the gate is a no-op.
+_QUAL_PATTERNS = re.compile(
+    r"qualification|qualifying|\bquals?\.?\b|\bq-?r\d|\bq\d\b",
+    re.IGNORECASE,
+)
+_MAIN_PATTERNS = re.compile(
+    r"\bround\s*\d|\bfinal(?:e|es|s)?\b|\bsemi(?:final)?(?:es|s)?\b"
+    r"|\bquarter(?:final)?(?:es|s)?\b|1/\d+\s*final",
+    re.IGNORECASE,
+)
+
+
+def _parse_book_round(tournament_text: str) -> str | None:
+    """Classify a book's tournament string as "main" or "qual" draw, or None.
+
+    Coarse on purpose: the draw size (and therefore the mapping from "Round 1"
+    to a specific R### code) varies by tournament tier. "main" vs "qual" is
+    sufficient to prevent a main-draw book event from mapping to a qualifier
+    catalog entry (and vice versa), which is the ambiguity we hit in practice.
+    """
+    if not tournament_text:
+        return None
+    if _QUAL_PATTERNS.search(tournament_text):
+        return "qual"
+    if _MAIN_PATTERNS.search(tournament_text):
+        return "main"
+    return None
+
+
+def _round_class(catalog_round: str | None) -> str | None:
+    """Classify a catalog round code as "main" or "qual"."""
+    if not catalog_round:
+        return None
+    return "qual" if catalog_round.upper().startswith("Q") else "main"
 
 
 def _match_tournament(
@@ -341,11 +398,28 @@ def map_book_events(
             if year_filtered:
                 candidates = year_filtered
 
+        # Round gate: if the book's tournament text surfaces a round class
+        # (main draw vs qualifier), drop catalog candidates whose round class
+        # disagrees. No-op for books without round info in their tournament
+        # string. Applied before single-vs-multi candidate branching so both
+        # paths benefit.
+        book_tournament = rows[0].get("tournament", "")
+        book_round = _parse_book_round(book_tournament)
+        if book_round is not None:
+            round_filtered = [
+                c for c in candidates
+                if _round_class(c.get("round")) in (None, book_round)
+            ]
+            if not round_filtered:
+                result.no_match_found.append((eid, name_a, name_b))
+                skipped_no_match += 1
+                continue
+            candidates = round_filtered
+
         if len(candidates) == 1:
             match = candidates[0]
         else:
             # Multiple candidates — try tournament disambiguation
-            book_tournament = rows[0].get("tournament", "")
             narrowed = _match_tournament(book_tournament, candidates)
 
             if len(narrowed) == 1:
