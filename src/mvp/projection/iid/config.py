@@ -39,8 +39,8 @@ class IIDMetricsConfig(BaseModel):
 
     include_classification: bool = True
     include_regression: bool = True
-    total_lines: list[float] = [20.5, 21.5, 22.5, 23.5]
-    spread_lines: list[float] = [-3.5, -2.5, -1.5, 1.5, 2.5, 3.5]
+    total_lines: list[float] = [18.5, 19.5, 20.5, 21.5, 22.5, 23.5, 24.5, 25.5]
+    spread_lines: list[float] = [-5.5, -4.5, -3.5, -2.5, -1.5, 1.5, 2.5, 3.5, 4.5, 5.5]
 
 
 class IIDProjectionConfig(BaseModel):
