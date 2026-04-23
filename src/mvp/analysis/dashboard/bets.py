@@ -6,6 +6,8 @@ from datetime import date, timedelta
 
 import polars as pl
 
+from mvp.analysis.dashboard.components import expand_by_book
+
 
 def _filter_bets(ds: pl.DataFrame) -> pl.DataFrame:
     """Filter to actual bets (bet_side is not null) with resolved results."""
@@ -534,7 +536,7 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
         )
 
     st.subheader("By Book")
-    _render_breakdown(bets, "book", "Book", st)
+    _render_breakdown(expand_by_book(bets), "book", "Book", st)
 
     st.subheader("By Odds Band")
     _render_odds_breakdown(bets, st)

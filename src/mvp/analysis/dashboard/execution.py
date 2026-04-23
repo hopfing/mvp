@@ -7,6 +7,8 @@ from datetime import UTC, datetime
 
 import polars as pl
 
+from mvp.analysis.dashboard.components import expand_by_book
+
 
 def _get_bets(ds: pl.DataFrame) -> pl.DataFrame:
     """Filter to rows that are actual bets."""
@@ -378,7 +380,7 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
 
     if "book" in ds.columns:
         st.subheader("CLV vs Best Close by Book")
-        clv_book = clv_by_group(ds, group_col="book")
+        clv_book = clv_by_group(expand_by_book(ds), group_col="book")
         if len(clv_book) > 0:
             display = _wld_display(clv_book, "group", "Book")
             st.dataframe(display.to_pandas(), use_container_width=True, hide_index=True)
@@ -402,7 +404,7 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
 
     if "book" in ds.columns and "bet_placed_at" in ds.columns:
         st.subheader("CLV vs Best Close by Book x Timing")
-        clv_bt = clv_by_book_timing(ds)
+        clv_bt = clv_by_book_timing(expand_by_book(ds))
         if clv_bt is not None:
             display = clv_bt.select(
                 pl.col("book").alias("Book"),

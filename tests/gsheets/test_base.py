@@ -20,8 +20,12 @@ from mvp.gsheets.base import (
 
 
 class TestColumnSchema:
-    def test_column_schema_has_36_columns(self):
-        assert len(COLUMN_SCHEMA) == 38
+    def test_column_schema_has_39_columns(self):
+        assert len(COLUMN_SCHEMA) == 39
+
+    def test_book2_follows_book(self):
+        book_idx = COLUMN_NAMES.index("book")
+        assert COLUMN_NAMES[book_idx + 1] == "book2"
 
     def test_match_uid_is_in_schema(self):
         assert "match_uid" in COLUMN_NAMES
@@ -380,7 +384,7 @@ class TestMergePredictions:
         })
         result = merge_predictions(existing, new, matches)
         assert list(result.columns) == COLUMN_NAMES
-        assert len(result.columns) == 38
+        assert len(result.columns) == 39
 
     def test_empty_existing_empty_new(self):
         existing = _sheet_df([])
@@ -413,7 +417,7 @@ class TestMergePredictions:
         })
         result = merge_predictions(existing, new, matches)
         assert len(result) == 0
-        assert len(result.columns) == 38
+        assert len(result.columns) == 39
         assert list(result.columns) == COLUMN_NAMES
 
     def test_duplicate_match_uid_not_added(self):
@@ -562,6 +566,66 @@ class TestMergePredictions:
         assert result["tournament_day"][0] == "2024-01-15"
         # Prediction columns should NOT be updated
         assert result["p1_prob"][0] == "0.65"
+
+    def test_book2_filled_when_two_books_tie_at_best(self):
+        row = _make_sheet_row(match_uid="M1", prediction="P1", stake="", book="", book2="")
+        existing = _sheet_df([row])
+        new = prepare_predictions(_make_predictions(match_uid="OTHER"))
+        matches = _matches_df({"match_uid": [], "won": [], "player_id": [], "opp_id": []})
+        # BR and DK tie at 2.10 for p1; MGM is 2.05
+        odds_maps = {
+            "BR": {"M1": {"A": 2.10, "B": 1.80}},
+            "DK": {"M1": {"A": 2.10, "B": 1.75}},
+            "MGM": {"M1": {"A": 2.05, "B": 1.82}},
+        }
+        result = merge_predictions(existing, new, matches, odds_maps=odds_maps)
+        m1 = result.filter(pl.col("match_uid") == "M1")
+        assert m1["book"][0] == "BR"    # first in registry order
+        assert m1["book2"][0] == "DK"   # second tied
+
+    def test_book2_blank_when_no_tie(self):
+        row = _make_sheet_row(match_uid="M1", prediction="P1", stake="", book="", book2="")
+        existing = _sheet_df([row])
+        new = prepare_predictions(_make_predictions(match_uid="OTHER"))
+        matches = _matches_df({"match_uid": [], "won": [], "player_id": [], "opp_id": []})
+        odds_maps = {
+            "DK": {"M1": {"A": 2.15, "B": 1.75}},
+            "BR": {"M1": {"A": 2.10, "B": 1.80}},
+        }
+        result = merge_predictions(existing, new, matches, odds_maps=odds_maps)
+        m1 = result.filter(pl.col("match_uid") == "M1")
+        assert m1["book"][0] == "DK"
+        assert m1["book2"][0] == ""
+
+    def test_tie_break_rounds_to_two_decimals(self):
+        row = _make_sheet_row(match_uid="M1", prediction="P1", stake="", book="", book2="")
+        existing = _sheet_df([row])
+        new = prepare_predictions(_make_predictions(match_uid="OTHER"))
+        matches = _matches_df({"match_uid": [], "won": [], "player_id": [], "opp_id": []})
+        # 2.104 and 2.102 both round to 2.10 -> tie
+        odds_maps = {
+            "BR": {"M1": {"A": 2.104, "B": 1.80}},
+            "DK": {"M1": {"A": 2.102, "B": 1.75}},
+        }
+        result = merge_predictions(existing, new, matches, odds_maps=odds_maps)
+        m1 = result.filter(pl.col("match_uid") == "M1")
+        assert m1["book"][0] == "BR"
+        assert m1["book2"][0] == "DK"
+
+    def test_three_way_tie_takes_first_two(self):
+        row = _make_sheet_row(match_uid="M1", prediction="P1", stake="", book="", book2="")
+        existing = _sheet_df([row])
+        new = prepare_predictions(_make_predictions(match_uid="OTHER"))
+        matches = _matches_df({"match_uid": [], "won": [], "player_id": [], "opp_id": []})
+        odds_maps = {
+            "BR": {"M1": {"A": 2.10, "B": 1.80}},
+            "DK": {"M1": {"A": 2.10, "B": 1.75}},
+            "MGM": {"M1": {"A": 2.10, "B": 1.82}},
+        }
+        result = merge_predictions(existing, new, matches, odds_maps=odds_maps)
+        m1 = result.filter(pl.col("match_uid") == "M1")
+        assert m1["book"][0] == "BR"
+        assert m1["book2"][0] == "DK"
 
     def test_no_odds_maps_leaves_odds_unchanged(self):
         row = _make_sheet_row(match_uid="M1", p1_odds="2.00", stake="")

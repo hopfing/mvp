@@ -172,6 +172,66 @@ def render_metric_cards(cards: list[dict]) -> None:
             )
 
 
+def expand_by_book(bets: pl.DataFrame) -> pl.DataFrame:
+    """Expand split-book bets into per-book rows for book-level aggregation.
+
+    A bet with both `book` and `book2` set represents a 50/50 split across two
+    sportsbooks. For book-level views, we emit two rows — one per book — each
+    carrying half the stake and net, but the full W/L/V result (since the
+    outcome is observed at both books).
+
+    Rows without `book2` are unchanged (with `stake`/`net` cast to Float64).
+    Rows without `book` are dropped.
+
+    The returned DataFrame has no `book2` column; `book` is the unified key.
+    """
+    if "book" not in bets.columns:
+        return bets
+
+    cast_cols = []
+    if "stake" in bets.columns:
+        cast_cols.append(pl.col("stake").cast(pl.Float64, strict=False).alias("stake"))
+    if "net" in bets.columns:
+        cast_cols.append(pl.col("net").cast(pl.Float64, strict=False).alias("net"))
+    prepared = bets.with_columns(cast_cols) if cast_cols else bets
+
+    has_book2 = "book2" in prepared.columns
+    if not has_book2:
+        return prepared.filter(
+            pl.col("book").is_not_null() & (pl.col("book") != "")
+        )
+
+    split_mask = (
+        pl.col("book2").is_not_null()
+        & (pl.col("book2") != "")
+        & pl.col("book").is_not_null()
+        & (pl.col("book") != "")
+    )
+
+    split_rows = prepared.filter(split_mask)
+    unsplit_rows = prepared.filter(~split_mask).filter(
+        pl.col("book").is_not_null() & (pl.col("book") != "")
+    )
+
+    halve_cols = []
+    if "stake" in split_rows.columns:
+        halve_cols.append((pl.col("stake") / 2).alias("stake"))
+    if "net" in split_rows.columns:
+        halve_cols.append((pl.col("net") / 2).alias("net"))
+
+    split_primary = split_rows.with_columns(halve_cols) if halve_cols else split_rows
+    split_secondary = split_rows.with_columns(
+        halve_cols + [pl.col("book2").alias("book")]
+        if halve_cols
+        else [pl.col("book2").alias("book")]
+    )
+
+    combined = pl.concat(
+        [unsplit_rows, split_primary, split_secondary], how="vertical_relaxed"
+    )
+    return combined.drop("book2")
+
+
 def style_roi(roi: float) -> str:
     """Return CSS color string for ROI value."""
     if roi > 0.05:

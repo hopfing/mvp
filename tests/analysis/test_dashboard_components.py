@@ -51,3 +51,61 @@ def test_format_edge_table():
     result = format_sim_table(sims, scenarios=["edge_10pct", "edge_5pct"])
     assert len(result) == 2
     assert "N" in result.columns
+
+
+def test_expand_by_book_splits_two_book_rows():
+    from mvp.analysis.dashboard.components import expand_by_book
+
+    bets = pl.DataFrame({
+        "match_uid": ["M1", "M2"],
+        "book": ["BR", "DK"],
+        "book2": ["DK", ""],
+        "stake": ["100", "50"],
+        "net": ["10", "-50"],
+        "bet_result": ["W", "L"],
+    })
+    out = expand_by_book(bets)
+    assert "book2" not in out.columns
+    assert out.height == 3
+
+    m1 = out.filter(pl.col("match_uid") == "M1").sort("book")
+    assert m1["book"].to_list() == ["BR", "DK"]
+    assert m1["stake"].to_list() == [50.0, 50.0]
+    assert m1["net"].to_list() == [5.0, 5.0]
+    assert m1["bet_result"].to_list() == ["W", "W"]
+
+    m2 = out.filter(pl.col("match_uid") == "M2")
+    assert m2.height == 1
+    assert m2["book"][0] == "DK"
+    assert m2["stake"][0] == 50.0
+    assert m2["net"][0] == -50.0
+
+
+def test_expand_by_book_drops_rows_without_book():
+    from mvp.analysis.dashboard.components import expand_by_book
+
+    bets = pl.DataFrame({
+        "match_uid": ["M1", "M2"],
+        "book": ["BR", ""],
+        "book2": ["", ""],
+        "stake": ["100", "50"],
+        "net": ["10", "-50"],
+    })
+    out = expand_by_book(bets)
+    assert out.height == 1
+    assert out["match_uid"][0] == "M1"
+
+
+def test_expand_by_book_no_book2_column():
+    from mvp.analysis.dashboard.components import expand_by_book
+
+    bets = pl.DataFrame({
+        "match_uid": ["M1"],
+        "book": ["BR"],
+        "stake": ["100"],
+        "net": ["10"],
+    })
+    out = expand_by_book(bets)
+    assert out.height == 1
+    assert out["stake"][0] == 100.0
+    assert out["net"][0] == 10.0

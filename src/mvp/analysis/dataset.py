@@ -23,6 +23,7 @@ SHEET_COLUMNS = [
     "bet_odds",
     "stake",
     "book",
+    "book2",
     "bet_result",
     "net",
     "notes",

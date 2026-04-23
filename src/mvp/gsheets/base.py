@@ -43,6 +43,7 @@ COLUMN_SCHEMA = [
     {"name": "stake", "owner": "user"},
     {"name": "to_win", "owner": "formula"},
     {"name": "book", "owner": "user"},
+    {"name": "book2", "owner": "user"},
     # Results
     {"name": "result", "owner": "pipeline"},  # auto-filled
     {"name": "pred_result", "owner": "formula"},
@@ -420,21 +421,26 @@ def merge_predictions(
             pl.Series("notes", new_notes),
         )
 
-    # 3c. Auto-fill p1_odds, p2_odds, book from best available odds
+    # 3c. Auto-fill p1_odds, p2_odds, book from best available odds.
+    # When 2+ books tie at the best predicted-side odds (rounded to 2dp), take
+    # the first two in odds_maps iteration order as book/book2.
     if len(merged) > 0 and odds_maps:
         new_p1_odds = []
         new_p2_odds = []
         new_books = []
+        new_books2 = []
         for row in merged.iter_rows(named=True):
             current_stake = (row.get("stake") or "").strip()
             current_p1_odds = (row.get("p1_odds") or "").strip()
             current_p2_odds = (row.get("p2_odds") or "").strip()
             current_book = (row.get("book") or "").strip()
+            current_book2 = (row.get("book2") or "").strip()
 
             if current_stake:
                 new_p1_odds.append(current_p1_odds)
                 new_p2_odds.append(current_p2_odds)
                 new_books.append(current_book)
+                new_books2.append(current_book2)
                 continue
 
             uid = row.get("match_uid") or ""
@@ -444,8 +450,7 @@ def merge_predictions(
 
             best_p1 = None
             best_p2 = None
-            best_pred_book = None
-            best_pred_odds = None
+            pred_offers: list[tuple[str, float]] = []
 
             for book_name, book_odds in odds_maps.items():
                 match_odds = book_odds.get(uid, {})
@@ -456,19 +461,26 @@ def merge_predictions(
                 if p2_o is not None and (best_p2 is None or p2_o > best_p2):
                     best_p2 = p2_o
                 pred_odds = p1_o if prediction == "P1" else p2_o if prediction == "P2" else None
-                if pred_odds is not None and (best_pred_odds is None or pred_odds > best_pred_odds):
-                    best_pred_odds = pred_odds
-                    best_pred_book = book_name
+                if pred_odds is not None:
+                    pred_offers.append((book_name, pred_odds))
+
+            if pred_offers:
+                best_rounded = round(max(o for _, o in pred_offers), 2)
+                tied = [b for b, o in pred_offers if round(o, 2) == best_rounded]
+                new_books.append(tied[0])
+                new_books2.append(tied[1] if len(tied) >= 2 else current_book2)
+            else:
+                new_books.append(current_book)
+                new_books2.append(current_book2)
 
             new_p1_odds.append(f"{best_p1:.2f}" if best_p1 is not None else current_p1_odds)
             new_p2_odds.append(f"{best_p2:.2f}" if best_p2 is not None else current_p2_odds)
-            display = best_pred_book if best_pred_book else current_book
-            new_books.append(display)
 
         merged = merged.with_columns(
             pl.Series("p1_odds", new_p1_odds),
             pl.Series("p2_odds", new_p2_odds),
             pl.Series("book", new_books),
+            pl.Series("book2", new_books2),
         )
 
     # 3d. Stamp bet_placed_at when we first see a stake
