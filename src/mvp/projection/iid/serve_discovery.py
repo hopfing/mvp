@@ -118,7 +118,7 @@ class ServeDiscoverySelector:
         cache_dir: Path | str | None = None,
         checkpoint_path: Path | str | None = None,
         run_name: str | None = None,
-        checkpoint_interval: int = 50,
+        checkpoint_interval: int = 25,
     ) -> None:
         self.config_path = Path(config_path)
         self.config = ServeDiscoveryConfig.from_file(config_path)

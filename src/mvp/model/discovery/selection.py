@@ -92,7 +92,7 @@ class FeatureSelector:
         self,
         verbose: bool = True,
         checkpoint_path: Path | None = None,
-        checkpoint_interval: int = 50,
+        checkpoint_interval: int = 25,
     ) -> SelectionResult:
         """Select features by iteratively adding the best one.
 
