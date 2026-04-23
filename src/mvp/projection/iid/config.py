@@ -236,7 +236,14 @@ class IIDDiscoveryConfig(BaseModel):
     serve_model: ServeModelConfig = ServeModelConfig(type="matchup")
     metrics: IIDMetricsConfig = IIDMetricsConfig()
     features: IIDDiscoveryFeaturesConfig = IIDDiscoveryFeaturesConfig()
-    metric: Literal["mae", "rmse", "log_loss", "iid_crps_total_games"] = "mae"
+    metric: Literal[
+        "mae",
+        "rmse",
+        "log_loss",
+        "iid_crps_total_games",
+        "iid_total_cal",
+        "iid_spread_cal",
+    ] = "mae"
     selection_method: Literal["forward"] = "forward"
 
     @classmethod

@@ -326,6 +326,8 @@ class FastIIDDiscoverySelector:
         actual_b = self.actual_serve_rate_b
         folds = self.folds
         metric = self.config.metric
+        total_lines = list(self.config.metrics.total_lines)
+        spread_lines = list(self.config.metrics.spread_lines)
 
         regressor_type = self.config.serve_model.regressor.type
         regressor_params = dict(self.config.serve_model.regressor.params)
@@ -420,6 +422,26 @@ class FastIIDDiscoverySelector:
                         y_games_a[test_idx] + y_games_b[test_idx]
                     ).astype(np.int64)
                     score = crps_discrete_pmf(obs_total, dist.total_games_pmf)
+                elif metric == "iid_total_cal":
+                    obs_total = (
+                        y_games_a[test_idx] + y_games_b[test_idx]
+                    ).astype(np.int64)
+                    errs = []
+                    for line in total_lines:
+                        p_over = dist.p_over_total(line)
+                        actual_over = (obs_total > line).astype(np.float64)
+                        errs.append(abs(float(p_over.mean()) - float(actual_over.mean())))
+                    score = float(sum(errs))
+                elif metric == "iid_spread_cal":
+                    obs_spread = (
+                        y_games_a[test_idx] - y_games_b[test_idx]
+                    ).astype(np.float64)
+                    errs = []
+                    for line in spread_lines:
+                        p_cover = dist.p_a_spread_cover(line)
+                        actual_cover = (obs_spread > line).astype(np.float64)
+                        errs.append(abs(float(p_cover.mean()) - float(actual_cover.mean())))
+                    score = float(sum(errs))
                 else:
                     raise ValueError(f"Unknown metric: {metric}")
 

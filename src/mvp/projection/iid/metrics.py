@@ -108,6 +108,16 @@ def compute_iid_metrics(
             metrics[f"iid_line_spread_{line}_actual"] = actual_rate
             metrics[f"iid_line_spread_{line}_signed"] = mean_p - actual_rate
 
+    if total_lines:
+        abs_signed = [abs(metrics[f"iid_line_total_{line}_signed"]) for line in total_lines]
+        metrics["iid_total_cal"] = float(sum(abs_signed))
+        metrics["iid_total_cal_max"] = float(max(abs_signed))
+
+    if spread_lines:
+        abs_signed = [abs(metrics[f"iid_line_spread_{line}_signed"]) for line in spread_lines]
+        metrics["iid_spread_cal"] = float(sum(abs_signed))
+        metrics["iid_spread_cal_max"] = float(max(abs_signed))
+
     return metrics
 
 

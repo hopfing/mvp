@@ -1740,6 +1740,11 @@ def print_iid_projection_summary(results: dict[str, Any], name: str | None = Non
                 f"    O/U {line:>6}  pred={pred:.3f}  actual={actual:.3f}  "
                 f"signed={signed:+.3f}"
             )
+        if "iid_total_cal" in metrics:
+            print(
+                f"    cal={metrics['iid_total_cal']:.3f}  "
+                f"cal_max={metrics.get('iid_total_cal_max', 0):.3f}"
+            )
 
     spread_keys = sorted(
         k for k in metrics
@@ -1755,6 +1760,11 @@ def print_iid_projection_summary(results: dict[str, Any], name: str | None = Non
             print(
                 f"    spread {line:>6}  pred={pred:.3f}  actual={actual:.3f}  "
                 f"signed={signed:+.3f}"
+            )
+        if "iid_spread_cal" in metrics:
+            print(
+                f"    cal={metrics['iid_spread_cal']:.3f}  "
+                f"cal_max={metrics.get('iid_spread_cal_max', 0):.3f}"
             )
 
     print(f"\nMLflow run: {results.get('run_id', 'N/A')}")
