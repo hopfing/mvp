@@ -356,6 +356,7 @@ class FeatureDiscovery:
         self,
         all_features: list[str] | None = None,
         checkpoint_path: Path | None = None,
+        checkpoint_interval: int | None = None,
     ) -> SelectionResult:
         """Run feature selection phase.
 
@@ -363,6 +364,8 @@ class FeatureDiscovery:
             all_features: Features to consider. If None, uses all registered.
             checkpoint_path: Path to write/read forward selection checkpoint.
                 Only applies to the forward selection method.
+            checkpoint_interval: Override for how often to write checkpoints
+                during forward selection. If None, uses selector default.
 
         Returns:
             SelectionResult with selected features.
@@ -428,7 +431,11 @@ class FeatureDiscovery:
             round1_baseline=round1_baseline,
         )
 
-        result = selector.run(verbose=True, checkpoint_path=checkpoint_path)
+        result = selector.run(
+            verbose=True,
+            checkpoint_path=checkpoint_path,
+            checkpoint_interval=checkpoint_interval,
+        )
 
         self._log(f"Selected {len(result.selected_features)} features")
         for step in result.history:
@@ -530,11 +537,16 @@ class FeatureDiscovery:
         finally:
             temp_path.unlink(missing_ok=True)
 
-    def run(self, checkpoint_path: Path | None = None) -> DiscoveryResult:
+    def run(
+        self,
+        checkpoint_path: Path | None = None,
+        checkpoint_interval: int | None = None,
+    ) -> DiscoveryResult:
         """Run complete discovery workflow.
 
         Args:
             checkpoint_path: Path to write/read forward selection checkpoint.
+            checkpoint_interval: Override for checkpoint write frequency.
 
         Returns:
             DiscoveryResult with all findings.
@@ -543,7 +555,10 @@ class FeatureDiscovery:
         self._log("=" * 60)
 
         # Phase 1: Selection
-        selection_result = self.run_selection(checkpoint_path=checkpoint_path)
+        selection_result = self.run_selection(
+            checkpoint_path=checkpoint_path,
+            checkpoint_interval=checkpoint_interval,
+        )
         selected = selection_result.selected_features
 
         if not selected:

@@ -126,12 +126,15 @@ class ProjectionDiscovery:
         return scorer
 
     def run(
-        self, checkpoint_path: Path | None = None,
+        self,
+        checkpoint_path: Path | None = None,
+        checkpoint_interval: int | None = None,
     ) -> ProjectionDiscoveryResult:
         """Run projection feature discovery.
 
         Args:
             checkpoint_path: Path to write/read forward selection checkpoint.
+            checkpoint_interval: Override for checkpoint write frequency.
 
         Returns:
             ProjectionDiscoveryResult with selected features.
@@ -175,7 +178,11 @@ class ProjectionDiscovery:
             base_features=base,
         )
 
-        selection_result = selector.run(verbose=True, checkpoint_path=checkpoint_path)
+        selection_result = selector.run(
+            verbose=True,
+            checkpoint_path=checkpoint_path,
+            checkpoint_interval=checkpoint_interval,
+        )
         selected = selection_result.selected_features
 
         if not selected:

@@ -482,6 +482,10 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         "--fresh", action="store_true",
         help="Discard existing checkpoint and start from scratch",
     )
+    exp_parser.add_argument(
+        "--checkpoint", type=int, default=None, dest="checkpoint_interval",
+        help="Override checkpoint write frequency (candidates per checkpoint)",
+    )
 
     # tune subcommand - hyperparameter optimization
     tune_parser = subparsers.add_parser(
@@ -1363,7 +1367,10 @@ def _cmd_experiment_classification(
         verbose=args.verbose,
     )
 
-    result = discovery.run(checkpoint_path=checkpoint_path)
+    result = discovery.run(
+        checkpoint_path=checkpoint_path,
+        checkpoint_interval=args.checkpoint_interval,
+    )
 
     if result.selected_features:
         discovery._last_result = result
@@ -1393,7 +1400,10 @@ def _cmd_experiment_projection(
         verbose=args.verbose,
     )
 
-    result = discovery.run(checkpoint_path=checkpoint_path)
+    result = discovery.run(
+        checkpoint_path=checkpoint_path,
+        checkpoint_interval=args.checkpoint_interval,
+    )
 
     if result.selected_features:
         discovery.save_config(output_path, result)
@@ -1461,11 +1471,14 @@ def _cmd_experiment_serve(
         output_name = f"{output_name}.yaml"
     output_path = PROJECTION_DIR / output_name
 
-    selector = ServeDiscoverySelector(
-        config_path=config_path,
-        checkpoint_path=checkpoint_path,
-        run_name=output_path.stem,
-    )
+    selector_kwargs: dict = {
+        "config_path": config_path,
+        "checkpoint_path": checkpoint_path,
+        "run_name": output_path.stem,
+    }
+    if args.checkpoint_interval is not None:
+        selector_kwargs["checkpoint_interval"] = args.checkpoint_interval
+    selector = ServeDiscoverySelector(**selector_kwargs)
     result = selector.run()
 
     print("\n" + "=" * 70)

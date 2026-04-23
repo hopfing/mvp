@@ -481,6 +481,7 @@ class FeatureSelector:
         self,
         verbose: bool = False,
         checkpoint_path: Path | None = None,
+        checkpoint_interval: int | None = None,
     ) -> SelectionResult:
         """Run feature selection using configured method.
 
@@ -488,9 +489,13 @@ class FeatureSelector:
             SelectionResult with selected features and history.
         """
         if self.method == "forward":
-            return self.forward_selection(
-                verbose=verbose, checkpoint_path=checkpoint_path,
-            )
+            kwargs: dict[str, Any] = {
+                "verbose": verbose,
+                "checkpoint_path": checkpoint_path,
+            }
+            if checkpoint_interval is not None:
+                kwargs["checkpoint_interval"] = checkpoint_interval
+            return self.forward_selection(**kwargs)
         elif self.method == "recursive":
             return self.recursive_elimination()
         elif self.method == "threshold":
