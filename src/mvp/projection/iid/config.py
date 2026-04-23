@@ -126,6 +126,7 @@ class ServeDiscoveryConfig(BaseModel):
     # if present, else library defaults).
     model_forms: list[Literal["logistic", "xgboost"]] = ["logistic", "xgboost"]
     model_params: dict[str, dict[str, Any]] = {}  # per-form params overrides
+    metrics: IIDMetricsConfig = IIDMetricsConfig()
     metric: Literal[
         "log_loss",
         "brier_score",
@@ -133,6 +134,8 @@ class ServeDiscoveryConfig(BaseModel):
         "calibration_error",
         "iid_crps_total_games",
         "iid_crps_spread",
+        "iid_total_cal",
+        "iid_spread_cal",
         "mae",
         "rmse",
     ] = "log_loss"

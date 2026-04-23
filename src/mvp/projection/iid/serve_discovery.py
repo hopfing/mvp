@@ -44,7 +44,11 @@ from mvp.projection.iid.stateful_chain import match_distribution_from_state_fn
 logger = logging.getLogger(__name__)
 
 _POINT_METRICS = {"log_loss", "brier_score", "roc_auc", "calibration_error"}
-_CHAIN_METRICS = {"iid_crps_total_games", "iid_crps_spread", "mae", "rmse"}
+_CHAIN_METRICS = {
+    "iid_crps_total_games", "iid_crps_spread",
+    "iid_total_cal", "iid_spread_cal",
+    "mae", "rmse",
+}
 # Point features that cannot be represented in the chain DP: the deuce
 # closed-form in stateful_chain.hold_from_state_fn treats ("D","D") as a
 # single absorbing node, so features that distinguish deuce iterations
@@ -53,7 +57,9 @@ _CHAIN_METRICS = {"iid_crps_total_games", "iid_crps_spread", "mae", "rmse"}
 _CHAIN_INCOMPATIBLE_POINT_FEATURES = frozenset({"point_num"})
 _MINIMIZE_METRICS = {
     "log_loss", "brier_score", "calibration_error",
-    "iid_crps_total_games", "iid_crps_spread", "mae", "rmse",
+    "iid_crps_total_games", "iid_crps_spread",
+    "iid_total_cal", "iid_spread_cal",
+    "mae", "rmse",
 }
 
 
@@ -62,6 +68,9 @@ def _score_dist_metric(
     dist: Any,
     y_games_a: np.ndarray,
     y_games_b: np.ndarray,
+    *,
+    total_lines: list[float] | None = None,
+    spread_lines: list[float] | None = None,
 ) -> float:
     """Score a MatchDistribution against observed games for a chain-grain metric."""
     if metric == "mae":
@@ -76,6 +85,26 @@ def _score_dist_metric(
         obs_idx = obs_spread + dist.spread_offset
         obs_idx = np.clip(obs_idx, 0, dist.spread_pmf.shape[1] - 1)
         return crps_discrete_pmf(obs_idx, dist.spread_pmf)
+    if metric == "iid_total_cal":
+        if not total_lines:
+            raise ValueError("iid_total_cal requires non-empty total_lines")
+        obs_total = (y_games_a + y_games_b).astype(np.int64)
+        errs = []
+        for line in total_lines:
+            p_over = dist.p_over_total(line)
+            actual_over = (obs_total > line).astype(np.float64)
+            errs.append(abs(float(p_over.mean()) - float(actual_over.mean())))
+        return float(sum(errs))
+    if metric == "iid_spread_cal":
+        if not spread_lines:
+            raise ValueError("iid_spread_cal requires non-empty spread_lines")
+        obs_spread = (y_games_a - y_games_b).astype(np.float64)
+        errs = []
+        for line in spread_lines:
+            p_cover = dist.p_a_spread_cover(line)
+            actual_cover = (obs_spread > line).astype(np.float64)
+            errs.append(abs(float(p_cover.mean()) - float(actual_cover.mean())))
+        return float(sum(errs))
     raise ValueError(f"Unknown chain metric: {metric}")
 
 
@@ -647,7 +676,11 @@ class ServeDiscoverySelector:
             y_games_a = test_df["_target_games_a"].to_numpy().astype(np.float64)
             y_games_b = test_df["_target_games_b"].to_numpy().astype(np.float64)
             fold_scores.append(
-                _score_dist_metric(self.config.metric, dist, y_games_a, y_games_b)
+                _score_dist_metric(
+                    self.config.metric, dist, y_games_a, y_games_b,
+                    total_lines=list(self.config.metrics.total_lines),
+                    spread_lines=list(self.config.metrics.spread_lines),
+                )
             )
         return float(np.mean(fold_scores))
 
@@ -722,8 +755,14 @@ class ServeDiscoverySelector:
             dist = match_distribution_from_state_fn(p_a_fn, p_b_fn, p_a, p_b, best_of)
             y_games_a = test_df["_target_games_a"].to_numpy().astype(np.float64)
             y_games_b = test_df["_target_games_b"].to_numpy().astype(np.float64)
+            total_lines = list(self.config.metrics.total_lines)
+            spread_lines = list(self.config.metrics.spread_lines)
             fold_metrics.append({
-                m: _score_dist_metric(m, dist, y_games_a, y_games_b)
+                m: _score_dist_metric(
+                    m, dist, y_games_a, y_games_b,
+                    total_lines=total_lines,
+                    spread_lines=spread_lines,
+                )
                 for m in _CHAIN_METRICS
             })
 
