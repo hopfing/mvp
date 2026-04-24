@@ -251,15 +251,26 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
         self._match_feature_is_diff = is_diff_flags
         return cols
 
-    def fit(self, df: pl.DataFrame) -> None:
+    def fit(
+        self,
+        df: pl.DataFrame,
+        *,
+        preloaded_match_features: "pl.DataFrame | None" = None,
+        preloaded_points: "pl.DataFrame | None" = None,
+    ) -> None:
         """Train the point-grain classifier on matches present in `df`.
 
         `df` is the IID runner's train split (one row per match_uid). Points
         are loaded and filtered to these match_uids; match-level features are
         (re)computed via a cached FeatureEngine call.
+
+        `preloaded_match_features` and `preloaded_points` are optional pre-filtered
+        frames passed by ServeDiscoverySelector to avoid repeated full parquet reads
+        during the FS loop. When provided they must already be filtered to the
+        training match_uids.
         """
         from mvp.common.base_job import get_data_root, get_local_data_root
-        from mvp.model.engine import FeatureEngine
+        from mvp.model.engine import FeatureEngine, build_column_name, parse_feature_spec
         from mvp.projection.iid.score_state_features import (
             DERIVED_POINT_FEATURES,
             add_derived_point_features,
@@ -282,25 +293,40 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
             get_local_data_root() / "features" / "cache"
         )
 
-        points = pl.read_parquet(points_path).filter(
-            pl.col("match_uid").is_in(train_uids)
-        )
+        if preloaded_points is not None:
+            points = preloaded_points
+        else:
+            points = pl.read_parquet(points_path).filter(
+                pl.col("match_uid").is_in(train_uids)
+            )
         if len(points) == 0:
             raise ValueError("no points rows matched the training match_uids")
 
         self._match_feature_cols = self._resolve_match_feature_cols()
 
         if self.match_level_features:
-            engine = self._engine if self._engine is not None else FeatureEngine(
-                matches_path=matches_path, cache_dir=cache_dir,
-            )
-            matches_features = engine.compute(
-                feature_specs=self.match_level_features,
-                extra_columns=["player_id", "opp_id", "match_uid"],
-            )
-            matches_features = matches_features.rename(
-                {"player_id": "server_id", "opp_id": "returner_id"}
-            )
+            if preloaded_match_features is not None:
+                needed = [
+                    build_column_name(full_name, params)
+                    for spec in self.match_level_features
+                    for _, _, full_name, params in [parse_feature_spec(spec)]
+                ]
+                available = set(preloaded_match_features.columns)
+                sel = ["match_uid", "player_id", "opp_id"] + [c for c in needed if c in available]
+                matches_features = preloaded_match_features.select(sel).rename(
+                    {"player_id": "server_id", "opp_id": "returner_id"}
+                )
+            else:
+                engine = self._engine if self._engine is not None else FeatureEngine(
+                    matches_path=matches_path, cache_dir=cache_dir,
+                )
+                matches_features = engine.compute(
+                    feature_specs=self.match_level_features,
+                    extra_columns=["player_id", "opp_id", "match_uid"],
+                )
+                matches_features = matches_features.rename(
+                    {"player_id": "server_id", "opp_id": "returner_id"}
+                )
             # Drop any non-key column that already exists in points to avoid
             # `_right` collisions (same pattern as ServeDiscoverySelector
             # ._build_base_matrix). points carries match-grain fields like

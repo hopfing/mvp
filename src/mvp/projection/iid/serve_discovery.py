@@ -161,6 +161,10 @@ class ServeDiscoverySelector:
         # Match-grain cache for chain-metric path (lazily populated).
         self._match_df: pl.DataFrame | None = None
         self._match_splits: list[tuple[list[int], list[int]]] | None = None
+        # Pre-loaded data for chain-path model.fit() — avoids reading full
+        # matches.parquet (1.67M rows) and points.parquet (7.1M rows) per candidate per fold.
+        self._match_features_both_sides: pl.DataFrame | None = None
+        self._preloaded_points: pl.DataFrame | None = None
         # FeatureEngine shared across chain-path fits — set in run() after
         # _pre_cache_all. Reusing one instance keeps cache_key stable even if
         # matches.parquet is touched mid-run.
@@ -178,6 +182,15 @@ class ServeDiscoverySelector:
         if not point_pool:
             point_pool = default_point_level_candidate_pool()
             logger.info("candidate_point_level_features empty → using full default pool (%d specs)", len(point_pool))
+        if self.config.metric in _CHAIN_METRICS and self.config.features.candidate_match_level_features:
+            missing_base = [f for f in selected_match if f not in match_pool]
+            if missing_base:
+                raise ValueError(
+                    f"chain-metric FS: base_match_level_features {missing_base} are not in "
+                    f"candidate_match_level_features — base features must be included in the "
+                    f"candidate pool so they are available in the preloaded match feature frame"
+                )
+
         if self.config.metric in _CHAIN_METRICS:
             dropped = [f for f in point_pool if f in _CHAIN_INCOMPATIBLE_POINT_FEATURES]
             if dropped:
@@ -612,6 +625,10 @@ class ServeDiscoverySelector:
             & pl.col("_target_games_b").is_not_null()
             & pl.col("best_of").is_in([3, 5])
         )
+        # Capture both player perspectives before deduplication — needed to build
+        # the two-sided match feature frame used to avoid engine.compute() per fit call.
+        both_sides_keys = df.select(["match_uid", "player_id", "opp_id"])
+
         df = df.sort(["match_uid", "player_id"]).unique(
             subset=["match_uid"], keep="first", maintain_order=True,
         )
@@ -644,6 +661,20 @@ class ServeDiscoverySelector:
             len(df), len(splits), len(match_pool),
         )
 
+        # Pre-load both-perspective match features to avoid engine.compute() (reads full
+        # 1.67M-row matches.parquet) on every candidate × fold during the FS loop.
+        self._match_features_both_sides = engine.load_features_numpy(match_pool, both_sides_keys, cache_key)
+
+        # Pre-load points filtered to training matches to avoid 7.1M-row parquet read per fit call.
+        match_uids = df["match_uid"].to_list()
+        self._preloaded_points = pl.read_parquet(self.points_path).filter(
+            pl.col("match_uid").is_in(match_uids)
+        )
+        logger.info(
+            "Chain-metric path: pre-loaded %d two-sided match feature rows, %d point rows",
+            len(self._match_features_both_sides), len(self._preloaded_points),
+        )
+
     def _score_cv_chain(
         self, match_level: list[str], point_level: list[str],
     ) -> float:
@@ -657,6 +688,17 @@ class ServeDiscoverySelector:
             train_df = self._match_df[train_idx]
             test_df = self._match_df[test_idx]
 
+            preloaded_feats = None
+            preloaded_pts = None
+            if self._match_features_both_sides is not None and self._preloaded_points is not None:
+                train_uids = set(train_df["match_uid"].to_list())
+                preloaded_feats = self._match_features_both_sides.filter(
+                    pl.col("match_uid").is_in(train_uids)
+                )
+                preloaded_pts = self._preloaded_points.filter(
+                    pl.col("match_uid").is_in(train_uids)
+                )
+
             model = ScoreStateChainServeModel(
                 model_type=self.config.scoring_model.type,
                 match_level_features=list(match_level),
@@ -667,7 +709,7 @@ class ServeDiscoverySelector:
                 cache_dir=self.cache_dir,
                 engine=self._engine,
             )
-            model.fit(train_df)
+            model.fit(train_df, preloaded_match_features=preloaded_feats, preloaded_points=preloaded_pts)
             p_a_fn, p_b_fn = model.predict_state_fn(test_df)
             p_a, p_b = model.predict(test_df)
             best_of = test_df["best_of"].to_numpy().astype(np.int64)
@@ -738,6 +780,17 @@ class ServeDiscoverySelector:
             train_df = self._match_df[train_idx]
             test_df = self._match_df[test_idx]
 
+            preloaded_feats = None
+            preloaded_pts = None
+            if self._match_features_both_sides is not None and self._preloaded_points is not None:
+                train_uids = set(train_df["match_uid"].to_list())
+                preloaded_feats = self._match_features_both_sides.filter(
+                    pl.col("match_uid").is_in(train_uids)
+                )
+                preloaded_pts = self._preloaded_points.filter(
+                    pl.col("match_uid").is_in(train_uids)
+                )
+
             model = ScoreStateChainServeModel(
                 model_type=form,
                 match_level_features=list(match_level),
@@ -748,7 +801,7 @@ class ServeDiscoverySelector:
                 cache_dir=self.cache_dir,
                 engine=self._engine,
             )
-            model.fit(train_df)
+            model.fit(train_df, preloaded_match_features=preloaded_feats, preloaded_points=preloaded_pts)
             p_a_fn, p_b_fn = model.predict_state_fn(test_df)
             p_a, p_b = model.predict(test_df)
             best_of = test_df["best_of"].to_numpy().astype(np.int64)
