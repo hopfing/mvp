@@ -422,8 +422,8 @@ def merge_predictions(
         )
 
     # 3c. Auto-fill p1_odds, p2_odds, book from best available odds.
-    # When 2+ books tie at the best predicted-side odds (rounded to 2dp), take
-    # the first two in odds_maps iteration order as book/book2.
+    # book = max odds, tiebroken by odds_maps iteration order.
+    # book2 = max odds among remaining books within 0.01 of best, same tiebreak.
     if len(merged) > 0 and odds_maps:
         new_p1_odds = []
         new_p2_odds = []
@@ -465,10 +465,20 @@ def merge_predictions(
                     pred_offers.append((book_name, pred_odds))
 
             if pred_offers:
-                best_rounded = round(max(o for _, o in pred_offers), 2)
-                tied = [b for b, o in pred_offers if round(o, 2) == best_rounded]
-                new_books.append(tied[0])
-                new_books2.append(tied[1] if len(tied) >= 2 else current_book2)
+                best_raw = max(o for _, o in pred_offers)
+                primary = next(b for b, o in pred_offers if o == best_raw)
+                candidates = [
+                    (b, o)
+                    for b, o in pred_offers
+                    if b != primary and best_raw - o <= 0.01 + 1e-9
+                ]
+                if candidates:
+                    best2 = max(o for _, o in candidates)
+                    secondary = next(b for b, o in candidates if o == best2)
+                else:
+                    secondary = current_book2
+                new_books.append(primary)
+                new_books2.append(secondary)
             else:
                 new_books.append(current_book)
                 new_books2.append(current_book2)

@@ -612,6 +612,36 @@ class TestMergePredictions:
         assert m1["book"][0] == "BR"
         assert m1["book2"][0] == "DK"
 
+    def test_book2_filled_when_within_penny_tolerance(self):
+        row = _make_sheet_row(match_uid="M1", prediction="P1", stake="", book="", book2="")
+        existing = _sheet_df([row])
+        new = prepare_predictions(_make_predictions(match_uid="OTHER"))
+        matches = _matches_df({"match_uid": [], "won": [], "player_id": [], "opp_id": []})
+        # B365 has strict best at 1.78; BR and DK at 1.77 are within 0.01
+        odds_maps = {
+            "B365": {"M1": {"A": 1.78, "B": 2.00}},
+            "BR": {"M1": {"A": 1.77, "B": 2.05}},
+            "DK": {"M1": {"A": 1.77, "B": 2.05}},
+        }
+        result = merge_predictions(existing, new, matches, odds_maps=odds_maps)
+        m1 = result.filter(pl.col("match_uid") == "M1")
+        assert m1["book"][0] == "B365"
+        assert m1["book2"][0] == "BR"
+
+    def test_book2_excluded_when_gap_exceeds_penny(self):
+        row = _make_sheet_row(match_uid="M1", prediction="P1", stake="", book="", book2="")
+        existing = _sheet_df([row])
+        new = prepare_predictions(_make_predictions(match_uid="OTHER"))
+        matches = _matches_df({"match_uid": [], "won": [], "player_id": [], "opp_id": []})
+        odds_maps = {
+            "B365": {"M1": {"A": 1.80, "B": 2.00}},
+            "BR": {"M1": {"A": 1.78, "B": 2.05}},
+        }
+        result = merge_predictions(existing, new, matches, odds_maps=odds_maps)
+        m1 = result.filter(pl.col("match_uid") == "M1")
+        assert m1["book"][0] == "B365"
+        assert m1["book2"][0] == ""
+
     def test_three_way_tie_takes_first_two(self):
         row = _make_sheet_row(match_uid="M1", prediction="P1", stake="", book="", book2="")
         existing = _sheet_df([row])
