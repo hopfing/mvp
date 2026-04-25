@@ -476,7 +476,7 @@ def merge_predictions(
                     best2 = max(o for _, o in candidates)
                     secondary = next(b for b, o in candidates if o == best2)
                 else:
-                    secondary = current_book2
+                    secondary = ""
                 new_books.append(primary)
                 new_books2.append(secondary)
             else:
