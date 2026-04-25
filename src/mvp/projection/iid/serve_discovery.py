@@ -309,7 +309,7 @@ class ServeDiscoverySelector:
             from tqdm import tqdm
 
             worst_score = float("inf") if self.config.metric in _MINIMIZE_METRICS else float("-inf")
-            best_new_score = worst_score
+            best_new_score = current_score
             best_cand: str | None = None
             best_grain: str | None = None
 
