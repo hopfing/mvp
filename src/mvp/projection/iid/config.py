@@ -141,9 +141,14 @@ class ServeDiscoveryConfig(BaseModel):
     ] = "log_loss"
     selection_method: Literal["forward"] = "forward"
     min_delta: float = 0.0001  # minimum fractional improvement to accept a candidate
-    # Cap on training rows per fold during candidate scoring. None = use full training slice.
+    # Cap on training rows per fold during candidate scoring (point-grain path only).
+    # Has no effect when metric is a chain metric — use fs_match_subsample instead.
     # Final-form re-eval always runs on the full slice so reported metrics are honest.
     fs_train_subsample: int | None = None
+    # Cap on training MATCHES per fold during candidate chain scoring (chain-metric path).
+    # Mirrors fs_train_subsample for the match-grain path used by iid_total_cal etc.
+    # Final-form re-eval always runs on the full slice so reported metrics are honest.
+    fs_match_subsample: int | None = None
     fs_subsample_seed: int = 42
 
     @classmethod

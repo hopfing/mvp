@@ -161,6 +161,9 @@ class ServeDiscoverySelector:
         # Match-grain cache for chain-metric path (lazily populated).
         self._match_df: pl.DataFrame | None = None
         self._match_splits: list[tuple[list[int], list[int]]] | None = None
+        # Subsampled version of _match_splits for FS candidate scoring (fs_match_subsample).
+        # Equals _match_splits when fs_match_subsample is None.
+        self._fs_match_splits: list[tuple[list[int], list[int]]] | None = None
         # Pre-loaded data for chain-path model.fit() — avoids reading full
         # matches.parquet (1.67M rows) and points.parquet (7.1M rows) per candidate per fold.
         self._match_features_both_sides: pl.DataFrame | None = None
@@ -656,6 +659,7 @@ class ServeDiscoverySelector:
 
         self._match_df = df
         self._match_splits = splits
+        self._fs_match_splits = self._maybe_subsample_match_splits(splits)
         logger.info(
             "Chain-metric path: match-grain df=%d matches, %d folds, %d candidate match feats materialized",
             len(df), len(splits), len(match_pool),
@@ -678,13 +682,13 @@ class ServeDiscoverySelector:
     def _score_cv_chain(
         self, match_level: list[str], point_level: list[str],
     ) -> float:
-        assert self._match_df is not None and self._match_splits is not None, (
+        assert self._match_df is not None and self._fs_match_splits is not None, (
             "_score_cv_chain called before _prepare_match_data"
         )
         if not match_level and not point_level:
             return float("inf")
         fold_scores: list[float] = []
-        for train_idx, test_idx in self._match_splits:
+        for train_idx, test_idx in self._fs_match_splits:
             train_df = self._match_df[train_idx]
             test_df = self._match_df[test_idx]
 
@@ -865,6 +869,37 @@ class ServeDiscoverySelector:
         sampled_sizes = [len(t) for t, _ in sampled]
         logger.info(
             "FS train subsample: cap=%d, train sizes %s → %s",
+            cap, original_sizes, sampled_sizes,
+        )
+        return sampled
+
+    def _maybe_subsample_match_splits(
+        self,
+        splits: list[tuple[list[int], list[int]]],
+    ) -> list[tuple[list[int], list[int]]]:
+        """Subsample train match indices per fold for fast chain-metric candidate scoring.
+
+        Mirrors _maybe_subsample_splits but operates on match-grain splits used by
+        _score_cv_chain. Test indices are kept at full size. Final-form eval always
+        uses the full _match_splits so reported metrics are honest.
+        """
+        cap = self.config.fs_match_subsample
+        if cap is None:
+            return splits
+        rng = np.random.default_rng(self.config.fs_subsample_seed)
+        sampled: list[tuple[list[int], list[int]]] = []
+        for train_idx, test_idx in splits:
+            if len(train_idx) > cap:
+                idx_arr = np.asarray(train_idx)
+                picked = rng.choice(idx_arr, size=cap, replace=False)
+                picked.sort()
+                sampled.append((picked.tolist(), test_idx))
+            else:
+                sampled.append((train_idx, test_idx))
+        original_sizes = [len(t) for t, _ in splits]
+        sampled_sizes = [len(t) for t, _ in sampled]
+        logger.info(
+            "Chain FS match subsample: cap=%d, train sizes %s → %s",
             cap, original_sizes, sampled_sizes,
         )
         return sampled
