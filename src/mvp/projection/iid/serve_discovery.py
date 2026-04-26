@@ -11,6 +11,7 @@ peak memory proportional to (rows × |selected| + |point_features|) rather than
 
 import logging
 import math
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -341,55 +342,104 @@ class ServeDiscoverySelector:
                     len(this_round_scores), total_cands,
                 )
 
-            bar = tqdm(tagged, desc=desc, leave=False, ncols=120)
-            if best_cand is not None and hasattr(bar, "set_postfix"):
-                bar.set_postfix(
-                    best=f"{best_new_score:.6f}",
-                    feat=f"{best_cand}[{best_grain}]",
-                    refresh=False,
-                )
-
             eval_count = 0
             chain_mode = self.config.metric in _CHAIN_METRICS
-            for grain, cand in bar:
-                if cand in this_round_scores:
-                    score = this_round_scores[cand]
-                else:
-                    if grain == "match":
-                        # Chain path ignores the extended point-grain df — it
-                        # scores off self._match_df which already has every
-                        # candidate match feature materialized. Skip the extend.
-                        if chain_mode:
-                            score = self._score_cv(base_df, fs_splits, selected_match + [cand], selected_point)
-                        else:
-                            extended = self._extend_df_with_match_feature(base_df, slim_matches, engine, cache_key, cand)
-                            score = self._score_cv(extended, fs_splits, selected_match + [cand], selected_point)
+
+            if chain_mode and self.config.n_parallel_candidates > 1:
+                to_score = [(g, c) for g, c in tagged if c not in this_round_scores]
+
+                bar = tqdm(total=len(tagged), initial=len(this_round_scores),
+                           desc=desc, leave=False, ncols=120)
+                if best_cand is not None and hasattr(bar, "set_postfix"):
+                    bar.set_postfix(
+                        best=f"{best_new_score:.6f}",
+                        feat=f"{best_cand}[{best_grain}]",
+                        refresh=False,
+                    )
+
+                def _score_one(grain_cand, _ml=selected_match, _pl=selected_point):
+                    g, c = grain_cand
+                    ml = _ml + [c] if g == "match" else list(_ml)
+                    pl_feats = list(_pl) if g == "match" else _pl + [c]
+                    return g, c, self._score_cv_chain(ml, pl_feats)
+
+                with ThreadPoolExecutor(max_workers=self.config.n_parallel_candidates) as executor:
+                    futures = {executor.submit(_score_one, gc): gc for gc in to_score}
+                    for future in as_completed(futures):
+                        grain, cand, score = future.result()
+                        this_round_scores[cand] = score
+                        eval_count += 1
+                        bar.update(1)
+                        if self._is_better(score, best_new_score):
+                            best_new_score = score
+                            best_cand = cand
+                            best_grain = grain
+                            if hasattr(bar, "set_postfix"):
+                                bar.set_postfix(best=f"{best_new_score:.6f}", feat=f"{cand}[{grain}]", refresh=False)
+                        if (
+                            self.checkpoint_path
+                            and self.checkpoint_interval > 0
+                            and eval_count % self.checkpoint_interval == 0
+                        ):
+                            self._save_checkpoint(
+                                started_at=started_at,
+                                completed_rounds=[
+                                    {"feature": r.feature_added, "grain": r.grain, "score": r.score}
+                                    for r in rounds if r.feature_added is not None
+                                ],
+                                current_round=round_idx,
+                                total_candidates=total_cands,
+                                current_round_scores=this_round_scores,
+                                best_metric=current_score,
+                            )
+                bar.close()
+            else:
+                bar = tqdm(tagged, desc=desc, leave=False, ncols=120)
+                if best_cand is not None and hasattr(bar, "set_postfix"):
+                    bar.set_postfix(
+                        best=f"{best_new_score:.6f}",
+                        feat=f"{best_cand}[{best_grain}]",
+                        refresh=False,
+                    )
+                for grain, cand in bar:
+                    if cand in this_round_scores:
+                        score = this_round_scores[cand]
                     else:
-                        score = self._score_cv(base_df, fs_splits, selected_match, selected_point + [cand])
-                    this_round_scores[cand] = score
-                    eval_count += 1
-                    if (
-                        self.checkpoint_path
-                        and self.checkpoint_interval > 0
-                        and eval_count % self.checkpoint_interval == 0
-                    ):
-                        self._save_checkpoint(
-                            started_at=started_at,
-                            completed_rounds=[
-                                {"feature": r.feature_added, "grain": r.grain, "score": r.score}
-                                for r in rounds if r.feature_added is not None
-                            ],
-                            current_round=round_idx,
-                            total_candidates=total_cands,
-                            current_round_scores=this_round_scores,
-                            best_metric=current_score,
-                        )
-                if self._is_better(score, best_new_score):
-                    best_new_score = score
-                    best_cand = cand
-                    best_grain = grain
-                    if hasattr(bar, "set_postfix"):
-                        bar.set_postfix(best=f"{best_new_score:.6f}", feat=f"{cand}[{grain}]", refresh=False)
+                        if grain == "match":
+                            # Chain path ignores the extended point-grain df — it
+                            # scores off self._match_df which already has every
+                            # candidate match feature materialized. Skip the extend.
+                            if chain_mode:
+                                score = self._score_cv(base_df, fs_splits, selected_match + [cand], selected_point)
+                            else:
+                                extended = self._extend_df_with_match_feature(base_df, slim_matches, engine, cache_key, cand)
+                                score = self._score_cv(extended, fs_splits, selected_match + [cand], selected_point)
+                        else:
+                            score = self._score_cv(base_df, fs_splits, selected_match, selected_point + [cand])
+                        this_round_scores[cand] = score
+                        eval_count += 1
+                        if (
+                            self.checkpoint_path
+                            and self.checkpoint_interval > 0
+                            and eval_count % self.checkpoint_interval == 0
+                        ):
+                            self._save_checkpoint(
+                                started_at=started_at,
+                                completed_rounds=[
+                                    {"feature": r.feature_added, "grain": r.grain, "score": r.score}
+                                    for r in rounds if r.feature_added is not None
+                                ],
+                                current_round=round_idx,
+                                total_candidates=total_cands,
+                                current_round_scores=this_round_scores,
+                                best_metric=current_score,
+                            )
+                    if self._is_better(score, best_new_score):
+                        best_new_score = score
+                        best_cand = cand
+                        best_grain = grain
+                        if hasattr(bar, "set_postfix"):
+                            bar.set_postfix(best=f"{best_new_score:.6f}", feat=f"{cand}[{grain}]", refresh=False)
 
             best_delta = (
                 self._improvement(current_score, best_new_score)
@@ -703,11 +753,14 @@ class ServeDiscoverySelector:
                     pl.col("match_uid").is_in(train_uids)
                 )
 
+            scoring_params = dict(self.config.scoring_model.params)
+            if self.config.n_parallel_candidates > 1:
+                scoring_params["n_jobs"] = 1
             model = ScoreStateChainServeModel(
                 model_type=self.config.scoring_model.type,
                 match_level_features=list(match_level),
                 point_level_features=list(point_level),
-                params=dict(self.config.scoring_model.params),
+                params=scoring_params,
                 points_path=self.points_path,
                 matches_path=self.matches_path,
                 cache_dir=self.cache_dir,

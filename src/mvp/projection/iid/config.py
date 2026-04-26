@@ -150,6 +150,10 @@ class ServeDiscoveryConfig(BaseModel):
     # Final-form re-eval always runs on the full slice so reported metrics are honest.
     fs_match_subsample: int | None = None
     fs_subsample_seed: int = 42
+    # Number of candidates to score in parallel (chain-metric path only).
+    # Uses threading — XGBoost releases the GIL during BLAS/tree ops.
+    # Forces n_jobs=1 on the scoring model to avoid core over-subscription.
+    n_parallel_candidates: int = 1
 
     @classmethod
     def from_yaml(cls, yaml_str: str) -> "ServeDiscoveryConfig":
