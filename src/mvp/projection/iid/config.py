@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 from mvp.model.config import DataConfig, FeaturesConfig, ValidationConfig
 
@@ -152,8 +152,23 @@ class ServeDiscoveryConfig(BaseModel):
     fs_subsample_seed: int = 42
     # Number of candidates to score in parallel (chain-metric path only).
     # Uses threading — XGBoost releases the GIL during BLAS/tree ops.
-    # Forces n_jobs=1 on the scoring model to avoid core over-subscription.
+    # n_jobs in scoring_model.params defaults to 1; n_parallel_candidates * n_jobs
+    # must not exceed the logical processor count.
     n_parallel_candidates: int = 1
+
+    @model_validator(mode="after")
+    def _validate_parallelism(self) -> "ServeDiscoveryConfig":
+        import os
+        n_jobs = self.scoring_model.params.get("n_jobs", 1)
+        cpu_count = os.cpu_count() or 1
+        product = self.n_parallel_candidates * n_jobs
+        if product > cpu_count:
+            raise ValueError(
+                f"n_parallel_candidates ({self.n_parallel_candidates}) * n_jobs ({n_jobs})"
+                f" = {product}, which exceeds logical processor count ({cpu_count})."
+                f" Reduce one or both."
+            )
+        return self
 
     @classmethod
     def from_yaml(cls, yaml_str: str) -> "ServeDiscoveryConfig":

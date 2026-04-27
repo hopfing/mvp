@@ -754,7 +754,7 @@ class ServeDiscoverySelector:
                 )
 
             scoring_params = dict(self.config.scoring_model.params)
-            if self.config.n_parallel_candidates > 1:
+            if "n_jobs" not in scoring_params:
                 scoring_params["n_jobs"] = 1
             model = ScoreStateChainServeModel(
                 model_type=self.config.scoring_model.type,
