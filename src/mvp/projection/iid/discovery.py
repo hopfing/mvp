@@ -48,6 +48,7 @@ from mvp.projection.iid.chain import (
 )
 from mvp.projection.iid.config import IIDDiscoveryConfig
 from mvp.projection.iid.metrics import crps_discrete_pmf
+from mvp.projection.iid.metric_registry import spread_cal_errs, total_cal_errs
 from mvp.projection.models import get_regression_model
 
 logger = logging.getLogger(__name__)
@@ -423,25 +424,13 @@ class FastIIDDiscoverySelector:
                     ).astype(np.int64)
                     score = crps_discrete_pmf(obs_total, dist.total_games_pmf)
                 elif metric == "iid_total_cal":
-                    obs_total = (
-                        y_games_a[test_idx] + y_games_b[test_idx]
-                    ).astype(np.int64)
-                    errs = []
-                    for line in total_lines:
-                        p_over = dist.p_over_total(line)
-                        actual_over = (obs_total > line).astype(np.float64)
-                        errs.append(abs(float(p_over.mean()) - float(actual_over.mean())))
-                    score = float(sum(errs))
+                    score = float(sum(total_cal_errs(
+                        dist, y_games_a[test_idx], y_games_b[test_idx], total_lines,
+                    )))
                 elif metric == "iid_spread_cal":
-                    obs_spread = (
-                        y_games_a[test_idx] - y_games_b[test_idx]
-                    ).astype(np.float64)
-                    errs = []
-                    for line in spread_lines:
-                        p_cover = dist.p_a_spread_cover(line)
-                        actual_cover = (obs_spread > line).astype(np.float64)
-                        errs.append(abs(float(p_cover.mean()) - float(actual_cover.mean())))
-                    score = float(sum(errs))
+                    score = float(sum(spread_cal_errs(
+                        dist, y_games_a[test_idx], y_games_b[test_idx], spread_lines,
+                    )))
                 else:
                     raise ValueError(f"Unknown metric: {metric}")
 

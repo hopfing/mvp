@@ -33,7 +33,13 @@ from mvp.model.metrics import compute_metrics
 from mvp.model.splitters import make_splitter
 from mvp.model.discovery.discover import get_all_feature_specs
 from mvp.projection.iid.config import ServeDiscoveryConfig
-from mvp.projection.iid.metrics import crps_discrete_pmf
+from mvp.projection.iid.metric_registry import (
+    chain_metric_names,
+    is_chain_metric,
+    is_minimize,
+    score_chain,
+    worst_score,
+)
 from mvp.projection.iid.score_state_features import (
     add_derived_point_features,
     default_point_level_candidate_pool,
@@ -44,71 +50,12 @@ from mvp.projection.iid.stateful_chain import match_distribution_from_state_fn
 
 logger = logging.getLogger(__name__)
 
-_POINT_METRICS = {"log_loss", "brier_score", "roc_auc", "calibration_error"}
-_CHAIN_METRICS = {
-    "iid_crps_total_games", "iid_crps_spread",
-    "iid_total_cal", "iid_spread_cal",
-    "iid_total_cal_max", "iid_spread_cal_max",
-    "mae", "rmse",
-}
 # Point features that cannot be represented in the chain DP: the deuce
 # closed-form in stateful_chain.hold_from_state_fn treats ("D","D") as a
 # single absorbing node, so features that distinguish deuce iterations
 # (point_num resets per game but advances through deuce cycles) would
 # invalidate the closed form. Excluded from the chain-path candidate pool.
 _CHAIN_INCOMPATIBLE_POINT_FEATURES = frozenset({"point_num"})
-_MINIMIZE_METRICS = {
-    "log_loss", "brier_score", "calibration_error",
-    "iid_crps_total_games", "iid_crps_spread",
-    "iid_total_cal", "iid_spread_cal",
-    "iid_total_cal_max", "iid_spread_cal_max",
-    "mae", "rmse",
-}
-
-
-def _score_dist_metric(
-    metric: str,
-    dist: Any,
-    y_games_a: np.ndarray,
-    y_games_b: np.ndarray,
-    *,
-    total_lines: list[float] | None = None,
-    spread_lines: list[float] | None = None,
-) -> float:
-    """Score a MatchDistribution against observed games for a chain-grain metric."""
-    if metric == "mae":
-        return float(np.mean(np.abs(y_games_a - dist.expected_games_a)))
-    if metric == "rmse":
-        return float(np.sqrt(np.mean((y_games_a - dist.expected_games_a) ** 2)))
-    if metric == "iid_crps_total_games":
-        obs_total = (y_games_a + y_games_b).astype(np.int64)
-        return crps_discrete_pmf(obs_total, dist.total_games_pmf)
-    if metric == "iid_crps_spread":
-        obs_spread = (y_games_a - y_games_b).astype(np.int64)
-        obs_idx = obs_spread + dist.spread_offset
-        obs_idx = np.clip(obs_idx, 0, dist.spread_pmf.shape[1] - 1)
-        return crps_discrete_pmf(obs_idx, dist.spread_pmf)
-    if metric in ("iid_total_cal", "iid_total_cal_max"):
-        if not total_lines:
-            raise ValueError(f"{metric} requires non-empty total_lines")
-        obs_total = (y_games_a + y_games_b).astype(np.int64)
-        errs = []
-        for line in total_lines:
-            p_over = dist.p_over_total(line)
-            actual_over = (obs_total > line).astype(np.float64)
-            errs.append(abs(float(p_over.mean()) - float(actual_over.mean())))
-        return float(max(errs)) if metric == "iid_total_cal_max" else float(sum(errs))
-    if metric in ("iid_spread_cal", "iid_spread_cal_max"):
-        if not spread_lines:
-            raise ValueError(f"{metric} requires non-empty spread_lines")
-        obs_spread = (y_games_a - y_games_b).astype(np.float64)
-        errs = []
-        for line in spread_lines:
-            p_cover = dist.p_a_spread_cover(line)
-            actual_cover = (obs_spread > line).astype(np.float64)
-            errs.append(abs(float(p_cover.mean()) - float(actual_cover.mean())))
-        return float(max(errs)) if metric == "iid_spread_cal_max" else float(sum(errs))
-    raise ValueError(f"Unknown chain metric: {metric}")
 
 
 @dataclass
@@ -225,7 +172,7 @@ class ServeDiscoverySelector:
             point_pool = [f for f in point_pool if f not in point_excludes]
             logger.info("Excluded %d point-level specs (pool %d → %d)", before - len(point_pool), before, len(point_pool))
 
-        if self.config.metric in _CHAIN_METRICS and self.config.features.candidate_match_level_features:
+        if is_chain_metric(self.config.metric) and self.config.features.candidate_match_level_features:
             missing_base = [f for f in selected_match if f not in match_pool]
             if missing_base:
                 raise ValueError(
@@ -234,7 +181,7 @@ class ServeDiscoverySelector:
                     f"candidate pool so they are available in the preloaded match feature frame"
                 )
 
-        if self.config.metric in _CHAIN_METRICS:
+        if is_chain_metric(self.config.metric):
             dropped = [f for f in point_pool if f in _CHAIN_INCOMPATIBLE_POINT_FEATURES]
             if dropped:
                 point_pool = [f for f in point_pool if f not in _CHAIN_INCOMPATIBLE_POINT_FEATURES]
@@ -262,7 +209,7 @@ class ServeDiscoverySelector:
 
         # Chain-metric path needs a match-grain df with all candidate match features
         # materialized, plus match-grain folds from config.validation.
-        if self.config.metric in _CHAIN_METRICS:
+        if is_chain_metric(self.config.metric):
             self._prepare_match_data(match_pool=match_pool, engine=engine, cache_key=cache_key)
 
         candidate_match = [c for c in match_pool if c not in selected_match]
@@ -284,7 +231,7 @@ class ServeDiscoverySelector:
                     selected_match.append(feat)
                     if feat in candidate_match:
                         candidate_match.remove(feat)
-                    if self.config.metric not in _CHAIN_METRICS:
+                    if not is_chain_metric(self.config.metric):
                         base_df = self._extend_df_with_match_feature(base_df, slim_matches, engine, cache_key, feat)
                 else:
                     selected_point.append(feat)
@@ -313,7 +260,7 @@ class ServeDiscoverySelector:
                 current_score = self._score_cv(base_df, fs_splits, selected_match, selected_point)
                 logger.info("Base-only CV %s = %.6f (%d features)", self.config.metric, current_score, len(selected_match) + len(selected_point))
             else:
-                current_score = float("inf") if self.config.metric in _MINIMIZE_METRICS else float("-inf")
+                current_score = worst_score(self.config.metric)
                 logger.info("No base features — starting from worst-case score")
             rounds.append(
                 FSRoundResult(
@@ -351,7 +298,6 @@ class ServeDiscoverySelector:
 
             from tqdm import tqdm
 
-            worst_score = float("inf") if self.config.metric in _MINIMIZE_METRICS else float("-inf")
             best_new_score = current_score
             best_cand: str | None = None
             best_grain: str | None = None
@@ -370,7 +316,7 @@ class ServeDiscoverySelector:
             # Seed best from partial scores if any (before creating tqdm so log
             # lines don't interleave with the progress bar).
             if this_round_scores:
-                best_prev_cand = min(this_round_scores, key=this_round_scores.get) if self.config.metric in _MINIMIZE_METRICS else max(this_round_scores, key=this_round_scores.get)
+                best_prev_cand = min(this_round_scores, key=this_round_scores.get) if is_minimize(self.config.metric) else max(this_round_scores, key=this_round_scores.get)
                 cand_score = this_round_scores[best_prev_cand]
                 if self._is_better(cand_score, best_new_score):
                     best_new_score = cand_score
@@ -382,7 +328,7 @@ class ServeDiscoverySelector:
                 )
 
             eval_count = 0
-            chain_mode = self.config.metric in _CHAIN_METRICS
+            chain_mode = is_chain_metric(self.config.metric)
 
             if chain_mode and self.config.n_parallel_candidates > 1:
                 to_score = [(g, c) for g, c in tagged if c not in this_round_scores]
@@ -517,7 +463,7 @@ class ServeDiscoverySelector:
 
             if not first_round_logged and round_idx == 1:
                 first_round_logged = True
-                reverse = self.config.metric not in _MINIMIZE_METRICS
+                reverse = not is_minimize(self.config.metric)
                 ranked = [
                     (f, m) for f, m in this_round_scores.items() if math.isfinite(m)
                 ]
@@ -587,7 +533,7 @@ class ServeDiscoverySelector:
         best_metric: float,
     ) -> None:
         assert self.checkpoint_path is not None
-        direction = "minimize" if self.config.metric in _MINIMIZE_METRICS else "maximize"
+        direction = "minimize" if is_minimize(self.config.metric) else "maximize"
         cp = SelectionCheckpoint(
             run_name=self.run_name,
             started_at=started_at,
@@ -604,7 +550,7 @@ class ServeDiscoverySelector:
 
     def _improvement(self, current: float, new: float) -> float:
         """Positive = better. For lower-is-better metrics, flip sign."""
-        if self.config.metric in _MINIMIZE_METRICS:
+        if is_minimize(self.config.metric):
             return current - new
         # roc_auc: higher is better
         return new - current
@@ -620,7 +566,7 @@ class ServeDiscoverySelector:
             return False
         if not math.isfinite(b):
             return True
-        if self.config.metric in _MINIMIZE_METRICS:
+        if is_minimize(self.config.metric):
             return a < b
         return a > b
 
@@ -631,7 +577,7 @@ class ServeDiscoverySelector:
         match_level: list[str],
         point_level: list[str],
     ) -> float:
-        if self.config.metric in _CHAIN_METRICS:
+        if is_chain_metric(self.config.metric):
             return self._score_cv_chain(match_level, point_level)
         feature_cols = self._resolve_cols(match_level, point_level)
         fold_scores: list[float] = []
@@ -814,7 +760,7 @@ class ServeDiscoverySelector:
             y_games_a = test_df["_target_games_a"].to_numpy().astype(np.float64)
             y_games_b = test_df["_target_games_b"].to_numpy().astype(np.float64)
             fold_scores.append(
-                _score_dist_metric(
+                score_chain(
                     self.config.metric, dist, y_games_a, y_games_b,
                     total_lines=list(self.config.metrics.total_lines),
                     spread_lines=list(self.config.metrics.spread_lines),
@@ -831,7 +777,7 @@ class ServeDiscoverySelector:
         form: str,
         params: dict[str, Any],
     ) -> tuple[dict[str, float], dict[str, Any] | None]:
-        if self.config.metric in _CHAIN_METRICS:
+        if is_chain_metric(self.config.metric):
             return self._final_train_eval_chain(match_level, point_level, form, params)
         feature_cols = self._resolve_cols(match_level, point_level)
         fold_metrics: list[dict[str, float]] = []
@@ -907,12 +853,12 @@ class ServeDiscoverySelector:
             total_lines = list(self.config.metrics.total_lines)
             spread_lines = list(self.config.metrics.spread_lines)
             fold_metrics.append({
-                m: _score_dist_metric(
+                m: score_chain(
                     m, dist, y_games_a, y_games_b,
                     total_lines=total_lines,
                     spread_lines=spread_lines,
                 )
-                for m in _CHAIN_METRICS
+                for m in chain_metric_names()
             })
 
         agg: dict[str, float] = {}

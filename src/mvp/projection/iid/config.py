@@ -1,12 +1,15 @@
 """Configuration schema for the IID projection runner."""
 
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 import yaml
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, BeforeValidator, model_validator
 
 from mvp.model.config import DataConfig, FeaturesConfig, ValidationConfig
+from mvp.projection.iid.metric_registry import validate_metric_name
+
+MetricName = Annotated[str, BeforeValidator(validate_metric_name)]
 
 
 class MatchupServeRegressorConfig(BaseModel):
@@ -131,18 +134,7 @@ class ServeDiscoveryConfig(BaseModel):
     model_forms: list[Literal["logistic", "xgboost"]] = ["logistic", "xgboost"]
     model_params: dict[str, dict[str, Any]] = {}  # per-form params overrides
     metrics: IIDMetricsConfig = IIDMetricsConfig()
-    metric: Literal[
-        "log_loss",
-        "brier_score",
-        "roc_auc",
-        "calibration_error",
-        "iid_crps_total_games",
-        "iid_crps_spread",
-        "iid_total_cal",
-        "iid_spread_cal",
-        "mae",
-        "rmse",
-    ] = "log_loss"
+    metric: MetricName = "log_loss"
     selection_method: Literal["forward"] = "forward"
     min_delta: float = 0.0001  # minimum fractional improvement to accept a candidate
     # Cap on training rows per fold during candidate scoring (point-grain path only).

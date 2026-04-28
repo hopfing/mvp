@@ -17,6 +17,42 @@ from mvp.projection.iid.serve_model import SERVE_PROB_MAX, SERVE_PROB_MIN
 from mvp.projection.metrics import compute_regression_metrics
 
 
+def total_cal_errs(
+    dist,
+    y_games_a: np.ndarray,
+    y_games_b: np.ndarray,
+    total_lines: list[float],
+) -> list[float]:
+    """Per-line absolute calibration errors for total-games O/U lines.
+
+    Shared between the projection runner's per-fold metric emit and FS
+    chain-scoring so the aggregate values cannot diverge.
+    """
+    obs_total = (y_games_a + y_games_b).astype(np.int64)
+    errs: list[float] = []
+    for line in total_lines:
+        p_over = dist.p_over_total(line)
+        actual_over = (obs_total > line).astype(np.float64)
+        errs.append(abs(float(p_over.mean()) - float(actual_over.mean())))
+    return errs
+
+
+def spread_cal_errs(
+    dist,
+    y_games_a: np.ndarray,
+    y_games_b: np.ndarray,
+    spread_lines: list[float],
+) -> list[float]:
+    """Per-line absolute calibration errors for A's game-spread lines."""
+    obs_spread = (y_games_a - y_games_b).astype(np.float64)
+    errs: list[float] = []
+    for line in spread_lines:
+        p_cover = dist.p_a_spread_cover(line)
+        actual_cover = (obs_spread > line).astype(np.float64)
+        errs.append(abs(float(p_cover.mean()) - float(actual_cover.mean())))
+    return errs
+
+
 def crps_discrete_pmf(obs_idx: np.ndarray, pmf: np.ndarray) -> float:
     """Continuous Ranked Probability Score for a discrete pmf.
 
@@ -108,15 +144,17 @@ def compute_iid_metrics(
             metrics[f"iid_line_spread_{line}_actual"] = actual_rate
             metrics[f"iid_line_spread_{line}_signed"] = mean_p - actual_rate
 
+    # Aggregate per-line calibration errors via the shared helpers so FS
+    # scoring and runner emit cannot diverge.
     if total_lines:
-        abs_signed = [abs(metrics[f"iid_line_total_{line}_signed"]) for line in total_lines]
-        metrics["iid_total_cal"] = float(sum(abs_signed))
-        metrics["iid_total_cal_max"] = float(max(abs_signed))
+        cal_errs = total_cal_errs(dist, y_games_a, y_games_b, total_lines)
+        metrics["iid_total_cal"] = float(sum(cal_errs))
+        metrics["iid_total_cal_max"] = float(max(cal_errs))
 
     if spread_lines:
-        abs_signed = [abs(metrics[f"iid_line_spread_{line}_signed"]) for line in spread_lines]
-        metrics["iid_spread_cal"] = float(sum(abs_signed))
-        metrics["iid_spread_cal_max"] = float(max(abs_signed))
+        cal_errs = spread_cal_errs(dist, y_games_a, y_games_b, spread_lines)
+        metrics["iid_spread_cal"] = float(sum(cal_errs))
+        metrics["iid_spread_cal_max"] = float(max(cal_errs))
 
     return metrics
 
