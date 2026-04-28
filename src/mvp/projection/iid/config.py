@@ -96,6 +96,10 @@ class ServeDiscoveryFeaturesConfig(BaseModel):
     # Empty list → expand to full pool.
     candidate_match_level_features: list[str] = []
     candidate_point_level_features: list[str] = []
+    # Optional blocklists applied AFTER pool resolution (so they work whether
+    # the candidate list is explicit or expanded from the default pool).
+    exclude_match_level_features: list[str] = []
+    exclude_point_level_features: list[str] = []
     # Window sizes passed through to get_all_feature_specs when expanding the
     # default match-level pool. None = use the shared DEFAULT_day_windows
     # ([0, 7, 14, 30, 60, 90, 180, 365]) from model.discovery.discover.

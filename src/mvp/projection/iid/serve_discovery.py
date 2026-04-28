@@ -186,6 +186,43 @@ class ServeDiscoverySelector:
         if not point_pool:
             point_pool = default_point_level_candidate_pool()
             logger.info("candidate_point_level_features empty → using full default pool (%d specs)", len(point_pool))
+
+        match_excludes = set(self.config.features.exclude_match_level_features)
+        if match_excludes:
+            unknown = match_excludes - set(match_pool)
+            if unknown:
+                raise ValueError(
+                    f"exclude_match_level_features contains specs not in the candidate pool: "
+                    f"{sorted(unknown)}"
+                )
+            base_conflict = match_excludes & set(selected_match)
+            if base_conflict:
+                raise ValueError(
+                    f"exclude_match_level_features overlaps base_match_level_features: "
+                    f"{sorted(base_conflict)}"
+                )
+            before = len(match_pool)
+            match_pool = [f for f in match_pool if f not in match_excludes]
+            logger.info("Excluded %d match-level specs (pool %d → %d)", before - len(match_pool), before, len(match_pool))
+
+        point_excludes = set(self.config.features.exclude_point_level_features)
+        if point_excludes:
+            unknown = point_excludes - set(point_pool)
+            if unknown:
+                raise ValueError(
+                    f"exclude_point_level_features contains specs not in the candidate pool: "
+                    f"{sorted(unknown)}"
+                )
+            base_conflict = point_excludes & set(selected_point)
+            if base_conflict:
+                raise ValueError(
+                    f"exclude_point_level_features overlaps base_point_level_features: "
+                    f"{sorted(base_conflict)}"
+                )
+            before = len(point_pool)
+            point_pool = [f for f in point_pool if f not in point_excludes]
+            logger.info("Excluded %d point-level specs (pool %d → %d)", before - len(point_pool), before, len(point_pool))
+
         if self.config.metric in _CHAIN_METRICS and self.config.features.candidate_match_level_features:
             missing_base = [f for f in selected_match if f not in match_pool]
             if missing_base:
