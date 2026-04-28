@@ -48,6 +48,7 @@ _POINT_METRICS = {"log_loss", "brier_score", "roc_auc", "calibration_error"}
 _CHAIN_METRICS = {
     "iid_crps_total_games", "iid_crps_spread",
     "iid_total_cal", "iid_spread_cal",
+    "iid_total_cal_max", "iid_spread_cal_max",
     "mae", "rmse",
 }
 # Point features that cannot be represented in the chain DP: the deuce
@@ -60,6 +61,7 @@ _MINIMIZE_METRICS = {
     "log_loss", "brier_score", "calibration_error",
     "iid_crps_total_games", "iid_crps_spread",
     "iid_total_cal", "iid_spread_cal",
+    "iid_total_cal_max", "iid_spread_cal_max",
     "mae", "rmse",
 }
 
@@ -86,26 +88,26 @@ def _score_dist_metric(
         obs_idx = obs_spread + dist.spread_offset
         obs_idx = np.clip(obs_idx, 0, dist.spread_pmf.shape[1] - 1)
         return crps_discrete_pmf(obs_idx, dist.spread_pmf)
-    if metric == "iid_total_cal":
+    if metric in ("iid_total_cal", "iid_total_cal_max"):
         if not total_lines:
-            raise ValueError("iid_total_cal requires non-empty total_lines")
+            raise ValueError(f"{metric} requires non-empty total_lines")
         obs_total = (y_games_a + y_games_b).astype(np.int64)
         errs = []
         for line in total_lines:
             p_over = dist.p_over_total(line)
             actual_over = (obs_total > line).astype(np.float64)
             errs.append(abs(float(p_over.mean()) - float(actual_over.mean())))
-        return float(sum(errs))
-    if metric == "iid_spread_cal":
+        return float(max(errs)) if metric == "iid_total_cal_max" else float(sum(errs))
+    if metric in ("iid_spread_cal", "iid_spread_cal_max"):
         if not spread_lines:
-            raise ValueError("iid_spread_cal requires non-empty spread_lines")
+            raise ValueError(f"{metric} requires non-empty spread_lines")
         obs_spread = (y_games_a - y_games_b).astype(np.float64)
         errs = []
         for line in spread_lines:
             p_cover = dist.p_a_spread_cover(line)
             actual_cover = (obs_spread > line).astype(np.float64)
             errs.append(abs(float(p_cover.mean()) - float(actual_cover.mean())))
-        return float(sum(errs))
+        return float(max(errs)) if metric == "iid_spread_cal_max" else float(sum(errs))
     raise ValueError(f"Unknown chain metric: {metric}")
 
 
