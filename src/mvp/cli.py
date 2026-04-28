@@ -592,6 +592,10 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
     iid_proj_parser.add_argument(
         "--refresh", action="store_true", help="Rebuild matches.parquet before running"
     )
+    iid_proj_parser.add_argument(
+        "--memory-limit", type=int, default=None,
+        help="Override memory limit %% (0 to disable, default 75)",
+    )
 
     # iid-backtest subcommand - backtest IID projector against 2026 totals/spread book lines
     iid_bt_parser = subparsers.add_parser(
