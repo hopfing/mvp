@@ -1257,6 +1257,20 @@ def _save_validation_json(result, path):
 _PROJECTION_MODEL_TYPES = {"xgb_regressor", "linear", "ridge"}
 
 
+def _is_lines_discovery(config_path: Path) -> bool:
+    """Detect whether a discovery config targets the lines proxy.
+
+    Lines discovery configs carry a `discovery.target` field
+    (`total` / `spread` / `player_games`) that no other discovery type uses.
+    """
+    import yaml
+
+    with open(config_path) as f:
+        raw = yaml.safe_load(f)
+    discovery = raw.get("discovery") or {}
+    return discovery.get("target") in ("total", "spread", "player_games")
+
+
 def _is_projection_discovery(config_path: Path) -> bool:
     """Detect whether a discovery config targets projection (regression)."""
     import yaml
@@ -1345,6 +1359,8 @@ def cmd_experiment(args: argparse.Namespace) -> int:
         )
         return 1
 
+    if _is_lines_discovery(config_path):
+        return _cmd_experiment_lines(args, config_path, checkpoint_path)
     if _is_iid_discovery(config_path):
         return _cmd_experiment_iid(args, config_path, checkpoint_path)
     if _is_serve_discovery(config_path):
@@ -1413,6 +1429,37 @@ def _cmd_experiment_projection(
         discovery.save_config(output_path, result)
         print(f"\nSaved config to: {output_path}")
         print(f"Run with: poetry run py -m mvp project {output_path.stem}")
+    else:
+        print("\nNo features selected - no config saved")
+
+    return 0
+
+
+def _cmd_experiment_lines(
+    args: argparse.Namespace, config_path: Path, checkpoint_path: Path,
+) -> int:
+    """Run lines-proxy feature discovery."""
+    from mvp.projection.lines.discovery import LinesDiscovery
+
+    output_name = args.output
+    if not output_name.endswith(".yaml"):
+        output_name = f"{output_name}.yaml"
+    output_path = PROJECTION_DIR / output_name
+
+    discovery = LinesDiscovery(
+        config_path=config_path,
+        verbose=args.verbose,
+    )
+
+    result = discovery.run(
+        checkpoint_path=checkpoint_path,
+        checkpoint_interval=args.checkpoint_interval,
+    )
+
+    if result.selected_features:
+        discovery.save_config(output_path, result)
+        print(f"\nSaved config to: {output_path}")
+        print(f"Run with: poetry run py -m mvp iid-project {output_path.stem}")
     else:
         print("\nNo features selected - no config saved")
 
