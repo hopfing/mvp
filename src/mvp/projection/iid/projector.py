@@ -8,10 +8,14 @@ and per-tiebreak win prob via `chain.p_service_game_win` /
 `chain.p_tiebreak_game_win`, and runs `chain.match_distribution`.
 """
 
+import logging
+import time
 from dataclasses import dataclass
 
 import numpy as np
 import polars as pl
+
+logger = logging.getLogger(__name__)
 
 from mvp.projection.iid.chain import (
     MatchDistribution,
@@ -81,6 +85,8 @@ class TennisProjector:
         best_of = df[best_of_col].to_numpy().astype(np.int64)
         match_uid: np.ndarray = df[match_uid_col].to_numpy()
 
+        logger.info("Projecting %d matches", len(df))
+        t0 = time.perf_counter()
         if self.serve_model.is_state_aware:
             p_a_fn, p_b_fn = self.serve_model.predict_state_fn(df)
             # predict_state_fn caches per-df match feature matrices; predict()
@@ -100,6 +106,7 @@ class TennisProjector:
             t_ab = p_tiebreak_game_win(p_a, p_b)
             dist = match_distribution(h_a, h_b, t_ab, best_of)
 
+        logger.info("Projection complete in %.1fs", time.perf_counter() - t0)
         return ProjectionOutput(
             distribution=dist,
             match_uid=match_uid,

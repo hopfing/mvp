@@ -7,6 +7,8 @@ the fundamental input to the IID chain in `mvp.projection.iid.chain` — from
 them, hold-per-game and tiebreak-game-win probabilities follow analytically.
 """
 
+import logging
+import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from pathlib import Path
@@ -16,6 +18,8 @@ import numpy as np
 import polars as pl
 
 from mvp.projection.models import get_regression_model
+
+logger = logging.getLogger(__name__)
 
 
 ServeStateFn = Callable[["ScoreState"], np.ndarray]  # type: ignore[name-defined]
@@ -293,6 +297,7 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
             get_local_data_root() / "features" / "cache"
         )
 
+        t0 = time.perf_counter()
         if preloaded_points is not None:
             points = preloaded_points
         else:
@@ -301,10 +306,15 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
             )
         if len(points) == 0:
             raise ValueError("no points rows matched the training match_uids")
+        logger.info(
+            "Loaded %d points for %d train matches (%.1fs)",
+            len(points), len(train_uids), time.perf_counter() - t0,
+        )
 
         self._match_feature_cols = self._resolve_match_feature_cols()
 
         if self.match_level_features:
+            t_join = time.perf_counter()
             if preloaded_match_features is not None:
                 needed = [
                     build_column_name(full_name, params)
@@ -349,12 +359,21 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
                     renames[c] = "returner_" + c[len("opp_"):]
             if renames:
                 joined = joined.rename(renames)
+            logger.info(
+                "Joined %d match-level features (%.1fs)",
+                len(self.match_level_features), time.perf_counter() - t_join,
+            )
         else:
             joined = points
 
         derived = [n for n in self.point_level_features if n in DERIVED_POINT_FEATURES]
         if derived:
+            t_derive = time.perf_counter()
             joined = add_derived_point_features(joined, derived)
+            logger.info(
+                "Derived %d point features (%.1fs)",
+                len(derived), time.perf_counter() - t_derive,
+            )
 
         joined = joined.filter(pl.col("point_won_by_server").is_not_null())
         if len(joined) == 0:
@@ -364,6 +383,11 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
         X = joined.select(feature_cols).to_numpy()
         y = joined["point_won_by_server"].cast(pl.Int64).to_numpy()
 
+        logger.info(
+            "Fitting score-state %s model (%d samples, %d features)",
+            self.model_type, X.shape[0], X.shape[1],
+        )
+        t_fit = time.perf_counter()
         self._model = build_score_state_model(
             type_=self.model_type,
             feature_names=feature_cols,
@@ -372,6 +396,9 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
             point_feature_names=self.point_level_features,
         )
         self._model.fit(X, y)
+        logger.info(
+            "Score-state fit complete in %.1fs", time.perf_counter() - t_fit,
+        )
 
     def _match_feature_values(self, df: pl.DataFrame, *, swap: bool) -> np.ndarray:
         """Build the match-level feature matrix in server-perspective.
