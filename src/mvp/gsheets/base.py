@@ -423,7 +423,7 @@ def merge_predictions(
 
     # 3c. Auto-fill p1_odds, p2_odds, book from best available odds.
     # book = max odds, tiebroken by odds_maps iteration order.
-    # book2 = max odds among remaining books within 0.01 of best, same tiebreak.
+    # book2 = max odds among remaining books within <0.02 of best, same tiebreak.
     if len(merged) > 0 and odds_maps:
         new_p1_odds = []
         new_p2_odds = []
@@ -470,7 +470,7 @@ def merge_predictions(
                 candidates = [
                     (b, o)
                     for b, o in pred_offers
-                    if b != primary and best_raw - o <= 0.01 + 1e-9
+                    if b != primary and best_raw - o < 0.02 - 1e-9
                 ]
                 if candidates:
                     best2 = max(o for _, o in candidates)
