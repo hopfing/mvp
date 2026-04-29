@@ -47,7 +47,9 @@ from mvp.projection.iid.serve_model import (
 run_logger = logging.getLogger(__name__)
 
 
-def _build_serve_model(cfg: ServeModelConfig) -> ServeWinProbEstimator:
+def _build_serve_model(
+    cfg: ServeModelConfig, engine: Any = None,
+) -> ServeWinProbEstimator:
     if cfg.type == "identity":
         return IdentityServeModel(
             window=cfg.window,
@@ -78,6 +80,7 @@ def _build_serve_model(cfg: ServeModelConfig) -> ServeWinProbEstimator:
             match_level_features=cfg.match_level_features,
             point_level_features=cfg.point_level_features,
             params=dict(cfg.params),
+            engine=engine,
             clip_min=cfg.clip_min,
             clip_max=cfg.clip_max,
         )
@@ -262,7 +265,9 @@ class IIDProjectionRunner:
                     fold_idx + 1, len(train_df), len(test_df),
                 )
 
-                serve_model = _build_serve_model(self.config.serve_model)
+                serve_model = _build_serve_model(
+                    self.config.serve_model, engine=self.engine,
+                )
                 projector = TennisProjector(serve_model)
                 projector.fit(train_df)
                 out = projector.project(test_df)

@@ -22,7 +22,7 @@ import polars as pl
 
 from mvp.common.base_job import get_data_root, get_local_data_root
 from mvp.model.config import apply_filters, get_filter_feature_specs
-from mvp.model.engine import FeatureEngine
+from mvp.model.engine import make_fs_engine
 from mvp.model.features._score_helpers import total_games_lost, total_games_won
 from mvp.projection.iid.config import IIDProjectionConfig, ServeModelConfig
 from mvp.projection.iid.projector import ProjectionOutput, TennisProjector
@@ -55,7 +55,9 @@ def output_path(config_path: Path) -> Path:
     return BACKTEST_ROOT / f"{config_path.stem}.csv"
 
 
-def _build_serve_model(cfg: ServeModelConfig) -> ServeWinProbEstimator:
+def _build_serve_model(
+    cfg: ServeModelConfig, engine: Any = None,
+) -> ServeWinProbEstimator:
     if cfg.type == "identity":
         return IdentityServeModel(
             window=cfg.window, clip_min=cfg.clip_min, clip_max=cfg.clip_max,
@@ -82,6 +84,7 @@ def _build_serve_model(cfg: ServeModelConfig) -> ServeWinProbEstimator:
             match_level_features=cfg.match_level_features,
             point_level_features=cfg.point_level_features,
             params=dict(cfg.params),
+            engine=engine,
             clip_min=cfg.clip_min,
             clip_max=cfg.clip_max,
         )
@@ -134,10 +137,12 @@ def _collapse_to_match_rows(df: pl.DataFrame) -> pl.DataFrame:
     )
 
 
-def _compute_features(config: IIDProjectionConfig) -> pl.DataFrame:
+def _compute_features(
+    config: IIDProjectionConfig,
+) -> tuple[pl.DataFrame, Any]:
     matches_path = get_data_root() / "aggregate" / "atptour" / "matches.parquet"
     cache_dir = get_local_data_root() / "features" / "cache"
-    engine = FeatureEngine(matches_path=matches_path, cache_dir=cache_dir)
+    engine = make_fs_engine(matches_path=matches_path, cache_dir=cache_dir)
 
     feature_specs = config.features.include
     compute_only = config.features.compute_only or []
@@ -151,10 +156,12 @@ def _compute_features(config: IIDProjectionConfig) -> pl.DataFrame:
             if col not in runner_columns:
                 runner_columns.append(col)
 
-    return engine.compute(all_specs, extra_columns=runner_columns)
+    return engine.compute(all_specs, extra_columns=runner_columns), engine
 
 
-def _train_projector(config: IIDProjectionConfig, df: pl.DataFrame) -> TennisProjector:
+def _train_projector(
+    config: IIDProjectionConfig, df: pl.DataFrame, engine: Any = None,
+) -> TennisProjector:
     """Fit the projector on the config's training window."""
     train_df = df
     if config.data.filters:
@@ -169,7 +176,7 @@ def _train_projector(config: IIDProjectionConfig, df: pl.DataFrame) -> TennisPro
     if len(train_df) == 0:
         raise ValueError("No training matches after filters")
     logger.info("Training projector on %d matches", len(train_df))
-    serve_model = _build_serve_model(config.serve_model)
+    serve_model = _build_serve_model(config.serve_model, engine=engine)
     projector = TennisProjector(serve_model)
     projector.fit(train_df)
     return projector
@@ -201,10 +208,10 @@ def _load_artifact(config_path: Path) -> TennisProjector:
 
 def _train_or_load(
     config: IIDProjectionConfig, config_path: Path, df: pl.DataFrame,
-    *, retrain: bool,
+    *, retrain: bool, engine: Any = None,
 ) -> TennisProjector:
     if retrain or not artifact_path(config_path).exists():
-        projector = _train_projector(config, df)
+        projector = _train_projector(config, df, engine=engine)
         _save_artifact(projector, config_path, n_train=0)
         return projector
     logger.info("Loading existing IID artifact for %s", config_path.stem)
@@ -530,9 +537,11 @@ def run_backtest(config_path: Path | str, *, retrain: bool = False) -> Path:
         raise FileNotFoundError(f"Config not found: {config_path}")
 
     config = IIDProjectionConfig.from_file(str(config_path))
-    df = _compute_features(config)
+    df, engine = _compute_features(config)
 
-    projector = _train_or_load(config, config_path, df, retrain=retrain)
+    projector = _train_or_load(
+        config, config_path, df, retrain=retrain, engine=engine,
+    )
 
     test_df = _build_test_set(config, df)
     if len(test_df) == 0:
