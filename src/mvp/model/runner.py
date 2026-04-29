@@ -23,7 +23,7 @@ from mvp.model.config import (
     get_filter_feature_specs,
 )
 from mvp.model.diagnostics import Diagnostics, EnsembleDiagnostics
-from mvp.model.engine import FeatureEngine, check_memory, get_feature_columns
+from mvp.model.engine import check_memory, get_feature_columns, make_fs_engine
 from mvp.model.imputation import apply_imputation, build_imputation, fit_imputation
 from mvp.model.metrics import compute_metrics
 from mvp.model.mlflow_logger import ExperimentLogger
@@ -72,7 +72,7 @@ class ExperimentRunner:
         self.run_name = run_name or self.config_path.stem
         self.log_to_mlflow = log_to_mlflow
 
-        self.engine = FeatureEngine(
+        self.engine = make_fs_engine(
             matches_path=self.matches_path,
             cache_dir=self.cache_dir,
         )

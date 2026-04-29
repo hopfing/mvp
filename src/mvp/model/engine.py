@@ -57,12 +57,15 @@ def fs_cutoff() -> date:
 
 
 def make_fs_engine(matches_path: Path, cache_dir: Path) -> "FeatureEngine":
-    """Construct a FeatureEngine in FS-stable mode.
+    """Construct a FeatureEngine in cutoff-stable mode.
 
-    Use this in any forward-selection path so the cache key is keyed on the
-    active FS cutoff (monthly default, or today on --refresh) rather than the
-    file-bytes hash. Non-FS callers should construct ``FeatureEngine``
-    directly to preserve current behavior.
+    Cache key is keyed on the active FS cutoff (monthly default, or today on
+    --refresh) rather than the file-bytes hash. Used by forward selection and
+    by dev-test CLI commands (``mvp model`` / ``mvp project`` / ``mvp
+    iid-project``) so re-runs against the same data don't invalidate the cache
+    when matches.parquet is rewritten by the live pipeline. Production code
+    (``ProductionPredictor`` via ``mvp live``) constructs ``FeatureEngine``
+    directly with no ``cutoff_date`` and is unaffected by the override.
     """
     return FeatureEngine(
         matches_path=matches_path,

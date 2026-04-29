@@ -806,9 +806,14 @@ def cmd_model(args: argparse.Namespace) -> int:
         raise FileNotFoundError(f"Config file not found: {args.config} (tried {config_path})")
 
     if args.refresh:
+        from datetime import date as _date
+
         from mvp.atptour.aggregators.matches import MatchesAggregator
+        from mvp.model.engine import set_fs_cutoff
+
         logger.info("Rebuilding matches.parquet")
         MatchesAggregator().run()
+        set_fs_cutoff(_date.today())
 
     runner = ExperimentRunner(config_path=config_path)
     results = runner.run()
@@ -1687,9 +1692,14 @@ def cmd_project(args: argparse.Namespace) -> int:
         )
 
     if args.refresh:
+        from datetime import date as _date
+
         from mvp.atptour.aggregators.matches import MatchesAggregator
+        from mvp.model.engine import set_fs_cutoff
+
         logger.info("Rebuilding matches.parquet")
         MatchesAggregator().run()
+        set_fs_cutoff(_date.today())
 
     runner = ProjectionRunner(config_path=config_path)
     results = runner.run()
@@ -1844,9 +1854,14 @@ def cmd_iid_project(args: argparse.Namespace) -> int:
         )
 
     if args.refresh:
+        from datetime import date as _date
+
         from mvp.atptour.aggregators.matches import MatchesAggregator
+        from mvp.model.engine import set_fs_cutoff
+
         logger.info("Rebuilding matches.parquet")
         MatchesAggregator().run()
+        set_fs_cutoff(_date.today())
 
     runner = IIDProjectionRunner(config_path=config_path)
     results = runner.run()
