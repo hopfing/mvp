@@ -10,7 +10,7 @@ import numpy as np
 import polars as pl
 
 from mvp.model.config import apply_filters
-from mvp.model.engine import FeatureEngine, check_memory, get_feature_columns
+from mvp.model.engine import check_memory, get_feature_columns, make_fs_engine
 from mvp.model.features._score_helpers import total_games_lost, total_games_won
 from mvp.model.imputation import build_imputation
 from mvp.model.registry import get_registry
@@ -88,7 +88,7 @@ class FastProjectionSelector:
 
     def precompute(self) -> None:
         """Run the expensive one-time computation."""
-        engine = FeatureEngine(
+        engine = make_fs_engine(
             matches_path=self.matches_path,
             cache_dir=self.cache_dir,
         )

@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import time
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,53 @@ from mvp.model.registry import get_registry
 logger = logging.getLogger(__name__)
 
 _MEMORY_LIMIT_PCT = int(os.environ.get("MVP_MEMORY_LIMIT_PCT", "75"))
+
+
+def first_of_current_month() -> date:
+    """Default FS cutoff date — first day of the current calendar month.
+
+    The FS cache is keyed on the cutoff. Holding this fixed for a whole month
+    means a single FS run's cache stays valid across that month regardless of
+    new matches arriving in the underlying parquet. Bumps once per month or on
+    explicit ``--refresh``.
+    """
+    return date.today().replace(day=1)
+
+
+# Process-wide override for the active FS cutoff. Set by the CLI on --refresh
+# (to today's date) so all FS callers in this run produce a fresh recompute.
+# When None, FS callers fall back to first_of_current_month().
+_FS_CUTOFF_OVERRIDE: date | None = None
+
+
+def set_fs_cutoff(cutoff: date | None) -> None:
+    """Set the process-wide FS cutoff override (CLI-controlled).
+
+    Pass ``date.today()`` to force a recompute against current data;
+    pass ``None`` to clear the override and revert to the monthly default.
+    """
+    global _FS_CUTOFF_OVERRIDE
+    _FS_CUTOFF_OVERRIDE = cutoff
+
+
+def fs_cutoff() -> date:
+    """Resolve the active FS cutoff: override if set, else first-of-month."""
+    return _FS_CUTOFF_OVERRIDE or first_of_current_month()
+
+
+def make_fs_engine(matches_path: Path, cache_dir: Path) -> "FeatureEngine":
+    """Construct a FeatureEngine in FS-stable mode.
+
+    Use this in any forward-selection path so the cache key is keyed on the
+    active FS cutoff (monthly default, or today on --refresh) rather than the
+    file-bytes hash. Non-FS callers should construct ``FeatureEngine``
+    directly to preserve current behavior.
+    """
+    return FeatureEngine(
+        matches_path=matches_path,
+        cache_dir=cache_dir,
+        cutoff_date=fs_cutoff(),
+    )
 
 
 class MemoryLimitExceeded(RuntimeError):
@@ -216,15 +264,29 @@ class FeatureEngine:
     feature functions, and caches results for reuse.
     """
 
-    def __init__(self, matches_path: Path, cache_dir: Path) -> None:
+    def __init__(
+        self,
+        matches_path: Path,
+        cache_dir: Path,
+        cutoff_date: date | None = None,
+    ) -> None:
         """Initialize the Feature Engine.
 
         Args:
             matches_path: Path to the matches.parquet file.
             cache_dir: Directory for caching computed features.
+            cutoff_date: Optional training horizon. When set, matches are
+                filtered to ``effective_match_date <= cutoff_date`` at read
+                time and the cache key is derived from the cutoff date instead
+                of the file bytes. This is the FS-stable mode: shared data
+                that's rewritten frequently (e.g., live-pipeline output)
+                doesn't invalidate the cache as long as the cutoff is fixed.
+                When None, the engine uses the file-bytes hash and applies no
+                date filter — current behavior, preserved for non-FS callers.
         """
         self.matches_path = matches_path
         self.cache_dir = cache_dir
+        self.cutoff_date = cutoff_date
 
         # Create cache directory if it doesn't exist
         self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -267,11 +329,22 @@ class FeatureEngine:
             json.dump(self._manifest, f, indent=2)
 
     def _compute_matches_hash(self) -> str:
-        """Compute a hash of the matches file for cache invalidation.
+        """Compute a hash of the matches data for cache invalidation.
 
-        Uses file size + content hash (first/last 64KB) for stability
-        across machines where mtime may differ for identical files.
+        When ``cutoff_date`` is set, the hash is derived from the cutoff date
+        string. Old cached values stay valid as long as the cutoff doesn't
+        move, even when matches.parquet is rewritten with the same logical
+        history plus new appended rows (the live-pipeline case).
+
+        When ``cutoff_date`` is None, falls back to the file-bytes hash
+        (file size + first/last 64KB) for callers that need to detect any
+        change to the underlying parquet.
         """
+        if self.cutoff_date is not None:
+            return hashlib.md5(
+                f"cutoff:{self.cutoff_date.isoformat()}".encode()
+            ).hexdigest()
+
         stat = self.matches_path.stat()
         h = hashlib.md5()
         h.update(str(stat.st_size).encode())
@@ -282,6 +355,30 @@ class FeatureEngine:
                 f.seek(max(0, stat.st_size - chunk_size))
                 h.update(f.read(chunk_size))
         return h.hexdigest()
+
+    def _apply_cutoff_filter(self, df: pl.DataFrame) -> pl.DataFrame:
+        """Filter matches to ``effective_match_date <= cutoff_date``.
+
+        No-op when ``cutoff_date`` is None. Logs the row count drop so callers
+        can see the FS horizon being applied.
+        """
+        if self.cutoff_date is None:
+            return df
+        if "effective_match_date" not in df.columns:
+            # Column wasn't loaded; can't filter. This shouldn't happen for
+            # FS callers since effective_match_date is in the always-loaded
+            # set, but guard rather than silently produce wrong cache.
+            raise ValueError(
+                "FeatureEngine cutoff_date is set but effective_match_date "
+                "is not in the loaded columns; cannot apply cutoff filter."
+            )
+        before = df.height
+        df = df.filter(pl.col("effective_match_date") <= self.cutoff_date)
+        logger.info(
+            "Applied cutoff <= %s: %d → %d rows",
+            self.cutoff_date.isoformat(), before, df.height,
+        )
+        return df
 
     def _compute_registry_hash(self) -> str:
         """Compute a hash of all feature function source code.
@@ -551,6 +648,7 @@ class FeatureEngine:
         else:
             df = pl.read_parquet(self.matches_path)
         logger.info("Loaded matches: %d rows x %d columns", df.height, df.width)
+        df = self._apply_cutoff_filter(df)
         check_memory("ensure_cached: after parquet load")
 
         # Cache validity
@@ -894,6 +992,7 @@ class FeatureEngine:
         else:
             df = pl.read_parquet(self.matches_path)
             logger.info("Loaded matches: %d rows x %d columns", df.height, df.width)
+        df = self._apply_cutoff_filter(df)
         check_memory("after parquet load")
 
         # Check cache validity — wipe everything if data or code changed

@@ -12,7 +12,7 @@ from sklearn.linear_model import LogisticRegression
 
 from mvp.model.config import apply_filters
 from mvp.model.discovery.config import DiscoveryConfig
-from mvp.model.engine import FeatureEngine, check_memory, get_feature_columns
+from mvp.model.engine import check_memory, get_feature_columns, make_fs_engine
 from mvp.model.imputation import build_imputation
 from mvp.model.metrics import compute_metrics
 from mvp.model.models import get_model
@@ -111,7 +111,7 @@ class FastForwardSelector:
                 and reorder rows. override_y/row_mask/sample_weights
                 are aligned to these rows (applied after filtering).
         """
-        engine = FeatureEngine(
+        engine = make_fs_engine(
             matches_path=self.matches_path,
             cache_dir=self.cache_dir,
         )

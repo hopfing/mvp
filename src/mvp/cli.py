@@ -1327,9 +1327,16 @@ def cmd_experiment(args: argparse.Namespace) -> int:
         raise FileNotFoundError(f"Config file not found: {args.config} (tried {config_path})")
 
     if args.refresh:
+        from datetime import date as _date
+
         from mvp.atptour.aggregators.matches import MatchesAggregator
+        from mvp.model.engine import set_fs_cutoff
+
         logger.info("Rebuilding matches.parquet")
         MatchesAggregator().run()
+        # Force the FS cache to recompute against today's data; otherwise FS
+        # callers default to first-of-current-month for cache stability.
+        set_fs_cutoff(_date.today())
 
     # Checkpoint gate: determine checkpoint path from --output name,
     # then enforce --resume / --fresh rules.

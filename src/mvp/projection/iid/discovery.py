@@ -32,9 +32,9 @@ from mvp.model.config import apply_filters, get_filter_feature_specs
 from mvp.model.discovery.discover import get_all_feature_specs
 from mvp.model.discovery.selection import FeatureSelector, SelectionResult
 from mvp.model.engine import (
-    FeatureEngine,
     build_column_name,
     check_memory,
+    make_fs_engine,
     parse_feature_spec,
 )
 from mvp.model.features._score_helpers import total_games_lost, total_games_won
@@ -136,7 +136,7 @@ class FastIIDDiscoverySelector:
         is NOT usable at this scale — it holds every computed feature in a
         single DataFrame simultaneously.
         """
-        engine = FeatureEngine(
+        engine = make_fs_engine(
             matches_path=self.matches_path,
             cache_dir=self.cache_dir,
         )

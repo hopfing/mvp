@@ -27,7 +27,12 @@ from mvp.model.discovery.checkpoint import (
     load_checkpoint,
     save_checkpoint,
 )
-from mvp.model.engine import FeatureEngine, build_column_name, parse_feature_spec
+from mvp.model.engine import (
+    FeatureEngine,
+    build_column_name,
+    make_fs_engine,
+    parse_feature_spec,
+)
 from mvp.model.features._score_helpers import total_games_lost, total_games_won
 from mvp.model.metrics import compute_metrics
 from mvp.model.splitters import make_splitter
@@ -975,7 +980,7 @@ class ServeDiscoverySelector:
             if col not in extra_columns:
                 extra_columns.append(col)
 
-        engine = FeatureEngine(matches_path=self.matches_path, cache_dir=self.cache_dir)
+        engine = make_fs_engine(matches_path=self.matches_path, cache_dir=self.cache_dir)
         cache_key = engine.ensure_cached(all_match_specs, extra_columns=extra_columns)
         return engine, cache_key
 
