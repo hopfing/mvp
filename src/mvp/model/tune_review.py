@@ -67,6 +67,7 @@ def format_leaderboard(
                 f"  CRPS_spread={crps_spread:.4f}"
                 f"  MAE={mae:.4f}  LL={ll:.4f}  ({duration:.0f}s)"
             )
+            shown = {"iid_crps_total_games", "iid_crps_spread", "mae", "log_loss"}
         elif is_projection:
             mae = ua.get("mae", float("nan"))
             rmse = ua.get("rmse", float("nan"))
@@ -77,6 +78,7 @@ def format_leaderboard(
                 f"  {i + 1:>2}. MAE={mae:.4f}  RMSE={rmse:.4f}"
                 f"  R²={r2:.4f}{crps_str}  ({duration:.0f}s)"
             )
+            shown = {"mae", "rmse", "r_squared", "crps"}
         else:
             ll = ua.get("log_loss", float("nan"))
             cal = ua.get("calibration_error", float("nan"))
@@ -88,6 +90,17 @@ def format_leaderboard(
                 f"  {i + 1:>2}. LL={ll:.4f}  cal={cal * 100:.2f}%{scal_str}"
                 f"  err80={err80 * 100:.1f}%  ({duration:.0f}s)"
             )
+            shown = {
+                "log_loss", "calibration_error", "signed_calibration",
+                "error_rate_80plus",
+            }
+
+        extra = [m for m in sort_by if m not in shown]
+        if extra:
+            extra_str = "  ".join(
+                f"{m}={ua.get(m, float('nan')):.4f}" for m in extra
+            )
+            lines.append(f"      sort: {extra_str}")
 
         for k, v in sorted(trial.params.items()):
             lines.append(f"      {k}: {v}")

@@ -11,12 +11,23 @@ import optuna
 import yaml
 
 from mvp.common.base_job import get_data_root
+from mvp.projection.iid.metric_registry import METRICS as _IID_METRICS
 
 logger = logging.getLogger(__name__)
 
 _PROJECTION_MODEL_TYPES = {"xgb_regressor", "linear", "ridge"}
 
-_MAXIMIZE_METRICS = {"accuracy", "roc_auc", "r_squared"}
+# Manually-tracked maximize metrics that aren't in the IID registry, plus
+# point-grain variants (re-emitted with a "point_" prefix by the score-state
+# serve model) for any registry entry whose direction is "maximize".
+_MAXIMIZE_METRICS = (
+    {"accuracy", "roc_auc", "r_squared"}
+    | {
+        f"point_{name}"
+        for name, spec in _IID_METRICS.items()
+        if spec.direction == "maximize"
+    }
+)
 
 def _is_iid_config(raw: dict) -> bool:
     return isinstance(raw.get("serve_model"), dict)
