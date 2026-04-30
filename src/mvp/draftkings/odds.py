@@ -3,12 +3,16 @@
 
 import json
 import logging
+import random
 import re
+import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
 import polars as pl
+import requests
 
 from mvp.common.base_extractor import BaseExtractor
 
@@ -171,13 +175,46 @@ class DraftKingsOddsScraper(BaseExtractor):
         super().__init__(domain="draftkings", data_root=data_root,
                          run_at=run_at)
 
+    def _fetch_with_session(
+        self,
+        session: requests.Session,
+        url: str,
+        retries: int = 3,
+        headers: dict[str, str] | None = None,
+    ) -> requests.Response:
+        # Mirrors BaseExtractor._fetch but routes through a caller-supplied
+        # session so worker threads can each hold their own session and avoid
+        # sharing cookie jars / connection pools across threads.
+        min_delay = 0.75
+        max_delay = 1.25
+        for attempt in range(retries + 1):
+            try:
+                time.sleep(random.uniform(min_delay, max_delay))
+                logger.info("Fetching URL: %s", url)
+                response = session.get(
+                    url, timeout=self.timeout, headers=headers
+                )
+                response.raise_for_status()
+                return response
+            except requests.RequestException as e:
+                logger.warning("Fetch failed: %s", e)
+                min_delay *= 1.25
+                max_delay *= 1.25
+                if attempt == retries:
+                    raise
+
     def _warm_session(self) -> None:
         """Visit the tennis page to establish cookies needed for the API."""
         self._fetch(TENNIS_URL)
 
-    def fetch_tennis_leagues(self) -> list[dict]:
+    def fetch_tennis_leagues(
+        self, session: requests.Session | None = None
+    ) -> list[dict]:
         """Fetch active tennis leagues from DK, filtered to ATP/Challenger."""
-        html = self.fetch_html(TENNIS_URL)
+        if session is None:
+            html = self.fetch_html(TENNIS_URL)
+        else:
+            html = self._fetch_with_session(session, TENNIS_URL).text
 
         match = re.search(
             r"window\.__INITIAL_STATE__\s*=\s*(\{.+?\});?\s*</script>",
@@ -206,6 +243,7 @@ class DraftKingsOddsScraper(BaseExtractor):
         self,
         dk_tournament_id: str,
         market: str = "moneyline",
+        session: requests.Session | None = None,
     ) -> tuple[list[OddsEntry], dict]:
         """Fetch odds for one league + market. Returns (entries, raw_response)."""
         subcat_id = SUBCATEGORIES[market]
@@ -227,7 +265,10 @@ class DraftKingsOddsScraper(BaseExtractor):
             f"&include=Events"
             f"&entity=events"
         )
-        resp = self._fetch(url, headers=_API_HEADERS)
+        if session is None:
+            resp = self._fetch(url, headers=_API_HEADERS)
+        else:
+            resp = self._fetch_with_session(session, url, headers=_API_HEADERS)
         data = resp.json()
 
         now = datetime.now(UTC)
@@ -237,13 +278,20 @@ class DraftKingsOddsScraper(BaseExtractor):
     def fetch_all_odds(
         self,
         market: str = "moneyline",
+        leagues: list[dict] | None = None,
+        session: requests.Session | None = None,
     ) -> tuple[list[OddsEntry], list[dict]]:
-        """Discover leagues + fetch odds for each."""
+        """Discover leagues + fetch odds for each.
+
+        When run() drives this, it passes pre-discovered ``leagues`` and a
+        per-thread ``session`` so each market task is independent.
+        """
         if market not in SUBCATEGORIES:
             raise ValueError(f"Unknown market: {market}. Choose from {list(SUBCATEGORIES)}")
 
-        leagues = self.fetch_tennis_leagues()
-        logger.info("Found %d ATP/Challenger leagues on DK", len(leagues))
+        if leagues is None:
+            leagues = self.fetch_tennis_leagues(session=session)
+            logger.info("Found %d ATP/Challenger leagues on DK", len(leagues))
 
         all_entries: list[OddsEntry] = []
         raw_responses: list[dict] = []
@@ -253,6 +301,7 @@ class DraftKingsOddsScraper(BaseExtractor):
                 entries, raw = self.fetch_league_odds(
                     dk_tournament_id=league["dk_tournament_id"],
                     market=market,
+                    session=session,
                 )
                 all_entries.extend(entries)
                 raw_responses.append({"league": league, "response": raw})
@@ -262,12 +311,19 @@ class DraftKingsOddsScraper(BaseExtractor):
 
         return all_entries, raw_responses
 
-    def fetch_and_save_raw(self, market: str = "moneyline") -> int:
+    def fetch_and_save_raw(
+        self,
+        market: str = "moneyline",
+        leagues: list[dict] | None = None,
+        session: requests.Session | None = None,
+    ) -> int:
         """Fetch odds from DK and save raw JSON.
 
         Returns number of entries fetched.
         """
-        entries, raw_responses = self.fetch_all_odds(market=market)
+        entries, raw_responses = self.fetch_all_odds(
+            market=market, leagues=leagues, session=session
+        )
 
         if not entries:
             logger.info("No DK odds entries found")
@@ -368,18 +424,51 @@ class DraftKingsOddsScraper(BaseExtractor):
         out_path = self.build_path("stage", f"{market}.parquet")
         return self.save_parquet(df, out_path)
 
-    def _run_market(self, market: str) -> int:
+    def _run_market(
+        self,
+        market: str,
+        leagues: list[dict] | None = None,
+        session: requests.Session | None = None,
+    ) -> int:
         """Full flow for a single market type."""
-        n = self.fetch_and_save_raw(market=market)
+        n = self.fetch_and_save_raw(
+            market=market, leagues=leagues, session=session
+        )
         self.stage(market=market)
         self.consolidate(market=market)
         return n
 
     def run(self) -> int:
-        """Fetch all market types."""
+        """Fetch all market types, running markets concurrently.
+
+        League discovery happens once on the main session. Each market task
+        runs in its own thread with its own ``requests.Session`` to avoid
+        sharing cookies / connection pools across threads.
+        """
+        leagues = self.fetch_tennis_leagues()
+        logger.info("Found %d ATP/Challenger leagues on DK", len(leagues))
+
+        markets = list(SUBCATEGORIES)
+
+        def _run_one(market: str) -> int:
+            session = self._create_session()
+            try:
+                return self._run_market(
+                    market, leagues=leagues, session=session
+                )
+            finally:
+                session.close()
+
         total = 0
-        for market in SUBCATEGORIES:
-            total += self._run_market(market)
+        with ThreadPoolExecutor(max_workers=len(markets)) as pool:
+            future_to_market = {
+                pool.submit(_run_one, m): m for m in markets
+            }
+            for fut, market in future_to_market.items():
+                try:
+                    total += fut.result()
+                except Exception as e:
+                    logger.warning("Market %s failed: %s", market, e)
         return total
 
 
