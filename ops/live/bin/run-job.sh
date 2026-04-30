@@ -9,6 +9,11 @@
 
 set -uo pipefail
 
+# Cron's default PATH is sparse (/usr/bin:/bin); user-local installs
+# like ~/.local/bin/poetry aren't reachable. Prepend the standard
+# user-local bin dirs so the wrapped command can find them.
+export PATH="$HOME/.local/bin:$HOME/bin:$PATH"
+
 NAME=""
 DIR=""
 while [[ $# -gt 0 ]]; do
