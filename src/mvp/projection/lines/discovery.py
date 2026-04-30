@@ -186,7 +186,7 @@ class LinesDiscovery:
                 "model_type": "xgboost",
                 "match_level_features": list(selected_match_level),
                 "point_level_features": [],
-                "params": {},
+                "params": dict(self.config.model.params),
             },
-            "validation": self.config.validation.model_dump(),
+            "validation": self.config.validation.model_dump(exclude_unset=True),
         }
