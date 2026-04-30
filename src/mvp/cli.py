@@ -14,6 +14,7 @@ warnings.filterwarnings("ignore", category=UserWarning, module="sklearn.utils.pa
 
 import polars as pl
 
+from mvp import notify
 from mvp.common.base_job import get_data_root, get_local_data_root
 from mvp.common.enums import BOOK_DISPLAY_NAMES
 
@@ -2227,6 +2228,7 @@ def cmd_live(args: argparse.Namespace) -> int:
             n_new = len(merged) - len(existing)
             print(f"Synced to Google Sheets ({n_new} new matches)")
             report.record_sheets_sync(success=True, count=n_new)
+            notify.post_predictions("mvp-live", n_new)
         except Exception as e:
             logger.error("Sheets sync failed: %s", e)
             print(f"Warning: Sheets sync failed ({e}). Predictions saved locally.")
@@ -2310,7 +2312,11 @@ def main(args: list[str] | None = None) -> int:
     elif parsed.command == "experiment":
         return cmd_experiment(parsed)
     elif parsed.command == "live":
-        return cmd_live(parsed)
+        try:
+            return cmd_live(parsed)
+        except Exception as e:
+            notify.post_failure("mvp-live", f"{type(e).__name__}: {e}")
+            raise
     elif parsed.command == "confidence":
         return cmd_confidence(parsed)
     elif parsed.command == "project":
