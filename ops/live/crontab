@@ -1,0 +1,6 @@
+# MVP live pipeline crontab — managed by ops/live/install.sh
+# Edit in the repo, not via `crontab -e`. Re-run install.sh to apply.
+
+*/15 * * * * ~/projects/mvp/ops/live/bin/run-job.sh --name mvp-live --dir ~/projects/mvp -- poetry run python -m mvp live
+0 3 * * * find ~/logs -name "*.log" -mtime +30 -delete
+10 * * * * ~/projects/mvp/ops/live/bin/check-heartbeat.sh
