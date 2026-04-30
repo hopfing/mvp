@@ -38,7 +38,7 @@ def log_loss(preds, labels) -> float:
     return float(np.mean(list(_per_line_log_loss(preds, labels).values())))
 
 
-def brier(preds, labels) -> float:
+def brier_score(preds, labels) -> float:
     """Mean Brier score across lines."""
     return float(np.mean(list(_per_line_brier(preds, labels).values())))
 
@@ -57,7 +57,7 @@ _SCORERS = {
     "log_loss": log_loss,
     "cal_max":  cal_max,
     "cal_sum":  cal_sum,
-    "brier":    brier,
+    "brier_score": brier_score,
 }
 
 
@@ -75,7 +75,7 @@ def per_line_diagnostics(
     return {
         "log_loss":  _per_line_log_loss(preds, labels),
         "cal_err":   _per_line_cal_err(preds, labels),
-        "brier":     _per_line_brier(preds, labels),
+        "brier_score": _per_line_brier(preds, labels),
         "mean_pred": {L: float(np.mean(preds[L])) for L in preds},
         "empirical": {L: float(np.mean(labels[L])) for L in labels},
     }

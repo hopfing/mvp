@@ -31,7 +31,7 @@ class LinesDiscoveryOptions(BaseModel):
     """Discovery-specific options for the lines proxy."""
 
     target: Target
-    metric: Literal["log_loss", "cal_max", "cal_sum", "brier"] = "log_loss"
+    metric: Literal["log_loss", "cal_max", "cal_sum", "brier_score"] = "log_loss"
     selection_method: Literal["forward"] = "forward"
     min_delta: float = 0.0001
     features: LinesFeaturesConfig = LinesFeaturesConfig()
