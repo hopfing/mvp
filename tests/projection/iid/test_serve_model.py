@@ -760,3 +760,70 @@ class TestScoreStateChainServeModelE2E:
         for vec in dist.set_outcome_probs.values():
             total_set_prob += vec
         np.testing.assert_allclose(total_set_prob, 1.0, atol=1e-8)
+
+    def test_score_test_points_returns_point_metrics(self, tmp_path):
+        rng = np.random.default_rng(7)
+        n_matches = 40
+        match_uids = [f"m{i:03d}" for i in range(n_matches)]
+        points_rows: list[dict] = []
+        for i, uid in enumerate(match_uids):
+            for _ in range(60):
+                is_bp = bool(rng.random() < 0.2)
+                p_true = 0.35 if is_bp else 0.70
+                y = int(rng.random() < p_true)
+                points_rows.append(
+                    {
+                        "match_uid": uid,
+                        "server_id": f"p{i * 2:04d}",
+                        "returner_id": f"p{i * 2 + 1:04d}",
+                        "point_won_by_server": y,
+                        "is_break_point": is_bp,
+                    }
+                )
+        points_df = pl.DataFrame(points_rows)
+        points_path = tmp_path / "points.parquet"
+        points_df.write_parquet(points_path)
+
+        train_uids = match_uids[:30]
+        test_uids = match_uids[30:]
+        train_df = pl.DataFrame(
+            {"match_uid": train_uids, "best_of": [3] * len(train_uids)}
+        )
+        test_df = pl.DataFrame(
+            {"match_uid": test_uids, "best_of": [3] * len(test_uids)}
+        )
+
+        chain_model = ScoreStateChainServeModel(
+            model_type="logistic",
+            match_level_features=[],
+            point_level_features=["is_break_point"],
+            points_path=points_path,
+        )
+        chain_model.fit(train_df)
+
+        metrics = chain_model.score_test_points(test_df)
+
+        # Standard compute_metrics keys, all prefixed.
+        for k in (
+            "point_log_loss",
+            "point_brier_score",
+            "point_roc_auc",
+            "point_accuracy",
+            "point_calibration_error",
+        ):
+            assert k in metrics, f"missing {k}"
+        assert 0.0 < metrics["point_log_loss"] < 2.0
+        assert 0.0 <= metrics["point_brier_score"] <= 1.0
+        assert 0.0 <= metrics["point_accuracy"] <= 1.0
+
+    def test_score_test_points_before_fit_raises(self, tmp_path):
+        chain_model = ScoreStateChainServeModel(
+            model_type="logistic",
+            match_level_features=[],
+            point_level_features=["is_break_point"],
+            points_path=tmp_path / "points.parquet",
+        )
+        with pytest.raises(RuntimeError, match="before fit"):
+            chain_model.score_test_points(
+                pl.DataFrame({"match_uid": ["m000"], "best_of": [3]}),
+            )

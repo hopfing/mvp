@@ -239,6 +239,31 @@ class IIDProjectionRunner:
         all_metrics: list[dict[str, float]] = []
         all_predictions: list[dict[str, Any]] = []
 
+        # For score_state serve models, materialize points and match-level
+        # features once and reuse across folds. This avoids re-reading
+        # match_beats_points.parquet on every fold (in fit) and again per fold
+        # for score_test_points; the engine.compute call is also collapsed to
+        # a single call.
+        is_score_state = self.config.serve_model.type == "score_state"
+        preloaded_points_full: pl.DataFrame | None = None
+        preloaded_match_features: pl.DataFrame | None = None
+        if is_score_state:
+            points_path = (
+                get_data_root() / "aggregate" / "atptour"
+                / "match_beats_points.parquet"
+            )
+            run_logger.info("Preloading points parquet from %s", points_path)
+            preloaded_points_full = pl.read_parquet(points_path)
+            mlf = self.config.serve_model.match_level_features
+            if mlf:
+                run_logger.info(
+                    "Preloading %d match-level features for score_state", len(mlf),
+                )
+                preloaded_match_features = self.engine.compute(
+                    feature_specs=mlf,
+                    extra_columns=["player_id", "opp_id", "match_uid"],
+                )
+
         run_context = logger.start_run(run_name=self.run_name) if logger else None
         if run_context:
             run_context.__enter__()
@@ -269,7 +294,26 @@ class IIDProjectionRunner:
                     self.config.serve_model, engine=self.engine,
                 )
                 projector = TennisProjector(serve_model)
-                projector.fit(train_df)
+
+                fold_train_points: pl.DataFrame | None = None
+                fold_test_points: pl.DataFrame | None = None
+                if is_score_state and preloaded_points_full is not None:
+                    train_uids = train_df["match_uid"].unique().to_list()
+                    test_uids = test_df["match_uid"].unique().to_list()
+                    fold_train_points = preloaded_points_full.filter(
+                        pl.col("match_uid").is_in(train_uids)
+                    )
+                    fold_test_points = preloaded_points_full.filter(
+                        pl.col("match_uid").is_in(test_uids)
+                    )
+                    serve_model.fit(
+                        train_df,
+                        preloaded_points=fold_train_points,
+                        preloaded_match_features=preloaded_match_features,
+                    )
+                else:
+                    projector.fit(train_df)
+
                 out = projector.project(test_df)
 
                 y_won = test_df["won"].to_numpy().astype(np.int64)
@@ -294,6 +338,12 @@ class IIDProjectionRunner:
                 metrics.update(compute_hold_diagnostics(out, test_df))
                 metrics.update(compute_set_score_diagnostics(out, test_df))
                 metrics.update(compute_tiebreak_diagnostics(out, test_df))
+                if isinstance(serve_model, ScoreStateChainServeModel):
+                    metrics.update(serve_model.score_test_points(
+                        test_df,
+                        preloaded_points=fold_test_points,
+                        preloaded_match_features=preloaded_match_features,
+                    ))
                 all_metrics.append(metrics)
                 all_predictions.append({
                     "df": test_df.select(["match_uid", "circuit", "surface", "round", "best_of"]),

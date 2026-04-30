@@ -400,6 +400,114 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
             "Score-state fit complete in %.1fs", time.perf_counter() - t_fit,
         )
 
+    def score_test_points(
+        self,
+        df: pl.DataFrame,
+        *,
+        preloaded_match_features: "pl.DataFrame | None" = None,
+        preloaded_points: "pl.DataFrame | None" = None,
+    ) -> dict[str, float]:
+        """Point-grain classification metrics on held-out match points.
+
+        Materializes the same point feature matrix used at fit time for the
+        match_uids in `df`, runs the fitted model's `predict_proba`, and scores
+        against `point_won_by_server`. Returns metrics with `point_` prefixes
+        so they coexist with the chain's match-grain classification metrics.
+        """
+        from mvp.common.base_job import get_data_root, get_local_data_root
+        from mvp.model.engine import FeatureEngine, build_column_name, parse_feature_spec
+        from mvp.model.metrics import compute_metrics
+        from mvp.projection.iid.score_state_features import (
+            DERIVED_POINT_FEATURES,
+            add_derived_point_features,
+        )
+
+        if self._model is None:
+            raise RuntimeError("score_test_points called before fit")
+        if "match_uid" not in df.columns:
+            raise ValueError("score_test_points: df missing match_uid column")
+        test_uids = df["match_uid"].unique().to_list()
+        if not test_uids:
+            return {}
+
+        points_path = self._points_path or (
+            get_data_root() / "aggregate" / "atptour" / "match_beats_points.parquet"
+        )
+        matches_path = self._matches_path or (
+            get_data_root() / "aggregate" / "atptour" / "matches.parquet"
+        )
+        cache_dir = self._cache_dir or (
+            get_local_data_root() / "features" / "cache"
+        )
+
+        if preloaded_points is not None:
+            points = preloaded_points
+        else:
+            points = pl.read_parquet(points_path).filter(
+                pl.col("match_uid").is_in(test_uids)
+            )
+        if len(points) == 0:
+            return {}
+
+        if self.match_level_features:
+            if preloaded_match_features is not None:
+                needed = [
+                    build_column_name(full_name, params)
+                    for spec in self.match_level_features
+                    for _, _, full_name, params in [parse_feature_spec(spec)]
+                ]
+                available = set(preloaded_match_features.columns)
+                sel = ["match_uid", "player_id", "opp_id"] + [c for c in needed if c in available]
+                matches_features = preloaded_match_features.select(sel).rename(
+                    {"player_id": "server_id", "opp_id": "returner_id"}
+                )
+            else:
+                engine = self._engine if self._engine is not None else FeatureEngine(
+                    matches_path=matches_path, cache_dir=cache_dir,
+                )
+                matches_features = engine.compute(
+                    feature_specs=self.match_level_features,
+                    extra_columns=["player_id", "opp_id", "match_uid"],
+                )
+                matches_features = matches_features.rename(
+                    {"player_id": "server_id", "opp_id": "returner_id"}
+                )
+            keys = {"match_uid", "server_id", "returner_id"}
+            overlap = (set(points.columns) & set(matches_features.columns)) - keys
+            if overlap:
+                matches_features = matches_features.drop(list(overlap))
+            joined = points.join(
+                matches_features,
+                on=["match_uid", "server_id", "returner_id"],
+                how="inner",
+            )
+            renames: dict[str, str] = {}
+            for c in joined.columns:
+                if c.startswith("player_") and c != "player_id":
+                    renames[c] = "server_" + c[len("player_"):]
+                elif c.startswith("opp_") and c != "opp_id":
+                    renames[c] = "returner_" + c[len("opp_"):]
+            if renames:
+                joined = joined.rename(renames)
+        else:
+            joined = points
+
+        derived = [n for n in self.point_level_features if n in DERIVED_POINT_FEATURES]
+        if derived:
+            joined = add_derived_point_features(joined, derived)
+
+        joined = joined.filter(pl.col("point_won_by_server").is_not_null())
+        if len(joined) == 0:
+            return {}
+
+        feature_cols = self._match_feature_cols + self.point_level_features
+        X = joined.select(feature_cols).to_numpy()
+        y = joined["point_won_by_server"].cast(pl.Int64).to_numpy()
+
+        y_prob = self._model.predict_proba(X)
+        raw = compute_metrics(y, y_prob)
+        return {f"point_{k}": v for k, v in raw.items()}
+
     def _match_feature_values(self, df: pl.DataFrame, *, swap: bool) -> np.ndarray:
         """Build the match-level feature matrix in server-perspective.
 
