@@ -183,6 +183,19 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
         self._X_match_B: np.ndarray | None = None   # server=B perspective
         self._point_constants: dict[str, np.ndarray] = {}
 
+    def __getstate__(self) -> dict[str, Any]:
+        # _engine holds the global FeatureRegistry, which contains closure
+        # funcs from register_diff/_sum/_matchup that pickle can't resolve by
+        # qualified name. fit() and score_test_points() rebuild a fresh engine
+        # when _engine is None, and predict_state_fn doesn't need one — so
+        # dropping it on save is safe. Per-df caches are stale across pickle.
+        state = self.__dict__.copy()
+        state["_engine"] = None
+        state["_X_match_A"] = None
+        state["_X_match_B"] = None
+        state["_point_constants"] = {}
+        return state
+
     @property
     def is_state_aware(self) -> bool:
         return True
