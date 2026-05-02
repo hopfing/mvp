@@ -375,12 +375,6 @@ def _build_predictions_frame(
     test_df: pl.DataFrame, out: ProjectionOutput,
 ) -> pl.DataFrame:
     """One row per match with model summary + actuals + per-match pmf indices."""
-    total_pmf = out.distribution.total_games_pmf
-    spread_pmf = out.distribution.spread_pmf
-    spread_offset = out.distribution.spread_offset
-    proj_total = (total_pmf * np.arange(total_pmf.shape[1])).sum(axis=1)
-    spread_support = np.arange(spread_pmf.shape[1]) - spread_offset
-    proj_a_margin = (spread_pmf * spread_support).sum(axis=1)
     return pl.DataFrame({
         "match_uid": test_df["match_uid"],
         "effective_match_date": test_df["effective_match_date"],
@@ -401,8 +395,6 @@ def _build_predictions_frame(
         "round": test_df["round"],
         "p_match_win_a": out.distribution.p_match_win_a,
         "_row_idx": np.arange(len(out.distribution.p_match_win_a), dtype=np.int64),
-        "proj_total": proj_total,
-        "proj_a_margin": proj_a_margin,
         "actual_total": (
             test_df["_target_games_a"] + test_df["_target_games_b"]
         ).cast(pl.Float64),
@@ -466,7 +458,6 @@ def _settle_totals(preds: pl.DataFrame, totals: pl.DataFrame, dist) -> pl.DataFr
                 "model_p": model_p,
                 "edge": edge,
                 "edge_novig": model_p - p_novig,
-                "proj": r["proj_total"],
                 "actual": actual,
                 "won": won,
                 "profit": profit,
@@ -519,19 +510,9 @@ def _settle_spreads(preds: pl.DataFrame, spreads: pl.DataFrame, dist) -> pl.Data
         p1_p_novig = p1_implied / overround
         p2_p_novig = p2_implied / overround
 
-        # Express each side's line in A's frame so it's comparable to proj_a_margin.
-        # If p1 == A, A covers when a_margin > -p1_points → A's "line" is -p1_points.
-        # If p1 == B, p1 covers when a_margin < p1_points → A's view of that bet is line = p1_points.
-        if r["p1_id"] == a_id:
-            p1_line_a = -p1_points
-            p2_line_a = p2_points
-        else:
-            p1_line_a = p1_points
-            p2_line_a = -p2_points
-
-        for side, model_p, odds, won, points, p_novig, line_a in [
-            ("p1", p_p1_model, r["p1_odds"], p1_won, p1_points, p1_p_novig, p1_line_a),
-            ("p2", p_p2_model, r["p2_odds"], p2_won, p2_points, p2_p_novig, p2_line_a),
+        for side, model_p, odds, won, points, p_novig in [
+            ("p1", p_p1_model, r["p1_odds"], p1_won, p1_points, p1_p_novig),
+            ("p2", p_p2_model, r["p2_odds"], p2_won, p2_points, p2_p_novig),
         ]:
             book_p = 1.0 / odds
             edge = model_p - book_p
@@ -549,7 +530,6 @@ def _settle_spreads(preds: pl.DataFrame, spreads: pl.DataFrame, dist) -> pl.Data
                 "round": r["round"],
                 "market": "game_spread",
                 "line": points,
-                "line_a": line_a,
                 "side": side,  # "p1" or "p2" relative to the event_map ordering
                 "bet_type": "favorite" if points < 0 else ("underdog" if points > 0 else "pickem"),
                 "book": r["book"],
@@ -559,7 +539,6 @@ def _settle_spreads(preds: pl.DataFrame, spreads: pl.DataFrame, dist) -> pl.Data
                 "model_p": model_p,
                 "edge": edge,
                 "edge_novig": model_p - p_novig,
-                "proj": r["proj_a_margin"],
                 "actual": a_margin if r["p1_id"] == a_id else -a_margin,
                 "won": won,
                 "profit": profit,
@@ -662,25 +641,43 @@ def _dedupe_best_price(raw: pl.DataFrame) -> pl.DataFrame:
     )
 
 
-def _dedupe_central_line(bets: pl.DataFrame) -> pl.DataFrame:
-    """One row per (match × market × side): line closest to the model's projection.
+def _select_main_line(raw: pl.DataFrame) -> pl.DataFrame:
+    """Filter raw bet rows to only the main (median-offered) line per (match × market).
 
-    Tie-break by smaller |edge| so we prefer the more conservative line.
+    Main line = the offered line value whose distance to the per-(match, market)
+    median is smallest, ties broken by the line offered at the most books.
+    Spreads use line magnitude (|line|) since +/- are paired sides of the same line.
     """
-    if len(bets) == 0:
-        return bets
-    # For totals, line vs proj is straightforward. For spreads, compare line_a
-    # (line expressed in A's frame) to proj_a_margin so both sides use the same axis.
-    line_axis = pl.when(pl.col("market") == "game_spread").then(pl.col("line_a")).otherwise(pl.col("line"))
-    return (
-        bets.with_columns(
-            (line_axis - pl.col("proj")).abs().alias("_dist"),
-            pl.col("edge").abs().alias("_abs_edge"),
+    if len(raw) == 0:
+        return raw
+    line_axis = (
+        pl.when(pl.col("market") == "game_spread")
+        .then(pl.col("line").abs())
+        .otherwise(pl.col("line"))
+    )
+    raw = raw.with_columns(line_axis.alias("_line_axis"))
+    medians = (
+        raw.group_by(["match_uid", "market"])
+        .agg(pl.col("_line_axis").median().alias("_median_line"))
+    )
+    coverage = (
+        raw.group_by(["match_uid", "market", "_line_axis"])
+        .agg(pl.col("book").n_unique().alias("_n_books"))
+    )
+    pick = (
+        coverage.join(medians, on=["match_uid", "market"])
+        .with_columns((pl.col("_line_axis") - pl.col("_median_line")).abs().alias("_dist"))
+        .sort(
+            ["match_uid", "market", "_dist", "_n_books"],
+            descending=[False, False, False, True],
         )
-        .sort(["_dist", "_abs_edge"])
-        .group_by(["match_uid", "market", "side"])
-        .agg(pl.all().first())
-        .drop("_dist", "_abs_edge")
+        .group_by(["match_uid", "market"])
+        .agg(pl.col("_line_axis").first().alias("_main_line_axis"))
+    )
+    return (
+        raw.join(pick, on=["match_uid", "market"])
+        .filter(pl.col("_line_axis") == pl.col("_main_line_axis"))
+        .drop("_line_axis", "_main_line_axis")
     )
 
 
@@ -728,16 +725,17 @@ def _print_view(label: str, df: pl.DataFrame, edge_col: str) -> None:
 def print_backtest_summary(csv_path: Path) -> None:
     raw = pl.read_csv(csv_path)
     all_lines = _dedupe_best_price(raw)
-    central = _dedupe_central_line(all_lines)
+    main_lines = _dedupe_best_price(_select_main_line(raw))
 
     print(f"\nBacktest output: {csv_path}")
-    print(f"Raw bet rows (all books):                                    {len(raw)}")
-    print(f"Best-price per (match × market × line × side):               {len(all_lines)}")
-    print(f"Closest-to-projection per (match × market × side):           {len(central)}")
+    print(f"Raw bet rows (all books):                          {len(raw)}")
+    print(f"Best-price per (match × market × line × side):     {len(all_lines)}")
+    print(f"Best-price on main (median-offered) line only:     {len(main_lines)}")
 
-    # Primary view: how you'd actually bet.
-    _print_view("CENTRAL LINE — NO-VIG", central, "edge_novig")
-    # Secondary views for comparison.
-    _print_view("CENTRAL LINE — RAW", central, "edge")
+    # Primary view: bet the main market line, evaluate vs no-vig book probability.
+    _print_view("MAIN LINE — NO-VIG", main_lines, "edge_novig")
+    # Operational realism: same bets, raw vig included.
+    _print_view("MAIN LINE — RAW", main_lines, "edge")
+    # Diagnostic: how the model performs across every offered line.
     _print_view("ALL LINES — NO-VIG", all_lines, "edge_novig")
     _print_view("ALL LINES — RAW", all_lines, "edge")
