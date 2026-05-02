@@ -375,6 +375,12 @@ def _build_predictions_frame(
     test_df: pl.DataFrame, out: ProjectionOutput,
 ) -> pl.DataFrame:
     """One row per match with model summary + actuals + per-match pmf indices."""
+    total_pmf = out.distribution.total_games_pmf
+    spread_pmf = out.distribution.spread_pmf
+    spread_offset = out.distribution.spread_offset
+    proj_total = (total_pmf * np.arange(total_pmf.shape[1])).sum(axis=1)
+    spread_support = np.arange(spread_pmf.shape[1]) - spread_offset
+    proj_a_margin = (spread_pmf * spread_support).sum(axis=1)
     return pl.DataFrame({
         "match_uid": test_df["match_uid"],
         "effective_match_date": test_df["effective_match_date"],
@@ -395,6 +401,8 @@ def _build_predictions_frame(
         "round": test_df["round"],
         "p_match_win_a": out.distribution.p_match_win_a,
         "_row_idx": np.arange(len(out.distribution.p_match_win_a), dtype=np.int64),
+        "proj_total": proj_total,
+        "proj_a_margin": proj_a_margin,
         "actual_total": (
             test_df["_target_games_a"] + test_df["_target_games_b"]
         ).cast(pl.Float64),
@@ -421,10 +429,17 @@ def _settle_totals(preds: pl.DataFrame, totals: pl.DataFrame, dist) -> pl.DataFr
         p_over_model = float(_p_over_at(pmf[idx:idx+1], line)[0])
         p_under_model = 1.0 - p_over_model
 
+        # No-vig: strip the overround using both sides at the same book.
+        over_implied = 1.0 / r["over_odds"]
+        under_implied = 1.0 / r["under_odds"]
+        overround = over_implied + under_implied
+        over_p_novig = over_implied / overround
+        under_p_novig = under_implied / overround
+
         actual = r["actual_total"]
-        for side, model_p, odds, won in [
-            ("over", p_over_model, r["over_odds"], int(actual > line)),
-            ("under", p_under_model, r["under_odds"], int(actual < line)),
+        for side, model_p, odds, won, p_novig in [
+            ("over", p_over_model, r["over_odds"], int(actual > line), over_p_novig),
+            ("under", p_under_model, r["under_odds"], int(actual < line), under_p_novig),
         ]:
             book_p = 1.0 / odds
             edge = model_p - book_p
@@ -447,8 +462,11 @@ def _settle_totals(preds: pl.DataFrame, totals: pl.DataFrame, dist) -> pl.DataFr
                 "book": r["book"],
                 "odds": odds,
                 "book_p_implied": book_p,
+                "book_p_novig": p_novig,
                 "model_p": model_p,
                 "edge": edge,
+                "edge_novig": model_p - p_novig,
+                "proj": r["proj_total"],
                 "actual": actual,
                 "won": won,
                 "profit": profit,
@@ -494,9 +512,26 @@ def _settle_spreads(preds: pl.DataFrame, spreads: pl.DataFrame, dist) -> pl.Data
             p1_won = int(-a_margin > -p1_points)
             p2_won = int(a_margin > -p2_points)
 
-        for side, model_p, odds, won, points in [
-            ("p1", p_p1_model, r["p1_odds"], p1_won, p1_points),
-            ("p2", p_p2_model, r["p2_odds"], p2_won, p2_points),
+        # No-vig: strip overround from the paired p1/p2 prices at this book.
+        p1_implied = 1.0 / r["p1_odds"]
+        p2_implied = 1.0 / r["p2_odds"]
+        overround = p1_implied + p2_implied
+        p1_p_novig = p1_implied / overround
+        p2_p_novig = p2_implied / overround
+
+        # Express each side's line in A's frame so it's comparable to proj_a_margin.
+        # If p1 == A, A covers when a_margin > -p1_points → A's "line" is -p1_points.
+        # If p1 == B, p1 covers when a_margin < p1_points → A's view of that bet is line = p1_points.
+        if r["p1_id"] == a_id:
+            p1_line_a = -p1_points
+            p2_line_a = p2_points
+        else:
+            p1_line_a = p1_points
+            p2_line_a = -p2_points
+
+        for side, model_p, odds, won, points, p_novig, line_a in [
+            ("p1", p_p1_model, r["p1_odds"], p1_won, p1_points, p1_p_novig, p1_line_a),
+            ("p2", p_p2_model, r["p2_odds"], p2_won, p2_points, p2_p_novig, p2_line_a),
         ]:
             book_p = 1.0 / odds
             edge = model_p - book_p
@@ -514,13 +549,17 @@ def _settle_spreads(preds: pl.DataFrame, spreads: pl.DataFrame, dist) -> pl.Data
                 "round": r["round"],
                 "market": "game_spread",
                 "line": points,
+                "line_a": line_a,
                 "side": side,  # "p1" or "p2" relative to the event_map ordering
                 "bet_type": "favorite" if points < 0 else ("underdog" if points > 0 else "pickem"),
                 "book": r["book"],
                 "odds": odds,
                 "book_p_implied": book_p,
+                "book_p_novig": p_novig,
                 "model_p": model_p,
                 "edge": edge,
+                "edge_novig": model_p - p_novig,
+                "proj": r["proj_a_margin"],
                 "actual": a_margin if r["p1_id"] == a_id else -a_margin,
                 "won": won,
                 "profit": profit,
@@ -593,64 +632,112 @@ def run_backtest(config_path: Path | str, *, retrain: bool = False) -> Path:
     return out_path
 
 
-def print_backtest_summary(csv_path: Path) -> None:
-    raw = pl.read_csv(csv_path)
-    # Realistic view: one bet per (match × market × line × side) at best price.
-    bets = (
+_BAND_EDGES = [0.0, 0.02, 0.04, 0.06, 0.08, 0.10]
+_BAND_LABELS = ["neg", "0-2%", "2-4%", "4-6%", "6-8%", "8-10%", "10%+"]
+
+
+def _band_exprs(edge_col: str) -> tuple[pl.Expr, pl.Expr]:
+    """Return (label, sort_order) expressions for an edge column.
+
+    A 'neg' band is emitted when edge < 0, which can happen for edge_novig
+    (vig > raw edge). Raw 'edge' is gated > 0 upstream, so 'neg' will be empty.
+    """
+    n = len(_BAND_LABELS)
+    label = pl.when(pl.col(edge_col) < _BAND_EDGES[0]).then(pl.lit(_BAND_LABELS[0]))
+    order = pl.when(pl.col(edge_col) < _BAND_EDGES[0]).then(n - 1)
+    for i, cut in enumerate(_BAND_EDGES[1:], start=1):
+        label = label.when(pl.col(edge_col) < cut).then(pl.lit(_BAND_LABELS[i]))
+        order = order.when(pl.col(edge_col) < cut).then(n - 1 - i)
+    label = label.otherwise(pl.lit(_BAND_LABELS[-1])).alias("edge_band")
+    order = order.otherwise(0).alias("_band_order")
+    return label, order
+
+
+def _dedupe_best_price(raw: pl.DataFrame) -> pl.DataFrame:
+    """One row per (match × market × line × side): best price across books."""
+    return (
         raw.sort("odds", descending=True)
         .group_by(["match_uid", "market", "line", "side"])
         .agg(pl.all().first())
     )
-    print(f"\nBacktest output: {csv_path}")
-    print(f"Raw bet rows (all books): {len(raw)}")
-    print(f"Deduped to best-price per (match × market × line × side): {len(bets)}")
-    print(f"Hit rate:   {bets['won'].mean():.3f}")
-    print(f"ROI:        {bets['profit'].mean():.4f}")
 
-    def _agg(df: pl.DataFrame, by: list[str]) -> pl.DataFrame:
-        return df.group_by(by).agg(
-            pl.len().alias("n_bets"),
-            pl.col("edge").mean().alias("avg_edge"),
-            pl.col("won").mean().alias("hit_rate"),
-            pl.col("profit").mean().alias("ROI"),
-        ).sort(by)
 
-    # Edge bands ordered low→high; the _band_order column drives sort and is dropped before print.
-    bets = bets.with_columns(
-        pl.when(pl.col("edge") < 0.02).then(pl.lit("0-2%"))
-        .when(pl.col("edge") < 0.04).then(pl.lit("2-4%"))
-        .when(pl.col("edge") < 0.06).then(pl.lit("4-6%"))
-        .when(pl.col("edge") < 0.08).then(pl.lit("6-8%"))
-        .when(pl.col("edge") < 0.10).then(pl.lit("8-10%"))
-        .otherwise(pl.lit("10%+"))
-        .alias("edge_band"),
-        pl.when(pl.col("edge") < 0.02).then(5)
-        .when(pl.col("edge") < 0.04).then(4)
-        .when(pl.col("edge") < 0.06).then(3)
-        .when(pl.col("edge") < 0.08).then(2)
-        .when(pl.col("edge") < 0.10).then(1)
-        .otherwise(0)
-        .alias("_band_order"),
+def _dedupe_central_line(bets: pl.DataFrame) -> pl.DataFrame:
+    """One row per (match × market × side): line closest to the model's projection.
+
+    Tie-break by smaller |edge| so we prefer the more conservative line.
+    """
+    if len(bets) == 0:
+        return bets
+    # For totals, line vs proj is straightforward. For spreads, compare line_a
+    # (line expressed in A's frame) to proj_a_margin so both sides use the same axis.
+    line_axis = pl.when(pl.col("market") == "game_spread").then(pl.col("line_a")).otherwise(pl.col("line"))
+    return (
+        bets.with_columns(
+            (line_axis - pl.col("proj")).abs().alias("_dist"),
+            pl.col("edge").abs().alias("_abs_edge"),
+        )
+        .sort(["_dist", "_abs_edge"])
+        .group_by(["match_uid", "market", "side"])
+        .agg(pl.all().first())
+        .drop("_dist", "_abs_edge")
     )
 
-    def _agg_band(df: pl.DataFrame, by: list[str]) -> pl.DataFrame:
-        return (
-            df.group_by(by + ["edge_band", "_band_order"]).agg(
-                pl.len().alias("n_bets"),
-                pl.col("edge").mean().alias("avg_edge"),
-                pl.col("won").mean().alias("hit_rate"),
-                pl.col("profit").mean().alias("ROI"),
-            )
-            .sort(by + ["_band_order"])
-            .drop("_band_order")
-        )
 
+def _agg(df: pl.DataFrame, by: list[str], edge_col: str) -> pl.DataFrame:
+    return df.group_by(by).agg(
+        pl.len().alias("n_bets"),
+        pl.col(edge_col).mean().alias("avg_edge"),
+        pl.col("won").mean().alias("hit_rate"),
+        pl.col("profit").mean().alias("ROI"),
+        pl.col("profit").sum().round(2).alias("pl_units"),
+    ).sort(by)
+
+
+def _agg_band(df: pl.DataFrame, by: list[str], edge_col: str) -> pl.DataFrame:
+    label, order = _band_exprs(edge_col)
+    return (
+        df.with_columns(label, order)
+        .group_by(by + ["edge_band", "_band_order"]).agg(
+            pl.len().alias("n_bets"),
+            pl.col(edge_col).mean().alias("avg_edge"),
+            pl.col("won").mean().alias("hit_rate"),
+            pl.col("profit").mean().alias("ROI"),
+            pl.col("profit").sum().round(2).alias("pl_units"),
+        )
+        .sort(by + ["_band_order"])
+        .drop("_band_order")
+    )
+
+
+def _print_view(label: str, df: pl.DataFrame, edge_col: str) -> None:
+    print(f"\n=== {label} (edge = {edge_col}) ===")
+    print(f"Bets: {len(df)}  |  Hit rate: {df['won'].mean():.3f}  "
+          f"|  ROI: {df['profit'].mean():.4f}  |  P&L: {df['profit'].sum():+.2f}u")
     with pl.Config(tbl_rows=-1, tbl_cols=-1):
         print("\nBy market:")
-        print(_agg(bets, ["market"]))
+        print(_agg(df, ["market"], edge_col))
         print("\nBy market × bet_type:")
-        print(_agg(bets, ["market", "bet_type"]))
+        print(_agg(df, ["market", "bet_type"], edge_col))
         print("\nBy market × edge_band:")
-        print(_agg_band(bets, ["market"]))
+        print(_agg_band(df, ["market"], edge_col))
         print("\nBy market × bet_type × edge_band:")
-        print(_agg_band(bets, ["market", "bet_type"]))
+        print(_agg_band(df, ["market", "bet_type"], edge_col))
+
+
+def print_backtest_summary(csv_path: Path) -> None:
+    raw = pl.read_csv(csv_path)
+    all_lines = _dedupe_best_price(raw)
+    central = _dedupe_central_line(all_lines)
+
+    print(f"\nBacktest output: {csv_path}")
+    print(f"Raw bet rows (all books):                                    {len(raw)}")
+    print(f"Best-price per (match × market × line × side):               {len(all_lines)}")
+    print(f"Closest-to-projection per (match × market × side):           {len(central)}")
+
+    # Primary view: how you'd actually bet.
+    _print_view("CENTRAL LINE — NO-VIG", central, "edge_novig")
+    # Secondary views for comparison.
+    _print_view("CENTRAL LINE — RAW", central, "edge")
+    _print_view("ALL LINES — NO-VIG", all_lines, "edge_novig")
+    _print_view("ALL LINES — RAW", all_lines, "edge")
