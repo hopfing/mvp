@@ -154,8 +154,10 @@ def execution_summary(ds: pl.DataFrame) -> dict:
 _BET_PLACED_AT_RELIABLE_AFTER = "2026-03-21 09:15"
 
 _TIMING_BUCKETS = [
-    ("12h+", 12, None),
-    ("6-12h", 6, 12),
+    ("18h+", 18, None),
+    ("12-18h", 12, 18),
+    ("9-12h", 9, 12),
+    ("6-9h", 6, 9),
     ("3-6h", 3, 6),
     ("1-3h", 1, 3),
     ("<1h", 0, 1),
