@@ -595,7 +595,7 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
     else:
         st.info("No edge-provenance data available (bet_edge_open missing).")
 
-    st.subheader("CLV vs Best Close by Line Movement (Bet Side)")
+    st.subheader("CLV vs Best Close by Line Movement")
     clv_move = clv_by_line_movement(ds)
     if len(clv_move) > 0:
         display = clv_move.select(

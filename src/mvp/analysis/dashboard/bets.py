@@ -851,7 +851,7 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
         )
     _render_edge_provenance(prov_bets, st)
 
-    st.subheader("By Line Movement (Bet Side)")
+    st.subheader("By Line Movement")
     if n_excluded > 0:
         st.caption(
             f"Excludes {n_excluded} bets placed before {_OPENING_RELIABLE_AFTER} "
