@@ -365,8 +365,17 @@ def _prep_edge_df(ds: pl.DataFrame) -> pl.DataFrame | None:
         .then(pl.col("p2_win_prob") - 1.0 / pl.col("best_opening_odds_p2"))
         .otherwise(pl.lit(None, dtype=pl.Float64))
         .alias("_bet_edge_open"),
+        pl.when(pl.col("bet_side") == "P1")
+        .then(pl.col("best_opening_odds_p1"))
+        .when(pl.col("bet_side") == "P2")
+        .then(pl.col("best_opening_odds_p2"))
+        .otherwise(pl.lit(None, dtype=pl.Float64))
+        .alias("_open_odds_bet_side"),
     ).with_columns(
-        (pl.col("_bet_edge") - pl.col("_bet_edge_open")).alias("_delta_edge")
+        (
+            (pl.col("bet_odds").cast(pl.Float64, strict=False) - pl.col("_open_odds_bet_side"))
+            / pl.col("_open_odds_bet_side")
+        ).alias("_pct_odds_change")
     )
 
 
@@ -428,20 +437,20 @@ def clv_by_provenance(ds: pl.DataFrame) -> pl.DataFrame:
 
 
 def clv_by_line_movement(ds: pl.DataFrame) -> pl.DataFrame:
-    """CLV W/L/D counts by delta_edge bucket (line movement on bet side)."""
+    """CLV W/L/D counts by % change in decimal odds on the bet side."""
     empty = pl.DataFrame(schema=_PROVENANCE_EMPTY_SCHEMA)
     df = _prep_edge_df(ds)
     if df is None or len(df) == 0:
         return empty
 
-    df = df.filter(pl.col("_delta_edge").is_not_null())
+    df = df.filter(pl.col("_pct_odds_change").is_not_null())
     if len(df) == 0:
         return empty
 
     rows = []
     for label, lo, hi in _MOVEMENT_BUCKETS:
         sub = df.filter(
-            (pl.col("_delta_edge") >= lo) & (pl.col("_delta_edge") < hi)
+            (pl.col("_pct_odds_change") >= lo) & (pl.col("_pct_odds_change") < hi)
         )
         r = _clv_counts(sub, label)
         if r is not None:

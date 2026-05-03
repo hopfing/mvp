@@ -401,9 +401,9 @@ def _render_edge_provenance(bets: pl.DataFrame, st) -> None:
     st.dataframe(styled, use_container_width=True, hide_index=True)
 
 
-# Line-movement buckets in 2.5% steps from -10% to +10%, mirroring
-# scanner.EDGE_BREAKS. Negative delta = price shortened on bet side
-# (market got more confident); positive = drifted (less confident).
+# Line-movement buckets in 2.5% steps from -10% to +10% of opening odds.
+# pct_odds_change = (bet_odds - opening_odds) / opening_odds.
+# Negative = price shortened (bet odds < open odds); positive = drifted.
 _MOVEMENT_BUCKETS = [
     ("Shortened 10%+",    -1.00, -0.10),
     ("Shortened 7.5-10%", -0.10, -0.075),
@@ -419,19 +419,18 @@ _MOVEMENT_BUCKETS = [
 
 
 def _render_line_movement(bets: pl.DataFrame, st) -> None:
-    """P&L breakdown by delta_edge = bet_edge - bet_edge_open.
+    """P&L breakdown by % change in decimal odds between open and bet.
 
-    Negative delta = price shortened on the bet side between open and bet
-    time (market got more confident in your side; you bet at a worse price
-    than was available at open). Positive delta = price drifted (less
-    confident; the "edge" partly came from the market dropping its prob).
-    The drift cohort historically underperforms.
+    pct_odds_change = (bet_odds - opening_odds) / opening_odds.
+    Negative = price shortened (you bet at worse odds than were available
+    at open); positive = drifted (price lengthened — the "edge" partly came
+    from the market dropping its probability on your side).
     """
-    if "delta_edge" not in bets.columns:
+    if "pct_odds_change" not in bets.columns:
         st.info("No line-movement data available.")
         return
 
-    df = bets.filter(pl.col("delta_edge").is_not_null())
+    df = bets.filter(pl.col("pct_odds_change").is_not_null())
     if len(df) == 0:
         st.info("No line-movement data available.")
         return
@@ -440,7 +439,7 @@ def _render_line_movement(bets: pl.DataFrame, st) -> None:
     rows.append({**_per_bet_stats(df), "Movement": "All"})
     for label, lo, hi in _MOVEMENT_BUCKETS:
         sub = df.filter(
-            (pl.col("delta_edge") >= lo) & (pl.col("delta_edge") < hi)
+            (pl.col("pct_odds_change") >= lo) & (pl.col("pct_odds_change") < hi)
         )
         rows.append({**_per_bet_stats(sub), "Movement": label})
 
@@ -551,9 +550,9 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
         )
 
         # bet_edge_open mirrors bet_edge but uses best opening odds across
-        # books. Edge provenance (drift-only vs always-edge) is the relevant
-        # cohort signal for sizing decisions; delta_edge captures how far the
-        # market moved between open and bet time on the bet side.
+        # books — drives the edge provenance breakdown (always-edge vs
+        # drift-only). pct_odds_change measures how the price itself moved
+        # between open and bet time on the bet side (negative = shortened).
         if (
             "best_opening_odds_p1" in bets.columns
             and "best_opening_odds_p2" in bets.columns
@@ -567,8 +566,17 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
                 .then(pl.col("p2_win_prob") - 1.0 / pl.col("best_opening_odds_p2"))
                 .otherwise(pl.lit(None, dtype=pl.Float64))
                 .alias("bet_edge_open"),
+                pl.when(pl.col("bet_side") == "P1")
+                .then(pl.col("best_opening_odds_p1"))
+                .when(pl.col("bet_side") == "P2")
+                .then(pl.col("best_opening_odds_p2"))
+                .otherwise(pl.lit(None, dtype=pl.Float64))
+                .alias("_open_odds_bet_side"),
             ).with_columns(
-                (pl.col("bet_edge") - pl.col("bet_edge_open")).alias("delta_edge")
+                (
+                    (pl.col("bet_odds").cast(pl.Float64, strict=False) - pl.col("_open_odds_bet_side"))
+                    / pl.col("_open_odds_bet_side")
+                ).alias("pct_odds_change")
             )
         edge_vals = bets["bet_edge"].drop_nulls()
         if len(edge_vals) > 0:
