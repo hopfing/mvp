@@ -20,8 +20,12 @@ from mvp.gsheets.base import (
 
 
 class TestColumnSchema:
-    def test_column_schema_has_39_columns(self):
-        assert len(COLUMN_SCHEMA) == 39
+    def test_column_schema_has_40_columns(self):
+        assert len(COLUMN_SCHEMA) == 40
+
+    def test_fav_edge_open_precedes_fav_edge(self):
+        i = COLUMN_NAMES.index("fav_edge_open")
+        assert COLUMN_NAMES[i + 1] == "fav_edge"
 
     def test_book2_follows_book(self):
         book_idx = COLUMN_NAMES.index("book")
@@ -373,7 +377,7 @@ class TestMergePredictions:
         uids = result["match_uid"].to_list()
         assert uids.index("M2") < uids.index("M1")
 
-    def test_output_has_all_36_columns(self):
+    def test_output_has_all_columns(self):
         existing = _sheet_df([])
         new = prepare_predictions(_make_predictions())
         matches = _matches_df({
@@ -384,7 +388,7 @@ class TestMergePredictions:
         })
         result = merge_predictions(existing, new, matches)
         assert list(result.columns) == COLUMN_NAMES
-        assert len(result.columns) == 39
+        assert len(result.columns) == 40
 
     def test_empty_existing_empty_new(self):
         existing = _sheet_df([])
@@ -417,8 +421,53 @@ class TestMergePredictions:
         })
         result = merge_predictions(existing, new, matches)
         assert len(result) == 0
-        assert len(result.columns) == 39
+        assert len(result.columns) == 40
         assert list(result.columns) == COLUMN_NAMES
+
+    def test_fav_edge_open_populated_from_opening_odds(self):
+        existing = _sheet_df([])
+        new = prepare_predictions(_make_predictions(p1_win_prob=0.65, p2_win_prob=0.35))
+        matches = _matches_df({
+            "match_uid": ["2024-0001-MS001"],
+            "won": [None],
+            "player_id": ["PLAYER_A"],
+            "opp_id": ["PLAYER_B"],
+        })
+        # Opening odds: 1.80 on predicted side P1 -> implied 0.5556 -> edge 0.0944
+        opening = {
+            "BookA": {"2024-0001-MS001": {"PLAYER_A": 1.80, "PLAYER_B": 2.00}},
+            "BookB": {"2024-0001-MS001": {"PLAYER_A": 1.70, "PLAYER_B": 2.10}},
+        }
+        result = merge_predictions(
+            existing, new, matches, opening_odds_maps=opening,
+        )
+        assert len(result) == 1
+        # Best opening on P1 side is 1.80 (max across books) -> edge = 0.65 - 1/1.80 = 0.0944
+        edge_str = result["fav_edge_open"][0]
+        assert edge_str != ""
+        assert abs(float(edge_str) - (0.65 - 1.0 / 1.80)) < 1e-3
+
+    def test_fav_edge_open_not_overwritten_once_set(self):
+        row = _make_sheet_row(
+            match_uid="2024-0001-MS001",
+            fav_edge_open="0.1234",
+        )
+        existing = _sheet_df([row])
+        new = prepare_predictions(_make_predictions())
+        matches = _matches_df({
+            "match_uid": ["2024-0001-MS001"],
+            "won": [None],
+            "player_id": ["PLAYER_A"],
+            "opp_id": ["PLAYER_B"],
+        })
+        opening = {
+            "BookA": {"2024-0001-MS001": {"PLAYER_A": 1.50, "PLAYER_B": 2.50}},
+        }
+        result = merge_predictions(
+            existing, new, matches, opening_odds_maps=opening,
+        )
+        # Existing value preserved, not recomputed from current opening odds
+        assert result["fav_edge_open"][0] == "0.1234"
 
     def test_duplicate_match_uid_not_added(self):
         row = _make_sheet_row(match_uid="2024-0001-MS001")

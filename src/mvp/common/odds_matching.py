@@ -98,23 +98,58 @@ class BaseOddsMatcher(BaseJob):
 
         return df
 
-    def match(self, predictions: pl.DataFrame) -> OddsMatchResult:
-        """Look up odds for predictions using the event map.
+    def get_opening_odds(self) -> pl.DataFrame:
+        """Read the first NOT_STARTED snapshot per (event, player) across all
+        runs in the staged moneyline parquet. Mirrors the analysis layer's
+        opening-odds derivation but operates on whatever staged data is
+        currently available to the live pipeline.
+        """
+        odds_path = self.build_path("stage", "moneyline.parquet")
+        if not odds_path.exists():
+            return pl.DataFrame()
 
-        Reads the persisted event map to resolve event_ids to match_uids,
-        then uses p1_book_name/p2_book_name to assign odds to the correct side.
+        df = pl.read_parquet(odds_path)
+        if len(df) == 0:
+            return df
+
+        if "event_status" in df.columns:
+            df = df.filter(pl.col("event_status") == "NOT_STARTED")
+        if len(df) == 0:
+            return df
+
+        return (
+            df.sort("fetched_at")
+            .group_by([self.event_id_column, "player_name"], maintain_order=True)
+            .head(1)
+        )
+
+    def match(self, predictions: pl.DataFrame) -> OddsMatchResult:
+        """Look up latest pre-match odds for predictions using the event map."""
+        return self._match_from_odds(predictions, self.get_latest_odds(), label="latest")
+
+    def match_opening(self, predictions: pl.DataFrame) -> OddsMatchResult:
+        """Look up opening (first NOT_STARTED) odds for predictions."""
+        return self._match_from_odds(predictions, self.get_opening_odds(), label="opening")
+
+    def _match_from_odds(
+        self,
+        predictions: pl.DataFrame,
+        odds_df: pl.DataFrame,
+        label: str = "latest",
+    ) -> OddsMatchResult:
+        """Shared event-map lookup: assign book odds to predictions by side.
 
         Args:
             predictions: DataFrame with p1_id, p2_id, match_uid.
+            odds_df: Book-staged moneyline rows to project (latest or opening).
+            label: Tag for log line.
 
         Returns:
             OddsMatchResult with odds map keyed by match_uid.
         """
-        odds_df = self.get_latest_odds()
         if len(odds_df) == 0 or len(predictions) == 0:
             return OddsMatchResult()
 
-        # Load event map for this book: event_id -> {match_uid, p1_book_name, p2_book_name}
         from mvp.analysis.event_map import load_event_map_with_overrides
 
         event_map_df = load_event_map_with_overrides()
@@ -129,14 +164,12 @@ class BaseOddsMatcher(BaseJob):
                 "p2_book_name": row["p2_book_name"],
             }
 
-        # Build prediction lookup by match_uid
         pred_by_uid: dict[str, dict] = {}
         for row in predictions.iter_rows(named=True):
             uid = row.get("match_uid") or ""
             if uid:
                 pred_by_uid[uid] = row
 
-        # Group odds by event
         book_events: dict[str, list[dict]] = {}
         for row in odds_df.iter_rows(named=True):
             book_events.setdefault(row[self.event_id_column], []).append(row)
@@ -172,8 +205,8 @@ class BaseOddsMatcher(BaseJob):
                 matched += 1
 
         self._logger.info(
-            "Odds lookup: %d %s events matched to %d predictions",
-            matched, self.book_label, len(predictions),
+            "Odds lookup (%s): %d %s events matched to %d predictions",
+            label, matched, self.book_label, len(predictions),
         )
 
         return OddsMatchResult(odds=result)

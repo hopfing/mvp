@@ -1933,6 +1933,7 @@ def cmd_live(args: argparse.Namespace) -> int:
     errors: list[str] = []
     predictions = None
     all_odds_maps: dict[str, dict[str, dict[str, float]]] = {}
+    all_opening_odds_maps: dict[str, dict[str, dict[str, float]]] = {}
     existing_map = None
 
     # --- Stage 1: Rankings, discovery, tournament processing, aggregation ---
@@ -2160,6 +2161,9 @@ def cmd_live(args: argparse.Namespace) -> int:
                 if result:
                     all_odds_maps[book.code] = result
                     print(f"Matched {book.label} odds for {len(result)}/{len(predictions)} predictions")
+                opening_result = matcher.match_opening(predictions).odds or None
+                if opening_result:
+                    all_opening_odds_maps[book.code] = opening_result
             except Exception as e:
                 logger.error("%s odds lookup failed: %s", book.label, e)
                 errors.append(f"{book.label} odds lookup: {e}")
@@ -2218,7 +2222,16 @@ def cmd_live(args: argparse.Namespace) -> int:
                 for book in BOOK_REGISTRY
                 if book.code in all_odds_maps
             }
-            merged = merge_predictions(existing, prepared, matches_df, odds_maps=book_odds_for_sheets or None)
+            opening_odds_for_sheets = {
+                BOOK_DISPLAY_NAMES.get(book.code, book.display_name): all_opening_odds_maps[book.code]
+                for book in BOOK_REGISTRY
+                if book.code in all_opening_odds_maps
+            }
+            merged = merge_predictions(
+                existing, prepared, matches_df,
+                odds_maps=book_odds_for_sheets or None,
+                opening_odds_maps=opening_odds_for_sheets or None,
+            )
             sheets.write(merged)
 
             sheets_parquet = get_data_root() / "sheets" / "bets.parquet"

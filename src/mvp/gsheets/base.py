@@ -34,7 +34,8 @@ COLUMN_SCHEMA = [
     # Odds (user-filled or auto-filled from books)
     {"name": "p1_odds", "owner": "user"},
     {"name": "p2_odds", "owner": "user"},
-    # Edge analysis (formulas)
+    # Edge analysis
+    {"name": "fav_edge_open", "owner": "pipeline"},
     {"name": "fav_edge", "owner": "formula"},
     {"name": "dog_edge", "owner": "formula"},
     # Bet action
@@ -217,6 +218,7 @@ def prepare_predictions(predictions: pl.DataFrame) -> pl.DataFrame:
             "model_version": row["model_version"],
             "predicted_at": predicted_at_str,
             "bet_placed_at": "",
+            "fav_edge_open": "",
         })
 
     if not rows:
@@ -271,6 +273,7 @@ def merge_predictions(
     new_predictions: pl.DataFrame,
     matches: pl.DataFrame,
     odds_maps: dict[str, dict[str, dict[str, float]]] | None = None,
+    opening_odds_maps: dict[str, dict[str, dict[str, float]]] | None = None,
 ) -> pl.DataFrame:
     """Merge new predictions with existing sheet data, auto-filling results.
 
@@ -492,6 +495,52 @@ def merge_predictions(
             pl.Series("book", new_books),
             pl.Series("book2", new_books2),
         )
+
+    # 3c2. Populate fav_edge_open from best opening odds across books on the
+    # predicted side. Frozen once set — opening is captured a single time per
+    # match and never recomputed.
+    if len(merged) > 0 and opening_odds_maps:
+        new_fav_open = []
+        for row in merged.iter_rows(named=True):
+            current = (row.get("fav_edge_open") or "").strip()
+            if current:
+                new_fav_open.append(current)
+                continue
+
+            uid = row.get("match_uid") or ""
+            prediction = (row.get("prediction") or "").strip()
+            p1_id = (row.get("p1_id") or "").strip()
+            p2_id = (row.get("p2_id") or "").strip()
+            if not uid or prediction not in ("P1", "P2"):
+                new_fav_open.append("")
+                continue
+
+            try:
+                p1_prob = float(row.get("p1_prob") or "")
+                p2_prob = float(row.get("p2_prob") or "")
+            except (TypeError, ValueError):
+                new_fav_open.append("")
+                continue
+
+            pred_prob = p1_prob if prediction == "P1" else p2_prob
+            pred_pid = p1_id if prediction == "P1" else p2_id
+            if not pred_pid:
+                new_fav_open.append("")
+                continue
+
+            best_open = None
+            for _, book_odds in opening_odds_maps.items():
+                o = book_odds.get(uid, {}).get(pred_pid)
+                if o is not None and (best_open is None or o > best_open):
+                    best_open = o
+
+            if best_open and best_open > 0:
+                edge = pred_prob - (1.0 / best_open)
+                new_fav_open.append(f"{edge:.4f}")
+            else:
+                new_fav_open.append("")
+
+        merged = merged.with_columns(pl.Series("fav_edge_open", new_fav_open))
 
     # 3d. Stamp bet_placed_at when we first see a stake
     if len(merged) > 0:
