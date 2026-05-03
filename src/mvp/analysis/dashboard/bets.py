@@ -201,6 +201,121 @@ def _render_breakdown(
     _style_breakdown(agg, label, st)
 
 
+_EDGE_SLICES = [("All", None), ("Edge", True), ("No Edge", False)]
+
+
+def _per_bet_stats(bets: pl.DataFrame) -> dict:
+    """Compute Bets/W/L/V/Win %/Stake/P&L/ROI % for an arbitrary subset."""
+    n = len(bets)
+    if n == 0:
+        return {
+            "Bets": 0, "W": 0, "L": 0, "V": 0,
+            "Win %": None, "Stake": None, "P&L": None, "ROI %": None,
+        }
+    w = int(bets.filter(pl.col("bet_result") == "W").height)
+    losses = int(bets.filter(pl.col("bet_result") == "L").height)
+    void = int(bets.filter(pl.col("bet_result") == "V").height)
+    decided = w + losses
+
+    stake = None
+    if "stake" in bets.columns:
+        stake_vals = bets["stake"].cast(pl.Float64, strict=False).drop_nulls()
+        if len(stake_vals) > 0:
+            stake = float(stake_vals.sum())
+
+    pnl = None
+    if "net" in bets.columns:
+        net_vals = bets["net"].cast(pl.Float64, strict=False).drop_nulls()
+        if len(net_vals) > 0:
+            pnl = float(net_vals.sum())
+
+    win_pct = round(w / decided * 100, 1) if decided > 0 else None
+    roi_pct = round(pnl / stake * 100, 1) if (pnl is not None and stake and stake > 0) else None
+
+    return {
+        "Bets": n, "W": w, "L": losses, "V": void,
+        "Win %": win_pct,
+        "Stake": round(stake, 2) if stake is not None else None,
+        "P&L": round(pnl, 2) if pnl is not None else None,
+        "ROI %": roi_pct,
+    }
+
+
+def _edge_subset(bets: pl.DataFrame, edge_flag: bool | None) -> pl.DataFrame:
+    if edge_flag is True:
+        return bets.filter(pl.col("bet_edge") > 0)
+    if edge_flag is False:
+        return bets.filter(pl.col("bet_edge") <= 0)
+    return bets
+
+
+def _render_edge_bands(bets: pl.DataFrame, st) -> None:
+    """By-Edge-Band breakdown using scanner's 2.5pp buckets.
+
+    All / Edge / No Edge summary rows, then per-band rows positive-first.
+    """
+    from mvp.analysis.scanner import EDGE_BREAKS, EDGE_LABELS
+
+    if "bet_edge" not in bets.columns:
+        st.info("No bet edge data available.")
+        return
+
+    df = bets.filter(pl.col("bet_edge").is_not_null())
+    if len(df) == 0:
+        st.info("No bet edge data available.")
+        return
+
+    e = pl.col("bet_edge")
+    expr = pl.when(e < EDGE_BREAKS[0]).then(pl.lit(EDGE_LABELS[0]))
+    for i in range(len(EDGE_BREAKS) - 1):
+        expr = expr.when(e < EDGE_BREAKS[i + 1]).then(pl.lit(EDGE_LABELS[i + 1]))
+    expr = expr.otherwise(pl.lit(EDGE_LABELS[-1]))
+    bucketed = df.with_columns(expr.alias("edge_band"))
+
+    rows: list[dict] = []
+    for label, flag in _EDGE_SLICES:
+        stats = _per_bet_stats(_edge_subset(df, flag))
+        stats["Edge Band"] = label
+        rows.append(stats)
+    for label in reversed(EDGE_LABELS):
+        stats = _per_bet_stats(bucketed.filter(pl.col("edge_band") == label))
+        stats["Edge Band"] = label
+        rows.append(stats)
+
+    table = pl.DataFrame(rows).select(
+        "Edge Band", "Bets", "W", "L", "V", "Win %", "Stake", "P&L", "ROI %"
+    )
+    pdf = table.to_pandas()
+
+    def _color_negative(val):
+        if isinstance(val, (int, float)) and val < 0:
+            return "color: #e74c3c"
+        return ""
+
+    def _row_style(row):
+        band = row["Edge Band"]
+        if band == "All":
+            return ["font-weight: bold; background-color: rgba(255,255,255,0.08)"] * len(row)
+        if band == "Edge":
+            return ["background-color: rgba(46,204,113,0.10)"] * len(row)
+        if band == "No Edge":
+            return ["background-color: rgba(231,76,60,0.10)"] * len(row)
+        return [""] * len(row)
+
+    styled = (
+        pdf.style.apply(_row_style, axis=1)
+        .applymap(_color_negative, subset=["P&L", "ROI %"])
+        .format(
+            {
+                "Stake": "${:,.2f}", "P&L": "${:+,.2f}",
+                "Win %": "{:.1f}%", "ROI %": "{:+.1f}%",
+            },
+            na_rep="—",
+        )
+    )
+    st.dataframe(styled, use_container_width=True, hide_index=True)
+
+
 def _render_odds_breakdown(bets: pl.DataFrame, st) -> None:
     """Bucket bet_odds into bands and render breakdown."""
     from mvp.analysis.scanner import ODDS_BREAKS, ODDS_LABELS
@@ -540,6 +655,9 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
 
     st.subheader("By Odds Band")
     _render_odds_breakdown(bets, st)
+
+    st.subheader("By Edge Band")
+    _render_edge_bands(bets, st)
 
     if "net" in bets.columns:
         st.subheader("Cumulative P&L by Bet #")
