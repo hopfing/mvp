@@ -293,6 +293,165 @@ def clv_by_timing(ds: pl.DataFrame) -> pl.DataFrame:
     return pl.DataFrame(rows, schema=_TIMING_EMPTY_SCHEMA)
 
 
+_PROVENANCE_EMPTY_SCHEMA = {
+    "bucket": pl.Utf8, "n": pl.UInt32,
+    "positive": pl.UInt32, "negative": pl.UInt32, "even": pl.UInt32,
+    "pos_pct": pl.Float64, "pos_neg_pct": pl.Float64,
+}
+
+_PROVENANCE_LABELS = ["Always-edge", "Drift-only", "No edge at bet"]
+
+_MOVEMENT_BUCKETS = [
+    ("Shortened 10%+",    -1.00, -0.10),
+    ("Shortened 7.5-10%", -0.10, -0.075),
+    ("Shortened 5-7.5%",  -0.075, -0.05),
+    ("Shortened 2.5-5%",  -0.05, -0.025),
+    ("Shortened 0-2.5%",  -0.025, 0.0),
+    ("Drifted 0-2.5%",     0.0,   0.025),
+    ("Drifted 2.5-5%",     0.025, 0.05),
+    ("Drifted 5-7.5%",     0.05,  0.075),
+    ("Drifted 7.5-10%",    0.075, 0.10),
+    ("Drifted 10%+",       0.10,  1.00),
+]
+_MOVEMENT_LABELS = [label for label, _, _ in _MOVEMENT_BUCKETS]
+
+
+def _prep_edge_df(ds: pl.DataFrame) -> pl.DataFrame | None:
+    """Filter to bets with CLV columns and derive bet_edge / bet_edge_open.
+
+    bet_edge mirrors bets.py: fav_edge when bet_side == pred_side else dog_edge.
+    bet_edge_open uses best_opening_odds_p1/p2 on the bet side.
+
+    Filters out bets placed before _BET_PLACED_AT_RELIABLE_AFTER: pre-floor
+    bets are excluded because the staged-odds capture wasn't comprehensive
+    enough for "opening odds" to be reliable on those matches, which would
+    contaminate the provenance and line-movement breakdowns.
+    """
+    bets = _get_bets(ds)
+    if (
+        len(bets) == 0
+        or _CLOSE_COL not in bets.columns
+        or "bet_odds" not in bets.columns
+        or "bet_placed_at" not in bets.columns
+    ):
+        return None
+
+    bets = bets.filter(
+        pl.col("bet_placed_at").cast(pl.Utf8) > _BET_PLACED_AT_RELIABLE_AFTER
+    )
+    if len(bets) == 0:
+        return None
+
+    needed = {
+        "fav_edge", "dog_edge", "pred_side", "bet_side",
+        "best_opening_odds_p1", "best_opening_odds_p2",
+        "p1_win_prob", "p2_win_prob",
+    }
+    if not needed.issubset(bets.columns):
+        return None
+
+    df = _with_wld(bets, _CLOSE_COL)
+    if len(df) == 0:
+        return None
+
+    return df.with_columns(
+        pl.when(pl.col("bet_side") == pl.col("pred_side"))
+        .then(pl.col("fav_edge"))
+        .otherwise(pl.col("dog_edge"))
+        .alias("_bet_edge"),
+        pl.when(pl.col("bet_side") == "P1")
+        .then(pl.col("p1_win_prob") - 1.0 / pl.col("best_opening_odds_p1"))
+        .when(pl.col("bet_side") == "P2")
+        .then(pl.col("p2_win_prob") - 1.0 / pl.col("best_opening_odds_p2"))
+        .otherwise(pl.lit(None, dtype=pl.Float64))
+        .alias("_bet_edge_open"),
+    ).with_columns(
+        (pl.col("_bet_edge") - pl.col("_bet_edge_open")).alias("_delta_edge")
+    )
+
+
+def _clv_counts(subset: pl.DataFrame, label: str) -> dict | None:
+    if len(subset) == 0:
+        return None
+    pos = int(subset.filter(pl.col("_bet_r") > pl.col("_close_r")).height)
+    neg = int(subset.filter(pl.col("_bet_r") < pl.col("_close_r")).height)
+    even = int(subset.filter(pl.col("_bet_r") == pl.col("_close_r")).height)
+    n = len(subset)
+    return {
+        "bucket": label,
+        "n": n,
+        "positive": pos,
+        "negative": neg,
+        "even": even,
+        "pos_pct": pos / n if n else None,
+        "pos_neg_pct": pos / (pos + neg) if (pos + neg) > 0 else None,
+    }
+
+
+def clv_by_provenance(ds: pl.DataFrame) -> pl.DataFrame:
+    """CLV W/L/D counts by edge provenance.
+
+    Always-edge: bet_edge_open > 0.
+    Drift-only: bet_edge_open <= 0 and bet_edge > 0 (edge appeared via drift).
+    No edge at bet: bet_edge <= 0.
+    """
+    empty = pl.DataFrame(schema=_PROVENANCE_EMPTY_SCHEMA)
+    df = _prep_edge_df(ds)
+    if df is None or len(df) == 0:
+        return empty
+
+    has_open = df.filter(pl.col("_bet_edge_open").is_not_null())
+
+    rows = []
+    r = _clv_counts(
+        has_open.filter(pl.col("_bet_edge_open") > 0), "Always-edge",
+    )
+    if r is not None:
+        rows.append(r)
+    r = _clv_counts(
+        has_open.filter(
+            (pl.col("_bet_edge_open") <= 0) & (pl.col("_bet_edge") > 0)
+        ),
+        "Drift-only",
+    )
+    if r is not None:
+        rows.append(r)
+    r = _clv_counts(
+        df.filter(pl.col("_bet_edge") <= 0), "No edge at bet",
+    )
+    if r is not None:
+        rows.append(r)
+
+    if not rows:
+        return empty
+    return pl.DataFrame(rows, schema=_PROVENANCE_EMPTY_SCHEMA)
+
+
+def clv_by_line_movement(ds: pl.DataFrame) -> pl.DataFrame:
+    """CLV W/L/D counts by delta_edge bucket (line movement on bet side)."""
+    empty = pl.DataFrame(schema=_PROVENANCE_EMPTY_SCHEMA)
+    df = _prep_edge_df(ds)
+    if df is None or len(df) == 0:
+        return empty
+
+    df = df.filter(pl.col("_delta_edge").is_not_null())
+    if len(df) == 0:
+        return empty
+
+    rows = []
+    for label, lo, hi in _MOVEMENT_BUCKETS:
+        sub = df.filter(
+            (pl.col("_delta_edge") >= lo) & (pl.col("_delta_edge") < hi)
+        )
+        r = _clv_counts(sub, label)
+        if r is not None:
+            rows.append(r)
+
+    if not rows:
+        return empty
+    return pl.DataFrame(rows, schema=_PROVENANCE_EMPTY_SCHEMA)
+
+
 def clv_by_book_timing(ds: pl.DataFrame) -> pl.DataFrame | None:
     """Cross-slice CLV W/L/D by book x timing bucket."""
     df = _prep_timing_df(ds)
@@ -419,4 +578,36 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
                 (pl.col("pos_neg_pct") * 100).round(1).alias("Pos/Neg %"),
             )
             st.dataframe(display.to_pandas(), use_container_width=True, hide_index=True)
+
+    st.subheader("CLV vs Best Close by Edge Provenance")
+    clv_prov = clv_by_provenance(ds)
+    if len(clv_prov) > 0:
+        display = clv_prov.select(
+            pl.col("bucket").alias("Provenance"),
+            pl.col("n").alias("Settled"),
+            pl.col("positive").alias("Positive"),
+            pl.col("negative").alias("Negative"),
+            pl.col("even").alias("Even"),
+            (pl.col("pos_pct") * 100).round(1).alias("Pos %"),
+            (pl.col("pos_neg_pct") * 100).round(1).alias("Pos/Neg %"),
+        )
+        st.dataframe(display.to_pandas(), use_container_width=True, hide_index=True)
+    else:
+        st.info("No edge-provenance data available (bet_edge_open missing).")
+
+    st.subheader("CLV vs Best Close by Line Movement (Bet Side)")
+    clv_move = clv_by_line_movement(ds)
+    if len(clv_move) > 0:
+        display = clv_move.select(
+            pl.col("bucket").alias("Movement"),
+            pl.col("n").alias("Settled"),
+            pl.col("positive").alias("Positive"),
+            pl.col("negative").alias("Negative"),
+            pl.col("even").alias("Even"),
+            (pl.col("pos_pct") * 100).round(1).alias("Pos %"),
+            (pl.col("pos_neg_pct") * 100).round(1).alias("Pos/Neg %"),
+        )
+        st.dataframe(display.to_pandas(), use_container_width=True, hide_index=True)
+    else:
+        st.info("No line-movement data available.")
 

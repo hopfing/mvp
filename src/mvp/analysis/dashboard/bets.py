@@ -203,6 +203,18 @@ def _render_breakdown(
 
 _EDGE_SLICES = [("All", None), ("Edge", True), ("No Edge", False)]
 
+# Bets placed before this date are excluded from edge-provenance / line-
+# movement tables: the staged-odds capture wasn't comprehensive enough for
+# "opening odds" to be reliable on those matches. Same floor used by
+# clv_by_timing in the Execution page.
+_OPENING_RELIABLE_AFTER = "2026-03-21 09:15"
+
+
+def _color_negative(val):
+    if isinstance(val, (int, float)) and val < 0:
+        return "color: #e74c3c"
+    return ""
+
 
 def _per_bet_stats(bets: pl.DataFrame) -> dict:
     """Compute Bets/W/L/V/Win %/Stake/P&L/ROI % for an arbitrary subset."""
@@ -287,11 +299,6 @@ def _render_edge_bands(bets: pl.DataFrame, st) -> None:
     )
     pdf = table.to_pandas()
 
-    def _color_negative(val):
-        if isinstance(val, (int, float)) and val < 0:
-            return "color: #e74c3c"
-        return ""
-
     def _row_style(row):
         band = row["Edge Band"]
         if band == "All":
@@ -300,6 +307,151 @@ def _render_edge_bands(bets: pl.DataFrame, st) -> None:
             return ["background-color: rgba(46,204,113,0.10)"] * len(row)
         if band == "No Edge":
             return ["background-color: rgba(231,76,60,0.10)"] * len(row)
+        return [""] * len(row)
+
+    styled = (
+        pdf.style.apply(_row_style, axis=1)
+        .applymap(_color_negative, subset=["P&L", "ROI %"])
+        .format(
+            {
+                "Stake": "${:,.2f}", "P&L": "${:+,.2f}",
+                "Win %": "{:.1f}%", "ROI %": "{:+.1f}%",
+            },
+            na_rep="—",
+        )
+    )
+    st.dataframe(styled, use_container_width=True, hide_index=True)
+
+
+def _render_edge_provenance(bets: pl.DataFrame, st) -> None:
+    """P&L cohort breakdown by where the bet's edge originated.
+
+    - Always-edge: edge was visible at market open (bet_edge_open > 0).
+    - Drift-only: edge appeared via line movement after open
+      (bet_edge_open <= 0 and bet_edge > 0). Historical ROI on this
+      cohort has been negative — market drifted away from the bet side
+      after capturing real information.
+    - No edge at bet: bet_edge <= 0 (defensive bucket; should be ~empty
+      for a positive-edge bet rule).
+    Rows missing bet_edge_open (older matches without captured opening
+    odds) surface separately so they're not silently absorbed.
+    """
+    if "bet_edge" not in bets.columns or "bet_edge_open" not in bets.columns:
+        st.info("No edge-provenance data available (bet_edge_open missing).")
+        return
+
+    df = bets.filter(pl.col("bet_edge").is_not_null())
+    if len(df) == 0:
+        st.info("No bet edge data available.")
+        return
+
+    has_open = df.filter(pl.col("bet_edge_open").is_not_null())
+    no_open = df.filter(pl.col("bet_edge_open").is_null())
+
+    rows: list[dict] = []
+    rows.append({**_per_bet_stats(df), "Provenance": "All"})
+    rows.append({
+        **_per_bet_stats(has_open.filter(pl.col("bet_edge_open") > 0)),
+        "Provenance": "Always-edge",
+    })
+    rows.append({
+        **_per_bet_stats(
+            has_open.filter(
+                (pl.col("bet_edge_open") <= 0) & (pl.col("bet_edge") > 0)
+            )
+        ),
+        "Provenance": "Drift-only",
+    })
+    rows.append({
+        **_per_bet_stats(df.filter(pl.col("bet_edge") <= 0)),
+        "Provenance": "No edge at bet",
+    })
+    if len(no_open) > 0:
+        rows.append({
+            **_per_bet_stats(no_open),
+            "Provenance": "(no opening odds)",
+        })
+
+    table = pl.DataFrame(rows).select(
+        "Provenance", "Bets", "W", "L", "V", "Win %", "Stake", "P&L", "ROI %"
+    )
+    pdf = table.to_pandas()
+
+    def _row_style(row):
+        prov = row["Provenance"]
+        if prov == "All":
+            return ["font-weight: bold; background-color: rgba(255,255,255,0.08)"] * len(row)
+        if prov == "Always-edge":
+            return ["background-color: rgba(46,204,113,0.10)"] * len(row)
+        if prov == "Drift-only":
+            return ["background-color: rgba(231,76,60,0.10)"] * len(row)
+        return [""] * len(row)
+
+    styled = (
+        pdf.style.apply(_row_style, axis=1)
+        .applymap(_color_negative, subset=["P&L", "ROI %"])
+        .format(
+            {
+                "Stake": "${:,.2f}", "P&L": "${:+,.2f}",
+                "Win %": "{:.1f}%", "ROI %": "{:+.1f}%",
+            },
+            na_rep="—",
+        )
+    )
+    st.dataframe(styled, use_container_width=True, hide_index=True)
+
+
+# Line-movement buckets in 2.5% steps from -10% to +10%, mirroring
+# scanner.EDGE_BREAKS. Negative delta = price shortened on bet side
+# (market got more confident); positive = drifted (less confident).
+_MOVEMENT_BUCKETS = [
+    ("Shortened 10%+",    -1.00, -0.10),
+    ("Shortened 7.5-10%", -0.10, -0.075),
+    ("Shortened 5-7.5%",  -0.075, -0.05),
+    ("Shortened 2.5-5%",  -0.05, -0.025),
+    ("Shortened 0-2.5%",  -0.025, 0.0),
+    ("Drifted 0-2.5%",     0.0,   0.025),
+    ("Drifted 2.5-5%",     0.025, 0.05),
+    ("Drifted 5-7.5%",     0.05,  0.075),
+    ("Drifted 7.5-10%",    0.075, 0.10),
+    ("Drifted 10%+",       0.10,  1.00),
+]
+
+
+def _render_line_movement(bets: pl.DataFrame, st) -> None:
+    """P&L breakdown by delta_edge = bet_edge - bet_edge_open.
+
+    Negative delta = price shortened on the bet side between open and bet
+    time (market got more confident in your side; you bet at a worse price
+    than was available at open). Positive delta = price drifted (less
+    confident; the "edge" partly came from the market dropping its prob).
+    The drift cohort historically underperforms.
+    """
+    if "delta_edge" not in bets.columns:
+        st.info("No line-movement data available.")
+        return
+
+    df = bets.filter(pl.col("delta_edge").is_not_null())
+    if len(df) == 0:
+        st.info("No line-movement data available.")
+        return
+
+    rows: list[dict] = []
+    rows.append({**_per_bet_stats(df), "Movement": "All"})
+    for label, lo, hi in _MOVEMENT_BUCKETS:
+        sub = df.filter(
+            (pl.col("delta_edge") >= lo) & (pl.col("delta_edge") < hi)
+        )
+        rows.append({**_per_bet_stats(sub), "Movement": label})
+
+    table = pl.DataFrame(rows).select(
+        "Movement", "Bets", "W", "L", "V", "Win %", "Stake", "P&L", "ROI %"
+    )
+    pdf = table.to_pandas()
+
+    def _row_style(row):
+        if row["Movement"] == "All":
+            return ["font-weight: bold; background-color: rgba(255,255,255,0.08)"] * len(row)
         return [""] * len(row)
 
     styled = (
@@ -397,6 +549,27 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
             .otherwise(pl.col("dog_edge"))
             .alias("bet_edge")
         )
+
+        # bet_edge_open mirrors bet_edge but uses best opening odds across
+        # books. Edge provenance (drift-only vs always-edge) is the relevant
+        # cohort signal for sizing decisions; delta_edge captures how far the
+        # market moved between open and bet time on the bet side.
+        if (
+            "best_opening_odds_p1" in bets.columns
+            and "best_opening_odds_p2" in bets.columns
+            and "p1_win_prob" in bets.columns
+            and "p2_win_prob" in bets.columns
+        ):
+            bets = bets.with_columns(
+                pl.when(pl.col("bet_side") == "P1")
+                .then(pl.col("p1_win_prob") - 1.0 / pl.col("best_opening_odds_p1"))
+                .when(pl.col("bet_side") == "P2")
+                .then(pl.col("p2_win_prob") - 1.0 / pl.col("best_opening_odds_p2"))
+                .otherwise(pl.lit(None, dtype=pl.Float64))
+                .alias("bet_edge_open"),
+            ).with_columns(
+                (pl.col("bet_edge") - pl.col("bet_edge_open")).alias("delta_edge")
+            )
         edge_vals = bets["bet_edge"].drop_nulls()
         if len(edge_vals) > 0:
             edge_min_pct = round(float(edge_vals.min()) * 100 - 0.5, 1)
@@ -658,6 +831,33 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
 
     st.subheader("By Edge Band")
     _render_edge_bands(bets, st)
+
+    # Edge-provenance and line-movement tables filter to bets placed after
+    # opening-odds capture became reliable.
+    if "bet_placed_at" in bets.columns:
+        prov_bets = bets.filter(
+            pl.col("bet_placed_at").cast(pl.Utf8) > _OPENING_RELIABLE_AFTER
+        )
+        n_excluded = len(bets) - len(prov_bets)
+    else:
+        prov_bets = bets.head(0)
+        n_excluded = len(bets)
+
+    st.subheader("By Edge Provenance")
+    if n_excluded > 0:
+        st.caption(
+            f"Excludes {n_excluded} bets placed before {_OPENING_RELIABLE_AFTER} "
+            "where opening-odds capture is unreliable."
+        )
+    _render_edge_provenance(prov_bets, st)
+
+    st.subheader("By Line Movement (Bet Side)")
+    if n_excluded > 0:
+        st.caption(
+            f"Excludes {n_excluded} bets placed before {_OPENING_RELIABLE_AFTER} "
+            "where opening-odds capture is unreliable."
+        )
+    _render_line_movement(prov_bets, st)
 
     if "net" in bets.columns:
         st.subheader("Cumulative P&L by Bet #")
