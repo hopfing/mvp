@@ -178,12 +178,20 @@ def _parse_pipe_response(
             pz = fields.get("PZ", "")
             fi = fields.get("FI", "")
             if pz and fi:
+                # FS=1 in the match-info PA marks a live/in-play fixture; the
+                # field (along with sibling SU/ML/PT/EM) is absent for
+                # upcoming-but-not-started matches. Treat presence of FS=1 as
+                # STARTED so downstream first_live / cross-book guards aren't
+                # poisoned by a stale NOT_STARTED on a match that has gone live.
+                fs = fields.get("FS", "")
+                event_status = "STARTED" if fs == "1" else "NOT_STARTED"
                 matches_by_pz[pz] = {
                     "p1": p1,
                     "p2": p2,
                     "fi": fi,
                     "tournament": current_tournament,
                     "circuit": current_circuit,
+                    "event_status": event_status,
                 }
 
         elif rec_type == "MA" and fields.get("SY") == "gb":
@@ -223,6 +231,7 @@ def _parse_pipe_response(
                 continue
 
             event_id = match_info["fi"]
+            event_status = match_info.get("event_status", "NOT_STARTED")
             entries.append(Bet365OddsEntry(
                 book="b365",
                 b365_event_id=event_id,
@@ -232,7 +241,7 @@ def _parse_pipe_response(
                 tournament=match_info["tournament"],
                 circuit=match_info["circuit"],
                 opponent_name=match_info["p2"],
-                event_status="NOT_STARTED",
+                event_status=event_status,
                 fetched_at=fetched_at,
             ))
             entries.append(Bet365OddsEntry(
@@ -244,7 +253,7 @@ def _parse_pipe_response(
                 tournament=match_info["tournament"],
                 circuit=match_info["circuit"],
                 opponent_name=match_info["p1"],
-                event_status="NOT_STARTED",
+                event_status=event_status,
                 fetched_at=fetched_at,
             ))
 
