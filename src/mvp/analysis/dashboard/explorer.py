@@ -107,6 +107,50 @@ def _aggregate_by(
     return pl.DataFrame(rows)
 
 
+from mvp.odds.aggregator import THRESHOLD_HOURS as _TIMING_THRESHOLDS_HOURS
+
+_TIMING_AGGS = (
+    ("best", "Best Line"),
+    ("med", "Median Line"),
+    ("worst", "Worst Line"),
+)
+_TIMING_EDGE_SLICES = (("Edge", True), ("No Edge", False))
+
+
+def _aggregate_by_timing(df: pl.DataFrame, agg: str) -> pl.DataFrame:
+    """Group by edge slice × threshold for one cross-book agg.
+
+    Edge / No Edge filter is *per-cell* — for cell (agg, T-Nh), the filter
+    is ``model_edge_<agg>_<N>h > 0``, so we're consistently testing
+    "of the picks the model said had edge at this line, how did they
+    convert at this line?"
+
+    Rows ordered: edge slice first (Edge then No Edge), then threshold
+    ascending (T-1h, T-3h, ..., T-18h).
+    """
+    rows: list[dict] = []
+    for label, flag in _TIMING_EDGE_SLICES:
+        for h in _TIMING_THRESHOLDS_HOURS:
+            odds_col = f"pred_odds_{agg}_{h}h"
+            edge_col = f"model_edge_{agg}_{h}h"
+            if odds_col not in df.columns or edge_col not in df.columns:
+                stats = _flat_bet_stats(df.head(0), odds_col)
+            else:
+                if flag:
+                    cell_df = df.filter(
+                        pl.col(edge_col).is_not_null() & (pl.col(edge_col) > 0)
+                    )
+                else:
+                    cell_df = df.filter(
+                        pl.col(edge_col).is_not_null() & (pl.col(edge_col) <= 0)
+                    )
+                stats = _flat_bet_stats(cell_df, odds_col)
+            stats["Threshold"] = f"T-{h}h"
+            stats["Edge"] = label
+            rows.append(stats)
+    return pl.DataFrame(rows)
+
+
 def _aggregate_books(df: pl.DataFrame, books: list[str]) -> pl.DataFrame:
     """Aggregate by book x edge using per-book closing odds (no All summary)."""
     rows: list[dict] = []
@@ -492,3 +536,18 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
             st.markdown(f"**{label}**")
             table = _aggregate_books(circuit_dfs[val], books)
             _style_breakdown(table, "Book", st)
+
+    # By Timing — per-threshold cross-book best / median / worst.
+    has_timing = any(
+        f"pred_odds_{agg}_{h}h" in resolved.columns
+        for agg, _ in _TIMING_AGGS
+        for h in _TIMING_THRESHOLDS_HOURS
+    )
+    if has_timing:
+        st.subheader("By Timing")
+        for agg, agg_label in _TIMING_AGGS:
+            st.markdown(f"### {agg_label}")
+            for val, label in circuits:
+                st.markdown(f"**{label}**")
+                table = _aggregate_by_timing(circuit_dfs[val], agg)
+                _style_breakdown(table, "Threshold", st)
