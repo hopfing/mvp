@@ -302,7 +302,8 @@ _OPEN_EDGE_BUCKETS = [
     ("10%+",      0.10,  1.0),
 ]
 
-_FINAL_EDGE_BUCKETS = [
+_BET_EDGE_BUCKETS = [
+    ("<0%",      -1.0,   0.0),
     ("0-2.5%",    0.0,   0.025),
     ("2.5-5%",    0.025, 0.05),
     ("5-7.5%",    0.05,  0.075),
@@ -390,7 +391,7 @@ def _provenance_cell_color(pos_pct: float | None) -> str:
 
 
 def render_provenance_matrix(ds: pl.DataFrame, st) -> None:
-    """Render the open-edge × final-edge CLV matrix on the execution page.
+    """Render the open-edge × bet-edge CLV matrix on the execution page.
 
     Cells: n / Pos% / Pos-Neg %. Background gradient on Pos %.
     """
@@ -407,14 +408,14 @@ def render_provenance_matrix(ds: pl.DataFrame, st) -> None:
         return
 
     open_labels = [b[0] for b in _OPEN_EDGE_BUCKETS]
-    final_labels = [b[0] for b in _FINAL_EDGE_BUCKETS]
+    bet_labels = [b[0] for b in _BET_EDGE_BUCKETS]
 
     display_rows: list[list[str]] = []
     color_rows: list[list[float | None]] = []
     for _, o_lo, o_hi in _OPEN_EDGE_BUCKETS:
         display_row: list[str] = []
         color_row: list[float | None] = []
-        for _, f_lo, f_hi in _FINAL_EDGE_BUCKETS:
+        for _, f_lo, f_hi in _BET_EDGE_BUCKETS:
             sub = df.filter(
                 (pl.col("_bet_edge_open") >= o_lo)
                 & (pl.col("_bet_edge_open") < o_hi)
@@ -436,8 +437,8 @@ def render_provenance_matrix(ds: pl.DataFrame, st) -> None:
         display_rows.append(display_row)
         color_rows.append(color_row)
 
-    display_df = pd.DataFrame(display_rows, index=open_labels, columns=final_labels)
-    color_df = pd.DataFrame(color_rows, index=open_labels, columns=final_labels)
+    display_df = pd.DataFrame(display_rows, index=open_labels, columns=bet_labels)
+    color_df = pd.DataFrame(color_rows, index=open_labels, columns=bet_labels)
 
     def _color_table(_df):
         out = pd.DataFrame("", index=_df.index, columns=_df.columns)
@@ -472,7 +473,7 @@ def render_provenance_matrix(ds: pl.DataFrame, st) -> None:
         '<th class="blank level0" >&nbsp;</th>',
         '<th class="blank level0" style="text-align: center; color: #aaa; '
         'font-size: 0.8em; font-weight: normal; padding: 6px;">'
-        "Final Edge →<br>Open Edge ↓</th>",
+        "Bet Edge →<br>Open Edge ↓</th>",
         1,
     )
     st.markdown(html, unsafe_allow_html=True)
@@ -605,6 +606,6 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
             )
             st.dataframe(display.to_pandas(), use_container_width=True, hide_index=True)
 
-    st.subheader("CLV vs Best Close by Open Edge × Final Edge")
+    st.subheader("CLV vs Best Close by Open Edge × Bet Edge")
     render_provenance_matrix(ds, st)
 

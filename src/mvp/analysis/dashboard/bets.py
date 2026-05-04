@@ -332,7 +332,8 @@ _OPEN_EDGE_BUCKETS = [
     ("10%+",      0.10,  1.0),
 ]
 
-_FINAL_EDGE_BUCKETS = [
+_BET_EDGE_BUCKETS = [
+    ("<0%",      -1.0,   0.0),
     ("0-2.5%",    0.0,   0.025),
     ("2.5-5%",    0.025, 0.05),
     ("5-7.5%",    0.05,  0.075),
@@ -352,12 +353,12 @@ def _provenance_cell_color(roi: float | None) -> str:
 
 
 def _render_provenance_matrix(bets: pl.DataFrame, st) -> None:
-    """Edge-at-open × final-edge matrix with N / Win% / P&L / ROI per cell.
+    """Open-edge × bet-edge matrix with N / Win% / P&L / ROI per cell.
 
     Rows: bet_edge_open buckets (<0% = no edge at open, drift territory).
-    Cols: bet_edge buckets (final edge that triggered the bet).
+    Cols: bet_edge buckets (edge at the time the bet was placed).
     Compares bets where edge was already there at open vs. bets where edge
-    came from line drift, at the same final-edge level.
+    came from line drift, at the same bet-edge level.
     Background gradient is by ROI %.
     """
     import pandas as pd
@@ -374,14 +375,14 @@ def _render_provenance_matrix(bets: pl.DataFrame, st) -> None:
         return
 
     open_labels = [b[0] for b in _OPEN_EDGE_BUCKETS]
-    final_labels = [b[0] for b in _FINAL_EDGE_BUCKETS]
+    bet_labels = [b[0] for b in _BET_EDGE_BUCKETS]
 
     display_rows: list[list[str]] = []
     roi_rows: list[list[float | None]] = []
     for _, o_lo, o_hi in _OPEN_EDGE_BUCKETS:
         display_row: list[str] = []
         roi_row: list[float | None] = []
-        for _, f_lo, f_hi in _FINAL_EDGE_BUCKETS:
+        for _, f_lo, f_hi in _BET_EDGE_BUCKETS:
             sub = df.filter(
                 (pl.col("bet_edge_open") >= o_lo)
                 & (pl.col("bet_edge_open") < o_hi)
@@ -404,8 +405,8 @@ def _render_provenance_matrix(bets: pl.DataFrame, st) -> None:
         display_rows.append(display_row)
         roi_rows.append(roi_row)
 
-    display_df = pd.DataFrame(display_rows, index=open_labels, columns=final_labels)
-    roi_df = pd.DataFrame(roi_rows, index=open_labels, columns=final_labels)
+    display_df = pd.DataFrame(display_rows, index=open_labels, columns=bet_labels)
+    roi_df = pd.DataFrame(roi_rows, index=open_labels, columns=bet_labels)
 
     def _color_table(_df):
         out = pd.DataFrame("", index=_df.index, columns=_df.columns)
@@ -440,7 +441,7 @@ def _render_provenance_matrix(bets: pl.DataFrame, st) -> None:
         '<th class="blank level0" >&nbsp;</th>',
         '<th class="blank level0" style="text-align: center; color: #aaa; '
         'font-size: 0.8em; font-weight: normal; padding: 6px;">'
-        "Final Edge →<br>Open Edge ↓</th>",
+        "Bet Edge →<br>Open Edge ↓</th>",
         1,
     )
     st.markdown(html, unsafe_allow_html=True)
@@ -817,7 +818,7 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
         prov_bets = bets.head(0)
         n_excluded = len(bets)
 
-    st.subheader("By Open Edge × Final Edge")
+    st.subheader("By Open Edge × Bet Edge")
     if n_excluded > 0:
         st.caption(
             f"Excludes {n_excluded} bets placed before {_OPENING_RELIABLE_AFTER} "
