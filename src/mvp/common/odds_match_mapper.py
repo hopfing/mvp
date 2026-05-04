@@ -14,6 +14,7 @@ SNAPSHOT_SCHEMA = {
     "player_id": pl.Utf8,
     "odds": pl.Float64,
     "fetched_at": pl.Datetime("us", "UTC"),
+    "run_at": pl.Datetime("us", "UTC"),
     "event_status": pl.Utf8,
 }
 
@@ -39,8 +40,11 @@ def resolve_snapshots(
         event_id_col: Name of the event ID column in staged (e.g. "dk_event_id").
 
     Returns:
-        DataFrame with columns: match_uid, book, side, odds, fetched_at,
-        event_status. One row per snapshot per side.
+        DataFrame with columns: match_uid, book, player_id, odds, fetched_at,
+        run_at, event_status. One row per snapshot per side. ``run_at`` is the
+        pipeline-cycle timestamp shared across books for cross-book alignment;
+        falls back to ``fetched_at`` when the staged source predates the
+        ``run_at`` field.
     """
     book_map = event_map.filter(pl.col("book") == book)
     if len(book_map) == 0:
@@ -81,7 +85,14 @@ def resolve_snapshots(
             pl.lit(book).alias("book"),
         ).filter(pl.col("player_id").is_not_null())
 
-    cols = ["match_uid", "book", "player_id", "odds", "fetched_at", "event_status"]
+    if "run_at" in resolved.columns:
+        resolved = resolved.with_columns(
+            pl.col("run_at").fill_null(pl.col("fetched_at"))
+        )
+    else:
+        resolved = resolved.with_columns(pl.col("fetched_at").alias("run_at"))
+
+    cols = ["match_uid", "book", "player_id", "odds", "fetched_at", "run_at", "event_status"]
     return resolved.select(cols)
 
 
