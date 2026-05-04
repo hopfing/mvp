@@ -40,6 +40,7 @@ def build_analysis_dataset(
     cross_book_odds: pl.DataFrame | None = None,
     all_snapshots: pl.DataFrame | None = None,
     opening_odds: pl.DataFrame | None = None,
+    threshold_odds: pl.DataFrame | None = None,
 ) -> pl.DataFrame:
     """Build a single wide DataFrame for analysis.
 
@@ -57,6 +58,9 @@ def build_analysis_dataset(
         cross_book_odds: Pre-computed cross-book odds summary from aggregator.
         all_snapshots: Resolved snapshots for market alignment at bet time.
         opening_odds: First-available and market-formed opening odds per player.
+        threshold_odds: Long-format cross-book threshold odds (one row per
+            ``match_uid`` × ``player_id`` × ``threshold_h``). Pivoted into
+            wide ``<agg>_<N>h_odds`` columns.
 
     Returns:
         Wide DataFrame with all joined data and derived metrics.
@@ -77,6 +81,9 @@ def build_analysis_dataset(
 
     if opening_odds is not None and len(opening_odds) > 0:
         ds = _join_cross_book_odds(ds, opening_odds)
+
+    if threshold_odds is not None and len(threshold_odds) > 0:
+        ds = _join_threshold_odds(ds, threshold_odds)
 
     ds = _compute_pred_side_metrics(ds)
     ds = _compute_clv(ds)
@@ -230,6 +237,53 @@ def _join_cross_book_odds(ds: pl.DataFrame, cross_book: pl.DataFrame) -> pl.Data
         right_on=["match_uid", "player_id"],
         how="left",
     )
+
+    return ds
+
+
+_THRESHOLD_AGG_MAP: dict[str, str] = {
+    "best_threshold_odds": "best",
+    "worst_threshold_odds": "worst",
+    "median_threshold_odds": "med",
+}
+
+
+def _join_threshold_odds(
+    ds: pl.DataFrame, threshold_odds: pl.DataFrame,
+) -> pl.DataFrame:
+    """Pivot long threshold odds and join as wide ``<agg>_<N>h_odds`` columns.
+
+    Long input has one row per (match_uid, player_id, threshold_h) with
+    columns ``best_threshold_odds``, ``worst_threshold_odds``,
+    ``median_threshold_odds``, ``n_books``. Pivots into per-threshold
+    wide columns named ``best_<N>h_odds``, ``worst_<N>h_odds``,
+    ``med_<N>h_odds``, plus ``n_books_<N>h``, joined per side.
+    """
+    if "threshold_h" not in threshold_odds.columns:
+        return ds
+
+    thresholds = sorted(threshold_odds["threshold_h"].unique().to_list())
+
+    for thresh in thresholds:
+        thr_df = threshold_odds.filter(pl.col("threshold_h") == thresh)
+        if len(thr_df) == 0:
+            continue
+
+        suffix = f"{thresh}h"
+        rename_map: dict[str, str] = {}
+        for src, agg in _THRESHOLD_AGG_MAP.items():
+            if src in thr_df.columns:
+                rename_map[src] = f"{agg}_{suffix}_odds"
+        if "n_books" in thr_df.columns:
+            rename_map["n_books"] = f"n_books_{suffix}"
+
+        cross = (
+            thr_df.select("match_uid", "player_id", *rename_map.keys())
+            .rename(rename_map)
+        )
+
+        # Reuse the same per-side join shape as _join_cross_book_odds
+        ds = _join_cross_book_odds(ds, cross)
 
     return ds
 
@@ -419,6 +473,24 @@ def _compute_pred_side_metrics(ds: pl.DataFrame) -> pl.DataFrame:
         ("market_formed_odds", "pred_odds_market_formed"),
     ]
 
+    # Threshold odds — auto-discover any "<agg>_<N>h_odds_p1" pairs.
+    _threshold_aggs = ("best", "worst", "med")
+    for col in ds.columns:
+        if not col.endswith("_odds_p1"):
+            continue
+        prefix = col.removesuffix("_odds_p1")
+        parts = prefix.split("_", 1)
+        if len(parts) != 2:
+            continue
+        agg, basis = parts
+        if agg not in _threshold_aggs:
+            continue
+        if not (basis.endswith("h") and basis[:-1].isdigit()):
+            continue
+        odds_mappings.append(
+            (f"{agg}_{basis}_odds", f"pred_odds_{agg}_{basis}")
+        )
+
     for src_prefix, dst_col in odds_mappings:
         p1_col = f"{src_prefix}_p1"
         p2_col = f"{src_prefix}_p2"
@@ -430,12 +502,26 @@ def _compute_pred_side_metrics(ds: pl.DataFrame) -> pl.DataFrame:
                 .alias(dst_col)
             )
 
-    for odds_col, edge_col in [
+    edge_pairs: list[tuple[str, str]] = [
         ("pred_odds_best_close", "model_edge_best_close"),
         ("pred_odds_avg_close", "model_edge_avg_close"),
         ("pred_odds_open", "model_edge_open"),
         ("pred_odds_market_formed", "model_edge_market_formed"),
-    ]:
+    ]
+    for col in ds.columns:
+        if not col.startswith("pred_odds_"):
+            continue
+        suffix = col.removeprefix("pred_odds_")
+        parts = suffix.split("_", 1)
+        if len(parts) != 2:
+            continue
+        agg, basis = parts
+        if agg not in ("best", "worst", "med"):
+            continue
+        if basis.endswith("h") and basis[:-1].isdigit():
+            edge_pairs.append((col, f"model_edge_{agg}_{basis}"))
+
+    for odds_col, edge_col in edge_pairs:
         if odds_col in ds.columns:
             ds = ds.with_columns(
                 (pl.col("pred_prob") - 1.0 / pl.col(odds_col))

@@ -6,6 +6,8 @@ import logging
 
 import polars as pl
 
+from mvp.odds.aggregator import THRESHOLD_AGGS, THRESHOLD_HOURS
+
 logger = logging.getLogger(__name__)
 
 _BEST_CLOSE = "pred_odds_best_close"
@@ -50,6 +52,16 @@ EDGE_BASES = [
     }),
 ]
 
+for _agg in THRESHOLD_AGGS:
+    for _h in THRESHOLD_HOURS:
+        EDGE_BASES.append((
+            f"{_agg}_{_h}h",
+            {
+                "odds_col": f"pred_odds_{_agg}_{_h}h",
+                "edge_col": f"model_edge_{_agg}_{_h}h",
+            },
+        ))
+
 SCENARIOS: list[dict] = [
     {"name": "consensus_100", "odds_col": _BEST_CLOSE,
      "filter": ("consensus", "==", 1.0)},
@@ -80,6 +92,16 @@ SCENARIOS.extend([
     {"name": "flat_worst_intraday", "odds_col": "pred_odds_worst_intraday",
      "filter": None},
 ])
+
+# Flat scenarios for each threshold × agg, so the dashboard can render
+# unfiltered "what if I always took <agg> at T-Nh" performance.
+for _agg in THRESHOLD_AGGS:
+    for _h in THRESHOLD_HOURS:
+        SCENARIOS.append({
+            "name": f"flat_{_agg}_{_h}h",
+            "odds_col": f"pred_odds_{_agg}_{_h}h",
+            "filter": None,
+        })
 
 SEGMENTS = [
     {"name": "overall", "column": None},

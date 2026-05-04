@@ -42,9 +42,12 @@ def refresh_analysis_data(
     from mvp.analysis.scanner import run_scanner
     from mvp.analysis.simulations import run_simulations
     from mvp.odds.aggregator import (
+        THRESHOLD_HOURS,
         compute_book_odds,
         compute_cross_book_odds,
+        compute_first_live_anchor,
         compute_opening_odds,
+        compute_threshold_odds_all,
         save_book_odds,
         save_cross_book_odds,
     )
@@ -103,6 +106,23 @@ def refresh_analysis_data(
         compute_opening_odds(all_snapshots)
         if len(all_snapshots) > 0 else None
     )
+
+    # Per-threshold odds anchored on first_live_fetched_at (same UTC clock
+    # as fetched_at; sidesteps the scheduled_datetime tz mismatch — issue #86).
+    threshold_odds = None
+    if len(all_snapshots) > 0:
+        anchors = compute_first_live_anchor(all_snapshots)
+        if len(anchors) > 0:
+            threshold_odds = compute_threshold_odds_all(
+                snapshots=all_snapshots,
+                match_anchors=anchors,
+                thresholds_hours=list(THRESHOLD_HOURS),
+                books=[b.code for b in book_registry],
+            )
+            print(
+                f"Threshold odds: {len(threshold_odds)} rows across "
+                f"{len(THRESHOLD_HOURS)} thresholds"
+            )
 
     # Concat per-book odds for the per-book wide columns
     odds_by_book = (
@@ -171,6 +191,7 @@ def refresh_analysis_data(
         cross_book_odds=cross_book if len(cross_book) > 0 else None,
         all_snapshots=all_snapshots if len(all_snapshots) > 0 else None,
         opening_odds=opening_odds,
+        threshold_odds=threshold_odds,
     )
 
     analysis_path = data_root / "analysis" / "analysis.parquet"
