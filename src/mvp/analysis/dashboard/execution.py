@@ -462,11 +462,20 @@ def render_provenance_matrix(ds: pl.DataFrame, st) -> None:
             {"selector": "th", "props": [("text-align", "center"), ("padding", "6px")]},
             {"selector": "th.col_heading", "props": [("border-bottom", "2px solid #888")]},
             {"selector": "th.row_heading", "props": [("border-right", "2px solid #888")]},
-            {"selector": "table", "props": [("border-collapse", "collapse"), ("width", "100%")]},
         ])
+        .set_table_attributes(
+            'style="width: 100%; table-layout: fixed; border-collapse: collapse;"'
+        )
     )
-    st.caption("Rows = edge at open. Columns = final edge at bet placement.")
-    st.markdown(styled.to_html(escape=False), unsafe_allow_html=True)
+    html = styled.to_html(escape=False)
+    html = html.replace(
+        '<th class="blank level0" >&nbsp;</th>',
+        '<th class="blank level0" style="text-align: center; color: #aaa; '
+        'font-size: 0.8em; font-weight: normal; padding: 6px;">'
+        "Open Edge ↓<br>Final Edge →</th>",
+        1,
+    )
+    st.markdown(html, unsafe_allow_html=True)
 
 
 def clv_by_book_timing(ds: pl.DataFrame) -> pl.DataFrame | None:
