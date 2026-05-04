@@ -10,6 +10,11 @@ logger = logging.getLogger(__name__)
 
 BOOKS = ["dk", "br", "mgm", "b365", "fd"]
 
+# Single source of truth for the timing thresholds used across the
+# analysis layer. The values are hours before the first-live anchor.
+THRESHOLD_HOURS: tuple[int, ...] = (1, 3, 6, 9, 12, 18)
+THRESHOLD_AGGS: tuple[str, ...] = ("best", "worst", "med")
+
 
 def compute_book_odds(snapshots: pl.DataFrame, book: str) -> pl.DataFrame:
     """Compute per-player odds summary for one book from resolved snapshots.
@@ -127,6 +132,261 @@ def compute_cross_book_odds(book_odds_list: list[pl.DataFrame]) -> pl.DataFrame:
         return _empty_cross_book()
 
     return pl.DataFrame(results)
+
+
+def compute_threshold_odds(
+    snapshots: pl.DataFrame,
+    match_anchors: pl.DataFrame,
+    book: str,
+    hours_before_start: int,
+) -> pl.DataFrame:
+    """Per-(match, player) line at the latest NOT_STARTED snapshot ≤ anchor − Nh.
+
+    For each (match_uid, player_id), take the snapshot whose run_at is the
+    maximum across:
+      - book matches the requested book
+      - event_status == "NOT_STARTED"
+      - run_at <= anchor_at - hours_before_start
+
+    Falls back to fetched_at if run_at is not present in snapshots.
+
+    Args:
+        snapshots: Resolved snapshots with (match_uid, book, player_id, odds,
+            fetched_at, event_status); optionally run_at.
+        match_anchors: Per-match reference timestamp with (match_uid,
+            anchor_at). Use ``first_live_fetched_at`` as the anchor
+            (same-clock as fetched_at) rather than scheduled_datetime,
+            which is in tournament-local tz and not directly comparable
+            to fetched_at.
+        book: Book label.
+        hours_before_start: Threshold in hours before the anchor.
+
+    Returns:
+        One row per (match_uid, player_id) where the book had a qualifying
+        snapshot. Columns: match_uid, book, player_id, threshold_h,
+        threshold_odds, threshold_run_at, threshold_fetched_at,
+        threshold_implied. Empty DataFrame if no qualifying snapshots.
+
+    Note:
+        Stale lines from books that stopped quoting before anchor − Nh will
+        appear here — freshness filtering is the job of the cross-book
+        aggregator.
+    """
+    if len(snapshots) == 0 or "anchor_at" not in match_anchors.columns:
+        return _empty_threshold_odds()
+
+    book_snaps = snapshots.filter(
+        (pl.col("book") == book)
+        & (pl.col("event_status") == "NOT_STARTED")
+    )
+    if len(book_snaps) == 0:
+        return _empty_threshold_odds()
+
+    ts_col = "run_at" if "run_at" in book_snaps.columns else "fetched_at"
+
+    anchors = (
+        match_anchors.select("match_uid", "anchor_at")
+        .filter(pl.col("anchor_at").is_not_null())
+        .unique(subset=["match_uid"])
+    )
+    if len(anchors) == 0:
+        return _empty_threshold_odds()
+
+    qualifying = book_snaps.join(anchors, on="match_uid", how="inner")
+    cutoff_expr = pl.col("anchor_at") - pl.duration(hours=hours_before_start)
+    qualifying = qualifying.filter(pl.col(ts_col) <= cutoff_expr)
+    if len(qualifying) == 0:
+        return _empty_threshold_odds()
+
+    qualifying = (
+        qualifying
+        .sort([ts_col, "fetched_at"])
+        .group_by(["match_uid", "player_id"], maintain_order=True)
+        .last()
+    )
+
+    cutoff_lit = pl.col("anchor_at") - pl.duration(hours=hours_before_start)
+    return qualifying.select(
+        "match_uid",
+        pl.lit(book).alias("book"),
+        "player_id",
+        pl.lit(hours_before_start, dtype=pl.Int64).alias("threshold_h"),
+        pl.col("odds").alias("threshold_odds"),
+        pl.col(ts_col).alias("threshold_run_at"),
+        pl.col("fetched_at").alias("threshold_fetched_at"),
+        pl.when(pl.col("odds") > 0)
+        .then(1.0 / pl.col("odds"))
+        .otherwise(pl.lit(None).cast(pl.Float64))
+        .alias("threshold_implied"),
+        ((cutoff_lit - pl.col(ts_col)).dt.total_seconds() / 60)
+        .cast(pl.Float64)
+        .alias("threshold_lag_min"),
+    )
+
+
+def _empty_threshold_odds() -> pl.DataFrame:
+    return pl.DataFrame(schema={
+        "match_uid": pl.Utf8,
+        "book": pl.Utf8,
+        "player_id": pl.Utf8,
+        "threshold_h": pl.Int64,
+        "threshold_odds": pl.Float64,
+        "threshold_run_at": pl.Datetime("us"),
+        "threshold_fetched_at": pl.Datetime("us"),
+        "threshold_implied": pl.Float64,
+        "threshold_lag_min": pl.Float64,
+    })
+
+
+def compute_cross_book_threshold_odds(
+    threshold_per_book_list: list[pl.DataFrame],
+    max_lag_min: int | None = 30,
+) -> pl.DataFrame:
+    """Cross-book best/worst/median per (match, player, threshold).
+
+    Drops books whose ``threshold_lag_min`` (minutes between
+    ``threshold_run_at`` and the threshold cutoff anchor − Nh) exceeds
+    ``max_lag_min``. This is an absolute freshness check — a book that
+    stopped quoting more than ``max_lag_min`` before the threshold time
+    is excluded, regardless of what other books in the same match did.
+
+    Args:
+        threshold_per_book_list: List of per-book DataFrames produced by
+            :func:`compute_threshold_odds`. Each row carries
+            ``threshold_lag_min`` = (anchor − Nh) − ``threshold_run_at``,
+            in minutes; non-negative by construction.
+        max_lag_min: Maximum allowed lag (minutes). ``None`` disables
+            the freshness filter.
+
+    Returns:
+        One row per (match_uid, player_id, threshold_h) with cross-book
+        best/worst/avg/median threshold odds and a count of qualifying
+        books.
+    """
+    if not threshold_per_book_list:
+        return _empty_cross_book_threshold()
+
+    all_books = pl.concat(threshold_per_book_list, how="diagonal_relaxed")
+    if len(all_books) == 0:
+        return _empty_cross_book_threshold()
+
+    if max_lag_min is not None and "threshold_lag_min" in all_books.columns:
+        all_books = all_books.filter(pl.col("threshold_lag_min") <= max_lag_min)
+
+    if len(all_books) == 0:
+        return _empty_cross_book_threshold()
+
+    return (
+        all_books
+        .group_by(["match_uid", "player_id", "threshold_h"])
+        .agg(
+            pl.len().alias("n_books"),
+            pl.col("threshold_odds").max().alias("best_threshold_odds"),
+            pl.col("threshold_odds").min().alias("worst_threshold_odds"),
+            pl.col("threshold_odds").median().alias("median_threshold_odds"),
+        )
+    )
+
+
+def _empty_cross_book_threshold() -> pl.DataFrame:
+    return pl.DataFrame(schema={
+        "match_uid": pl.Utf8,
+        "player_id": pl.Utf8,
+        "threshold_h": pl.Int64,
+        "n_books": pl.UInt32,
+        "best_threshold_odds": pl.Float64,
+        "worst_threshold_odds": pl.Float64,
+        "median_threshold_odds": pl.Float64,
+    })
+
+
+def compute_first_live_anchor(snapshots: pl.DataFrame) -> pl.DataFrame:
+    """Per-match ``first_live_fetched_at`` for use as a threshold anchor.
+
+    Defined identically to :func:`mvp.analysis.dataset._join_first_live_ts`:
+    the first non-NOT_STARTED snapshot whose fetched_at is strictly after
+    every NOT_STARTED snapshot seen for that match across any book. This
+    is in the same clock as ``fetched_at`` (UTC), so it can be subtracted
+    from snapshot timestamps without timezone bias (cf. issue #86).
+
+    Args:
+        snapshots: Resolved snapshots with (match_uid, fetched_at,
+            event_status).
+
+    Returns:
+        One row per match with columns (match_uid, anchor_at). Empty
+        DataFrame if no matches have a STARTED/IN_PLAY snapshot.
+    """
+    if len(snapshots) == 0 or "event_status" not in snapshots.columns:
+        return pl.DataFrame(schema={
+            "match_uid": pl.Utf8,
+            "anchor_at": pl.Datetime("us"),
+        })
+
+    last_ns = (
+        snapshots.filter(pl.col("event_status") == "NOT_STARTED")
+        .group_by("match_uid")
+        .agg(pl.col("fetched_at").max().alias("_last_ns"))
+    )
+    live = snapshots.filter(pl.col("event_status") != "NOT_STARTED")
+    if len(live) == 0:
+        return pl.DataFrame(schema={
+            "match_uid": pl.Utf8,
+            "anchor_at": snapshots.schema["fetched_at"],
+        })
+
+    return (
+        live.join(last_ns, on="match_uid", how="left")
+        .filter(
+            pl.col("_last_ns").is_null()
+            | (pl.col("fetched_at") > pl.col("_last_ns"))
+        )
+        .group_by("match_uid")
+        .agg(pl.col("fetched_at").min().alias("anchor_at"))
+    )
+
+
+def compute_threshold_odds_all(
+    snapshots: pl.DataFrame,
+    match_anchors: pl.DataFrame,
+    thresholds_hours: list[int],
+    books: list[str],
+    max_lag_min: int | None = 30,
+) -> pl.DataFrame:
+    """Compute long-format cross-book threshold odds across all thresholds.
+
+    For each ``thresh`` in ``thresholds_hours`` and each book in ``books``,
+    runs :func:`compute_threshold_odds` and aggregates across books with
+    :func:`compute_cross_book_threshold_odds`. Concatenates the per-threshold
+    results.
+
+    Args:
+        snapshots: Resolved snapshots.
+        match_anchors: Per-match anchor table (match_uid, anchor_at).
+        thresholds_hours: List of thresholds in hours.
+        books: List of book codes to include.
+        max_lag_min: Freshness tolerance passed through to
+            :func:`compute_cross_book_threshold_odds`.
+
+    Returns:
+        Long-format DataFrame: one row per (match_uid, player_id, threshold_h)
+        with cross-book best/worst/avg/median threshold odds and ``n_books``.
+    """
+    pieces: list[pl.DataFrame] = []
+    for thresh in thresholds_hours:
+        per_book = []
+        for book in books:
+            df = compute_threshold_odds(snapshots, match_anchors, book, thresh)
+            if len(df) > 0:
+                per_book.append(df)
+        cross = compute_cross_book_threshold_odds(
+            per_book, max_lag_min=max_lag_min,
+        )
+        if len(cross) > 0:
+            pieces.append(cross)
+    if not pieces:
+        return _empty_cross_book_threshold()
+    return pl.concat(pieces, how="diagonal_relaxed")
 
 
 def compute_opening_odds(snapshots: pl.DataFrame) -> pl.DataFrame:
