@@ -440,7 +440,7 @@ def _render_provenance_matrix(bets: pl.DataFrame, st) -> None:
         '<th class="blank level0" >&nbsp;</th>',
         '<th class="blank level0" style="text-align: center; color: #aaa; '
         'font-size: 0.8em; font-weight: normal; padding: 6px;">'
-        "Open Edge ↓<br>Final Edge →</th>",
+        "Final Edge →<br>Open Edge ↓</th>",
         1,
     )
     st.markdown(html, unsafe_allow_html=True)
