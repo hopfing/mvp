@@ -324,17 +324,20 @@ def _render_edge_bands(bets: pl.DataFrame, st) -> None:
 
 
 _OPEN_EDGE_BUCKETS = [
-    ("<0%",    -1.0,   0.0),
-    ("0-2.5%",  0.0,   0.025),
-    ("2.5-5%",  0.025, 0.05),
-    ("5%+",     0.05,  1.0),
+    ("<0%",      -1.0,   0.0),
+    ("0-2.5%",    0.0,   0.025),
+    ("2.5-5%",    0.025, 0.05),
+    ("5-7.5%",    0.05,  0.075),
+    ("7.5-10%",   0.075, 0.10),
+    ("10%+",      0.10,  1.0),
 ]
 
 _FINAL_EDGE_BUCKETS = [
-    ("0-2.5%",  0.0,   0.025),
-    ("2.5-5%",  0.025, 0.05),
-    ("5-7.5%",  0.05,  0.075),
-    ("7.5%+",   0.075, 1.0),
+    ("0-2.5%",    0.0,   0.025),
+    ("2.5-5%",    0.025, 0.05),
+    ("5-7.5%",    0.05,  0.075),
+    ("7.5-10%",   0.075, 0.10),
+    ("10%+",      0.10,  1.0),
 ]
 
 
@@ -402,7 +405,6 @@ def _render_provenance_matrix(bets: pl.DataFrame, st) -> None:
         roi_rows.append(roi_row)
 
     display_df = pd.DataFrame(display_rows, index=open_labels, columns=final_labels)
-    display_df.index.name = "Open Edge ↓ / Final Edge →"
     roi_df = pd.DataFrame(roi_rows, index=open_labels, columns=final_labels)
 
     def _color_table(_df):
@@ -428,9 +430,10 @@ def _render_provenance_matrix(bets: pl.DataFrame, st) -> None:
             {"selector": "th", "props": [("text-align", "center"), ("padding", "6px")]},
             {"selector": "th.col_heading", "props": [("border-bottom", "2px solid #888")]},
             {"selector": "th.row_heading", "props": [("border-right", "2px solid #888")]},
-            {"selector": "table", "props": [("border-collapse", "collapse")]},
+            {"selector": "table", "props": [("border-collapse", "collapse"), ("width", "100%")]},
         ])
     )
+    st.caption("Rows = edge at open. Columns = final edge at bet placement.")
     st.markdown(styled.to_html(escape=False), unsafe_allow_html=True)
 
 
