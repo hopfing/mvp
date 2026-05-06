@@ -653,7 +653,14 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
     def predict_state_fn(
         self, df: pl.DataFrame,
     ) -> tuple[ServeStateFn, ServeStateFn]:
-        """Build state-aware callables. Match-level features are cached once."""
+        """Build state-aware callables. Match-level features are cached once.
+
+        The chain DP visits thousands of distinct ScoreStates per fold, but the
+        model only reads state-derivable features named in `point_level_features`.
+        Distinct ScoreStates with identical model-relevant values produce the
+        same predict_proba output, so we cache per (perspective, key) where
+        key is the tuple of state-derivable values the model actually uses.
+        """
         if self._model is None:
             raise RuntimeError(
                 "ScoreStateChainServeModel.predict_state_fn called before fit"
@@ -662,6 +669,19 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
         self._X_match_B = self._match_feature_values(df, swap=True)
         self._point_constants = self._point_constant_values(df)
         n = len(df)
+
+        # Subset of point_level_features whose value depends on ScoreState —
+        # the cache key is the tuple of these values for the current state.
+        state_key_features = [
+            name for name in self.point_level_features
+            if name in self._STATE_DERIVABLE
+        ]
+
+        def _state_key(state: Any) -> tuple:
+            if not state_key_features:
+                return ()
+            vals = self._state_derivable_values(state)
+            return tuple(vals[name] for name in state_key_features)
 
         def _X_for(X_match: np.ndarray, state: Any) -> np.ndarray:
             state_vals = self._state_derivable_values(state)
@@ -676,15 +696,30 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
                 return np.hstack([X_match, X_point])
             return X_match
 
+        cache_a: dict[tuple, np.ndarray] = {}
+        cache_b: dict[tuple, np.ndarray] = {}
+
         def p_a_fn(state: Any) -> np.ndarray:
+            key = _state_key(state)
+            cached = cache_a.get(key)
+            if cached is not None:
+                return cached
             X = _X_for(self._X_match_A, state)  # type: ignore[arg-type]
             p = self._model.predict_proba(X)  # type: ignore[union-attr]
-            return np.clip(p, self.clip_min, self.clip_max)
+            p = np.clip(p, self.clip_min, self.clip_max)
+            cache_a[key] = p
+            return p
 
         def p_b_fn(state: Any) -> np.ndarray:
+            key = _state_key(state)
+            cached = cache_b.get(key)
+            if cached is not None:
+                return cached
             X = _X_for(self._X_match_B, state)  # type: ignore[arg-type]
             p = self._model.predict_proba(X)  # type: ignore[union-attr]
-            return np.clip(p, self.clip_min, self.clip_max)
+            p = np.clip(p, self.clip_min, self.clip_max)
+            cache_b[key] = p
+            return p
 
         return p_a_fn, p_b_fn
 
