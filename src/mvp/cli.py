@@ -1709,16 +1709,11 @@ def cmd_project(args: argparse.Namespace) -> int:
     return 0
 
 
-def print_iid_projection_summary(results: dict[str, Any], name: str | None = None) -> None:
-    """Print formatted summary of IID projection results."""
-    metrics = results.get("metrics", {})
-
-    print("\n" + "=" * 70)
-    title = name or "IID PROJECTION RESULTS"
-    print(f"{title:^70}")
-    print("=" * 70)
-    print(f"Matches: {results.get('n_matches', 0):,} | Folds: {results.get('n_folds', 0)}")
-
+def _print_iid_metric_block(metrics: dict[str, float]) -> None:
+    """Print one IID metric block (classification/regression/distributional/
+    serve/chain/line-calibration). Each sub-section is gated on the presence
+    of a sentinel key so this works for both top-level and per-segment dicts.
+    """
     # Classification family (match-win prob comparable to the production classifier)
     print("\n[Classification — match win prob]")
     print(
@@ -1733,7 +1728,7 @@ def print_iid_projection_summary(results: dict[str, Any], name: str | None = Non
         f"err_80+={metrics.get('error_rate_80plus', 0):.3f}"
     )
 
-    # Regression family (expected games for player A — comparable to per-player regression)
+    # Regression family (expected games for player A)
     print("\n[Regression — expected games for player A]")
     print(
         f"  mae={metrics.get('mae', 0):.3f}  "
@@ -1774,6 +1769,7 @@ def print_iid_projection_summary(results: dict[str, Any], name: str | None = Non
                 f"  clip bounds=[{metrics['serve_clip_min']:.2f}, "
                 f"{metrics['serve_clip_max']:.2f}]{extras}"
             )
+
     # Chain layer diagnostics
     if "hold_bias" in metrics:
         print("\n[Chain diagnostics]")
@@ -1793,7 +1789,7 @@ def print_iid_projection_summary(results: dict[str, Any], name: str | None = Non
             f"bias={metrics['tiebreak_rate_bias']:+.4f}"
         )
 
-    # Line calibration (signed: pred - actual; positive = model over-predicts this side)
+    # Line calibration: total games (signed = pred - actual; positive = model over-predicts the over)
     total_keys = sorted(
         k for k in metrics
         if k.startswith("iid_line_total_") and k.endswith("_signed")
@@ -1815,6 +1811,7 @@ def print_iid_projection_summary(results: dict[str, Any], name: str | None = Non
                 f"cal_max={metrics.get('iid_total_cal_max', 0):.3f}"
             )
 
+    # Line calibration: spread
     spread_keys = sorted(
         k for k in metrics
         if k.startswith("iid_line_spread_") and k.endswith("_signed")
@@ -1835,6 +1832,39 @@ def print_iid_projection_summary(results: dict[str, Any], name: str | None = Non
                 f"    cal={metrics['iid_spread_cal']:.3f}  "
                 f"cal_max={metrics.get('iid_spread_cal_max', 0):.3f}"
             )
+
+
+def print_iid_projection_summary(results: dict[str, Any], name: str | None = None) -> None:
+    """Print formatted summary of IID projection results.
+
+    Three sections — ALL (top-level fold-averaged metrics), then BO3 and BO5
+    drawn from the segment metrics produced by IIDProjectionDiagnostics. Each
+    section runs the same metric block; per-format chain biases let you see
+    whether closeness/blowout bias differs across formats.
+    """
+    metrics = results.get("metrics", {})
+    diagnostics = results.get("diagnostics")
+
+    print("\n" + "=" * 70)
+    title = name or "IID PROJECTION RESULTS"
+    print(f"{title:^70}")
+    print("=" * 70)
+    print(f"Matches: {results.get('n_matches', 0):,} | Folds: {results.get('n_folds', 0)}")
+
+    bo_segments: dict[str, dict[str, float]] = {}
+    if diagnostics is not None:
+        bo_segments = diagnostics.segments.get("best_of", {})
+
+    sections: list[tuple[str, dict[str, float]]] = [("ALL", metrics)]
+    for value in ("3", "5"):
+        if value in bo_segments:
+            sections.append((f"BO{value}", bo_segments[value]))
+
+    for tag, m in sections:
+        print(f"\n{'#' * 70}")
+        print(f"### {tag}")
+        print(f"{'#' * 70}")
+        _print_iid_metric_block(m)
 
     print(f"\nMLflow run: {results.get('run_id', 'N/A')}")
     print("=" * 70 + "\n")

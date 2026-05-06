@@ -345,8 +345,25 @@ class IIDProjectionRunner:
                         preloaded_match_features=preloaded_match_features,
                     ))
                 all_metrics.append(metrics)
+                pred_cols = [
+                    "match_uid", "circuit", "surface", "round", "best_of",
+                    "pts_service_pts_won", "pts_service_pts_played",
+                    "opp_pts_service_pts_won", "opp_pts_service_pts_played",
+                    "svc_games_played", "svc_bp_saved", "svc_bp_faced",
+                    "opp_svc_games_played", "opp_svc_bp_saved", "opp_svc_bp_faced",
+                    "player_set1_games", "player_set2_games",
+                    "player_set3_games", "player_set4_games", "player_set5_games",
+                    "opp_set1_games", "opp_set2_games",
+                    "opp_set3_games", "opp_set4_games", "opp_set5_games",
+                    "player_set1_tiebreak", "player_set2_tiebreak",
+                    "player_set3_tiebreak", "player_set4_tiebreak", "player_set5_tiebreak",
+                    "opp_set1_tiebreak", "opp_set2_tiebreak",
+                    "opp_set3_tiebreak", "opp_set4_tiebreak", "opp_set5_tiebreak",
+                ]
                 all_predictions.append({
-                    "df": test_df.select(["match_uid", "circuit", "surface", "round", "best_of"]),
+                    "df": test_df.select(
+                        [c for c in pred_cols if c in test_df.columns]
+                    ),
                     "out": out,
                     "y_won": y_won,
                     "y_games_a": y_games_a,
@@ -384,6 +401,8 @@ class IIDProjectionRunner:
                 all_predictions,
                 total_lines=self.config.metrics.total_lines,
                 spread_lines=self.config.metrics.spread_lines,
+                clip_min=self.config.serve_model.clip_min,
+                clip_max=self.config.serve_model.clip_max,
             )
             avg_metrics.update(diagnostic_results.metrics)
 

@@ -393,6 +393,7 @@ def _build_predictions_frame(
         "circuit": test_df["circuit"],
         "surface": test_df["surface"],
         "round": test_df["round"],
+        "best_of": test_df["best_of"].cast(pl.Int64),
         "p_match_win_a": out.distribution.p_match_win_a,
         "_row_idx": np.arange(len(out.distribution.p_match_win_a), dtype=np.int64),
         "actual_total": (
@@ -447,6 +448,7 @@ def _settle_totals(preds: pl.DataFrame, totals: pl.DataFrame, dist) -> pl.DataFr
                 "circuit": r["circuit"],
                 "surface": r["surface"],
                 "round": r["round"],
+                "best_of": int(r["best_of"]),
                 "market": "total_games",
                 "line": line,
                 "side": side,
@@ -528,6 +530,7 @@ def _settle_spreads(preds: pl.DataFrame, spreads: pl.DataFrame, dist) -> pl.Data
                 "circuit": r["circuit"],
                 "surface": r["surface"],
                 "round": r["round"],
+                "best_of": int(r["best_of"]),
                 "market": "game_spread",
                 "line": points,
                 "side": side,  # "p1" or "p2" relative to the event_map ordering
@@ -724,18 +727,33 @@ def _print_view(label: str, df: pl.DataFrame, edge_col: str) -> None:
 
 def print_backtest_summary(csv_path: Path) -> None:
     raw = pl.read_csv(csv_path)
-    all_lines = _dedupe_best_price(raw)
-    main_lines = _dedupe_best_price(_select_main_line(raw))
 
     print(f"\nBacktest output: {csv_path}")
-    print(f"Raw bet rows (all books):                          {len(raw)}")
-    print(f"Best-price per (match × market × line × side):     {len(all_lines)}")
-    print(f"Best-price on main (median-offered) line only:     {len(main_lines)}")
+    print(f"Raw bet rows (all books): {len(raw)}")
 
-    # Primary view: bet the main market line, evaluate vs no-vig book probability.
-    _print_view("MAIN LINE — NO-VIG", main_lines, "edge_novig")
-    # Operational realism: same bets, raw vig included.
-    _print_view("MAIN LINE — RAW", main_lines, "edge")
-    # Diagnostic: how the model performs across every offered line.
-    _print_view("ALL LINES — NO-VIG", all_lines, "edge_novig")
-    _print_view("ALL LINES — RAW", all_lines, "edge")
+    # Three sections: combined plus bo3 / bo5 broken out separately. Main lines
+    # are recomputed per-filter so the median-line selection reflects only the
+    # matches in that section (bo5 main lines come from bo5 matches alone).
+    sections = [
+        ("ALL", raw),
+        ("BO3", raw.filter(pl.col("best_of") == 3)),
+        ("BO5", raw.filter(pl.col("best_of") == 5)),
+    ]
+    for tag, sub_raw in sections:
+        if len(sub_raw) == 0:
+            print(f"\n{'#' * 70}\n### {tag}: no bets\n{'#' * 70}")
+            continue
+        sub_all = _dedupe_best_price(sub_raw)
+        sub_main = _dedupe_best_price(_select_main_line(sub_raw))
+        print(f"\n{'#' * 70}")
+        print(f"### {tag}")
+        print(
+            f"### Raw rows: {len(sub_raw)} | "
+            f"Best-price all-line: {len(sub_all)} | "
+            f"Main-line: {len(sub_main)}"
+        )
+        print(f"{'#' * 70}")
+        _print_view(f"{tag} — MAIN LINE — NO-VIG", sub_main, "edge_novig")
+        _print_view(f"{tag} — MAIN LINE — RAW", sub_main, "edge")
+        _print_view(f"{tag} — ALL LINES — NO-VIG", sub_all, "edge_novig")
+        _print_view(f"{tag} — ALL LINES — RAW", sub_all, "edge")

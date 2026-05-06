@@ -13,8 +13,15 @@ import numpy as np
 import polars as pl
 
 from mvp.projection.iid.chain import MatchDistribution
-from mvp.projection.iid.metrics import compute_iid_metrics
+from mvp.projection.iid.metrics import (
+    compute_hold_diagnostics,
+    compute_iid_metrics,
+    compute_serve_diagnostics,
+    compute_set_score_diagnostics,
+    compute_tiebreak_diagnostics,
+)
 from mvp.projection.iid.projector import ProjectionOutput
+from mvp.projection.iid.serve_model import SERVE_PROB_MAX, SERVE_PROB_MIN
 
 
 @dataclass
@@ -42,11 +49,14 @@ class IIDProjectionDiagnostics:
         *,
         total_lines: list[float] | None = None,
         spread_lines: list[float] | None = None,
+        clip_min: float = SERVE_PROB_MIN,
+        clip_max: float = SERVE_PROB_MAX,
     ) -> IIDProjectionDiagnosticResults:
         """Compute segmented metrics from accumulated fold predictions.
 
         Each fold prediction dict must have keys: `df`, `out`, `y_won`,
-        `y_games_a`, `y_games_b`. The `df` carries the segment columns.
+        `y_games_a`, `y_games_b`. The `df` carries the segment columns plus
+        the inputs needed by the chain-layer diagnostic functions.
         """
         if not predictions:
             return IIDProjectionDiagnosticResults(segments={})
@@ -69,7 +79,8 @@ class IIDProjectionDiagnostics:
                 if not mask.any():
                     continue
                 sub_out = _slice_output(combined_out, mask)
-                seg_metrics[str(value)] = compute_iid_metrics(
+                sub_df = combined_df.filter(pl.Series(mask))
+                m = compute_iid_metrics(
                     sub_out,
                     combined_y_won[mask],
                     combined_y_a[mask],
@@ -77,6 +88,17 @@ class IIDProjectionDiagnostics:
                     total_lines=total_lines,
                     spread_lines=spread_lines,
                 )
+                # Chain-layer diagnostics — same set the runner computes at
+                # the top level, but per-segment so the user can see whether
+                # serve/hold/set-score/tiebreak biases differ across bo3 vs
+                # bo5 (or per circuit/surface).
+                m.update(compute_serve_diagnostics(
+                    sub_out, sub_df, clip_min=clip_min, clip_max=clip_max,
+                ))
+                m.update(compute_hold_diagnostics(sub_out, sub_df))
+                m.update(compute_set_score_diagnostics(sub_out, sub_df))
+                m.update(compute_tiebreak_diagnostics(sub_out, sub_df))
+                seg_metrics[str(value)] = m
             segments[seg_col] = seg_metrics
 
         return IIDProjectionDiagnosticResults(segments=segments)
