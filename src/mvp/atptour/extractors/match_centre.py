@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 import polars as pl
-import requests
+from curl_cffi import requests
 
 from mvp.atptour.extractors.match_beats_decrypt import decrypt_response
 from mvp.atptour.tournament import Tournament
@@ -232,7 +232,7 @@ class MatchCentreExtractor(BaseExtractor):
                 return None
 
             return decrypt_response(encrypted, last_modified)
-        except (requests.RequestException, ValueError, KeyError):
+        except (requests.RequestsError, ValueError, KeyError):
             return None
 
     def _fetch_data(
@@ -251,6 +251,6 @@ class MatchCentreExtractor(BaseExtractor):
                 return None
 
             return decrypt_response(encrypted, last_modified)
-        except (requests.RequestException, ValueError, KeyError) as e:
+        except (requests.RequestsError, ValueError, KeyError) as e:
             logger.warning("Fetch failed for %s: %s", endpoint, e)
             return None

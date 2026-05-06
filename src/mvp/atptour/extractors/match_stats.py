@@ -3,7 +3,7 @@
 import logging
 
 import polars as pl
-import requests
+from curl_cffi import requests
 
 from mvp.atptour.tournament import Tournament
 from mvp.common.base_extractor import BaseExtractor
@@ -61,7 +61,7 @@ class MatchStatsExtractor(BaseExtractor):
 
             try:
                 data = self.fetch_json(url)
-            except requests.RequestException as e:
+            except requests.RequestsError as e:
                 logger.warning(
                     "Hawkeye request failed for %s match %s: %s",
                     tournament.logging_id,

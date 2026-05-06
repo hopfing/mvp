@@ -4,7 +4,7 @@ import logging
 import random
 import time
 
-import requests
+from curl_cffi import requests
 
 from mvp.common.base_job import BaseJob
 
@@ -20,7 +20,7 @@ class BaseExtractor(BaseJob):
         self.session = self._create_session()
 
     def _create_session(self) -> requests.Session:
-        session = requests.Session()
+        session = requests.Session(impersonate="chrome131")
         session.headers.update(
             {
                 "User-Agent": (
@@ -55,7 +55,7 @@ class BaseExtractor(BaseJob):
                 )
                 response.raise_for_status()
                 return response
-            except requests.RequestException as e:
+            except requests.RequestsError as e:
                 logger.warning("Fetch failed: %s", e)
                 min_delay *= 1.25
                 max_delay *= 1.25
