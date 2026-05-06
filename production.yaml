@@ -10,11 +10,10 @@ winner:
     train_date_range:
       end: '2025-12-31'
       start: '2020-01-01'
-    trained_at: '2026-03-20T17:56:42.942474+00:00'
+    trained_at: '2026-03-31T19:23:08.770504+00:00'
   history: []
   voters:
   - artifact: data/models/lr_fs_15f_260331.joblib
     config: models/voters/lr_fs_15f_260331.yaml
     name: lr_fs_15f_260331
     scoped: false
-  
