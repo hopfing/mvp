@@ -14,13 +14,24 @@ logger = logging.getLogger(__name__)
 class BaseExtractor(BaseJob):
     """Base extractor with HTTP session, retry, and backoff."""
 
-    def __init__(self, domain: str, data_root=None, timeout: int = 30, run_at=None):
+    def __init__(
+        self,
+        domain: str,
+        data_root=None,
+        timeout: int = 30,
+        run_at=None,
+        impersonate: str | None = "chrome131",
+    ):
         super().__init__(domain=domain, data_root=data_root, run_at=run_at)
         self.timeout = timeout
+        self.impersonate = impersonate
         self.session = self._create_session()
 
     def _create_session(self) -> requests.Session:
-        session = requests.Session(impersonate="chrome131")
+        if self.impersonate:
+            session = requests.Session(impersonate=self.impersonate)
+        else:
+            session = requests.Session()
         session.headers.update(
             {
                 "User-Agent": (

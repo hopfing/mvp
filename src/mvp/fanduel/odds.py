@@ -301,7 +301,12 @@ class FanDuelOddsScraper(BaseExtractor):
     """Scraper for FanDuel tennis odds."""
 
     def __init__(self, data_root=None, run_at=None):
-        super().__init__(domain="fanduel", data_root=data_root, run_at=run_at)
+        super().__init__(
+            domain="fanduel",
+            data_root=data_root,
+            run_at=run_at,
+            impersonate=None,
+        )
 
     def _discover_access_key(self) -> str:
         """Fetch HTML shell, locate main.*.js, fetch it, extract the _ak const."""
