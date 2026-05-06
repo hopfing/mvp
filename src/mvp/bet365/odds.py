@@ -128,6 +128,22 @@ def _classify_circuit(tournament_name: str) -> str | None:
     return None
 
 
+def _fix_mojibake(text: str) -> str:
+    """Repair UTF-8 bytes that Chrome's CDP decoded as Latin-1.
+
+    Why: bet365 occasionally serves a localized response variant whose
+    headers omit charset; CDP returns the body as a Latin-1-decoded string,
+    which we then write back as UTF-8 (double-encoding `é` to bytes
+    `c3 83 c2 a9`). Round-tripping latin-1 -> utf-8 recovers the originals.
+    """
+    if "Ã" not in text and "Â" not in text:
+        return text
+    try:
+        return text.encode("latin-1").decode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return text
+
+
 def _parse_pipe_response(
     raw: str,
     fetched_at: datetime,
@@ -478,6 +494,8 @@ class Bet365OddsScraper(BaseJob):
             except Exception:
                 logger.warning("Skipping unreadable raw file: %s", raw_path.name)
                 continue
+
+            raw_text = _fix_mojibake(raw_text)
 
             # B365 raw files have tab in name: odds_j10_20260330_130003.txt
             stem = raw_path.stem

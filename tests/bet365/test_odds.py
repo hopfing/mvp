@@ -198,3 +198,46 @@ class TestParsePipeResponse:
         entries = _parse_pipe_response(response, now)
         assert len(entries) == 2
         assert all(e.circuit == "challenger" for e in entries)
+
+
+# -- Mojibake fix --
+
+
+class TestFixMojibake:
+    def test_recovers_accented_player_name(self):
+        from mvp.bet365.odds import _fix_mojibake
+
+        assert _fix_mojibake("JosÃ© Pereira") == "José Pereira"
+
+    def test_recovers_localized_tournament(self):
+        from mvp.bet365.odds import _fix_mojibake
+
+        assert (
+            _fix_mojibake("Challenger de Santos - 1Â° ronda")
+            == "Challenger de Santos - 1° ronda"
+        )
+        assert (
+            _fix_mojibake("ATP Madrid - ClasificaciÃ³n")
+            == "ATP Madrid - Clasificación"
+        )
+        assert _fix_mojibake("ATP MÃºnich - Semifinales") == "ATP Múnich - Semifinales"
+
+    def test_clean_text_passthrough(self):
+        from mvp.bet365.odds import _fix_mojibake
+
+        # ASCII-only — no Ã/Â markers, returned unchanged.
+        assert _fix_mojibake("Carlos Alcaraz") == "Carlos Alcaraz"
+        assert _fix_mojibake("ATP Madrid - Round 1") == "ATP Madrid - Round 1"
+
+    def test_already_correct_unicode_passthrough(self):
+        from mvp.bet365.odds import _fix_mojibake
+
+        # Already-correct accents (no mojibake markers) — unchanged.
+        assert _fix_mojibake("José Pereira") == "José Pereira"
+
+    def test_undecodable_falls_back_to_input(self):
+        from mvp.bet365.odds import _fix_mojibake
+
+        # 'Ã' followed by a char that doesn't form valid UTF-8 — keep as-is.
+        s = "Ãx"
+        assert _fix_mojibake(s) == s
