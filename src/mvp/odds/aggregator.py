@@ -12,7 +12,7 @@ BOOKS = ["dk", "br", "mgm", "b365", "fd"]
 
 # Single source of truth for the timing thresholds used across the
 # analysis layer. The values are hours before the first-live anchor.
-THRESHOLD_HOURS: tuple[int, ...] = (1, 3, 6, 9, 12, 18)
+THRESHOLD_HOURS: tuple[int, ...] = (1, 3, 6, 9, 12, 15, 18)
 THRESHOLD_AGGS: tuple[str, ...] = ("best", "worst", "med")
 
 
