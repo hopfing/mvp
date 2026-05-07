@@ -12,7 +12,11 @@ from typing import Any
 import numpy as np
 import polars as pl
 
-from mvp.projection.iid.chain import MatchDistribution
+from mvp.projection.iid.chain import (
+    SET_SCORE_LABELS,
+    MatchDistribution,
+    set_score_distribution,
+)
 from mvp.projection.iid.metrics import (
     compute_hold_diagnostics,
     compute_iid_metrics,
@@ -69,8 +73,20 @@ class IIDProjectionDiagnostics:
         # Concatenate the per-fold projection outputs into a single combined ProjectionOutput
         combined_out = _concat_outputs([p["out"] for p in predictions])
 
+        # Tag each match with quartile buckets for chain-predicted P(tight set)
+        # and P(blowout set). Slicing on the chain's own predicted mass (rather
+        # than realized outcomes) is leakage-free, so the per-bucket tight/
+        # blowout biases measure calibration at each prediction level.
+        combined_df = _add_pred_shape_buckets(combined_df, combined_out)
+
         segments: dict[str, dict[str, dict[str, float]]] = {}
-        for seg_col in ("circuit", "surface", "best_of"):
+        for seg_col in (
+            "circuit",
+            "surface",
+            "best_of",
+            "pred_tight_bucket",
+            "pred_blowout_bucket",
+        ):
             if seg_col not in combined_df.columns:
                 continue
             seg_metrics: dict[str, dict[str, float]] = {}
@@ -98,6 +114,7 @@ class IIDProjectionDiagnostics:
                 m.update(compute_hold_diagnostics(sub_out, sub_df))
                 m.update(compute_set_score_diagnostics(sub_out, sub_df))
                 m.update(compute_tiebreak_diagnostics(sub_out, sub_df))
+                m["segment_n"] = float(int(mask.sum()))
                 seg_metrics[str(value)] = m
             segments[seg_col] = seg_metrics
 
@@ -152,6 +169,57 @@ def _concat_outputs(outputs: list[ProjectionOutput]) -> ProjectionOutput:
         h_a=np.concatenate([o.h_a for o in outputs]),
         h_b=np.concatenate([o.h_b for o in outputs]),
         t_ab=np.concatenate([o.t_ab for o in outputs]),
+    )
+
+
+_TIGHT_LABELS = frozenset({"7-5", "5-7", "7-6", "6-7"})
+_BLOWOUT_LABELS = frozenset({"6-0", "0-6", "6-1", "1-6"})
+
+
+def _add_pred_shape_buckets(
+    df: pl.DataFrame, out: ProjectionOutput
+) -> pl.DataFrame:
+    """Add Q1..Q4 buckets for chain-predicted P(tight set) and P(blowout set).
+
+    Tight = {7-5, 5-7, 7-6, 6-7}; blowout = {6-0, 0-6, 6-1, 1-6} — same
+    indices `compute_set_score_diagnostics` aggregates. Buckets are
+    equal-count quartiles via ordinal rank, so labels are MLflow-safe.
+    """
+    pmf = set_score_distribution(out.h_a, out.h_b, out.t_ab)
+    tight_idx = [
+        i for i, lab in enumerate(SET_SCORE_LABELS) if lab in _TIGHT_LABELS
+    ]
+    blowout_idx = [
+        i for i, lab in enumerate(SET_SCORE_LABELS) if lab in _BLOWOUT_LABELS
+    ]
+    pred_tight = pmf[:, tight_idx].sum(axis=1)
+    pred_blowout = pmf[:, blowout_idx].sum(axis=1)
+
+    df = df.with_columns(
+        pl.Series("_pred_tight_p", pred_tight),
+        pl.Series("_pred_blowout_p", pred_blowout),
+    )
+    return df.with_columns(
+        _quartile_bucket("_pred_tight_p").alias("pred_tight_bucket"),
+        _quartile_bucket("_pred_blowout_p").alias("pred_blowout_bucket"),
+    )
+
+
+def _quartile_bucket(col_name: str) -> pl.Expr:
+    """Equal-count Q1..Q4 bucket via ordinal rank. Null inputs → null."""
+    rank_expr = pl.col(col_name).rank(method="ordinal")
+    n_valid = pl.col(col_name).is_not_null().sum()
+    idx = ((rank_expr - 1) * 4 // n_valid + 1).clip(1, 4)
+    return (
+        pl.when(pl.col(col_name).is_null())
+        .then(None)
+        .when(idx == 1)
+        .then(pl.lit("Q1"))
+        .when(idx == 2)
+        .then(pl.lit("Q2"))
+        .when(idx == 3)
+        .then(pl.lit("Q3"))
+        .otherwise(pl.lit("Q4"))
     )
 
 

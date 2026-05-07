@@ -1866,6 +1866,28 @@ def print_iid_projection_summary(results: dict[str, Any], name: str | None = Non
         print(f"{'#' * 70}")
         _print_iid_metric_block(m)
 
+    if diagnostics is not None:
+        for seg_col, header in (
+            ("pred_tight_bucket", "PRED P(TIGHT SET) QUARTILES"),
+            ("pred_blowout_bucket", "PRED P(BLOWOUT SET) QUARTILES"),
+        ):
+            seg = diagnostics.segments.get(seg_col, {})
+            if not seg:
+                continue
+            print(f"\n{'#' * 70}")
+            print(f"### {header}")
+            print(f"{'#' * 70}")
+            for value in sorted(seg.keys()):
+                m = seg[value]
+                n = int(m.get("segment_n", 0))
+                print(
+                    f"  {value:<24} N={n:>5}  "
+                    f"hold={m.get('hold_bias', 0):+.4f}/{m.get('hold_mae', 0):.4f}  "
+                    f"tight={m.get('set_score_bias_tight', 0):+.4f}  "
+                    f"blowout={m.get('set_score_bias_blowout', 0):+.4f}  "
+                    f"tb={m.get('tiebreak_rate_bias', 0):+.4f}"
+                )
+
     print(f"\nMLflow run: {results.get('run_id', 'N/A')}")
     print("=" * 70 + "\n")
 
