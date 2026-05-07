@@ -13,18 +13,26 @@ def get_filter_feature_specs(filters: dict[str, Any] | None) -> list[str]:
     """Return filter column names that are computed features (not raw columns).
 
     These must be included in the feature computation so filter columns
-    are available even when they aren't selected model features.
+    are available even when they aren't selected model features. Filter
+    keys that already exist as raw columns in matches.parquet are skipped
+    even when they share a name with a registered passthrough feature
+    (e.g. `best_of`, `surface`) — re-loading them would duplicate-join.
     """
     if not filters:
         return []
 
     import mvp.model.features  # noqa: F401 - triggers registration
+    from mvp.common.base_job import get_data_root
     from mvp.model.registry import get_registry
 
+    matches_path = get_data_root() / "aggregate" / "atptour" / "matches.parquet"
+    raw_cols = set(pl.scan_parquet(matches_path).collect_schema().names())
     registry = get_registry()
     known = set(registry.list_features())
     specs = []
     for col in filters:
+        if col in raw_cols:
+            continue
         # Check if the column (with player_ prefix stripped) is a registered feature
         if col.startswith("player_"):
             base = col[7:]
