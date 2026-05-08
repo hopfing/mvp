@@ -413,6 +413,11 @@ def match_distribution(
     for (sa, sb), vec in set_outcome_probs.items():
         if sa > sb:
             p_match_win_a += vec
+    # Floating-point accumulation can overshoot 1.0 by ~1e-16 for matches
+    # where one player's win prob is mathematically 1.0; clip to enforce
+    # the invariant before downstream consumers (e.g. sklearn's strict
+    # brier_score_loss) reject the array.
+    np.clip(p_match_win_a, 0.0, 1.0, out=p_match_win_a)
 
     total_idx = np.arange(max_total + 1, dtype=np.float64)
     expected_total_games = (total_games_pmf * total_idx).sum(axis=1)
