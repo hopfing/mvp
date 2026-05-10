@@ -1975,12 +1975,14 @@ def cmd_live(args: argparse.Namespace) -> int:
     from mvp.pipeline_report import PipelineReport
     report = PipelineReport()
 
-    # Start odds fetch in background (fully independent of pipeline).
-    odds_pool = ThreadPoolExecutor(max_workers=len(BOOK_REGISTRY))
-    book_futures = {
-        b.code: odds_pool.submit(_fetch_book_quiet, b, pipeline_run_at)
-        for b in BOOK_REGISTRY
-    }
+    # PAUSED: book scraping disabled to decouple scraping IP from betting IP
+    # until residential proxy is in place. Re-enable by uncommenting.
+    # # Start odds fetch in background (fully independent of pipeline).
+    # odds_pool = ThreadPoolExecutor(max_workers=len(BOOK_REGISTRY))
+    # book_futures = {
+    #     b.code: odds_pool.submit(_fetch_book_quiet, b, pipeline_run_at)
+    #     for b in BOOK_REGISTRY
+    # }
 
     errors: list[str] = []
     predictions = None
@@ -2039,7 +2041,8 @@ def cmd_live(args: argparse.Namespace) -> int:
         errors.append(f"extract/aggregate: {e}")
         report.set_errors(errors)
         report.save(get_data_root() / "pipeline" / "runs.jsonl")
-        odds_pool.shutdown(wait=False)
+        # PAUSED — see Stage 0
+        # odds_pool.shutdown(wait=False)
         raise RuntimeError(
             f"Pipeline cannot continue — extract/aggregate failed: {e}"
         )
@@ -2088,15 +2091,16 @@ def cmd_live(args: argparse.Namespace) -> int:
                 errors.append(f"{section} predictions: {e}")
 
     # --- Stage 4: Odds fetching ---
-    for book in BOOK_REGISTRY:
-        try:
-            n = book_futures[book.code].result(timeout=30)
-            print(f"Fetched {n} {book.label} moneyline odds entries")
-            report.record_book_fetched(book.code, n)
-        except Exception as e:
-            logger.error("%s odds fetch failed: %s", book.label, e)
-            errors.append(f"{book.label} odds fetch: {e}")
-            report.record_book_fetched(book.code, 0)
+    # PAUSED — see Stage 0
+    # for book in BOOK_REGISTRY:
+    #     try:
+    #         n = book_futures[book.code].result(timeout=30)
+    #         print(f"Fetched {n} {book.label} moneyline odds entries")
+    #         report.record_book_fetched(book.code, n)
+    #     except Exception as e:
+    #         logger.error("%s odds fetch failed: %s", book.label, e)
+    #         errors.append(f"{book.label} odds fetch: {e}")
+    #         report.record_book_fetched(book.code, 0)
 
     # --- Stage 5: Event mapping ---
     try:
@@ -2220,7 +2224,8 @@ def cmd_live(args: argparse.Namespace) -> int:
                 logger.error("%s odds lookup failed: %s", book.label, e)
                 errors.append(f"{book.label} odds lookup: {e}")
 
-    odds_pool.shutdown(wait=False)
+    # PAUSED — see Stage 0
+    # odds_pool.shutdown(wait=False)
 
     # --- Stage 7: Log unmapped predictions ---
     if predictions is not None and len(predictions) > 0 and existing_map is not None:
