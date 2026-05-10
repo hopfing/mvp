@@ -759,6 +759,8 @@ class ServeDiscoverySelector:
     def _score_cv_chain(
         self, match_level: list[str], point_level: list[str],
     ) -> float:
+        import gc
+
         assert self._match_df is not None and self._fs_match_splits is not None, (
             "_score_cv_chain called before _prepare_match_data"
         )
@@ -808,6 +810,14 @@ class ServeDiscoverySelector:
                     spread_lines=list(self.config.metrics.spread_lines),
                 )
             )
+            # Force release: chain-DP intermediates, predict_state_fn caches on
+            # `model`, and per-fold polars filter copies otherwise rely on
+            # CPython's heuristic GC + the polars/Rust allocator's pool to
+            # release. Explicit del + gc.collect() drops references promptly so
+            # the allocator has the chance to return pages between folds.
+            del model, p_a_fn, p_b_fn, p_a, p_b, dist
+            del preloaded_feats, preloaded_pts, train_df, test_df
+            gc.collect()
         return float(np.mean(fold_scores))
 
     def _final_train_eval(
