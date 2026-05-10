@@ -55,6 +55,12 @@ BOOK_REGISTRY: list[BookConfig] = [
                "Bet365OddsMatcher", "Bet365OddsScraper"),
 ]
 
+# Books currently allowed to scrape in the live pipeline. DK and FD are
+# excluded because their edges 403 the Mullvad-IL exit IP; re-add when a
+# residential proxy is wired in for them. CZR is excluded because the
+# betting account was banned and the API is no longer relevant.
+_SCRAPE_ENABLED_BOOKS: set[str] = {"br", "mgm", "b365"}
+
 logger = logging.getLogger(__name__)
 
 
@@ -1975,14 +1981,15 @@ def cmd_live(args: argparse.Namespace) -> int:
     from mvp.pipeline_report import PipelineReport
     report = PipelineReport()
 
-    # PAUSED: book scraping disabled to decouple scraping IP from betting IP
-    # until residential proxy is in place. Re-enable by uncommenting.
-    # # Start odds fetch in background (fully independent of pipeline).
-    # odds_pool = ThreadPoolExecutor(max_workers=len(BOOK_REGISTRY))
-    # book_futures = {
-    #     b.code: odds_pool.submit(_fetch_book_quiet, b, pipeline_run_at)
-    #     for b in BOOK_REGISTRY
-    # }
+    # Start odds fetch in background (fully independent of pipeline).
+    # Filtered to _SCRAPE_ENABLED_BOOKS so disabled books don't fire requests
+    # against egresses where they're known to fail (DK/FD via Mullvad).
+    enabled_books = [b for b in BOOK_REGISTRY if b.code in _SCRAPE_ENABLED_BOOKS]
+    odds_pool = ThreadPoolExecutor(max_workers=max(1, len(enabled_books)))
+    book_futures = {
+        b.code: odds_pool.submit(_fetch_book_quiet, b, pipeline_run_at)
+        for b in enabled_books
+    }
 
     errors: list[str] = []
     predictions = None
@@ -2041,8 +2048,7 @@ def cmd_live(args: argparse.Namespace) -> int:
         errors.append(f"extract/aggregate: {e}")
         report.set_errors(errors)
         report.save(get_data_root() / "pipeline" / "runs.jsonl")
-        # PAUSED — see Stage 0
-        # odds_pool.shutdown(wait=False)
+        odds_pool.shutdown(wait=False)
         raise RuntimeError(
             f"Pipeline cannot continue — extract/aggregate failed: {e}"
         )
@@ -2091,16 +2097,17 @@ def cmd_live(args: argparse.Namespace) -> int:
                 errors.append(f"{section} predictions: {e}")
 
     # --- Stage 4: Odds fetching ---
-    # PAUSED — see Stage 0
-    # for book in BOOK_REGISTRY:
-    #     try:
-    #         n = book_futures[book.code].result(timeout=30)
-    #         print(f"Fetched {n} {book.label} moneyline odds entries")
-    #         report.record_book_fetched(book.code, n)
-    #     except Exception as e:
-    #         logger.error("%s odds fetch failed: %s", book.label, e)
-    #         errors.append(f"{book.label} odds fetch: {e}")
-    #         report.record_book_fetched(book.code, 0)
+    for book in BOOK_REGISTRY:
+        if book.code not in _SCRAPE_ENABLED_BOOKS:
+            continue
+        try:
+            n = book_futures[book.code].result(timeout=30)
+            print(f"Fetched {n} {book.label} moneyline odds entries")
+            report.record_book_fetched(book.code, n)
+        except Exception as e:
+            logger.error("%s odds fetch failed: %s", book.label, e)
+            errors.append(f"{book.label} odds fetch: {e}")
+            report.record_book_fetched(book.code, 0)
 
     # --- Stage 5: Event mapping ---
     try:
@@ -2224,8 +2231,7 @@ def cmd_live(args: argparse.Namespace) -> int:
                 logger.error("%s odds lookup failed: %s", book.label, e)
                 errors.append(f"{book.label} odds lookup: {e}")
 
-    # PAUSED — see Stage 0
-    # odds_pool.shutdown(wait=False)
+    odds_pool.shutdown(wait=False)
 
     # --- Stage 7: Log unmapped predictions ---
     if predictions is not None and len(predictions) > 0 and existing_map is not None:
