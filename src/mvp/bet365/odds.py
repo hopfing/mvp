@@ -566,3 +566,18 @@ class Bet365OddsScraper(BaseJob):
         return n
 
 
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    from collections import Counter
+    scraper = Bet365OddsScraper()
+    entries, _ = scraper.fetch_all_odds()
+    print(f"\nTotal: {len(entries)} entries")
+    market_counts = Counter(e.market for e in entries)
+    for market, count in market_counts.most_common():
+        sample = next(e for e in entries if e.market == market)
+        print(f"  {market:20s}: {count:4d} entries"
+              f"  e.g. {sample.player_name} @ {sample.odds}")
+    tournament_counts = Counter(e.tournament for e in entries)
+    print(f"\nTournaments: {len(tournament_counts)}")
+    for tourn, count in tournament_counts.most_common():
+        print(f"  {tourn:30s}: {count:4d}")
