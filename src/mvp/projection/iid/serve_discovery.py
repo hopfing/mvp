@@ -11,6 +11,7 @@ peak memory proportional to (rows × |selected| + |point_features|) rather than
 
 import logging
 import math
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -32,6 +33,8 @@ from mvp.model.engine import (
     build_column_name,
     make_fs_engine,
     parse_feature_spec,
+    process_rss_mb,
+    system_mem_used_pct,
 )
 from mvp.model.features._score_helpers import total_games_lost, total_games_won
 from mvp.model.metrics import compute_metrics
@@ -353,6 +356,8 @@ class ServeDiscoverySelector:
                     pl_feats = list(_pl) if g == "match" else _pl + [c]
                     return g, c, self._score_cv_chain(ml, pl_feats)
 
+                last_log_t = time.perf_counter()
+                last_log_eval = 0
                 with ThreadPoolExecutor(max_workers=self.config.n_parallel_candidates) as executor:
                     futures = {executor.submit(_score_one, gc): gc for gc in to_score}
                     for future in as_completed(futures):
@@ -365,12 +370,29 @@ class ServeDiscoverySelector:
                             best_cand = cand
                             best_grain = grain
                             if hasattr(bar, "set_postfix"):
-                                bar.set_postfix(best=f"{best_new_score:.6f}", feat=f"{cand}[{grain}]", refresh=False)
+                                bar.set_postfix(
+                                    best=f"{best_new_score:.6f}",
+                                    feat=f"{cand}[{grain}]",
+                                    refresh=False,
+                                )
                         if (
                             self.checkpoint_path
                             and self.checkpoint_interval > 0
                             and eval_count % self.checkpoint_interval == 0
                         ):
+                            now = time.perf_counter()
+                            n_since = eval_count - last_log_eval
+                            sec_per_it = (now - last_log_t) / max(n_since, 1)
+                            rss = process_rss_mb()
+                            sys_pct = system_mem_used_pct()
+                            logger.info(
+                                "  [diag] round %d eval=%d/%d s/it=%.2f rss=%s sys=%s",
+                                round_idx, eval_count, len(to_score), sec_per_it,
+                                f"{rss:.0f}MB" if rss is not None else "n/a",
+                                f"{sys_pct}%" if sys_pct is not None else "n/a",
+                            )
+                            last_log_t = now
+                            last_log_eval = eval_count
                             self._save_checkpoint(
                                 started_at=started_at,
                                 completed_rounds=[
@@ -391,6 +413,8 @@ class ServeDiscoverySelector:
                         feat=f"{best_cand}[{best_grain}]",
                         refresh=False,
                     )
+                last_log_t = time.perf_counter()
+                last_log_eval = 0
                 for grain, cand in bar:
                     if cand in this_round_scores:
                         score = this_round_scores[cand]
@@ -413,6 +437,19 @@ class ServeDiscoverySelector:
                             and self.checkpoint_interval > 0
                             and eval_count % self.checkpoint_interval == 0
                         ):
+                            now = time.perf_counter()
+                            n_since = eval_count - last_log_eval
+                            sec_per_it = (now - last_log_t) / max(n_since, 1)
+                            rss = process_rss_mb()
+                            sys_pct = system_mem_used_pct()
+                            logger.info(
+                                "  [diag] round %d eval=%d/%d s/it=%.2f rss=%s sys=%s",
+                                round_idx, eval_count, len(tagged), sec_per_it,
+                                f"{rss:.0f}MB" if rss is not None else "n/a",
+                                f"{sys_pct}%" if sys_pct is not None else "n/a",
+                            )
+                            last_log_t = now
+                            last_log_eval = eval_count
                             self._save_checkpoint(
                                 started_at=started_at,
                                 completed_rounds=[

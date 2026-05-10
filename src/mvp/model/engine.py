@@ -120,6 +120,88 @@ def check_memory(context: str = "") -> None:
         raise MemoryLimitExceeded(msg)
 
 
+class _PROCESS_MEMORY_COUNTERS(ctypes.Structure):
+    _fields_ = [
+        ("cb", ctypes.wintypes.DWORD),
+        ("PageFaultCount", ctypes.wintypes.DWORD),
+        ("PeakWorkingSetSize", ctypes.c_size_t),
+        ("WorkingSetSize", ctypes.c_size_t),
+        ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+        ("QuotaPagedPoolUsage", ctypes.c_size_t),
+        ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+        ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+        ("PagefileUsage", ctypes.c_size_t),
+        ("PeakPagefileUsage", ctypes.c_size_t),
+    ]
+
+
+_RSS_API_INITIALIZED = False
+
+
+def _init_rss_api() -> None:
+    """Configure ctypes argtypes/restype once. Without this, x64 truncates
+    the HANDLE returned by GetCurrentProcess and GetProcessMemoryInfo fails
+    silently."""
+    global _RSS_API_INITIALIZED
+    if _RSS_API_INITIALIZED or not hasattr(ctypes, "windll"):
+        return
+    kernel32 = ctypes.windll.kernel32
+    kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+    # Prefer K32GetProcessMemoryInfo (kernel32, Windows 7+) — same signature
+    # as psapi.GetProcessMemoryInfo, no separate DLL load needed.
+    fn = getattr(kernel32, "K32GetProcessMemoryInfo", None)
+    if fn is None:
+        fn = ctypes.windll.psapi.GetProcessMemoryInfo
+    fn.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(_PROCESS_MEMORY_COUNTERS),
+        ctypes.wintypes.DWORD,
+    ]
+    fn.restype = ctypes.wintypes.BOOL
+    globals()["_get_proc_mem_info"] = fn
+    _RSS_API_INITIALIZED = True
+
+
+def process_rss_mb() -> float | None:
+    """Return current process working-set size in MB (Windows). None elsewhere."""
+    if not hasattr(ctypes, "windll"):
+        return None
+    _init_rss_api()
+    fn = globals().get("_get_proc_mem_info")
+    if fn is None:
+        return None
+    counters = _PROCESS_MEMORY_COUNTERS()
+    counters.cb = ctypes.sizeof(counters)
+    handle = ctypes.windll.kernel32.GetCurrentProcess()
+    if not fn(handle, ctypes.byref(counters), counters.cb):
+        return None
+    return counters.WorkingSetSize / (1024 * 1024)
+
+
+def system_mem_used_pct() -> int | None:
+    """Return system memory usage percent (Windows). None elsewhere."""
+    if not hasattr(ctypes, "windll"):
+        return None
+
+    class _MEMSTATEX(ctypes.Structure):
+        _fields_ = [
+            ("dwLength", ctypes.wintypes.DWORD),
+            ("dwMemoryLoad", ctypes.wintypes.DWORD),
+            ("ullTotalPhys", ctypes.c_uint64),
+            ("ullAvailPhys", ctypes.c_uint64),
+            ("ullTotalPageFile", ctypes.c_uint64),
+            ("ullAvailPageFile", ctypes.c_uint64),
+            ("ullTotalVirtual", ctypes.c_uint64),
+            ("ullAvailVirtual", ctypes.c_uint64),
+            ("ullAvailExtendedVirtual", ctypes.c_uint64),
+        ]
+    stat = _MEMSTATEX()
+    stat.dwLength = ctypes.sizeof(stat)
+    if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat)):
+        return None
+    return int(stat.dwMemoryLoad)
+
+
 def parse_feature_spec(spec: str) -> tuple[str | None, str, str, dict[str, Any]]:
     """Parse a feature specification string into prefix, base name, full name, and parameters.
 
