@@ -173,6 +173,144 @@ class SlidingWindowSplitter(BaseSplitter):
             train_start += self.step_size
 
 
+def _add_months(d: date, months: int) -> date:
+    """Add (or subtract) calendar months to a first-of-month date."""
+    total = d.year * 12 + (d.month - 1) + months
+    new_year = total // 12
+    new_month = total % 12 + 1
+    return date(new_year, new_month, d.day)
+
+
+def _validate_first_of_month(d: date, name: str) -> None:
+    if d.day != 1:
+        raise ValueError(f"{name} must be the 1st of a month, got {d.isoformat()}")
+
+
+class DateSlidingWindowSplitter(BaseSplitter):
+    """Sliding window validation expressed in calendar months.
+
+    Training window is a fixed `train_months` and slides forward together with
+    the test window. Both are aligned to MM/01/YYYY boundaries.
+    """
+
+    def __init__(
+        self,
+        train_months: int,
+        test_months: int,
+        start_date: date,
+        end_date: date | None = None,
+        date_col: str = "effective_match_date",
+    ) -> None:
+        if train_months <= 0:
+            raise ValueError("train_months must be positive")
+        if test_months <= 0:
+            raise ValueError("test_months must be positive")
+        _validate_first_of_month(start_date, "start_date")
+        if end_date is not None:
+            _validate_first_of_month(end_date, "end_date")
+
+        self.train_months = train_months
+        self.test_months = test_months
+        self.start_date = start_date
+        self.end_date = end_date
+        self.date_col = date_col
+
+    def split(self, df: pl.DataFrame) -> Iterator[tuple[list[int], list[int]]]:
+        sorted_df = df.with_row_index("_idx").sort(self.date_col)
+        dates = sorted_df[self.date_col].cast(pl.Date)
+        idx = sorted_df["_idx"]
+
+        max_date = dates.max()
+        upper = self.end_date if self.end_date is not None else _add_months(
+            date(max_date.year, max_date.month, 1), 1
+        )
+
+        i = 0
+        while True:
+            test_start = _add_months(self.start_date, i * self.test_months)
+            test_end = _add_months(test_start, self.test_months)
+            if test_end > upper:
+                break
+
+            train_start = _add_months(test_start, -self.train_months)
+            train_end = test_start
+
+            train_mask = (dates >= train_start) & (dates < train_end)
+            test_mask = (dates >= test_start) & (dates < test_end)
+
+            train_idx = idx.filter(train_mask).to_list()
+            test_idx = idx.filter(test_mask).to_list()
+
+            if train_idx and test_idx:
+                yield train_idx, test_idx
+
+            i += 1
+
+
+class DateExpandingWindowSplitter(BaseSplitter):
+    """Expanding window validation expressed in calendar months.
+
+    Training window grows from a fixed start; test window slides forward.
+    Both ends aligned to MM/01/YYYY boundaries.
+    """
+
+    def __init__(
+        self,
+        start_date: date,
+        test_months: int,
+        train_start_date: date | None = None,
+        end_date: date | None = None,
+        date_col: str = "effective_match_date",
+    ) -> None:
+        if test_months <= 0:
+            raise ValueError("test_months must be positive")
+        _validate_first_of_month(start_date, "start_date")
+        if end_date is not None:
+            _validate_first_of_month(end_date, "end_date")
+        if train_start_date is not None:
+            _validate_first_of_month(train_start_date, "train_start_date")
+
+        self.start_date = start_date
+        self.test_months = test_months
+        self.train_start_date = train_start_date
+        self.end_date = end_date
+        self.date_col = date_col
+
+    def split(self, df: pl.DataFrame) -> Iterator[tuple[list[int], list[int]]]:
+        sorted_df = df.with_row_index("_idx").sort(self.date_col)
+        dates = sorted_df[self.date_col].cast(pl.Date)
+        idx = sorted_df["_idx"]
+
+        min_date = dates.min()
+        max_date = dates.max()
+        train_start = (
+            self.train_start_date
+            if self.train_start_date is not None
+            else date(min_date.year, min_date.month, 1)
+        )
+        upper = self.end_date if self.end_date is not None else _add_months(
+            date(max_date.year, max_date.month, 1), 1
+        )
+
+        i = 0
+        while True:
+            test_start = _add_months(self.start_date, i * self.test_months)
+            test_end = _add_months(test_start, self.test_months)
+            if test_end > upper:
+                break
+
+            train_mask = (dates >= train_start) & (dates < test_start)
+            test_mask = (dates >= test_start) & (dates < test_end)
+
+            train_idx = idx.filter(train_mask).to_list()
+            test_idx = idx.filter(test_mask).to_list()
+
+            if train_idx and test_idx:
+                yield train_idx, test_idx
+
+            i += 1
+
+
 class DateWindowSplitter(BaseSplitter):
     """Single train/test split based on a date boundary.
 
@@ -216,6 +354,11 @@ def make_splitter(
     step_size: int | None = None,
     train_size: int | None = None,
     test_start: date | None = None,
+    train_months: int | None = None,
+    test_months: int | None = None,
+    start_date: date | None = None,
+    end_date: date | None = None,
+    train_start_date: date | None = None,
 ) -> BaseSplitter:
     """Create a splitter from validation parameters.
 
@@ -258,6 +401,28 @@ def make_splitter(
         if test_start is None:
             raise ValueError("date_window requires test_start")
         return DateWindowSplitter(test_start=test_start)
+    elif val_type == "date_sliding":
+        if train_months is None or test_months is None or start_date is None:
+            raise ValueError(
+                "date_sliding requires train_months, test_months, and start_date"
+            )
+        return DateSlidingWindowSplitter(
+            train_months=train_months,
+            test_months=test_months,
+            start_date=start_date,
+            end_date=end_date,
+        )
+    elif val_type == "date_expanding":
+        if test_months is None or start_date is None:
+            raise ValueError(
+                "date_expanding requires test_months and start_date"
+            )
+        return DateExpandingWindowSplitter(
+            start_date=start_date,
+            test_months=test_months,
+            train_start_date=train_start_date,
+            end_date=end_date,
+        )
     else:
         raise ValueError(f"Unknown validation type: {val_type}")
 

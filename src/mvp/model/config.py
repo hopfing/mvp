@@ -146,7 +146,14 @@ class ModelConfig(BaseModel):
 class ValidationConfig(BaseModel):
     """Validation strategy configuration."""
 
-    type: Literal["walk_forward", "expanding_window", "sliding_window", "date_window"] = "walk_forward"
+    type: Literal[
+        "walk_forward",
+        "expanding_window",
+        "sliding_window",
+        "date_window",
+        "date_sliding",
+        "date_expanding",
+    ] = "walk_forward"
     # For walk_forward (n_splits mode)
     n_splits: int = 5
     min_train_size: int = 50000
@@ -158,6 +165,12 @@ class ValidationConfig(BaseModel):
     train_size: int | None = None
     # For date_window
     test_start: date | None = None
+    # For date_sliding / date_expanding
+    train_months: int | None = None
+    test_months: int | None = None
+    start_date: date | None = None
+    end_date: date | None = None
+    train_start_date: date | None = None
 
 
 class MetricsConfig(BaseModel):
