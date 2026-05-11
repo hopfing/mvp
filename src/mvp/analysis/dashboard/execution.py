@@ -574,38 +574,51 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
             display = _wld_display(clv_book, "group", "Book")
             st.dataframe(display.to_pandas(), use_container_width=True, hide_index=True)
 
+    def _circuit_slices(frame: pl.DataFrame) -> list[tuple[str, pl.DataFrame]]:
+        out: list[tuple[str, pl.DataFrame]] = [("All", frame)]
+        if "circuit" in frame.columns:
+            for val, label in [("tour", "Tour"), ("chal", "Challenger")]:
+                out.append((label, frame.filter(pl.col("circuit") == val)))
+        return out
+
     if "bet_placed_at" in ds.columns:
         st.subheader("CLV vs Best Close by Timing")
-        clv_timing = clv_by_timing(ds)
-        if len(clv_timing) > 0:
-            display = clv_timing.select(
-                pl.col("bucket").alias("Hours Before Match Start"),
-                pl.col("n").alias("Settled"),
-                pl.col("positive").alias("Positive"),
-                pl.col("negative").alias("Negative"),
-                pl.col("even").alias("Even"),
-                (pl.col("pos_pct") * 100).round(1).alias("Pos %"),
-                (pl.col("pos_neg_pct") * 100).round(1).alias("Pos/Neg %"),
-            )
-            st.dataframe(display.to_pandas(), use_container_width=True, hide_index=True)
-        else:
-            st.info("No timing data available (bet tracking started 2026-03-21).")
+        for label, sub in _circuit_slices(ds):
+            st.markdown(f"**{label}**")
+            clv_timing = clv_by_timing(sub)
+            if len(clv_timing) > 0:
+                display = clv_timing.select(
+                    pl.col("bucket").alias("Hours Before Match Start"),
+                    pl.col("n").alias("Settled"),
+                    pl.col("positive").alias("Positive"),
+                    pl.col("negative").alias("Negative"),
+                    pl.col("even").alias("Even"),
+                    (pl.col("pos_pct") * 100).round(1).alias("Pos %"),
+                    (pl.col("pos_neg_pct") * 100).round(1).alias("Pos/Neg %"),
+                )
+                st.dataframe(display.to_pandas(), use_container_width=True, hide_index=True)
+            else:
+                st.info(f"No timing-eligible {label.lower()} bets in current filter.")
 
     if "book" in ds.columns and "bet_placed_at" in ds.columns:
         st.subheader("CLV vs Best Close by Book x Timing")
-        clv_bt = clv_by_book_timing(expand_by_book(ds))
-        if clv_bt is not None:
-            display = clv_bt.select(
-                pl.col("book").alias("Book"),
-                pl.col("bucket").alias("Timing"),
-                pl.col("n").alias("Settled"),
-                pl.col("positive").alias("Positive"),
-                pl.col("negative").alias("Negative"),
-                pl.col("even").alias("Even"),
-                (pl.col("pos_pct") * 100).round(1).alias("Pos %"),
-                (pl.col("pos_neg_pct") * 100).round(1).alias("Pos/Neg %"),
-            )
-            st.dataframe(display.to_pandas(), use_container_width=True, hide_index=True)
+        for label, sub in _circuit_slices(ds):
+            st.markdown(f"**{label}**")
+            clv_bt = clv_by_book_timing(expand_by_book(sub))
+            if clv_bt is not None and len(clv_bt) > 0:
+                display = clv_bt.select(
+                    pl.col("book").alias("Book"),
+                    pl.col("bucket").alias("Timing"),
+                    pl.col("n").alias("Settled"),
+                    pl.col("positive").alias("Positive"),
+                    pl.col("negative").alias("Negative"),
+                    pl.col("even").alias("Even"),
+                    (pl.col("pos_pct") * 100).round(1).alias("Pos %"),
+                    (pl.col("pos_neg_pct") * 100).round(1).alias("Pos/Neg %"),
+                )
+                st.dataframe(display.to_pandas(), use_container_width=True, hide_index=True)
+            else:
+                st.info(f"No book × timing data for {label.lower()} in current filter.")
 
     st.subheader("CLV vs Best Close by Open Edge × Bet Edge")
     render_provenance_matrix(ds, st)
