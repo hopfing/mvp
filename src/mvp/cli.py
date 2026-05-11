@@ -64,11 +64,117 @@ _SCRAPE_ENABLED_BOOKS: set[str] = {"br", "mgm", "b365"}
 logger = logging.getLogger(__name__)
 
 
+_PER_FOLD_LOWER_IS_BETTER: set[str] = {
+    "log_loss",
+    "brier_score",
+    "calibration_error",
+    "error_rate_80plus",
+}
+_PER_FOLD_COLUMNS: list[tuple[str, str, str]] = [
+    # (metric_key, header_label, format_spec) — format_spec accepts a float and returns a string
+    ("accuracy", "acc", "pct"),
+    ("roc_auc", "auc", "auc"),
+    ("log_loss", "ll", "ll"),
+    ("brier_score", "brier", "brier"),
+    ("calibration_error", "cal", "pct"),
+    ("error_rate_80plus", "err80", "pct"),
+]
+
+
+def _fmt_per_fold_value(key: str, value: float) -> str:
+    if key in ("accuracy", "calibration_error", "error_rate_80plus"):
+        return f"{value:.1%}"
+    if key == "roc_auc":
+        return f"{value:.3f}"
+    return f"{value:.4f}"
+
+
+def _best_fold_per_metric(
+    fold_metrics: list[dict[str, float]],
+) -> dict[str, int]:
+    """Return {metric_key: best_fold_idx (0-based)}, direction-aware."""
+    best: dict[str, int] = {}
+    for key, _, _ in _PER_FOLD_COLUMNS:
+        values = [m.get(key, 0.0) for m in fold_metrics]
+        if not values:
+            continue
+        if key in _PER_FOLD_LOWER_IS_BETTER:
+            best[key] = min(range(len(values)), key=lambda i: values[i])
+        else:
+            best[key] = max(range(len(values)), key=lambda i: values[i])
+    return best
+
+
+def _trajectory_delta(key: str, first: float, last: float) -> tuple[str, str]:
+    """Return (arrow, delta_str) where arrow is improvement-relative (↑ = better)."""
+    delta = last - first
+    if delta == 0:
+        return "=", "0.0pp" if key in ("accuracy", "calibration_error", "error_rate_80plus") else "+0.000"
+    improved = (delta < 0) if key in _PER_FOLD_LOWER_IS_BETTER else (delta > 0)
+    arrow = "↑" if improved else "↓"
+    if key in ("accuracy", "calibration_error", "error_rate_80plus"):
+        delta_str = f"{delta * 100:+.1f}pp"
+    elif key == "roc_auc":
+        delta_str = f"{delta:+.3f}"
+    else:
+        delta_str = f"{delta:+.4f}"
+    return arrow, delta_str
+
+
+def _print_per_fold_section(
+    fold_metrics: list[dict[str, float]],
+    fold_meta: list[dict[str, Any]],
+) -> None:
+    """Print per-fold table with best-per-column markers and trajectory line."""
+    if len(fold_metrics) <= 1:
+        return
+    if len(fold_meta) != len(fold_metrics):
+        # Metadata missing — skip rather than guess
+        return
+
+    best = _best_fold_per_metric(fold_metrics)
+
+    print("\nPer-Fold Metrics:")
+    header = (
+        f"  {'Fold':<5} {'Test window':<25} {'n_train':>8} {'n_test':>7}"
+        f" {'acc':>8} {'auc':>9} {'ll':>10} {'brier':>10} {'cal':>9} {'err80':>9}"
+    )
+    print(header)
+
+    for i, (m, meta) in enumerate(zip(fold_metrics, fold_meta)):
+        window = f"{meta['test_start']} .. {meta['test_end']}"
+        row = (
+            f"  {meta['fold_idx']:<5} {window:<25} {meta['n_train']:>8,} {meta['n_test']:>7,}"
+        )
+        for key, _, _ in _PER_FOLD_COLUMNS:
+            value_str = _fmt_per_fold_value(key, m.get(key, 0.0))
+            marked = f"★ {value_str}" if best.get(key) == i else f"  {value_str}"
+            width = 9 if key in ("accuracy", "calibration_error", "error_rate_80plus", "roc_auc") else 10
+            if key in ("brier_score",):
+                width = 10
+            row += f" {marked:>{width}}"
+        print(row)
+
+    # Trajectory: Fold 1 → Fold N
+    first = fold_metrics[0]
+    last = fold_metrics[-1]
+    parts = []
+    for key, label, _ in _PER_FOLD_COLUMNS:
+        arrow, delta_str = _trajectory_delta(key, first.get(key, 0.0), last.get(key, 0.0))
+        parts.append(f"{label} {arrow} ({delta_str})")
+    print(
+        f"\nTrajectory (Fold {fold_meta[0]['fold_idx']} → "
+        f"Fold {fold_meta[-1]['fold_idx']}): " + ", ".join(parts)
+    )
+
+
 def print_run_summary(results: dict[str, Any], name: str | None = None) -> None:
     """Print formatted summary of experiment results."""
     metrics = results.get("metrics", {})
     train_metrics = results.get("train_metrics", {})
     diagnostics = results.get("diagnostics")
+    fold_metrics = results.get("fold_metrics", []) or []
+    fold_meta = results.get("fold_meta", []) or []
 
     # Header
     print("\n" + "=" * 70)
@@ -93,6 +199,7 @@ def print_run_summary(results: dict[str, Any], name: str | None = None) -> None:
     else:
         print(f"\nTest: {test_acc:.1%} acc | {test_auc:.3f} AUC | {test_ll:.4f} LL | {test_brier:.4f} Brier")
 
+    _print_per_fold_section(fold_metrics, fold_meta)
 
     if not diagnostics:
         print(f"\nMLflow run: {results.get('run_id', 'N/A')}")

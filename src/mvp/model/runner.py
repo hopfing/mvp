@@ -338,6 +338,7 @@ class ExperimentRunner:
         all_metrics: list[dict[str, float]] = []
         all_train_metrics: list[dict[str, float]] = []
         all_predictions: list[dict[str, Any]] = []
+        all_fold_meta: list[dict[str, Any]] = []
         all_per_model_predictions: list[list[np.ndarray]] = [] if is_ensemble else []
 
         run_context = logger.start_run(run_name=self.run_name) if logger else None
@@ -554,6 +555,18 @@ class ExperimentRunner:
                     "y_prob": y_prob,
                 })
 
+                # Capture fold metadata for the per-fold report
+                _test_dates = test_df["effective_match_date"]
+                _test_min = _test_dates.min()
+                _test_max = _test_dates.max()
+                all_fold_meta.append({
+                    "fold_idx": fold_idx + 1,
+                    "test_start": _test_min.date() if hasattr(_test_min, "date") else _test_min,
+                    "test_end": _test_max.date() if hasattr(_test_max, "date") else _test_max,
+                    "n_train": len(train_df),
+                    "n_test": len(test_df),
+                })
+
                 if is_ensemble and isinstance(model, EnsembleModel):
                     all_per_model_predictions.append(
                         model.predict_proba_per_model(X_test)
@@ -752,6 +765,7 @@ class ExperimentRunner:
             "metrics": avg_metrics,
             "train_metrics": avg_train_metrics,
             "fold_metrics": all_metrics,
+            "fold_meta": all_fold_meta,
             "n_folds": len(all_metrics),
             "feature_columns": feature_cols,
             "run_id": run_id,
