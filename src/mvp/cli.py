@@ -89,19 +89,44 @@ def _fmt_per_fold_value(key: str, value: float) -> str:
     return f"{value:.4f}"
 
 
+def _eligible_fold_indices(fold_meta: list[dict[str, Any]]) -> list[int]:
+    """Return fold indices large enough for the best-per-column comparison.
+
+    Excludes folds with n_test < 50% of the median fold size — these are
+    typically sample-noise driven (e.g. December months in tennis), and let
+    them win a column on a few dozen rows would mislead.
+    """
+    sizes = [m.get("n_test", 0) for m in fold_meta]
+    if not sizes:
+        return []
+    sorted_sizes = sorted(sizes)
+    median = sorted_sizes[len(sorted_sizes) // 2]
+    threshold = max(1, median // 2)
+    return [i for i, n in enumerate(sizes) if n >= threshold]
+
+
 def _best_fold_per_metric(
     fold_metrics: list[dict[str, float]],
+    eligible_idx: list[int] | None = None,
 ) -> dict[str, int]:
-    """Return {metric_key: best_fold_idx (0-based)}, direction-aware."""
+    """Return {metric_key: best_fold_idx (0-based)}, direction-aware.
+
+    If `eligible_idx` is provided, the best is chosen only among those folds.
+    """
+    if eligible_idx is None:
+        eligible_idx = list(range(len(fold_metrics)))
+    if not eligible_idx:
+        return {}
+
     best: dict[str, int] = {}
     for key, _, _ in _PER_FOLD_COLUMNS:
-        values = [m.get(key, 0.0) for m in fold_metrics]
-        if not values:
+        candidates = [(i, fold_metrics[i].get(key, 0.0)) for i in eligible_idx]
+        if not candidates:
             continue
         if key in _PER_FOLD_LOWER_IS_BETTER:
-            best[key] = min(range(len(values)), key=lambda i: values[i])
+            best[key] = min(candidates, key=lambda x: x[1])[0]
         else:
-            best[key] = max(range(len(values)), key=lambda i: values[i])
+            best[key] = max(candidates, key=lambda x: x[1])[0]
     return best
 
 
@@ -132,7 +157,9 @@ def _print_per_fold_section(
         # Metadata missing — skip rather than guess
         return
 
-    best = _best_fold_per_metric(fold_metrics)
+    eligible_idx = _eligible_fold_indices(fold_meta)
+    best = _best_fold_per_metric(fold_metrics, eligible_idx)
+    n_excluded = len(fold_metrics) - len(eligible_idx)
 
     print("\nPer-Fold Metrics:")
     header = (
@@ -154,6 +181,11 @@ def _print_per_fold_section(
                 width = 10
             row += f" {marked:>{width}}"
         print(row)
+
+    if n_excluded > 0:
+        print(
+            f"  (★ ignores {n_excluded} fold(s) with n_test < 50% of median — sample-noise filter)"
+        )
 
     # Trajectory: Fold 1 → Fold N
     first = fold_metrics[0]
