@@ -84,6 +84,64 @@ register_diff("tour_match_pct")
 
 
 @feature(
+    name="chal_match_pct",
+    params=["days"],
+    description="Fraction of recent matches played on Challenger circuit",
+    mirror=True,
+)
+def chal_match_pct(days: int | None = None) -> pl.Expr:
+    """Fraction of a player's matches on the Challenger circuit in a rolling window."""
+    group_by = ["player_id"]
+    chal_indicator = (pl.col("circuit") == "chal").cast(pl.Int64)
+    if days is None:
+        chal_count = (
+            chal_indicator.cum_sum().shift(1).over(group_by, order_by="effective_match_date").fill_null(0)
+        )
+        total = cumulative_count(group_by=group_by)
+    else:
+        chal_count = (
+            chal_indicator
+            .rolling_sum_by(by="effective_match_date", window_size=f"{days}d", closed="left")
+            .over(group_by)
+            .fill_null(0)
+        )
+        total = rolling_count(days=days, group_by=group_by)
+    return pl.when(total > 0).then(chal_count / total).otherwise(None)
+
+
+register_diff("chal_match_pct")
+
+
+@feature(
+    name="itf_match_pct",
+    params=["days"],
+    description="Fraction of recent matches played on ITF circuit",
+    mirror=True,
+)
+def itf_match_pct(days: int | None = None) -> pl.Expr:
+    """Fraction of a player's matches on the ITF circuit in a rolling window."""
+    group_by = ["player_id"]
+    itf_indicator = (pl.col("circuit") == "itf").cast(pl.Int64)
+    if days is None:
+        itf_count = (
+            itf_indicator.cum_sum().shift(1).over(group_by, order_by="effective_match_date").fill_null(0)
+        )
+        total = cumulative_count(group_by=group_by)
+    else:
+        itf_count = (
+            itf_indicator
+            .rolling_sum_by(by="effective_match_date", window_size=f"{days}d", closed="left")
+            .over(group_by)
+            .fill_null(0)
+        )
+        total = rolling_count(days=days, group_by=group_by)
+    return pl.when(total > 0).then(itf_count / total).otherwise(None)
+
+
+register_diff("itf_match_pct")
+
+
+@feature(
     name="is_seeded",
     params=[],
     description="1 if player is seeded, 0 otherwise",
