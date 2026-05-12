@@ -23,6 +23,7 @@ from mvp.model.config import (
     get_filter_feature_specs,
 )
 from mvp.model.diagnostics import Diagnostics, EnsembleDiagnostics
+from mvp.model.discovery.importance import gain_importance
 from mvp.model.engine import check_memory, get_feature_columns, make_fs_engine
 from mvp.model.imputation import apply_imputation, build_imputation, fit_imputation
 from mvp.model.metrics import compute_metrics
@@ -337,6 +338,9 @@ class ExperimentRunner:
         all_train_metrics: list[dict[str, float]] = []
         all_predictions: list[dict[str, Any]] = []
         all_fold_meta: list[dict[str, Any]] = []
+        all_fold_importances: list[dict[str, float]] | None = (
+            None if is_ensemble else []
+        )
         all_per_model_predictions: list[list[np.ndarray]] = [] if is_ensemble else []
 
         run_context = logger.start_run(run_name=self.run_name) if logger else None
@@ -545,6 +549,15 @@ class ExperimentRunner:
                 # Predict and evaluate on train (for overfitting detection)
                 train_metrics = compute_metrics(y_train, y_prob_train)
                 all_train_metrics.append(train_metrics)
+
+                # Capture per-fold gain importance (tree, non-ensemble only)
+                if all_fold_importances is not None:
+                    try:
+                        all_fold_importances.append(
+                            gain_importance(model, feature_cols)
+                        )
+                    except ValueError:
+                        all_fold_importances = None
 
                 # Collect predictions for diagnostics
                 all_predictions.append({
@@ -764,6 +777,7 @@ class ExperimentRunner:
             "train_metrics": avg_train_metrics,
             "fold_metrics": all_metrics,
             "fold_meta": all_fold_meta,
+            "fold_feature_importances": all_fold_importances,
             "n_folds": len(all_metrics),
             "feature_columns": feature_cols,
             "run_id": run_id,

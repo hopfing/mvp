@@ -200,6 +200,35 @@ def _print_per_fold_section(
     )
 
 
+def _print_feature_importance(
+    fold_importances: list[dict[str, float]],
+    feature_cols: list[str],
+    top_n: int = 20,
+) -> None:
+    """Print top features by mean gain importance across folds."""
+    if not fold_importances or not feature_cols:
+        return
+    summary: list[tuple[str, float, float]] = []
+    for feat in feature_cols:
+        values = [fi.get(feat, 0.0) for fi in fold_importances]
+        mean_val = sum(values) / len(values)
+        var = sum((v - mean_val) ** 2 for v in values) / len(values)
+        std_val = var ** 0.5
+        summary.append((feat, mean_val, std_val))
+    summary.sort(key=lambda x: x[1], reverse=True)
+    top = summary[:top_n]
+    multi_fold = len(fold_importances) > 1
+    print(
+        f"\nFeature Importance (top {len(top)} by gain, "
+        f"mean across {len(fold_importances)} fold(s)):"
+    )
+    for rank, (feat, mean_val, std_val) in enumerate(top, 1):
+        if multi_fold:
+            print(f"  {rank:>2}. {feat:50s}  {mean_val:>6.2%}  ±{std_val * 100:.2f}%")
+        else:
+            print(f"  {rank:>2}. {feat:50s}  {mean_val:>6.2%}")
+
+
 def print_run_summary(results: dict[str, Any], name: str | None = None) -> None:
     """Print formatted summary of experiment results."""
     metrics = results.get("metrics", {})
@@ -355,6 +384,12 @@ def print_run_summary(results: dict[str, Any], name: str | None = None) -> None:
     temporal = diagnostics.temporal
     if temporal and temporal.get("temporal_drift", 0) > 0:
         print(f"Temporal drift: ±{temporal['temporal_drift']:.1%} from average")
+
+    # Feature importance (tree, non-ensemble only)
+    _print_feature_importance(
+        results.get("fold_feature_importances") or [],
+        results.get("feature_columns") or [],
+    )
 
     # Ensemble diagnostics
     if diagnostics.ensemble:
