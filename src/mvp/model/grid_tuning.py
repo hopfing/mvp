@@ -323,6 +323,7 @@ class GridTuner:
                         run_name=f"tune_{self.config_path.stem}",
                         log_to_mlflow=True,
                         holdout_folds=1,
+                        inner_cv_folds=4,
                     )
                 result = runner.run()
             finally:

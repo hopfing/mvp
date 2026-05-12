@@ -47,6 +47,7 @@ class ExperimentRunner:
         run_name: str | None = None,
         log_to_mlflow: bool = True,
         holdout_folds: int = 0,
+        inner_cv_folds: int = 0,
     ) -> None:
         """Initialize runner.
 
@@ -63,9 +64,23 @@ class ExperimentRunner:
                 folds still get calibrated probabilities (using the
                 tuning-fold-only calibrator) and are reported separately as
                 `holdout_metrics` / `holdout_fold_metrics`. Tuning sets this to 1.
+            inner_cv_folds: When > 0, each non-holdout outer fold replaces its
+                single outer-test prediction with k inner expanding-window CV
+                splits on the training portion. Optuna then sees the mean of
+                inner LL across outer folds (less noisy than a single per-fold
+                point estimate). Requires holdout_folds >= 1. Tuning sets this
+                to 4; normal model runs default to 0 (unchanged).
         """
         if holdout_folds < 0:
             raise ValueError(f"holdout_folds must be >= 0, got {holdout_folds}")
+        if inner_cv_folds < 0:
+            raise ValueError(f"inner_cv_folds must be >= 0, got {inner_cv_folds}")
+        if inner_cv_folds > 0 and holdout_folds < 1:
+            raise ValueError(
+                f"inner_cv_folds={inner_cv_folds} requires holdout_folds >= 1 "
+                "(inner CV gives a noise-resistant tuning signal, but the "
+                "honest selection check still depends on the held-out fold)"
+            )
         self.config_path = Path(config_path)
         self.config = ExperimentConfig.from_file(str(config_path))
         from mvp.common.base_job import get_data_root, get_local_data_root
@@ -81,6 +96,7 @@ class ExperimentRunner:
         self.run_name = run_name or self.config_path.stem
         self.log_to_mlflow = log_to_mlflow
         self.holdout_folds = holdout_folds
+        self.inner_cv_folds = inner_cv_folds
 
         self.engine = make_fs_engine(
             matches_path=self.matches_path,
@@ -392,15 +408,104 @@ class ExperimentRunner:
                     if bm_path.exists():
                         logger.log_artifact(str(bm_path))
 
+        # Build the iteration plan. With inner_cv_folds=0 this is just the
+        # outer splits; with inner_cv_folds>0 each non-holdout outer fold is
+        # expanded into k inner expanding-window splits on its training
+        # portion. The loop body below doesn't care which kind it's processing
+        # — we regroup after the loop using `iteration_to_outer`.
+        outer_splits = list(splitter.split(df))
+        n_outer = len(outer_splits)
+        if self.holdout_folds > 0:
+            n_tuning = n_outer - self.holdout_folds
+        else:
+            n_tuning = n_outer
+
+        # Precompute outer fold meta (used post-regroup so we report on outer
+        # windows, not inner split windows).
+        outer_fold_meta: list[dict[str, Any]] = []
+        for ofi, (otr_train_idx, otr_test_idx) in enumerate(outer_splits):
+            otr_test_df = df[otr_test_idx]
+            t_dates = otr_test_df["effective_match_date"]
+            t_min = t_dates.min()
+            t_max = t_dates.max()
+            outer_fold_meta.append({
+                "fold_idx": ofi + 1,
+                "test_start": t_min.date() if hasattr(t_min, "date") else t_min,
+                "test_end": t_max.date() if hasattr(t_max, "date") else t_max,
+                "n_train": len(otr_train_idx),
+                "n_test": len(otr_test_idx),
+            })
+
+        iteration_splits: list[tuple[list[int], list[int]]] = []
+        iteration_to_outer: list[int] = []
+        inner_fold_count_per_outer: list[int] = []
+        for ofi, (otr_train_idx, otr_test_idx) in enumerate(outer_splits):
+            is_tuning_fold = ofi < n_tuning
+            if self.inner_cv_folds > 0 and is_tuning_fold:
+                outer_train_df = df[otr_train_idx]
+                n_otr = len(outer_train_df)
+                # Heuristic split sizes that give roughly k expanding-window
+                # inner folds: min_train covers the first ~half of the data,
+                # test windows split the second half evenly.
+                min_train = max(n_otr // 2, 1000)
+                test_size_inner = max(
+                    (n_otr - min_train) // self.inner_cv_folds, 100
+                )
+                try:
+                    from mvp.model.splitters import ExpandingWindowSplitter
+                    inner_splitter = ExpandingWindowSplitter(
+                        n_splits=self.inner_cv_folds,
+                        min_train_size=min_train,
+                        test_size=test_size_inner,
+                    )
+                    inner_pairs = list(inner_splitter.split(outer_train_df))
+                except Exception as e:
+                    run_logger.warning(
+                        "Outer fold %d: inner CV unavailable (n_train=%d): %s. "
+                        "Falling back to single outer-test prediction.",
+                        ofi + 1, n_otr, e,
+                    )
+                    inner_pairs = []
+
+                if inner_pairs:
+                    # Map inner indices (positions within outer_train_df) back
+                    # to original df indices.
+                    for in_tr, in_te in inner_pairs:
+                        iteration_splits.append((
+                            [otr_train_idx[i] for i in in_tr],
+                            [otr_train_idx[i] for i in in_te],
+                        ))
+                        iteration_to_outer.append(ofi)
+                    inner_fold_count_per_outer.append(len(inner_pairs))
+                else:
+                    # Fallback: outer behavior for this fold
+                    iteration_splits.append((otr_train_idx, otr_test_idx))
+                    iteration_to_outer.append(ofi)
+                    inner_fold_count_per_outer.append(1)
+            else:
+                iteration_splits.append((otr_train_idx, otr_test_idx))
+                iteration_to_outer.append(ofi)
+                inner_fold_count_per_outer.append(1)
+
+        if self.inner_cv_folds > 0:
+            run_logger.info(
+                "Inner CV active: %d outer folds expanded to %d total fits "
+                "(inner_fold_count_per_outer=%s, holdout_folds=%d)",
+                n_outer, len(iteration_splits),
+                inner_fold_count_per_outer, self.holdout_folds,
+            )
+
         try:
-            for fold_idx, (train_idx, test_idx) in enumerate(splitter.split(df)):
-                check_memory(f"fold {fold_idx + 1} start")
+            for fold_idx, (train_idx, test_idx) in enumerate(iteration_splits):
+                outer_fold_id = iteration_to_outer[fold_idx]
+                check_memory(f"iter {fold_idx + 1} start (outer fold {outer_fold_id + 1})")
                 t_fold = time.perf_counter()
                 train_df = df[train_idx]
                 test_df = df[test_idx]
                 run_logger.info(
-                    "Fold %d: train=%d, test=%d",
-                    fold_idx + 1, len(train_df), len(test_df),
+                    "Iter %d/%d (outer fold %d): train=%d, test=%d",
+                    fold_idx + 1, len(iteration_splits),
+                    outer_fold_id + 1, len(train_df), len(test_df),
                 )
 
                 X_train = train_df.select(
@@ -604,6 +709,79 @@ class ExperimentRunner:
                     logger.log_metrics(
                         {f"fold_{fold_idx}_{k}": v for k, v in metrics.items()}
                     )
+
+            # If inner CV was active, the per-iteration lists above hold one
+            # entry per inner split. Regroup them by outer fold so downstream
+            # code (holdout split, calibration, diagnostics, reporting) keeps
+            # operating in terms of outer folds.
+            if self.inner_cv_folds > 0 and len(iteration_splits) > n_outer:
+                regrouped_predictions: list[dict[str, Any]] = []
+                regrouped_metrics: list[dict[str, float]] = []
+                regrouped_train_metrics: list[dict[str, float]] = []
+                regrouped_per_model: list[list[np.ndarray]] = []
+                regrouped_importances: list[dict[str, float]] | None = (
+                    [] if all_fold_importances is not None else None
+                )
+
+                for outer_idx in range(n_outer):
+                    iter_idxs = [
+                        i for i, oid in enumerate(iteration_to_outer)
+                        if oid == outer_idx
+                    ]
+                    if not iter_idxs:
+                        continue
+
+                    c_y_true = np.concatenate(
+                        [all_predictions[i]["y_true"] for i in iter_idxs]
+                    )
+                    c_y_prob = np.concatenate(
+                        [all_predictions[i]["y_prob"] for i in iter_idxs]
+                    )
+                    c_df = pl.concat(
+                        [all_predictions[i]["df"] for i in iter_idxs],
+                        how="diagonal_relaxed",
+                    )
+                    regrouped_predictions.append({
+                        "y_true": c_y_true,
+                        "y_prob": c_y_prob,
+                        "df": c_df,
+                    })
+                    regrouped_metrics.append(compute_metrics(c_y_true, c_y_prob))
+
+                    train_keys = list(all_train_metrics[iter_idxs[0]].keys())
+                    regrouped_train_metrics.append({
+                        k: float(np.mean(
+                            [all_train_metrics[i][k] for i in iter_idxs]
+                        ))
+                        for k in train_keys
+                    })
+
+                    if is_ensemble and all_per_model_predictions:
+                        n_base = len(all_per_model_predictions[iter_idxs[0]])
+                        regrouped_per_model.append([
+                            np.concatenate(
+                                [all_per_model_predictions[i][b] for i in iter_idxs]
+                            )
+                            for b in range(n_base)
+                        ])
+
+                    if (
+                        regrouped_importances is not None
+                        and all_fold_importances
+                    ):
+                        # Use the largest inner split's importance (most data)
+                        regrouped_importances.append(
+                            all_fold_importances[iter_idxs[-1]]
+                        )
+
+                all_predictions = regrouped_predictions
+                all_metrics = regrouped_metrics
+                all_train_metrics = regrouped_train_metrics
+                all_fold_meta = outer_fold_meta
+                if is_ensemble:
+                    all_per_model_predictions = regrouped_per_model
+                if regrouped_importances is not None:
+                    all_fold_importances = regrouped_importances
 
             # Split predictions into tuning vs holdout. The trailing folds
             # become the holdout: they get calibrated probabilities using a
@@ -922,4 +1100,8 @@ class ExperimentRunner:
             "holdout_fold_meta": holdout_fold_meta if holdout_predictions else None,
             "tuning_fold_indices": tuning_fold_indices,
             "holdout_fold_indices": holdout_fold_indices,
+            "inner_cv_folds": self.inner_cv_folds,
+            "inner_fold_count_per_outer": (
+                inner_fold_count_per_outer if self.inner_cv_folds > 0 else None
+            ),
         }

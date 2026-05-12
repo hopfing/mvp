@@ -244,6 +244,16 @@ class HyperparamTuner:
             for metric_name, metric_value in result["holdout_metrics"].items():
                 trial.set_user_attr(f"holdout_{metric_name}", metric_value)
 
+        # Inner CV diagnostics so we can confirm the noise-reduction layer is
+        # actually firing (and didn't silently fall back to single-fit per fold).
+        if result.get("inner_cv_folds"):
+            trial.set_user_attr("inner_cv_folds", result["inner_cv_folds"])
+        if result.get("inner_fold_count_per_outer") is not None:
+            trial.set_user_attr(
+                "inner_fold_count_per_outer",
+                result["inner_fold_count_per_outer"],
+            )
+
         trial.set_user_attr("duration_s", result["duration_s"])
 
         if len(self.metrics) == 1:
@@ -316,12 +326,19 @@ class HyperparamTuner:
                         run_name=f"tune_{self.config_path.stem}",
                         log_to_mlflow=False,
                         holdout_folds=1,
+                        inner_cv_folds=4,
                     )
                 result = runner.run()
                 metrics = dict(result["metrics"])
                 holdout_metrics = (
                     dict(result["holdout_metrics"])
                     if result.get("holdout_metrics") is not None
+                    else None
+                )
+                inner_cv_folds_used = result.get("inner_cv_folds") or 0
+                inner_fold_count_per_outer = (
+                    list(result["inner_fold_count_per_outer"])
+                    if result.get("inner_fold_count_per_outer") is not None
                     else None
                 )
             finally:
@@ -342,6 +359,8 @@ class HyperparamTuner:
                 "params": params,
                 "metrics": metrics,
                 "holdout_metrics": holdout_metrics,
+                "inner_cv_folds": inner_cv_folds_used,
+                "inner_fold_count_per_outer": inner_fold_count_per_outer,
                 "duration_s": round(duration, 1),
             }
         finally:
