@@ -14,7 +14,7 @@ import polars as pl
 
 run_logger = logging.getLogger(__name__)
 
-from mvp.model.calibration import PlattCalibrator
+from mvp.model.calibration import PlattCalibrator, SegmentedPlattCalibrator
 from mvp.model.config import (
     DateRange,
     EnsembleParams,
@@ -667,12 +667,32 @@ class ExperimentRunner:
             )
             raw_metrics = compute_metrics(combined_y_true_oof, combined_y_prob_oof)
 
-            calibrator = PlattCalibrator()
-            calibrator.fit(combined_y_prob_oof, combined_y_true_oof)
+            cal_cfg = self.config.calibration
+            if cal_cfg and cal_cfg.segments:
+                combined_df_oof = pl.concat(
+                    [p["df"] for p in all_predictions], how="diagonal_relaxed"
+                )
+                calibrator = SegmentedPlattCalibrator(
+                    segments=cal_cfg.segments, min_n=cal_cfg.min_n,
+                )
+                calibrator.fit(
+                    combined_y_prob_oof, combined_y_true_oof, combined_df_oof
+                )
+                run_logger.info(
+                    "Segmented Platt: %d per-segment fits + global fallback",
+                    calibrator.n_segments,
+                )
+                for pred_dict in all_predictions:
+                    pred_dict["y_prob"] = calibrator.transform(
+                        pred_dict["y_prob"], pred_dict["df"]
+                    )
+            else:
+                calibrator = PlattCalibrator()
+                calibrator.fit(combined_y_prob_oof, combined_y_true_oof)
 
-            # Apply calibration to each fold's predictions
-            for pred_dict in all_predictions:
-                pred_dict["y_prob"] = calibrator.transform(pred_dict["y_prob"])
+                # Apply calibration to each fold's predictions
+                for pred_dict in all_predictions:
+                    pred_dict["y_prob"] = calibrator.transform(pred_dict["y_prob"])
 
             # Recompute avg_metrics on calibrated predictions
             calibrated_y_prob = np.concatenate(
@@ -758,10 +778,18 @@ class ExperimentRunner:
                 logger.log_metrics({f"train_{k}": v for k, v in avg_train_metrics.items()})
                 logger.log_metrics(diagnostic_results.metrics)
                 if calibrator.is_fitted:
-                    logger.log_params({
-                        "platt_slope": f"{calibrator.slope:.6f}",
-                        "platt_intercept": f"{calibrator.intercept:.6f}",
-                    })
+                    if isinstance(calibrator, SegmentedPlattCalibrator):
+                        logger.log_params({
+                            "platt_segmented": "true",
+                            "platt_n_segments": str(calibrator.n_segments),
+                            "platt_global_slope": f"{calibrator._global.slope:.6f}",
+                            "platt_global_intercept": f"{calibrator._global.intercept:.6f}",
+                        })
+                    else:
+                        logger.log_params({
+                            "platt_slope": f"{calibrator.slope:.6f}",
+                            "platt_intercept": f"{calibrator.intercept:.6f}",
+                        })
 
                 # Log diagnostic JSON artifact
                 import tempfile

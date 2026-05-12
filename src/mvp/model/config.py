@@ -221,6 +221,7 @@ class CalibrationConfig(BaseModel):
     """Calibration configuration. Absence of this block = pooled-only behavior."""
 
     segments: list[str] | None = None
+    min_n: int = 200
 
 
 class ExperimentConfig(BaseModel):

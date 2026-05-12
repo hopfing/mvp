@@ -13,7 +13,7 @@ import polars as pl
 import yaml
 
 from mvp.common.base_job import get_data_root, get_local_data_root
-from mvp.model.calibration import PlattCalibrator
+from mvp.model.calibration import PlattCalibrator, SegmentedPlattCalibrator
 from mvp.model.confidence.dimensions import MODIFIERS
 from mvp.model.config import (
     EnsembleParams,
@@ -300,13 +300,24 @@ class ProductionPredictor:
             fold_weights = sample_weights[train_idx] if sample_weights is not None else None
             fold_model.fit(X[train_idx], y[train_idx], sample_weight=fold_weights)
             oof_probs[val_idx] = fold_model.predict_proba(X[val_idx])
-        calibrator = PlattCalibrator()
-        calibrator.fit(oof_probs, y)
-        logger.info(
-            "Platt calibrator: slope=%.4f, intercept=%.4f",
-            calibrator.slope,
-            calibrator.intercept,
-        )
+        cal_cfg = config.calibration
+        if cal_cfg and cal_cfg.segments:
+            calibrator = SegmentedPlattCalibrator(
+                segments=cal_cfg.segments, min_n=cal_cfg.min_n,
+            )
+            calibrator.fit(oof_probs, y, df)
+            logger.info(
+                "Segmented Platt: %d per-segment fits + global fallback",
+                calibrator.n_segments,
+            )
+        else:
+            calibrator = PlattCalibrator()
+            calibrator.fit(oof_probs, y)
+            logger.info(
+                "Platt calibrator: slope=%.4f, intercept=%.4f",
+                calibrator.slope,
+                calibrator.intercept,
+            )
 
         # Save artifact
         artifact_path = Path(entry["artifact"])
@@ -477,7 +488,10 @@ class ProductionPredictor:
 
         probs = model.predict_proba(X)
         if calibrator is not None:
-            probs = calibrator.transform(probs)
+            if isinstance(calibrator, SegmentedPlattCalibrator):
+                probs = calibrator.transform(probs, canonical)
+            else:
+                probs = calibrator.transform(probs)
 
         # For non-canonical rows that were included, flip the prob (winner only;
         # deciding_set prob is symmetric — no flip needed)
@@ -665,7 +679,10 @@ class ProductionPredictor:
 
         probs = model.predict_proba(X)
         if calibrator is not None:
-            probs = calibrator.transform(probs)
+            if isinstance(calibrator, SegmentedPlattCalibrator):
+                probs = calibrator.transform(probs, pending)
+            else:
+                probs = calibrator.transform(probs)
 
         # Add probabilities to pending matches
         pending = pending.with_columns(pl.Series("_prob", probs))

@@ -406,7 +406,15 @@ def print_run_summary(results: dict[str, Any], name: str | None = None) -> None:
 
         calibrator = results.get("calibrator")
         if calibrator is not None and calibrator.is_fitted:
-            print(f"  Platt: slope={calibrator.slope:.4f}, intercept={calibrator.intercept:.4f}")
+            from mvp.model.calibration import SegmentedPlattCalibrator
+            if isinstance(calibrator, SegmentedPlattCalibrator):
+                print(
+                    f"  Platt: segmented ({calibrator.n_segments} per-segment "
+                    f"fits + global slope={calibrator._global.slope:.4f}, "
+                    f"intercept={calibrator._global.intercept:.4f})"
+                )
+            else:
+                print(f"  Platt: slope={calibrator.slope:.4f}, intercept={calibrator.intercept:.4f}")
 
     # High-confidence errors
     errors = diagnostics.errors
