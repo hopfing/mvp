@@ -200,6 +200,38 @@ def _print_per_fold_section(
     )
 
 
+def _print_calibration_by_segment(cal_by_segment: dict[str, Any] | None) -> None:
+    """Print per-segment calibration buckets (signed err in pp)."""
+    if not cal_by_segment:
+        return
+    band_labels = ["50-60%", "60-70%", "70-80%", "80-90%", "90-100%"]
+    print(
+        "\nCalibration by Segment (signed err in pp, * = |err| > 3pp, "
+        "— = n < 30):"
+    )
+    header = (
+        f"  {'Segment':22}"
+        + "".join(f"{b:>10}" for b in band_labels)
+        + f"{'n':>10}"
+    )
+    print(header)
+    for seg_key, seg_data in cal_by_segment.items():
+        circuit, group = seg_key.split("_", 1)
+        label = f"{circuit.upper()} {group}"
+        row = f"  {label:22}"
+        for band in seg_data["bands"]:
+            n = band["n"]
+            if n < 30:
+                row += f"{'—':>10}"
+                continue
+            err_pp = (band["actual"] - band["predicted_mean"]) * 100
+            marker = "*" if abs(err_pp) > 3.0 else ""
+            cell = f"{marker}{err_pp:+.1f}pp"
+            row += f"{cell:>10}"
+        row += f"{seg_data['n_overall']:>10,}"
+        print(row)
+
+
 def _print_feature_importance(
     fold_importances: list[dict[str, float]],
     feature_cols: list[str],
@@ -370,6 +402,11 @@ def print_run_summary(results: dict[str, Any], name: str | None = None) -> None:
         e80 = errors["summary"].get("80plus", {})
         if e80.get("total", 0) > 0:
             print(f"High-conf errors: {e80['error_rate']:.1%} of {e80['total']:,} predictions at 80%+ were wrong")
+
+    # Per-segment calibration
+    _print_calibration_by_segment(
+        getattr(diagnostics, "calibration_by_segment", None)
+    )
 
     # Error conditions
     error_conds = diagnostics.error_conditions

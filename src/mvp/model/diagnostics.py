@@ -551,6 +551,69 @@ class Diagnostics:
             "calibration_max_error": calibration_max_error,
         }
 
+    def _calibration_by_segment(
+        self, df: pl.DataFrame, y_true: np.ndarray, y_prob: np.ndarray
+    ) -> dict[str, Any]:
+        """Calibration buckets broken out by circuit × betting_group.
+
+        Wider bands (50-60, 60-70, 70-80, 80-90, 90-100) than the pooled
+        view to keep per-cell sample sizes meaningful at segment grain.
+
+        Returns:
+            { "chal_Strong": {"bands": [{range, predicted_mean, actual, err, n}, ...],
+                              "n_overall": N}, ... }
+            Bands are returned in fixed order so the CLI render can rely on it.
+            Empty bands (n == 0) are still included with zeros so columns line up.
+        """
+        if "circuit" not in df.columns or "round" not in df.columns:
+            return {}
+
+        band_edges = [0.50, 0.60, 0.70, 0.80, 0.90, 1.00]
+        result: dict[str, Any] = {}
+        circuits_arr = df["circuit"].fill_null("").to_numpy()
+        rounds_arr = df["round"].fill_null("").to_numpy()
+
+        for circuit, groups in BETTING_GROUPS.items():
+            for group, group_rounds in groups.items():
+                seg_mask = (circuits_arr == circuit) & np.isin(rounds_arr, group_rounds)
+                if not seg_mask.any():
+                    continue
+                seg_y_true = y_true[seg_mask]
+                seg_y_prob = y_prob[seg_mask]
+                bands = []
+                for i in range(len(band_edges) - 1):
+                    low, high = band_edges[i], band_edges[i + 1]
+                    if i == len(band_edges) - 2:
+                        band_mask = (seg_y_prob >= low) & (seg_y_prob <= high)
+                    else:
+                        band_mask = (seg_y_prob >= low) & (seg_y_prob < high)
+                    n = int(band_mask.sum())
+                    if n == 0:
+                        bands.append({
+                            "range": [low, high],
+                            "predicted_mean": 0.0,
+                            "actual": 0.0,
+                            "err": 0.0,
+                            "n": 0,
+                        })
+                        continue
+                    band_probs = seg_y_prob[band_mask]
+                    band_true = seg_y_true[band_mask]
+                    predicted_mean = float(np.mean(band_probs))
+                    actual = float(np.mean(band_true))
+                    bands.append({
+                        "range": [low, high],
+                        "predicted_mean": predicted_mean,
+                        "actual": actual,
+                        "err": actual - predicted_mean,
+                        "n": n,
+                    })
+                result[f"{circuit}_{group}"] = {
+                    "bands": bands,
+                    "n_overall": int(seg_mask.sum()),
+                }
+        return result
+
     def _temporal_stability(
         self, df: pl.DataFrame, y_true: np.ndarray, y_prob: np.ndarray
     ) -> dict[str, Any]:
@@ -636,6 +699,7 @@ class Diagnostics:
             return DiagnosticResults(
                 segments={},
                 calibration=self._calibration(np.array([]), np.array([])),
+                calibration_by_segment={},
                 errors=self._error_analysis(
                     pl.DataFrame(), np.array([]), np.array([])
                 ),
@@ -654,6 +718,9 @@ class Diagnostics:
 
         segments = self._segment_metrics(combined_df, combined_y_true, combined_y_prob)
         calibration = self._calibration(combined_y_true, combined_y_prob)
+        calibration_by_segment = self._calibration_by_segment(
+            combined_df, combined_y_true, combined_y_prob
+        )
         errors = self._error_analysis(combined_df, combined_y_true, combined_y_prob)
         temporal = self._temporal_stability(
             combined_df, combined_y_true, combined_y_prob
@@ -665,6 +732,7 @@ class Diagnostics:
         return DiagnosticResults(
             segments=segments,
             calibration=calibration,
+            calibration_by_segment=calibration_by_segment,
             errors=errors,
             temporal=temporal,
             error_conditions=error_conditions,
@@ -990,6 +1058,7 @@ class DiagnosticResults:
     calibration: dict[str, Any]
     errors: dict[str, Any]
     temporal: dict[str, Any]
+    calibration_by_segment: dict[str, Any] | None = None
     error_conditions: dict[str, Any] | None = None
     ensemble: dict[str, Any] | None = None
 
@@ -1067,6 +1136,8 @@ class DiagnosticResults:
             "errors": self.errors,
             "temporal": self.temporal,
         }
+        if self.calibration_by_segment is not None:
+            data["calibration_by_segment"] = self.calibration_by_segment
         if self.error_conditions is not None:
             data["error_conditions"] = self.error_conditions
         if self.ensemble is not None:
