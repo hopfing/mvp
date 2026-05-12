@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 
 from mvp.model.config import SampleWeightConfig
 
@@ -93,10 +93,40 @@ class ValidationConfig(BaseModel):
     train_size: int | None = None
     test_start: date | None = None
     train_months: int | None = None
+    initial_train_months: int | None = None
     test_months: int | None = None
-    start_date: date | None = None
-    end_date: date | None = None
-    train_start_date: date | None = None
+
+    @model_validator(mode="after")
+    def _validate_date_splitter_params(self) -> "ValidationConfig":
+        if self.type == "date_sliding":
+            if self.initial_train_months is not None:
+                raise ValueError(
+                    "initial_train_months is for date_expanding; use train_months with date_sliding"
+                )
+            if self.train_months is None or self.test_months is None:
+                raise ValueError(
+                    "date_sliding requires train_months and test_months"
+                )
+        elif self.type == "date_expanding":
+            if self.train_months is not None:
+                raise ValueError(
+                    "train_months is for date_sliding; use initial_train_months with date_expanding"
+                )
+            if self.initial_train_months is None or self.test_months is None:
+                raise ValueError(
+                    "date_expanding requires initial_train_months and test_months"
+                )
+        else:
+            if (
+                self.train_months is not None
+                or self.initial_train_months is not None
+                or self.test_months is not None
+            ):
+                raise ValueError(
+                    f"train_months / initial_train_months / test_months are only valid "
+                    f"with date_sliding or date_expanding, not {self.type}"
+                )
+        return self
 
 
 class DiscoveryConfig(BaseModel):

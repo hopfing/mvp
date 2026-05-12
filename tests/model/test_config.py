@@ -2,6 +2,8 @@
 
 from datetime import date
 
+import pytest
+
 from mvp.model.config import ExperimentConfig
 
 
@@ -141,3 +143,92 @@ model:
 """
         config = ExperimentConfig.from_yaml(yaml_str)
         assert config.features.compute_only == []
+
+
+class TestDateValidationSplitterParams:
+    """Cross-type validators for date_sliding / date_expanding params."""
+
+    _PREFIX = """
+data:
+  date_range:
+    start: "2020-01-01"
+    end: "2024-12-31"
+features:
+  include:
+    - win_rate(days=30)
+model:
+  type: logistic
+"""
+
+    def test_date_sliding_valid(self):
+        yaml_str = self._PREFIX + """
+validation:
+  type: date_sliding
+  train_months: 12
+  test_months: 3
+"""
+        config = ExperimentConfig.from_yaml(yaml_str)
+        assert config.validation.train_months == 12
+        assert config.validation.test_months == 3
+
+    def test_date_expanding_valid(self):
+        yaml_str = self._PREFIX + """
+validation:
+  type: date_expanding
+  initial_train_months: 12
+  test_months: 12
+"""
+        config = ExperimentConfig.from_yaml(yaml_str)
+        assert config.validation.initial_train_months == 12
+        assert config.validation.test_months == 12
+
+    def test_date_sliding_rejects_initial_train_months(self):
+        yaml_str = self._PREFIX + """
+validation:
+  type: date_sliding
+  train_months: 12
+  initial_train_months: 24
+  test_months: 3
+"""
+        with pytest.raises(ValueError, match="initial_train_months is for date_expanding"):
+            ExperimentConfig.from_yaml(yaml_str)
+
+    def test_date_expanding_rejects_train_months(self):
+        yaml_str = self._PREFIX + """
+validation:
+  type: date_expanding
+  train_months: 12
+  initial_train_months: 24
+  test_months: 12
+"""
+        with pytest.raises(ValueError, match="train_months is for date_sliding"):
+            ExperimentConfig.from_yaml(yaml_str)
+
+    def test_date_sliding_requires_train_months(self):
+        yaml_str = self._PREFIX + """
+validation:
+  type: date_sliding
+  test_months: 3
+"""
+        with pytest.raises(ValueError, match="date_sliding requires"):
+            ExperimentConfig.from_yaml(yaml_str)
+
+    def test_date_expanding_requires_initial_train_months(self):
+        yaml_str = self._PREFIX + """
+validation:
+  type: date_expanding
+  test_months: 12
+"""
+        with pytest.raises(ValueError, match="date_expanding requires"):
+            ExperimentConfig.from_yaml(yaml_str)
+
+    def test_non_date_type_rejects_date_params(self):
+        yaml_str = self._PREFIX + """
+validation:
+  type: expanding_window
+  initial_train_size: 25000
+  step_size: 25000
+  train_months: 12
+"""
+        with pytest.raises(ValueError, match="only valid with date_sliding"):
+            ExperimentConfig.from_yaml(yaml_str)

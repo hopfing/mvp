@@ -243,10 +243,8 @@ class FastForwardSelector:
             train_size=val.train_size,
             test_start=getattr(val, "test_start", None),
             train_months=getattr(val, "train_months", None),
+            initial_train_months=getattr(val, "initial_train_months", None),
             test_months=getattr(val, "test_months", None),
-            start_date=getattr(val, "start_date", None),
-            end_date=getattr(val, "end_date", None),
-            train_start_date=getattr(val, "train_start_date", None),
         )
         self.folds = [
             (np.array(train_idx), np.array(test_idx))

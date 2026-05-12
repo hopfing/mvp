@@ -227,15 +227,14 @@ class TestDateSlidingWindowSplitter:
     """Tests for DateSlidingWindowSplitter."""
 
     def test_fold_count_and_boundaries(self):
+        # 48 months of data from 2022-01 to 2025-12. train_months=24, test_months=3.
+        # First test fold starts at 2024-01 (anchor 2022-01 + 24 months).
+        # Folds run through last quarter that fits: 2025-10 → 2026-01 → no, exceeds data.
+        # Last valid test_end: 2025-10 → 2026-01 (upper = 2026-01). Just fits.
         df = _monthly_df(date(2022, 1, 1), months=48)
-        splitter = DateSlidingWindowSplitter(
-            train_months=24,
-            test_months=3,
-            start_date=date(2024, 1, 1),
-            end_date=date(2025, 1, 1),
-        )
+        splitter = DateSlidingWindowSplitter(train_months=24, test_months=3)
         splits = list(splitter.split(df))
-        assert len(splits) == 4
+        assert len(splits) == 8  # 2024-Q1, Q2, Q3, Q4, 2025-Q1, Q2, Q3, Q4
 
         # First fold: train [2022-01, 2024-01), test [2024-01, 2024-04)
         train_idx, test_idx = splits[0]
@@ -248,12 +247,7 @@ class TestDateSlidingWindowSplitter:
 
     def test_train_shifts_by_test_months(self):
         df = _monthly_df(date(2022, 1, 1), months=48)
-        splitter = DateSlidingWindowSplitter(
-            train_months=24,
-            test_months=3,
-            start_date=date(2024, 1, 1),
-            end_date=date(2025, 1, 1),
-        )
+        splitter = DateSlidingWindowSplitter(train_months=24, test_months=3)
         splits = list(splitter.split(df))
         train_mins = [df[t]["effective_match_date"].min() for t, _ in splits]
         for i in range(1, len(train_mins)):
@@ -261,55 +255,23 @@ class TestDateSlidingWindowSplitter:
 
     def test_no_overlap(self):
         df = _monthly_df(date(2022, 1, 1), months=48)
-        splitter = DateSlidingWindowSplitter(
-            train_months=24,
-            test_months=3,
-            start_date=date(2024, 1, 1),
-            end_date=date(2025, 1, 1),
-        )
+        splitter = DateSlidingWindowSplitter(train_months=24, test_months=3)
         for train_idx, test_idx in splitter.split(df):
             assert len(set(train_idx) & set(test_idx)) == 0
 
-    def test_start_date_must_be_first_of_month(self):
-        with pytest.raises(ValueError, match="start_date"):
-            DateSlidingWindowSplitter(
-                train_months=12,
-                test_months=3,
-                start_date=date(2024, 1, 15),
-            )
+    def test_train_months_must_be_positive(self):
+        with pytest.raises(ValueError, match="train_months"):
+            DateSlidingWindowSplitter(train_months=0, test_months=3)
 
-    def test_end_date_must_be_first_of_month(self):
-        with pytest.raises(ValueError, match="end_date"):
-            DateSlidingWindowSplitter(
-                train_months=12,
-                test_months=3,
-                start_date=date(2024, 1, 1),
-                end_date=date(2025, 6, 30),
-            )
+    def test_test_months_must_be_positive(self):
+        with pytest.raises(ValueError, match="test_months"):
+            DateSlidingWindowSplitter(train_months=12, test_months=0)
 
-    def test_end_date_cutoff(self):
-        df = _monthly_df(date(2022, 1, 1), months=48)
-        splitter = DateSlidingWindowSplitter(
-            train_months=12,
-            test_months=6,
-            start_date=date(2024, 1, 1),
-            end_date=date(2024, 7, 1),
-        )
-        splits = list(splitter.split(df))
-        # Only one fold fits: [2024-01, 2024-07)
-        assert len(splits) == 1
-
-    def test_empty_fold_skipped(self):
-        # Frame has data only in 2024; ask for folds starting 2025 → no test rows
-        df = _monthly_df(date(2024, 1, 1), months=12)
-        splitter = DateSlidingWindowSplitter(
-            train_months=12,
-            test_months=3,
-            start_date=date(2025, 1, 1),
-            end_date=date(2025, 4, 1),
-        )
-        splits = list(splitter.split(df))
-        assert splits == []
+    def test_empty_when_no_data_after_train(self):
+        # train_months > data span → no folds produced
+        df = _monthly_df(date(2024, 1, 1), months=6)
+        splitter = DateSlidingWindowSplitter(train_months=12, test_months=3)
+        assert list(splitter.split(df)) == []
 
 
 class TestDateExpandingWindowSplitter:
@@ -317,66 +279,33 @@ class TestDateExpandingWindowSplitter:
 
     def test_train_grows_each_fold(self):
         df = _monthly_df(date(2020, 1, 1), months=72)
-        splitter = DateExpandingWindowSplitter(
-            train_start_date=date(2020, 1, 1),
-            start_date=date(2022, 1, 1),
-            test_months=12,
-            end_date=date(2025, 1, 1),
-        )
+        splitter = DateExpandingWindowSplitter(initial_train_months=24, test_months=12)
         splits = list(splitter.split(df))
-        assert len(splits) == 3
+        # Anchor 2020-01, first test 2022-01. Test folds: 2022, 2023, 2024, 2025 → 4 folds
+        assert len(splits) == 4
 
         prev_train_size = 0
         for train_idx, _ in splits:
             assert len(train_idx) > prev_train_size
             prev_train_size = len(train_idx)
 
-    def test_fixed_train_start(self):
+    def test_fixed_train_start_anchored_at_data_min(self):
         df = _monthly_df(date(2020, 1, 1), months=72)
-        splitter = DateExpandingWindowSplitter(
-            train_start_date=date(2020, 1, 1),
-            start_date=date(2022, 1, 1),
-            test_months=12,
-            end_date=date(2025, 1, 1),
-        )
+        splitter = DateExpandingWindowSplitter(initial_train_months=24, test_months=12)
         for train_idx, _ in splitter.split(df):
             assert df[train_idx]["effective_match_date"].min() == date(2020, 1, 1)
 
-    def test_train_start_defaults_to_data_min(self):
-        df = _monthly_df(date(2021, 6, 1), months=36)
-        splitter = DateExpandingWindowSplitter(
-            start_date=date(2023, 1, 1),
-            test_months=6,
-            end_date=date(2024, 1, 1),
-        )
-        splits = list(splitter.split(df))
-        assert len(splits) > 0
-        first_train_idx, _ = splits[0]
-        assert df[first_train_idx]["effective_match_date"].min() == date(2021, 6, 1)
+    def test_initial_train_months_must_be_positive(self):
+        with pytest.raises(ValueError, match="initial_train_months"):
+            DateExpandingWindowSplitter(initial_train_months=0, test_months=12)
 
-    def test_start_date_must_be_first_of_month(self):
-        with pytest.raises(ValueError, match="start_date"):
-            DateExpandingWindowSplitter(
-                start_date=date(2024, 1, 15),
-                test_months=12,
-            )
-
-    def test_train_start_date_must_be_first_of_month(self):
-        with pytest.raises(ValueError, match="train_start_date"):
-            DateExpandingWindowSplitter(
-                start_date=date(2024, 1, 1),
-                train_start_date=date(2020, 1, 5),
-                test_months=12,
-            )
+    def test_test_months_must_be_positive(self):
+        with pytest.raises(ValueError, match="test_months"):
+            DateExpandingWindowSplitter(initial_train_months=12, test_months=0)
 
     def test_no_overlap(self):
         df = _monthly_df(date(2020, 1, 1), months=72)
-        splitter = DateExpandingWindowSplitter(
-            train_start_date=date(2020, 1, 1),
-            start_date=date(2022, 1, 1),
-            test_months=12,
-            end_date=date(2025, 1, 1),
-        )
+        splitter = DateExpandingWindowSplitter(initial_train_months=24, test_months=12)
         for train_idx, test_idx in splitter.split(df):
             assert len(set(train_idx) & set(test_idx)) == 0
 
@@ -393,22 +322,13 @@ class TestDateSplitterDatetimeColumn:
 
     def test_sliding_with_datetime_column(self):
         df = self._datetime_df()
-        splitter = DateSlidingWindowSplitter(
-            train_months=12,
-            test_months=3,
-            start_date=date(2024, 1, 1),
-            end_date=date(2025, 1, 1),
-        )
+        splitter = DateSlidingWindowSplitter(train_months=24, test_months=3)
         splits = list(splitter.split(df))
-        assert len(splits) == 4
+        assert len(splits) == 8
 
     def test_expanding_with_datetime_column(self):
         df = self._datetime_df()
-        splitter = DateExpandingWindowSplitter(
-            train_start_date=date(2022, 1, 1),
-            start_date=date(2024, 1, 1),
-            test_months=3,
-            end_date=date(2025, 1, 1),
-        )
+        splitter = DateExpandingWindowSplitter(initial_train_months=24, test_months=12)
         splits = list(splitter.split(df))
-        assert len(splits) == 4
+        # Anchor 2022-01, first test 2024-01. Folds: 2024, 2025 → 2 folds
+        assert len(splits) == 2

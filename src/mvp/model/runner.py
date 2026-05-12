@@ -129,10 +129,8 @@ class ExperimentRunner:
             train_size=val.train_size,
             test_start=val.test_start,
             train_months=val.train_months,
+            initial_train_months=val.initial_train_months,
             test_months=val.test_months,
-            start_date=val.start_date,
-            end_date=val.end_date,
-            train_start_date=val.train_start_date,
         )
 
     def _resolve_ensemble(
