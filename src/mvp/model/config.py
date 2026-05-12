@@ -217,6 +217,12 @@ class SampleWeightConfig(BaseModel):
     half_life_days: int
 
 
+class CalibrationConfig(BaseModel):
+    """Calibration configuration. Absence of this block = pooled-only behavior."""
+
+    segments: list[str] | None = None
+
+
 class ExperimentConfig(BaseModel):
     """Complete experiment configuration."""
 
@@ -228,6 +234,7 @@ class ExperimentConfig(BaseModel):
     validation: ValidationConfig = ValidationConfig()
     metrics: MetricsConfig = MetricsConfig()
     sample_weight: SampleWeightConfig | None = None
+    calibration: CalibrationConfig | None = None
 
     @model_validator(mode="after")
     def validate_features_required(self) -> "ExperimentConfig":

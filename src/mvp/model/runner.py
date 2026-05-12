@@ -687,7 +687,14 @@ class ExperimentRunner:
             # Compute diagnostics
             run_logger.info("Computing diagnostics...")
             diagnostics = Diagnostics()
-            diagnostic_results = diagnostics.compute_all(all_predictions)
+            cal_segments = (
+                self.config.calibration.segments
+                if self.config.calibration is not None
+                else None
+            )
+            diagnostic_results = diagnostics.compute_all(
+                all_predictions, calibration_segments=cal_segments
+            )
 
             # Compute ensemble-specific diagnostics
             ensemble_diagnostic_results = None

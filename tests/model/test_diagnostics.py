@@ -110,32 +110,81 @@ class TestDiagnosticsSegmentAnalysis:
         assert result["overall"]["round"]["Q1"]["n_matches"] == 1
         assert result["overall"]["round"]["R32"]["n_matches"] == 1
 
-    def test_betting_group_mapping(self) -> None:
-        """Maps rounds to circuit-aware betting groups."""
+    def test_no_betting_group_in_segments_output(self) -> None:
+        """Segments output must not contain a betting_group key (removed)."""
         df = pl.DataFrame({
-            "circuit": ["tour"] * 4 + ["chal"] * 3,
-            "surface": ["Hard"] * 7,
-            "round": ["Q1", "R32", "SF", "F", "Q1", "R32", "SF"],
-            "player_ranking": [100] * 7,
-            "effective_match_date": ["2023-01-01"] * 7,
+            "circuit": ["tour"] * 3 + ["chal"] * 3,
+            "surface": ["Hard"] * 6,
+            "round": ["Q1", "R32", "F", "Q1", "R32", "SF"],
+            "effective_match_date": ["2023-01-01"] * 6,
         })
-        y_true = np.array([1, 1, 1, 1, 1, 1, 1])
-        y_prob = np.array([0.6, 0.6, 0.6, 0.6, 0.6, 0.6, 0.6])
+        y_true = np.array([1, 1, 1, 1, 1, 1])
+        y_prob = np.array([0.6, 0.6, 0.6, 0.6, 0.6, 0.6])
 
         diagnostics = Diagnostics()
         result = diagnostics._segment_metrics(df, y_true, y_prob)
 
-        # Tour: Qualifying=[Q1], Main Draw=[R32,SF], Final=[F]
-        tour_bg = result["by_circuit"]["tour"]["betting_group"]
-        assert tour_bg["Qualifying"]["n_matches"] == 1
-        assert tour_bg["Main Draw"]["n_matches"] == 2  # R32, SF
-        assert tour_bg["Final"]["n_matches"] == 1       # F
+        assert "betting_group" not in result["by_circuit"]["tour"]
+        assert "betting_group" not in result["by_circuit"]["chal"]
 
-        # Chal: Strong=[Q1], Mid=[R32], Tight=[SF]
-        chal_bg = result["by_circuit"]["chal"]["betting_group"]
-        assert chal_bg["Strong"]["n_matches"] == 1
-        assert chal_bg["Mid"]["n_matches"] == 1
-        assert chal_bg["Tight"]["n_matches"] == 1
+    def test_calibration_by_segment_dynamic(self) -> None:
+        """_calibration_by_segment groups by the cartesian product of columns."""
+        df = pl.DataFrame({
+            "circuit": ["tour"] * 4 + ["chal"] * 4,
+            "surface": ["Hard", "Hard", "Clay", "Clay"] * 2,
+            "round": ["Q1", "R32", "Q1", "R32"] * 2,
+            "effective_match_date": ["2023-01-01"] * 8,
+        })
+        y_true = np.array([1, 1, 1, 0, 1, 0, 1, 0])
+        y_prob = np.array([0.55, 0.65, 0.75, 0.55, 0.65, 0.55, 0.75, 0.65])
+        diagnostics = Diagnostics()
+
+        # segments=["circuit"] → 2 keys
+        result = diagnostics._calibration_by_segment(
+            df, y_true, y_prob, segments=["circuit"]
+        )
+        assert set(result.keys()) == {"tour", "chal"}
+        assert result["tour"]["segment_columns"] == ["circuit"]
+
+        # segments=["circuit", "surface"] → 4 keys
+        result = diagnostics._calibration_by_segment(
+            df, y_true, y_prob, segments=["circuit", "surface"]
+        )
+        assert set(result.keys()) == {"tour|Hard", "tour|Clay",
+                                       "chal|Hard", "chal|Clay"}
+
+    def test_calibration_by_segment_draw_stage(self) -> None:
+        """draw_stage column is computed on demand inside compute_all."""
+        from mvp.model.diagnostics import _augment_segment_columns
+        df = pl.DataFrame({
+            "circuit": ["tour"] * 4 + ["chal"] * 4,
+            "round": ["Q1", "Q2", "R32", "F"] * 2,
+        })
+        augmented = _augment_segment_columns(df, ["circuit", "draw_stage"])
+        assert "draw_stage" in augmented.columns
+        stages = augmented["draw_stage"].to_list()
+        # Q1/Q2 → Qualifying, R32/F → Main Draw
+        assert stages == [
+            "Qualifying", "Qualifying", "Main Draw", "Main Draw",
+            "Qualifying", "Qualifying", "Main Draw", "Main Draw",
+        ]
+
+    def test_calibration_by_segment_tournament_stage(self) -> None:
+        """tournament_stage maps round to Qualifying/Early/Mid/Late/Other."""
+        from mvp.model.diagnostics import _augment_segment_columns
+        df = pl.DataFrame({
+            "round": ["Q1", "Q2", "Q3", "R128", "R64", "R32",
+                      "R16", "QF", "SF", "F", "RR", "BRONZE"],
+        })
+        augmented = _augment_segment_columns(df, ["tournament_stage"])
+        stages = augmented["tournament_stage"].to_list()
+        assert stages == [
+            "Qualifying", "Qualifying", "Qualifying",
+            "Early", "Early", "Early",
+            "Mid", "Mid",
+            "Late", "Late", "Late",
+            "Other",
+        ]
 
     def test_surface_subsegment_within_circuit(self) -> None:
         """Surface metrics computed within each circuit."""

@@ -18,22 +18,6 @@ from mvp.model.metrics import (
 # Ordered rounds for per-round diagnostics
 ROUND_ORDER: list[str] = ["Q1", "Q2", "Q3", "RR", "R128", "R64", "R32", "R16", "QF", "SF", "F"]
 
-# Performance-based betting groups (circuit-aware)
-# Tour: flat performance R128-SF, only F/RR separate
-# Chal: Q1 stands alone (.813 AUC), Q2-QF moderate, SF/F weak
-BETTING_GROUPS: dict[str, dict[str, list[str]]] = {
-    "tour": {
-        "Qualifying": ["Q1", "Q2", "Q3"],
-        "Main Draw": ["R128", "R64", "R32", "R16", "QF", "SF"],
-        "Final": ["F", "RR"],
-    },
-    "chal": {
-        "Strong": ["Q1"],
-        "Mid": ["Q2", "R32", "R16", "QF"],
-        "Tight": ["SF", "F"],
-    },
-}
-
 # Ranking bucket boundaries
 RANKING_BUCKETS: list[tuple[str, int, int | None]] = [
     ("1-20", 1, 20),
@@ -241,6 +225,63 @@ def _build_correction_breakdowns(
     return sections
 
 
+SEGMENT_VALUE_ORDERS: dict[str, list[str]] = {
+    "circuit": ["chal", "tour", "itf"],
+    "draw_stage": ["Qualifying", "Main Draw"],
+    "tournament_stage": ["Qualifying", "Early", "Mid", "Late", "Other"],
+    "round": ROUND_ORDER,
+    "surface": ["Hard", "Clay", "Grass", "Carpet"],
+}
+
+
+def _segment_sort_key(seg_key: str, columns: list[str]) -> tuple:
+    """Build a tuple that sorts segment keys in logical order per column.
+
+    For each column with a known ordering, the value's index is used.
+    Unknown values (or columns without a known order) fall back to
+    alphabetical, sorted after all known values.
+    """
+    parts = seg_key.split("|")
+    out: list[tuple[int, Any]] = []
+    for i, col in enumerate(columns):
+        val = parts[i] if i < len(parts) else ""
+        order = SEGMENT_VALUE_ORDERS.get(col)
+        if order and val in order:
+            out.append((0, order.index(val)))
+        else:
+            out.append((1, val))
+    return tuple(out)
+
+
+def _augment_segment_columns(df: pl.DataFrame, segments: list[str]) -> pl.DataFrame:
+    """Add derived segmentation columns on demand.
+
+    Handles `draw_stage` (Qualifying / Main Draw) and `tournament_stage`
+    (Qualifying / Early / Mid / Late / Other), both computed from `round`.
+    """
+    if "draw_stage" in segments and "draw_stage" not in df.columns:
+        df = df.with_columns(
+            pl.when(pl.col("round").is_in(["Q1", "Q2", "Q3"]))
+            .then(pl.lit("Qualifying"))
+            .otherwise(pl.lit("Main Draw"))
+            .alias("draw_stage")
+        )
+    if "tournament_stage" in segments and "tournament_stage" not in df.columns:
+        df = df.with_columns(
+            pl.when(pl.col("round").is_in(["Q1", "Q2", "Q3"]))
+            .then(pl.lit("Qualifying"))
+            .when(pl.col("round").is_in(["R128", "R64", "R32"]))
+            .then(pl.lit("Early"))
+            .when(pl.col("round").is_in(["R16", "QF"]))
+            .then(pl.lit("Mid"))
+            .when(pl.col("round").is_in(["SF", "F", "RR"]))
+            .then(pl.lit("Late"))
+            .otherwise(pl.lit("Other"))
+            .alias("tournament_stage")
+        )
+    return df
+
+
 def _compute_metrics_for_segment(
     y_true: np.ndarray, y_prob: np.ndarray, include_calibration: bool = False
 ) -> dict[str, float]:
@@ -292,14 +333,6 @@ def _compute_metrics_for_segment(
 class Diagnostics:
     """Compute diagnostics for experiment analysis."""
 
-    def _get_betting_group(self, round_val: str, circuit: str) -> str:
-        """Map round to betting group based on circuit."""
-        circuit_groups = BETTING_GROUPS.get(circuit, {})
-        for group, rounds in circuit_groups.items():
-            if round_val in rounds:
-                return group
-        return "Other"
-
     def _get_ranking_bucket(self, ranking: int | None) -> str:
         """Map ranking to bucket."""
         if ranking is None:
@@ -324,7 +357,6 @@ class Diagnostics:
                     "overall": {metrics with calibration},
                     "surface": {"Clay": {...}, "Hard": {...}},
                     "round": {"Q1": {...}, "R32": {...}, ...},
-                    "betting_group": {"Strong": {...}, "Mid": {...}, "Tight": {...}},
                 },
                 "tour": {...},
             },
@@ -385,20 +417,6 @@ class Diagnostics:
                         circuit_data["round"][rnd] = _compute_metrics_for_segment(
                             circuit_y_true[rnd_mask],
                             circuit_y_prob[rnd_mask],
-                            include_calibration=True,
-                        )
-
-            # Betting group subsegments (circuit-aware)
-            circuit_data["betting_group"] = {}
-            circuit_groups = BETTING_GROUPS.get(circuit, {})
-            if rounds_arr is not None and circuit_groups:
-                circuit_rounds = rounds_arr[circuit_mask]
-                for group, group_rounds in circuit_groups.items():
-                    group_mask = np.isin(circuit_rounds, group_rounds)
-                    if group_mask.any():
-                        circuit_data["betting_group"][group] = _compute_metrics_for_segment(
-                            circuit_y_true[group_mask],
-                            circuit_y_prob[group_mask],
                             include_calibration=True,
                         )
 
@@ -552,66 +570,95 @@ class Diagnostics:
         }
 
     def _calibration_by_segment(
-        self, df: pl.DataFrame, y_true: np.ndarray, y_prob: np.ndarray
+        self,
+        df: pl.DataFrame,
+        y_true: np.ndarray,
+        y_prob: np.ndarray,
+        segments: list[str],
     ) -> dict[str, Any]:
-        """Calibration buckets broken out by circuit × betting_group.
+        """Calibration buckets broken out by the cartesian product of `segments`.
 
-        Wider bands (50-60, 60-70, 70-80, 80-90, 90-100) than the pooled
-        view to keep per-cell sample sizes meaningful at segment grain.
-
-        Returns:
-            { "chal_Strong": {"bands": [{range, predicted_mean, actual, err, n}, ...],
-                              "n_overall": N}, ... }
-            Bands are returned in fixed order so the CLI render can rely on it.
-            Empty bands (n == 0) are still included with zeros so columns line up.
+        Each returned key is the joined segment label (e.g. "tour|Clay" for
+        segments=["circuit", "surface"]). Bands match the pooled view
+        structure so the CLI render can reuse band logic. Empty bands
+        (n == 0) are still included with zeros so columns line up.
         """
-        if "circuit" not in df.columns or "round" not in df.columns:
+        if not segments:
+            return {}
+        missing = [s for s in segments if s not in df.columns]
+        if missing:
+            return {}
+        n_rows = len(df)
+        if n_rows == 0:
             return {}
 
         band_edges = [0.50, 0.60, 0.70, 0.80, 0.90, 1.00]
-        result: dict[str, Any] = {}
-        circuits_arr = df["circuit"].fill_null("").to_numpy()
-        rounds_arr = df["round"].fill_null("").to_numpy()
+        seg_arrays = [df[col].fill_null("").to_numpy() for col in segments]
+        keys = np.array([
+            "|".join(str(seg_arrays[c][i]) for c in range(len(segments)))
+            for i in range(n_rows)
+        ])
+        unique_keys = sorted(
+            set(keys.tolist()),
+            key=lambda k: _segment_sort_key(k, list(segments)),
+        )
 
-        for circuit, groups in BETTING_GROUPS.items():
-            for group, group_rounds in groups.items():
-                seg_mask = (circuits_arr == circuit) & np.isin(rounds_arr, group_rounds)
-                if not seg_mask.any():
-                    continue
-                seg_y_true = y_true[seg_mask]
-                seg_y_prob = y_prob[seg_mask]
-                bands = []
-                for i in range(len(band_edges) - 1):
-                    low, high = band_edges[i], band_edges[i + 1]
-                    if i == len(band_edges) - 2:
-                        band_mask = (seg_y_prob >= low) & (seg_y_prob <= high)
-                    else:
-                        band_mask = (seg_y_prob >= low) & (seg_y_prob < high)
-                    n = int(band_mask.sum())
-                    if n == 0:
-                        bands.append({
-                            "range": [low, high],
-                            "predicted_mean": 0.0,
-                            "actual": 0.0,
-                            "err": 0.0,
-                            "n": 0,
-                        })
-                        continue
-                    band_probs = seg_y_prob[band_mask]
-                    band_true = seg_y_true[band_mask]
-                    predicted_mean = float(np.mean(band_probs))
-                    actual = float(np.mean(band_true))
+        # If tournament_stage is one of the segment columns, capture which raw
+        # rounds got bucketed into the "Other" stage so the CLI can surface it.
+        stage_pos = (
+            segments.index("tournament_stage")
+            if "tournament_stage" in segments and "round" in df.columns
+            else None
+        )
+        rounds_for_other = (
+            df["round"].fill_null("").to_numpy() if stage_pos is not None else None
+        )
+
+        result: dict[str, Any] = {}
+        for key in unique_keys:
+            seg_mask = keys == key
+            if not seg_mask.any():
+                continue
+            seg_y_true = y_true[seg_mask]
+            seg_y_prob = y_prob[seg_mask]
+            bands = []
+            for i in range(len(band_edges) - 1):
+                low, high = band_edges[i], band_edges[i + 1]
+                if i == len(band_edges) - 2:
+                    band_mask = (seg_y_prob >= low) & (seg_y_prob <= high)
+                else:
+                    band_mask = (seg_y_prob >= low) & (seg_y_prob < high)
+                n = int(band_mask.sum())
+                if n == 0:
                     bands.append({
                         "range": [low, high],
-                        "predicted_mean": predicted_mean,
-                        "actual": actual,
-                        "err": actual - predicted_mean,
-                        "n": n,
+                        "predicted_mean": 0.0,
+                        "actual": 0.0,
+                        "err": 0.0,
+                        "n": 0,
                     })
-                result[f"{circuit}_{group}"] = {
-                    "bands": bands,
-                    "n_overall": int(seg_mask.sum()),
-                }
+                    continue
+                predicted_mean = float(np.mean(seg_y_prob[band_mask]))
+                actual = float(np.mean(seg_y_true[band_mask]))
+                bands.append({
+                    "range": [low, high],
+                    "predicted_mean": predicted_mean,
+                    "actual": actual,
+                    "err": actual - predicted_mean,
+                    "n": n,
+                })
+            entry: dict[str, Any] = {
+                "bands": bands,
+                "n_overall": int(seg_mask.sum()),
+                "segment_columns": list(segments),
+            }
+            if stage_pos is not None and rounds_for_other is not None:
+                parts = key.split("|")
+                if len(parts) > stage_pos and parts[stage_pos] == "Other":
+                    entry["other_rounds"] = sorted(
+                        set(rounds_for_other[seg_mask].tolist())
+                    )
+            result[key] = entry
         return result
 
     def _temporal_stability(
@@ -684,13 +731,18 @@ class Diagnostics:
         return {"conditions": conditions, "total_errors": total_errors}
 
     def compute_all(
-        self, predictions: list[dict[str, Any]]
+        self,
+        predictions: list[dict[str, Any]],
+        calibration_segments: list[str] | None = None,
     ) -> "DiagnosticResults":
         """Compute all diagnostics on aggregated predictions.
 
         Args:
             predictions: List of dicts with keys "df", "y_true", "y_prob"
                 for each fold.
+            calibration_segments: Optional list of column names to group
+                calibration buckets by. Absent / empty = no per-segment
+                calibration table.
 
         Returns:
             DiagnosticResults with all computed diagnostics.
@@ -718,9 +770,14 @@ class Diagnostics:
 
         segments = self._segment_metrics(combined_df, combined_y_true, combined_y_prob)
         calibration = self._calibration(combined_y_true, combined_y_prob)
-        calibration_by_segment = self._calibration_by_segment(
-            combined_df, combined_y_true, combined_y_prob
-        )
+        if calibration_segments:
+            combined_df = _augment_segment_columns(combined_df, calibration_segments)
+            calibration_by_segment = self._calibration_by_segment(
+                combined_df, combined_y_true, combined_y_prob,
+                calibration_segments,
+            )
+        else:
+            calibration_by_segment = {}
         errors = self._error_analysis(combined_df, combined_y_true, combined_y_prob)
         temporal = self._temporal_stability(
             combined_df, combined_y_true, combined_y_prob
@@ -1078,7 +1135,7 @@ class DiagnosticResults:
                         result[key] = value
 
             # Circuit subsegments
-            for subseg_type in ["surface", "round", "betting_group"]:
+            for subseg_type in ["surface", "round"]:
                 if subseg_type in circuit_data:
                     for subseg_value, metrics in circuit_data[subseg_type].items():
                         for metric_name, value in metrics.items():

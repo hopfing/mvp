@@ -200,25 +200,49 @@ def _print_per_fold_section(
     )
 
 
+def _format_segment_label(seg_key: str) -> str:
+    """Render a joined segment key (e.g. 'tour|Clay') for display."""
+    parts = seg_key.split("|")
+    return " ".join(
+        p.upper() if i == 0 else p for i, p in enumerate(parts)
+    )
+
+
 def _print_calibration_by_segment(cal_by_segment: dict[str, Any] | None) -> None:
     """Print per-segment calibration buckets (signed err in pp)."""
     if not cal_by_segment:
         return
     band_labels = ["50-60%", "60-70%", "70-80%", "80-90%", "90-100%"]
+    # Pull segment column names from the first entry for the header
+    first = next(iter(cal_by_segment.values()))
+    seg_columns = first.get("segment_columns") or []
+    seg_label = " × ".join(seg_columns) if seg_columns else "segment"
     print(
-        "\nCalibration by Segment (signed err in pp, * = |err| > 3pp, "
-        "— = n < 30):"
+        f"\nCalibration by Segment ({seg_label}, signed err in pp, "
+        "* = |err| > 3pp, — = n < 30):"
     )
+
+    def _label_for(seg_key: str, seg_data: dict[str, Any]) -> str:
+        label = _format_segment_label(seg_key)
+        other_rounds = seg_data.get("other_rounds")
+        if other_rounds:
+            label += f" ({', '.join(other_rounds)})"
+        return label
+
+    # Width segment label column to fit longest label
+    max_label_len = max(
+        (len(_label_for(k, v)) for k, v in cal_by_segment.items()), default=10
+    )
+    label_width = max(max_label_len + 2, 22)
     header = (
-        f"  {'Segment':22}"
+        f"  {'Segment':{label_width}}"
         + "".join(f"{b:>10}" for b in band_labels)
         + f"{'n':>10}"
     )
     print(header)
     for seg_key, seg_data in cal_by_segment.items():
-        circuit, group = seg_key.split("_", 1)
-        label = f"{circuit.upper()} {group}"
-        row = f"  {label:22}"
+        label = _label_for(seg_key, seg_data)
+        row = f"  {label:{label_width}}"
         for band in seg_data["bands"]:
             n = band["n"]
             if n < 30:
@@ -349,18 +373,6 @@ def print_run_summary(results: dict[str, Any], name: str | None = None) -> None:
                     n = m.get('n_matches', 0)
                     print(f"      {rnd:10} {acc:5.1%} | {auc:.3f} | {ll:.4f} | {brier:.4f} | {cal:.2%} | {err:.1%} | n={n:,}")
 
-            # Betting group subsegments (circuit-aware performance groups)
-            if circuit_data.get("betting_group"):
-                print("    betting group:")
-                for group, m in circuit_data["betting_group"].items():
-                    acc = m.get('accuracy', 0)
-                    auc = m.get('roc_auc', 0)
-                    ll = m.get('log_loss', 0)
-                    brier = m.get('brier_score', 0)
-                    cal = m.get('calibration_error', 0)
-                    err = m.get('error_rate_80plus', 0)
-                    n = m.get('n_matches', 0)
-                    print(f"      {group:10} {acc:5.1%} | {auc:.3f} | {ll:.4f} | {brier:.4f} | {cal:.2%} | {err:.1%} | n={n:,}")
 
     # Calibration buckets table
     cal_data = diagnostics.calibration
