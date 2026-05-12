@@ -88,6 +88,7 @@ class TuneResult:
     params: dict[str, Any]
     metrics: dict[str, float]
     duration_s: float
+    holdout_metrics: dict[str, float] | None = None
 
 
 @dataclass
@@ -107,6 +108,7 @@ class TuneState:
                     "params": r.params,
                     "metrics": r.metrics,
                     "duration_s": r.duration_s,
+                    "holdout_metrics": r.holdout_metrics,
                 }
                 for r in self.results
             ],
@@ -121,6 +123,7 @@ class TuneState:
                 params=r["params"],
                 metrics=r["metrics"],
                 duration_s=r["duration_s"],
+                holdout_metrics=r.get("holdout_metrics"),
             )
             for r in data["results"]
         ]
@@ -319,6 +322,7 @@ class GridTuner:
                         cache_dir=self.cache_dir,
                         run_name=f"tune_{self.config_path.stem}",
                         log_to_mlflow=True,
+                        holdout_folds=1,
                     )
                 result = runner.run()
             finally:
@@ -331,6 +335,11 @@ class GridTuner:
             return TuneResult(
                 params=params,
                 metrics=result["metrics"],
+                holdout_metrics=(
+                    dict(result["holdout_metrics"])
+                    if result.get("holdout_metrics") is not None
+                    else None
+                ),
                 duration_s=round(duration, 1),
             )
         finally:

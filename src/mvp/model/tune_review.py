@@ -9,6 +9,19 @@ from mvp.model.tuning import _MAXIMIZE_METRICS
 logger = logging.getLogger(__name__)
 
 
+def _to_holdout(metric: str) -> str:
+    """Return the holdout-prefixed version of a metric name.
+
+    Already-prefixed names pass through. The leaderboard always sorts on the
+    honest (holdout) metric — there's no legitimate use case for ranking
+    trials by the tuning-set metric they were optimized against, since that's
+    the noise-fitting signal we're trying to escape.
+    """
+    if metric.startswith("holdout_"):
+        return metric
+    return f"holdout_{metric}"
+
+
 def format_leaderboard(
     study: optuna.Study,
     sort_by: list[str] | None = None,
@@ -28,19 +41,48 @@ def format_leaderboard(
     is_iid = "iid_crps_total_games" in first_ua
     is_projection = "mae" in first_ua and "log_loss" not in first_ua
 
+    # Holdout metrics — look across ALL trials, since older trials from
+    # pre-holdout-support runs may sit alongside newer ones in the same study.
+    any_holdout_attrs: set[str] = set()
+    for t in trials:
+        any_holdout_attrs.update(
+            k for k in t.user_attrs if k.startswith("holdout_")
+        )
+
+    # The leaderboard always sorts on holdout (the honest metric). Any
+    # explicit sort_by is auto-prefixed so `--sort log_loss` and
+    # `--sort holdout_log_loss` both mean the same thing.
     if sort_by is None:
         if is_iid:
-            sort_by = ["iid_crps_total_games"]
+            sort_by = [_to_holdout("iid_crps_total_games")]
         elif is_projection:
-            sort_by = ["mae"]
+            sort_by = [_to_holdout("mae")]
         else:
-            sort_by = ["log_loss"]
+            sort_by = [_to_holdout("log_loss")]
+    else:
+        sort_by = [_to_holdout(m) for m in sort_by]
+
+    # If no trial has holdout metrics, the study predates this feature.
+    # Refuse to silently fall back to the tuning-set metric — that's the
+    # noise-fitting ranking we're trying to escape.
+    if not any_holdout_attrs:
+        return [
+            "No holdout metrics found on any trial in this study.",
+            "",
+            "This study was tuned before holdout support was added. Continue",
+            "running new trials (they will populate holdout_<metric>) and then",
+            "rerun tune-review.",
+        ]
 
     # Sort by the requested metrics — flip sign for maximize-direction metrics
-    # so ascending sort puts the best trial first.
+    # so ascending sort puts the best trial first. Holdout-prefixed metrics
+    # inherit their underlying metric's direction.
+    def _direction_key(m: str) -> str:
+        return m[len("holdout_"):] if m.startswith("holdout_") else m
+
     def sort_key(t: optuna.trial.FrozenTrial) -> tuple:
         return tuple(
-            -t.user_attrs.get(m, float("-inf")) if m in _MAXIMIZE_METRICS
+            -t.user_attrs.get(m, float("-inf")) if _direction_key(m) in _MAXIMIZE_METRICS
             else t.user_attrs.get(m, float("inf"))
             for m in sort_by
         )
@@ -81,19 +123,38 @@ def format_leaderboard(
             shown = {"mae", "rmse", "r_squared", "crps"}
         else:
             ll = ua.get("log_loss", float("nan"))
-            cal = ua.get("calibration_error", float("nan"))
-            scal = ua.get("signed_calibration")
-            err80 = ua.get("error_rate_80plus", float("nan"))
-
-            scal_str = f"  scal={scal * 100:+.2f}%" if scal is not None else ""
-            lines.append(
-                f"  {i + 1:>2}. LL={ll:.4f}  cal={cal * 100:.2f}%{scal_str}"
-                f"  err80={err80 * 100:.1f}%  ({duration:.0f}s)"
-            )
-            shown = {
-                "log_loss", "calibration_error", "signed_calibration",
-                "error_rate_80plus",
-            }
+            holdout_ll = ua.get("holdout_log_loss")
+            # When holdout is available, lead with holdout values (the honest
+            # metrics driving the ranking) and show tuning LL alongside so
+            # divergence is visible. Otherwise show the tuning-fold metrics.
+            if holdout_ll is not None:
+                h_cal = ua.get("holdout_calibration_error", float("nan"))
+                h_err80 = ua.get("holdout_error_rate_80plus", float("nan"))
+                lines.append(
+                    f"  {i + 1:>2}. holdout_LL={holdout_ll:.4f}  "
+                    f"holdout_cal={h_cal * 100:.2f}%  "
+                    f"holdout_err80={h_err80 * 100:.1f}%  "
+                    f"LL={ll:.4f}  ({duration:.0f}s)"
+                )
+                shown = {
+                    "log_loss", "holdout_log_loss",
+                    "holdout_calibration_error", "holdout_error_rate_80plus",
+                }
+            else:
+                cal = ua.get("calibration_error", float("nan"))
+                scal = ua.get("signed_calibration")
+                err80 = ua.get("error_rate_80plus", float("nan"))
+                scal_str = (
+                    f"  scal={scal * 100:+.2f}%" if scal is not None else ""
+                )
+                lines.append(
+                    f"  {i + 1:>2}. LL={ll:.4f}  cal={cal * 100:.2f}%{scal_str}"
+                    f"  err80={err80 * 100:.1f}%  ({duration:.0f}s)"
+                )
+                shown = {
+                    "log_loss", "calibration_error", "signed_calibration",
+                    "error_rate_80plus",
+                }
 
         extra = [m for m in sort_by if m not in shown]
         if extra:

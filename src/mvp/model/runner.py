@@ -46,6 +46,7 @@ class ExperimentRunner:
         workflow: str = "training",
         run_name: str | None = None,
         log_to_mlflow: bool = True,
+        holdout_folds: int = 0,
     ) -> None:
         """Initialize runner.
 
@@ -57,7 +58,14 @@ class ExperimentRunner:
             workflow: MLflow experiment name ("training" or "discovery").
             run_name: Override for MLflow run name. Defaults to filename.
             log_to_mlflow: Whether to log to MLflow. Set False for intermediate runs.
+            holdout_folds: Number of trailing CV folds to hold out from the
+                calibrator fit, diagnostics, and headline `metrics`. The held-out
+                folds still get calibrated probabilities (using the
+                tuning-fold-only calibrator) and are reported separately as
+                `holdout_metrics` / `holdout_fold_metrics`. Tuning sets this to 1.
         """
+        if holdout_folds < 0:
+            raise ValueError(f"holdout_folds must be >= 0, got {holdout_folds}")
         self.config_path = Path(config_path)
         self.config = ExperimentConfig.from_file(str(config_path))
         from mvp.common.base_job import get_data_root, get_local_data_root
@@ -72,6 +80,7 @@ class ExperimentRunner:
         self.workflow = workflow
         self.run_name = run_name or self.config_path.stem
         self.log_to_mlflow = log_to_mlflow
+        self.holdout_folds = holdout_folds
 
         self.engine = make_fs_engine(
             matches_path=self.matches_path,
@@ -596,6 +605,35 @@ class ExperimentRunner:
                         {f"fold_{fold_idx}_{k}": v for k, v in metrics.items()}
                     )
 
+            # Split predictions into tuning vs holdout. The trailing folds
+            # become the holdout: they get calibrated probabilities using a
+            # calibrator fit only on tuning preds, but they don't influence
+            # the reported `metrics` / diagnostics / objective. Tuning sets
+            # holdout_folds=1; normal runs default to 0.
+            n_folds_total = len(all_predictions)
+            if self.holdout_folds >= n_folds_total:
+                raise ValueError(
+                    f"holdout_folds ({self.holdout_folds}) must be < n_folds "
+                    f"({n_folds_total}). Tuning a single-fold setup with holdout "
+                    "isn't supported."
+                )
+            if self.holdout_folds > 0:
+                tuning_predictions = all_predictions[:-self.holdout_folds]
+                holdout_predictions = all_predictions[-self.holdout_folds:]
+                tuning_fold_meta = all_fold_meta[:-self.holdout_folds]
+                holdout_fold_meta = all_fold_meta[-self.holdout_folds:]
+                tuning_fold_indices = list(range(n_folds_total - self.holdout_folds))
+                holdout_fold_indices = list(
+                    range(n_folds_total - self.holdout_folds, n_folds_total)
+                )
+            else:
+                tuning_predictions = all_predictions
+                holdout_predictions = []
+                tuning_fold_meta = all_fold_meta
+                holdout_fold_meta = []
+                tuning_fold_indices = list(range(n_folds_total))
+                holdout_fold_indices = []
+
             # Average metrics across folds
             avg_metrics = {
                 k: float(np.mean([m[k] for m in all_metrics]))
@@ -606,7 +644,10 @@ class ExperimentRunner:
                 for k in all_train_metrics[0].keys()
             }
 
-            # Fit stacking meta-model on concatenated OOF predictions
+            # Fit stacking meta-model on concatenated OOF predictions.
+            # When holdout is on, fit on tuning preds only (scaler stats too) so
+            # holdout labels can't leak into stacking weights. Predict on full
+            # set so holdout still gets a stacked probability.
             if is_ensemble and self.config.model.params.get("strategy") == "stacking":
                 assert isinstance(model, EnsembleModel)
                 n_base = len(all_per_model_predictions[0])
@@ -616,6 +657,10 @@ class ExperimentRunner:
                     for i in range(n_base)
                 ])
                 y_meta = np.concatenate([p["y_true"] for p in all_predictions])
+
+                n_tuning_samples = sum(
+                    len(p["y_true"]) for p in tuning_predictions
+                )
 
                 ensemble_params = EnsembleParams.model_validate(self.config.model.params)
                 base_names = [ref.config for ref in ensemble_params.base_models]
@@ -633,12 +678,15 @@ class ExperimentRunner:
                     ])
                     X_meta_raw = combined_X[:, meta_feature_indices]
 
-                    medians_meta = np.nanmedian(X_meta_raw, axis=0)
+                    # Scaler stats from tuning slice only (prevents holdout leak)
+                    X_meta_raw_tuning = X_meta_raw[:n_tuning_samples]
+                    medians_meta = np.nanmedian(X_meta_raw_tuning, axis=0)
                     medians_meta = np.where(np.isnan(medians_meta), 0.0, medians_meta)
                     X_meta_raw = np.where(np.isnan(X_meta_raw), medians_meta, X_meta_raw)
 
-                    meta_mean = X_meta_raw.mean(axis=0)
-                    meta_std = X_meta_raw.std(axis=0)
+                    X_meta_raw_tuning = X_meta_raw[:n_tuning_samples]
+                    meta_mean = X_meta_raw_tuning.mean(axis=0)
+                    meta_std = X_meta_raw_tuning.std(axis=0)
                     meta_std[meta_std == 0] = 1.0
                     X_meta_std = (X_meta_raw - meta_mean) / meta_std
 
@@ -647,10 +695,15 @@ class ExperimentRunner:
 
                 model.set_meta_feature_indices(meta_feature_indices)
                 model.set_meta_feature_names(base_names + meta_feature_col_names)
-                model.fit_meta(X_meta, y_meta)
+                # Fit on tuning slice only
+                model.fit_meta(X_meta[:n_tuning_samples], y_meta[:n_tuning_samples])
 
+                # Predict on full set so holdout preds also get stacked probs
                 y_prob_stacked = model._meta_model.predict_proba(X_meta)[:, 1]
-                avg_metrics = compute_metrics(y_meta, y_prob_stacked)
+                avg_metrics = compute_metrics(
+                    y_meta[:n_tuning_samples],
+                    y_prob_stacked[:n_tuning_samples],
+                )
 
                 offset = 0
                 for pred_dict in all_predictions:
@@ -658,19 +711,24 @@ class ExperimentRunner:
                     pred_dict["y_prob"] = y_prob_stacked[offset:offset + n]
                     offset += n
 
-            # Platt scaling calibration on concatenated OOF predictions
+            # Platt scaling calibration. Fit on tuning preds' OOF only so the
+            # holdout is never seen by the calibrator. Apply the resulting
+            # calibrator to BOTH tuning and holdout preds so every fold gets a
+            # calibrated probability (the holdout's just hasn't seen its own
+            # labels). raw_metrics are also tuning-only — otherwise tuning on
+            # raw_log_loss would silently bypass the holdout.
             combined_y_true_oof = np.concatenate(
-                [p["y_true"] for p in all_predictions]
+                [p["y_true"] for p in tuning_predictions]
             )
             combined_y_prob_oof = np.concatenate(
-                [p["y_prob"] for p in all_predictions]
+                [p["y_prob"] for p in tuning_predictions]
             )
             raw_metrics = compute_metrics(combined_y_true_oof, combined_y_prob_oof)
 
             cal_cfg = self.config.calibration
             if cal_cfg and cal_cfg.segments:
                 combined_df_oof = pl.concat(
-                    [p["df"] for p in all_predictions], how="diagonal_relaxed"
+                    [p["df"] for p in tuning_predictions], how="diagonal_relaxed"
                 )
                 calibrator = SegmentedPlattCalibrator(
                     segments=cal_cfg.segments, min_n=cal_cfg.min_n,
@@ -690,13 +748,20 @@ class ExperimentRunner:
                 calibrator = PlattCalibrator()
                 calibrator.fit(combined_y_prob_oof, combined_y_true_oof)
 
-                # Apply calibration to each fold's predictions
+                # Apply calibration to each fold's predictions (tuning + holdout)
                 for pred_dict in all_predictions:
                     pred_dict["y_prob"] = calibrator.transform(pred_dict["y_prob"])
 
-            # Recompute avg_metrics on calibrated predictions
+            # Recompute per-fold and avg metrics on calibrated predictions so
+            # the per-fold report matches the headline (both reflect the single
+            # global calibrator that gets deployed). When holdout is on, the
+            # primary `all_metrics` / `avg_metrics` cover tuning folds only;
+            # holdout metrics are computed in parallel for separate reporting.
+            all_metrics = [
+                compute_metrics(p["y_true"], p["y_prob"]) for p in tuning_predictions
+            ]
             calibrated_y_prob = np.concatenate(
-                [p["y_prob"] for p in all_predictions]
+                [p["y_prob"] for p in tuning_predictions]
             )
             avg_metrics = compute_metrics(combined_y_true_oof, calibrated_y_prob)
 
@@ -704,7 +769,24 @@ class ExperimentRunner:
             for k, v in raw_metrics.items():
                 avg_metrics[f"raw_{k}"] = v
 
-            # Compute diagnostics
+            holdout_metrics: dict[str, float] | None = None
+            holdout_fold_metrics: list[dict[str, float]] | None = None
+            if holdout_predictions:
+                holdout_y_true = np.concatenate(
+                    [p["y_true"] for p in holdout_predictions]
+                )
+                holdout_y_prob = np.concatenate(
+                    [p["y_prob"] for p in holdout_predictions]
+                )
+                holdout_metrics = compute_metrics(holdout_y_true, holdout_y_prob)
+                holdout_fold_metrics = [
+                    compute_metrics(p["y_true"], p["y_prob"])
+                    for p in holdout_predictions
+                ]
+
+            # Compute diagnostics on tuning preds only — the calibrator was fit
+            # there, so segment cal / global cal bins / error conditions all
+            # reflect what's actually deployed and unbiased by the holdout.
             run_logger.info("Computing diagnostics...")
             diagnostics = Diagnostics()
             cal_segments = (
@@ -713,22 +795,30 @@ class ExperimentRunner:
                 else None
             )
             diagnostic_results = diagnostics.compute_all(
-                all_predictions, calibration_segments=cal_segments
+                tuning_predictions, calibration_segments=cal_segments
             )
 
-            # Compute ensemble-specific diagnostics
+            # Compute ensemble-specific diagnostics (tuning preds only)
             ensemble_diagnostic_results = None
             if is_ensemble and all_per_model_predictions:
-                n_base = len(all_per_model_predictions[0])
+                # Slice per-model preds to tuning folds
+                tuning_per_model_predictions = (
+                    all_per_model_predictions[:-self.holdout_folds]
+                    if self.holdout_folds > 0
+                    else all_per_model_predictions
+                )
+                n_base = len(tuning_per_model_predictions[0])
                 per_model_preds = [
-                    np.concatenate([fold[i] for fold in all_per_model_predictions])
+                    np.concatenate(
+                        [fold[i] for fold in tuning_per_model_predictions]
+                    )
                     for i in range(n_base)
                 ]
                 combined_y_true = np.concatenate(
-                    [p["y_true"] for p in all_predictions]
+                    [p["y_true"] for p in tuning_predictions]
                 )
                 combined_y_prob = np.concatenate(
-                    [p["y_prob"] for p in all_predictions]
+                    [p["y_prob"] for p in tuning_predictions]
                 )
                 assert base_model_specs is not None
                 ensemble_params = EnsembleParams.model_validate(
@@ -748,7 +838,7 @@ class ExperimentRunner:
                 ):
                     meta_intercept, meta_coefficients = model.get_meta_coefficients()
 
-                combined_df = pl.concat([p["df"] for p in all_predictions])
+                combined_df = pl.concat([p["df"] for p in tuning_predictions])
                 ediag = EnsembleDiagnostics()
                 ensemble_diagnostic_results = ediag.compute(
                     combined_y_true,
@@ -777,6 +867,10 @@ class ExperimentRunner:
                 logger.log_metrics(avg_metrics)
                 logger.log_metrics({f"train_{k}": v for k, v in avg_train_metrics.items()})
                 logger.log_metrics(diagnostic_results.metrics)
+                if holdout_metrics is not None:
+                    logger.log_metrics(
+                        {f"holdout_{k}": v for k, v in holdout_metrics.items()}
+                    )
                 if calibrator.is_fitted:
                     if isinstance(calibrator, SegmentedPlattCalibrator):
                         logger.log_params({
@@ -811,9 +905,9 @@ class ExperimentRunner:
             "metrics": avg_metrics,
             "train_metrics": avg_train_metrics,
             "fold_metrics": all_metrics,
-            "fold_meta": all_fold_meta,
+            "fold_meta": tuning_fold_meta,
             "fold_feature_importances": all_fold_importances,
-            "n_folds": len(all_metrics),
+            "n_folds": n_folds_total,
             "feature_columns": feature_cols,
             "run_id": run_id,
             "diagnostics": diagnostic_results,
@@ -823,4 +917,9 @@ class ExperimentRunner:
             "last_fold_y_test": y_test,
             "all_predictions": all_predictions,
             "per_model_oof": all_per_model_predictions if is_ensemble else [],
+            "holdout_metrics": holdout_metrics,
+            "holdout_fold_metrics": holdout_fold_metrics,
+            "holdout_fold_meta": holdout_fold_meta if holdout_predictions else None,
+            "tuning_fold_indices": tuning_fold_indices,
+            "holdout_fold_indices": holdout_fold_indices,
         }

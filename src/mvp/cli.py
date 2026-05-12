@@ -255,6 +255,22 @@ def _print_calibration_by_segment(cal_by_segment: dict[str, Any] | None) -> None
         row += f"{seg_data['n_overall']:>10,}"
         print(row)
 
+    print(f"\nSegment band counts (n per cell):")
+    print(
+        f"  {'Segment':{label_width}}"
+        + "".join(f"{b:>10}" for b in band_labels)
+    )
+    for seg_key, seg_data in cal_by_segment.items():
+        label = _label_for(seg_key, seg_data)
+        row = f"  {label:{label_width}}"
+        for band in seg_data["bands"]:
+            n = band["n"]
+            if n < 30:
+                row += f"{'—':>10}"
+            else:
+                row += f"{n:>10,}"
+        print(row)
+
 
 def _print_feature_importance(
     fold_importances: list[dict[str, float]],
@@ -292,6 +308,8 @@ def print_run_summary(results: dict[str, Any], name: str | None = None) -> None:
     diagnostics = results.get("diagnostics")
     fold_metrics = results.get("fold_metrics", []) or []
     fold_meta = results.get("fold_meta", []) or []
+    holdout_metrics = results.get("holdout_metrics")
+    holdout_fold_meta = results.get("holdout_fold_meta") or []
 
     # Header
     print("\n" + "=" * 70)
@@ -305,6 +323,13 @@ def print_run_summary(results: dict[str, Any], name: str | None = None) -> None:
     test_ll = metrics.get("log_loss", 0)
     test_brier = metrics.get("brier_score", 0)
 
+    test_suffix = ""
+    if holdout_metrics and fold_meta:
+        # Annotate Test with the tuning fold range when a holdout is in play
+        test_suffix = (
+            f"   (Folds {fold_meta[0]['fold_idx']}-{fold_meta[-1]['fold_idx']})"
+        )
+
     if train_metrics:
         train_acc = train_metrics.get("accuracy", 0)
         train_auc = train_metrics.get("roc_auc", 0)
@@ -312,7 +337,40 @@ def print_run_summary(results: dict[str, Any], name: str | None = None) -> None:
         train_brier = train_metrics.get("brier_score", 0)
         print(f"\n{'':8} {'Accuracy':>10} {'AUC':>10} {'Log Loss':>11} {'Brier':>10}")
         print(f"{'Train':8} {train_acc:>10.1%} {train_auc:>10.3f} {train_ll:>11.4f} {train_brier:>10.4f}")
-        print(f"{'Test':8} {test_acc:>10.1%} {test_auc:>10.3f} {test_ll:>11.4f} {test_brier:>10.4f}")
+        print(
+            f"{'Test':8} {test_acc:>10.1%} {test_auc:>10.3f} {test_ll:>11.4f}"
+            f" {test_brier:>10.4f}{test_suffix}"
+        )
+        if holdout_metrics:
+            h_acc = holdout_metrics.get("accuracy", 0)
+            h_auc = holdout_metrics.get("roc_auc", 0)
+            h_ll = holdout_metrics.get("log_loss", 0)
+            h_brier = holdout_metrics.get("brier_score", 0)
+            window_suffix = ""
+            if holdout_fold_meta:
+                window = (
+                    f"{holdout_fold_meta[0]['test_start']} .. "
+                    f"{holdout_fold_meta[-1]['test_end']}"
+                )
+                idx_label = (
+                    f"Fold {holdout_fold_meta[0]['fold_idx']}"
+                    if len(holdout_fold_meta) == 1
+                    else (
+                        f"Folds {holdout_fold_meta[0]['fold_idx']}-"
+                        f"{holdout_fold_meta[-1]['fold_idx']}"
+                    )
+                )
+                window_suffix = f"   ({idx_label}: {window})"
+            print(
+                f"{'Holdout':8} {h_acc:>10.1%} {h_auc:>10.3f} {h_ll:>11.4f}"
+                f" {h_brier:>10.4f}{window_suffix}"
+            )
+            h_cal = holdout_metrics.get("calibration_error")
+            h_err80 = holdout_metrics.get("error_rate_80plus")
+            if h_cal is not None and h_err80 is not None:
+                print(
+                    f"         cal={h_cal * 100:.2f}%   err80={h_err80 * 100:.1f}%"
+                )
     else:
         print(f"\nTest: {test_acc:.1%} acc | {test_auc:.3f} AUC | {test_ll:.4f} LL | {test_brier:.4f} Brier")
 

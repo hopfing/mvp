@@ -238,6 +238,12 @@ class HyperparamTuner:
         for metric_name, metric_value in result["metrics"].items():
             trial.set_user_attr(metric_name, metric_value)
 
+        # Holdout metrics (last-fold OOS check) — used by tune-review to
+        # re-rank trials by the honest metric, not the tuning-set metric.
+        if result.get("holdout_metrics"):
+            for metric_name, metric_value in result["holdout_metrics"].items():
+                trial.set_user_attr(f"holdout_{metric_name}", metric_value)
+
         trial.set_user_attr("duration_s", result["duration_s"])
 
         if len(self.metrics) == 1:
@@ -309,9 +315,15 @@ class HyperparamTuner:
                         cache_dir=self.cache_dir,
                         run_name=f"tune_{self.config_path.stem}",
                         log_to_mlflow=False,
+                        holdout_folds=1,
                     )
                 result = runner.run()
                 metrics = dict(result["metrics"])
+                holdout_metrics = (
+                    dict(result["holdout_metrics"])
+                    if result.get("holdout_metrics") is not None
+                    else None
+                )
             finally:
                 runner_logger.setLevel(prev_runner)
                 engine_logger.setLevel(prev_engine)
@@ -329,6 +341,7 @@ class HyperparamTuner:
             return {
                 "params": params,
                 "metrics": metrics,
+                "holdout_metrics": holdout_metrics,
                 "duration_s": round(duration, 1),
             }
         finally:
