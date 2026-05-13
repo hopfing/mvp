@@ -744,6 +744,24 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         help="Override memory limit %% (0 to disable, default 75)",
     )
 
+    # model-sweep subcommand - sweep validation.test_months on a model config
+    sweep_parser = subparsers.add_parser(
+        "model-sweep",
+        help="Run a model under multiple test_months values and compare cadences",
+    )
+    sweep_parser.add_argument(
+        "config", type=str,
+        help="Model config name or path (e.g., 'baseline' or 'baseline.yaml')",
+    )
+    sweep_parser.add_argument(
+        "--test-months", type=int, nargs="+", required=True,
+        help="List of test_months values to sweep (e.g. --test-months 12 6 3 1)",
+    )
+    sweep_parser.add_argument(
+        "--memory-limit", type=int, default=None,
+        help="Override memory limit %% (0 to disable, default 75)",
+    )
+
     # experiment subcommand - discovery from experiments/ directory
     exp_parser = subparsers.add_parser(
         "experiment", help="Run experiment/discovery (looks in experiments/ by default)"
@@ -1116,6 +1134,18 @@ def cmd_model(args: argparse.Namespace) -> int:
 
     print_run_summary(results, name=runner.run_name)
 
+    return 0
+
+
+def cmd_model_sweep(args: argparse.Namespace) -> int:
+    """Sweep validation.test_months on a model config and print comparison tables."""
+    from mvp.model.cadence_sweep import run_cadence_sweep
+
+    config_path = resolve_config_path(args.config, MODEL_DIR)
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config file not found: {args.config} (tried {config_path})")
+
+    run_cadence_sweep(config_path, args.test_months)
     return 0
 
 
@@ -2670,6 +2700,8 @@ def main(args: list[str] | None = None) -> int:
         return cmd_train(parsed)
     elif parsed.command == "model":
         return cmd_model(parsed)
+    elif parsed.command == "model-sweep":
+        return cmd_model_sweep(parsed)
     elif parsed.command == "tune":
         return cmd_tune(parsed)
     elif parsed.command == "tune-review":
