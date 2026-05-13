@@ -335,17 +335,36 @@ def print_run_summary(results: dict[str, Any], name: str | None = None) -> None:
         train_auc = train_metrics.get("roc_auc", 0)
         train_ll = train_metrics.get("log_loss", 0)
         train_brier = train_metrics.get("brier_score", 0)
-        print(f"\n{'':8} {'Accuracy':>10} {'AUC':>10} {'Log Loss':>11} {'Brier':>10}")
-        print(f"{'Train':8} {train_acc:>10.1%} {train_auc:>10.3f} {train_ll:>11.4f} {train_brier:>10.4f}")
+        train_cal = train_metrics.get("calibration_error", 0)
+        train_err80 = train_metrics.get("error_rate_80plus", 0)
+        test_cal = metrics.get("calibration_error", 0)
+        test_err80 = metrics.get("error_rate_80plus", 0)
+        drift = (
+            diagnostics.temporal.get("temporal_drift")
+            if diagnostics is not None
+            else None
+        )
+        drift_str = f"{drift:>7.1%}" if drift is not None else f"{'—':>7}"
+        print(
+            f"\n{'':8} {'Accuracy':>10} {'AUC':>10} {'Log Loss':>11} {'Brier':>10}"
+            f" {'Cal':>7} {'Err80':>7} {'Drift':>7}"
+        )
+        print(
+            f"{'Train':8} {train_acc:>10.1%} {train_auc:>10.3f} {train_ll:>11.4f}"
+            f" {train_brier:>10.4f} {train_cal:>7.2%} {train_err80:>7.1%} {'—':>7}"
+        )
         print(
             f"{'Test':8} {test_acc:>10.1%} {test_auc:>10.3f} {test_ll:>11.4f}"
-            f" {test_brier:>10.4f}{test_suffix}"
+            f" {test_brier:>10.4f} {test_cal:>7.2%} {test_err80:>7.1%} {drift_str}"
+            f"{test_suffix}"
         )
         if holdout_metrics:
             h_acc = holdout_metrics.get("accuracy", 0)
             h_auc = holdout_metrics.get("roc_auc", 0)
             h_ll = holdout_metrics.get("log_loss", 0)
             h_brier = holdout_metrics.get("brier_score", 0)
+            h_cal = holdout_metrics.get("calibration_error", 0)
+            h_err80 = holdout_metrics.get("error_rate_80plus", 0)
             window_suffix = ""
             if holdout_fold_meta:
                 window = (
@@ -363,14 +382,9 @@ def print_run_summary(results: dict[str, Any], name: str | None = None) -> None:
                 window_suffix = f"   ({idx_label}: {window})"
             print(
                 f"{'Holdout':8} {h_acc:>10.1%} {h_auc:>10.3f} {h_ll:>11.4f}"
-                f" {h_brier:>10.4f}{window_suffix}"
+                f" {h_brier:>10.4f} {h_cal:>7.2%} {h_err80:>7.1%} {'—':>7}"
+                f"{window_suffix}"
             )
-            h_cal = holdout_metrics.get("calibration_error")
-            h_err80 = holdout_metrics.get("error_rate_80plus")
-            if h_cal is not None and h_err80 is not None:
-                print(
-                    f"         cal={h_cal * 100:.2f}%   err80={h_err80 * 100:.1f}%"
-                )
     else:
         print(f"\nTest: {test_acc:.1%} acc | {test_auc:.3f} AUC | {test_ll:.4f} LL | {test_brier:.4f} Brier")
 
