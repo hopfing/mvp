@@ -48,6 +48,7 @@ class FeatureSelector:
         importance_fn: Callable[[list[str]], dict[str, float]] | None = None,
         base_features: list[str] | None = None,
         round1_baseline: float | None = None,
+        min_delta: float = 0.0,
     ) -> None:
         """Initialize selector.
 
@@ -64,6 +65,10 @@ class FeatureSelector:
                 round 1 ranking. Features not beating this baseline (given
                 ``direction``) are reported as "below baseline". If None,
                 only non-finite scores are filtered.
+            min_delta: For forward selection, the minimum absolute improvement
+                the best candidate must achieve over the current metric to be
+                accepted. 0.0 (default) preserves prior behavior — any strict
+                improvement passes.
         """
         self.scorer = scorer
         self.all_features = list(all_features)
@@ -75,6 +80,7 @@ class FeatureSelector:
         self.importance_fn = importance_fn
         self.base_features = list(base_features) if base_features else []
         self.round1_baseline = round1_baseline
+        self.min_delta = min_delta
 
     def _is_better(self, new_val: float, old_val: float) -> bool:
         """Check if new value is better than old value."""
@@ -230,14 +236,23 @@ class FeatureSelector:
                         scores=scores_this_round,
                     )
 
-            # If no improvement, stop
-            if best_feature is None or not self._is_better(
-                best_feature_metric, best_metric
-            ):
+            # If no improvement (or improvement < min_delta), stop
+            if best_feature is None:
+                delta = -float("inf")
+            elif self.direction == "minimize":
+                delta = best_metric - best_feature_metric
+            else:
+                delta = best_feature_metric - best_metric
+            if best_feature is None or delta < self.min_delta:
+                reason = (
+                    "no improvement" if self.min_delta == 0.0
+                    else f"improvement {delta:.6f} < min_delta {self.min_delta:.6f}"
+                )
+                logger.info("FS halting: %s", reason)
                 history.append({
                     "step": len(history) + 1,
                     "action": "stop",
-                    "reason": "no improvement",
+                    "reason": reason,
                     "metric": best_metric,
                 })
                 break

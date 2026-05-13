@@ -63,6 +63,7 @@ class DiscoveryOptions(BaseModel):
     metric: str = "calibration_error"
     direction: Literal["minimize", "maximize"] = "minimize"
     importance_threshold: float = 0.05
+    min_delta: float = 0.0  # forward selection: minimum absolute improvement to accept a candidate
     meta_discovery: MetaDiscoveryConfig | None = None
     features: DiscoveryFeaturesConfig = DiscoveryFeaturesConfig()
 

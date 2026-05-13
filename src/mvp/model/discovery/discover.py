@@ -429,6 +429,7 @@ class FeatureDiscovery:
             importance_threshold=self.config.discovery.importance_threshold,
             base_features=base,
             round1_baseline=round1_baseline,
+            min_delta=self.config.discovery.min_delta,
         )
 
         result = selector.run(
