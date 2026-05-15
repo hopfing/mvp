@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 import polars as pl
 import pytest
 
-from mvp.gsheets.base import COLUMN_NAMES, generate_formulas
+from mvp.gsheets.base import COLUMN_NAMES, SHEET_HEADERS, generate_formulas
 
 
 class TestSheetsSync:
@@ -30,7 +30,7 @@ class TestSheetsSync:
 
             sync = SheetsSync.__new__(SheetsSync)
             mock_ws = MagicMock()
-            mock_ws.get_all_values.return_value = [COLUMN_NAMES]
+            mock_ws.get_all_values.return_value = [SHEET_HEADERS]
             sync._worksheet = mock_ws
 
             result = sync.read_existing()
@@ -49,7 +49,7 @@ class TestSheetsSync:
 
             sync = SheetsSync.__new__(SheetsSync)
             mock_ws = MagicMock()
-            mock_ws.get_all_values.return_value = [COLUMN_NAMES, row]
+            mock_ws.get_all_values.return_value = [SHEET_HEADERS, row]
             sync._worksheet = mock_ws
 
             result = sync.read_existing()
@@ -115,8 +115,8 @@ class TestSheetsSync:
             col_idx = COLUMN_NAMES.index("to_win")
             assert data_row[col_idx] == "150.50"
 
-    def test_write_header_is_column_names(self):
-        """Write puts COLUMN_NAMES as the header row."""
+    def test_write_header_is_sheet_headers(self):
+        """Write puts SHEET_HEADERS as the header row (display names, not internal names)."""
         with patch("mvp.gsheets.sheets.gspread"):
             from mvp.gsheets.sheets import SheetsSync
 
@@ -129,7 +129,7 @@ class TestSheetsSync:
 
             call_args = mock_ws.update.call_args
             all_data = call_args.kwargs["values"]
-            assert all_data[0] == COLUMN_NAMES
+            assert all_data[0] == SHEET_HEADERS
 
     def test_schema_validation_on_read(self):
         """Reading a sheet with wrong columns raises ValueError."""

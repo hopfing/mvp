@@ -4,10 +4,14 @@
 import logging
 import string
 from datetime import datetime
+from pathlib import Path
 from typing import Protocol
 from zoneinfo import ZoneInfo
 
 import polars as pl
+import yaml
+
+from mvp.model.cal_tiers import classify_cal_tier, load_cal_tiers_from_path
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +42,9 @@ COLUMN_SCHEMA = [
     {"name": "fav_edge_open", "owner": "pipeline"},
     {"name": "fav_edge", "owner": "formula"},
     {"name": "dog_edge", "owner": "formula"},
+    # Calibration tier (decision support adjacent to edges)
+    {"name": "cell_cal", "header": "cal", "owner": "pipeline"},
+    {"name": "cal_tier", "header": "tier", "owner": "pipeline"},
     # Bet action
     {"name": "bet_side", "owner": "user"},
     {"name": "bet_odds", "owner": "formula"},
@@ -65,6 +72,11 @@ COLUMN_SCHEMA = [
 ]
 
 COLUMN_NAMES = [c["name"] for c in COLUMN_SCHEMA]
+# What gets written as / compared against the bets-sheet header row. Most
+# columns expose `name` directly; entries with an explicit `header` field
+# show a shorter user-facing label (e.g. cal_tier -> tier) without changing
+# the in-code DataFrame column name.
+SHEET_HEADERS = [c.get("header", c["name"]) for c in COLUMN_SCHEMA]
 PIPELINE_COLUMNS = {c["name"] for c in COLUMN_SCHEMA if c["owner"] == "pipeline"}
 USER_COLUMNS = {c["name"] for c in COLUMN_SCHEMA if c["owner"] == "user"}
 FORMULA_COLUMNS = {c["name"] for c in COLUMN_SCHEMA if c["owner"] == "formula"}
@@ -77,6 +89,27 @@ def _col_letter(index: int) -> str:
 
 
 COL_LETTERS = {col["name"]: _col_letter(i) for i, col in enumerate(COLUMN_SCHEMA)}
+
+
+def _resolve_lead_sidecar_path(production_yaml: Path = Path("production.yaml")) -> Path | None:
+    """Locate the cal_tiers sidecar for the production lead artifact.
+
+    Reads `winner.active.artifact` (or top-level `active.artifact` for the
+    flat config shape) and returns `<artifact_dir>/<artifact_stem>_cal_tiers.json`
+    if it exists. Returns None when the config or sidecar is missing.
+    """
+    if not production_yaml.exists():
+        return None
+    with open(production_yaml) as f:
+        raw = yaml.safe_load(f) or {}
+    section = raw.get("winner") or raw
+    active = (section or {}).get("active") or {}
+    artifact = active.get("artifact")
+    if not artifact:
+        return None
+    p = Path(artifact)
+    sidecar = p.with_name(f"{p.stem}_cal_tiers.json")
+    return sidecar if sidecar.exists() else None
 
 
 def generate_formulas(row: int) -> dict[str, str]:
@@ -219,6 +252,8 @@ def prepare_predictions(predictions: pl.DataFrame) -> pl.DataFrame:
             "predicted_at": predicted_at_str,
             "bet_placed_at": "",
             "fav_edge_open": "",
+            "cell_cal": "",
+            "cal_tier": "",
         })
 
     if not rows:
@@ -541,6 +576,31 @@ def merge_predictions(
                 new_fav_open.append("")
 
         merged = merged.with_columns(pl.Series("fav_edge_open", new_fav_open))
+
+    # 3c3. Populate cell_cal + cal_tier from the production lead's sidecar.
+    # Frozen once set — the tier you saw at decision time stays on the row
+    # even if the model is retrained later and the cells shift.
+    sidecar_path = _resolve_lead_sidecar_path()
+    cal_lookup = load_cal_tiers_from_path(sidecar_path) if sidecar_path else {}
+    if len(merged) > 0:
+        new_cell_cal: list[str] = []
+        new_cal_tier: list[str] = []
+        for row in merged.iter_rows(named=True):
+            current_tier = (row.get("cal_tier") or "").strip()
+            if current_tier:
+                new_cell_cal.append(row.get("cell_cal") or "")
+                new_cal_tier.append(current_tier)
+                continue
+            circuit = (row.get("circuit") or "").strip()
+            rnd = (row.get("round") or "").strip()
+            cal = cal_lookup.get((circuit, rnd))
+            tier = classify_cal_tier(cal)
+            new_cell_cal.append(f"{cal:.4f}" if cal is not None else "")
+            new_cal_tier.append(tier or "")
+        merged = merged.with_columns(
+            pl.Series("cell_cal", new_cell_cal),
+            pl.Series("cal_tier", new_cal_tier),
+        )
 
     # 3d. Stamp bet_placed_at when we first see a stake
     if len(merged) > 0:

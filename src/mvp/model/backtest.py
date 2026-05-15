@@ -19,6 +19,10 @@ import polars as pl
 import yaml
 
 from mvp.common.base_job import get_data_root
+from mvp.model.cal_tiers import (
+    classify_cal_tier,
+    extract_circuit_round_lookup,
+)
 from mvp.model.config import ExperimentConfig
 from mvp.model.predictor import ProductionPredictor
 
@@ -28,28 +32,6 @@ ARTIFACT_ROOT = Path("B:/backtests/lead")
 ODDS_PATH = get_data_root() / "aggregate" / "odds" / "odds.parquet"
 MATCHES_PATH = get_data_root() / "aggregate" / "atptour" / "matches.parquet"
 PRODUCTION_CONFIG_PATH = Path("production.yaml")
-
-# Calibration tier thresholds (mirror scripts/review_models.py classifier).
-# cal is expressed as a signed proportion (e.g. 0.02 == +2pp).
-_TIER_UNDERC_MIN = 0.02
-_TIER_OPTIMAL_MIN = 0.0
-_TIER_BORDER_MIN = -0.005
-_TIER_RISKY_MIN = -0.01
-
-
-def classify_cal_tier(cal: float | None) -> str | None:
-    """Bucket a signed calibration value into UnderC/Optimal/Border/Risky/Danger."""
-    if cal is None:
-        return None
-    if cal >= _TIER_UNDERC_MIN:
-        return "UnderC"
-    if cal >= _TIER_OPTIMAL_MIN:
-        return "Optimal"
-    if cal >= _TIER_BORDER_MIN:
-        return "Border"
-    if cal >= _TIER_RISKY_MIN:
-        return "Risky"
-    return "Danger"
 
 
 def artifact_dir(config_path: Path) -> Path:
@@ -161,7 +143,7 @@ def _load_tier_lookup(config_stem: str) -> tuple[dict[tuple[str, str], float], s
     if sidecar_path.exists():
         with open(sidecar_path) as f:
             diag = json.load(f)
-        lookup = _extract_circuit_round_lookup(diag)
+        lookup = extract_circuit_round_lookup(diag)
         return lookup, "sidecar"
 
     diag_path = _find_diagnostics_json(config_stem)
@@ -173,26 +155,10 @@ def _load_tier_lookup(config_stem: str) -> tuple[dict[tuple[str, str], float], s
         return {}, None
     with open(diag_path) as f:
         diag = json.load(f)
-    lookup = _extract_circuit_round_lookup(diag)
+    lookup = extract_circuit_round_lookup(diag)
     # Run id is the parent directory of artifacts/
     run_id = diag_path.parent.parent.name[:8]
     return lookup, run_id
-
-
-def _extract_circuit_round_lookup(diag: dict) -> dict[tuple[str, str], float]:
-    """Pull (circuit, round) -> signed_calibration from a diagnostics-shaped dict."""
-    lookup: dict[tuple[str, str], float] = {}
-    by_circuit = diag.get("segments", {}).get("by_circuit", {})
-    for circuit, circuit_data in by_circuit.items():
-        rounds = (circuit_data or {}).get("round", {}) or {}
-        for round_name, round_data in rounds.items():
-            if not round_data:
-                continue
-            cal = round_data.get("signed_calibration")
-            if cal is None:
-                continue
-            lookup[(circuit, round_name)] = float(cal)
-    return lookup
 
 
 def _build_bet_rows(

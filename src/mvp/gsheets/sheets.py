@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 
 from mvp.gsheets.base import (
     COLUMN_NAMES,
+    SHEET_HEADERS,
     _col_letter,
     generate_formulas,
 )
@@ -45,9 +46,9 @@ class SheetsSync:
             return pl.DataFrame(schema={col: pl.Utf8 for col in COLUMN_NAMES})
 
         header = data[0]
-        if header != COLUMN_NAMES:
+        if header != SHEET_HEADERS:
             raise ValueError(
-                f"Schema mismatch: expected {COLUMN_NAMES}, got {header}"
+                f"Schema mismatch: expected {SHEET_HEADERS}, got {header}"
             )
 
         if len(data) == 1:
@@ -78,7 +79,7 @@ class SheetsSync:
                     row_list[col_idx] = formula
             cell_rows.append(row_list)
 
-        all_data = [COLUMN_NAMES] + cell_rows
+        all_data = [SHEET_HEADERS] + cell_rows
 
         self._worksheet.clear()
         self._worksheet.update(

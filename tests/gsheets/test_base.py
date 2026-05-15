@@ -1,5 +1,6 @@
 """Tests for prediction sync base module."""
 
+import json
 import logging
 from datetime import date, datetime
 
@@ -20,12 +21,22 @@ from mvp.gsheets.base import (
 
 
 class TestColumnSchema:
-    def test_column_schema_has_40_columns(self):
-        assert len(COLUMN_SCHEMA) == 40
+    def test_column_schema_has_42_columns(self):
+        assert len(COLUMN_SCHEMA) == 42
 
     def test_fav_edge_open_precedes_fav_edge(self):
         i = COLUMN_NAMES.index("fav_edge_open")
         assert COLUMN_NAMES[i + 1] == "fav_edge"
+
+    def test_cal_tier_columns_follow_dog_edge(self):
+        i = COLUMN_NAMES.index("dog_edge")
+        assert COLUMN_NAMES[i + 1] == "cell_cal"
+        assert COLUMN_NAMES[i + 2] == "cal_tier"
+
+    def test_cal_columns_have_short_sheet_headers(self):
+        from mvp.gsheets.base import SHEET_HEADERS
+        assert SHEET_HEADERS[COLUMN_NAMES.index("cell_cal")] == "cal"
+        assert SHEET_HEADERS[COLUMN_NAMES.index("cal_tier")] == "tier"
 
     def test_book2_follows_book(self):
         book_idx = COLUMN_NAMES.index("book")
@@ -388,7 +399,7 @@ class TestMergePredictions:
         })
         result = merge_predictions(existing, new, matches)
         assert list(result.columns) == COLUMN_NAMES
-        assert len(result.columns) == 40
+        assert len(result.columns) == 42
 
     def test_empty_existing_empty_new(self):
         existing = _sheet_df([])
@@ -421,7 +432,7 @@ class TestMergePredictions:
         })
         result = merge_predictions(existing, new, matches)
         assert len(result) == 0
-        assert len(result.columns) == 40
+        assert len(result.columns) == 42
         assert list(result.columns) == COLUMN_NAMES
 
     def test_fav_edge_open_populated_from_opening_odds(self):
@@ -468,6 +479,98 @@ class TestMergePredictions:
         )
         # Existing value preserved, not recomputed from current opening odds
         assert result["fav_edge_open"][0] == "0.1234"
+
+    def test_cal_tier_populated_from_sidecar(self, tmp_path, monkeypatch):
+        sidecar = tmp_path / "lead_cal_tiers.json"
+        sidecar.write_text(json.dumps({
+            "segments": {
+                "by_circuit": {
+                    "tour": {"round": {"R32": {"signed_calibration": -0.0073}}},
+                    "chal": {"round": {"R16": {"signed_calibration": 0.0010}}},
+                },
+            },
+        }))
+        monkeypatch.setattr(
+            "mvp.gsheets.base._resolve_lead_sidecar_path", lambda: sidecar
+        )
+
+        existing = _sheet_df([])
+        # Predictor emits the raw circuit ("tour") which prepare_predictions
+        # maps to "ATP" — but the sidecar lookup keys on the original "tour"
+        # value, which is what merge_predictions sees on the row's `circuit`
+        # column. The `_make_predictions` helper goes through prepare_predictions,
+        # which mutates circuit to "ATP". For this test we want the raw label
+        # to flow into merge_predictions, so we set circuit on the new rows
+        # directly (skipping the ATP mapping) by using a sheet row that already
+        # has "tour" in the circuit column.
+        new = pl.DataFrame([{c: "" for c in COLUMN_NAMES}]).with_columns(
+            pl.lit("M_NEW").alias("match_uid"),
+            pl.lit("tour").alias("circuit"),
+            pl.lit("R32").alias("round"),
+        )
+        matches = _matches_df({
+            "match_uid": ["M_NEW"],
+            "won": [None],
+            "player_id": ["A"],
+            "opp_id": ["B"],
+        })
+        result = merge_predictions(existing, new, matches)
+        m = result.filter(pl.col("match_uid") == "M_NEW")
+        assert m["cal_tier"][0] == "Risky"  # -0.0073 is in [-0.01, -0.005)
+        assert abs(float(m["cell_cal"][0]) - (-0.0073)) < 1e-6
+
+    def test_cal_tier_not_overwritten_once_set(self, tmp_path, monkeypatch):
+        # Sidecar would suggest "Optimal" for this (circuit, round), but the
+        # row already has "Risky" — frozen-once-set must preserve "Risky".
+        sidecar = tmp_path / "lead_cal_tiers.json"
+        sidecar.write_text(json.dumps({
+            "segments": {
+                "by_circuit": {
+                    "tour": {"round": {"R32": {"signed_calibration": 0.005}}},
+                },
+            },
+        }))
+        monkeypatch.setattr(
+            "mvp.gsheets.base._resolve_lead_sidecar_path", lambda: sidecar
+        )
+
+        row = _make_sheet_row(
+            match_uid="M1",
+            circuit="tour",
+            round="R32",
+            cal_tier="Risky",
+            cell_cal="-0.0080",
+        )
+        existing = _sheet_df([row])
+        new = prepare_predictions(_make_predictions(match_uid="OTHER"))
+        matches = _matches_df({
+            "match_uid": [],
+            "won": [],
+            "player_id": [],
+            "opp_id": [],
+        })
+        result = merge_predictions(existing, new, matches)
+        m1 = result.filter(pl.col("match_uid") == "M1")
+        assert m1["cal_tier"][0] == "Risky"
+        assert m1["cell_cal"][0] == "-0.0080"
+
+    def test_cal_tier_blank_when_no_sidecar(self, monkeypatch):
+        monkeypatch.setattr(
+            "mvp.gsheets.base._resolve_lead_sidecar_path", lambda: None
+        )
+
+        existing = _sheet_df([])
+        new = prepare_predictions(_make_predictions())
+        matches = _matches_df({
+            "match_uid": ["2024-0001-MS001"],
+            "won": [None],
+            "player_id": ["PLAYER_A"],
+            "opp_id": ["PLAYER_B"],
+        })
+        result = merge_predictions(existing, new, matches)
+        # No sidecar -> empty lookup -> blank tier and cell_cal
+        assert result["cal_tier"][0] == ""
+        assert result["cell_cal"][0] == ""
 
     def test_duplicate_match_uid_not_added(self):
         row = _make_sheet_row(match_uid="2024-0001-MS001")
