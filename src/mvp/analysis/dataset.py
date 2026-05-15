@@ -28,6 +28,8 @@ SHEET_COLUMNS = [
     "net",
     "notes",
     "bet_placed_at",
+    "cell_cal",
+    "cal_tier",
 ]
 
 
@@ -198,14 +200,16 @@ def _join_sheet_data(ds: pl.DataFrame, sheet_data: pl.DataFrame | None) -> pl.Da
     available = [c for c in SHEET_COLUMNS if c in sheet_data.columns]
     sheet_subset = sheet_data.select(available)
 
-    # fav_edge/dog_edge come from sheet formulas as Utf8 strings — cast to Float64
-    edge_casts = [
+    # fav_edge/dog_edge come from sheet formulas as Utf8 strings — cast to Float64.
+    # cell_cal is written by the gsheets writer as a formatted string ("-0.0234")
+    # but downstream aggregations want it numeric.
+    float_casts = [
         pl.col(c).cast(pl.Float64, strict=False).alias(c)
-        for c in ("fav_edge", "dog_edge")
+        for c in ("fav_edge", "dog_edge", "cell_cal")
         if c in sheet_subset.columns
     ]
-    if edge_casts:
-        sheet_subset = sheet_subset.with_columns(edge_casts)
+    if float_casts:
+        sheet_subset = sheet_subset.with_columns(float_casts)
 
     ds = ds.join(sheet_subset, on="match_uid", how="left")
 

@@ -447,6 +447,177 @@ def _render_provenance_matrix(bets: pl.DataFrame, st) -> None:
     st.markdown(html, unsafe_allow_html=True)
 
 
+_TIER_ORDER = ["UnderC", "Optimal", "Border", "Risky", "Danger"]
+_KILL_THRESHOLD_N = 15
+_KILL_THRESHOLD_ROI = -10.0
+
+
+def _aggregate_with_clv(bets: pl.DataFrame, group_cols: list[str]) -> pl.DataFrame:
+    """Aggregate by group_cols with the standard stats plus CLV+% / Avg CLV.
+
+    Mirrors `_aggregate_by` and adds CLV columns when `clv_vs_best` is present
+    in the dataset. Used by the tier and per-cell breakdowns.
+    """
+    has_clv = "clv_vs_best" in bets.columns
+    aggs = [
+        pl.len().alias("Bets"),
+        (pl.col("bet_result") == "W").sum().cast(pl.Int64).alias("W"),
+        (pl.col("bet_result") == "L").sum().cast(pl.Int64).alias("L"),
+        (pl.col("bet_result") == "V").sum().cast(pl.Int64).alias("V"),
+        pl.col("stake").cast(pl.Float64, strict=False).sum().alias("Stake"),
+        pl.col("net").cast(pl.Float64, strict=False).sum().alias("P&L"),
+    ]
+    if has_clv:
+        aggs.extend([
+            (pl.col("clv_vs_best") > 0).cast(pl.Float64).mean().alias("_clv_pos_rate"),
+            pl.col("clv_vs_best").mean().alias("_clv_avg"),
+        ])
+    out = bets.group_by(group_cols).agg(aggs)
+    out = out.with_columns(
+        pl.when(pl.col("W") + pl.col("L") > 0)
+        .then((pl.col("W") / (pl.col("W") + pl.col("L")) * 100).round(1))
+        .otherwise(None)
+        .alias("Win %"),
+        pl.when(pl.col("Stake") > 0)
+        .then((pl.col("P&L") / pl.col("Stake") * 100).round(1))
+        .otherwise(None)
+        .alias("ROI %"),
+    ).with_columns(pl.col("Stake").round(2), pl.col("P&L").round(2))
+    if has_clv:
+        out = out.with_columns(
+            (pl.col("_clv_pos_rate") * 100).round(1).alias("CLV+%"),
+            (pl.col("_clv_avg") * 100).round(2).alias("Avg CLV"),
+        ).drop("_clv_pos_rate", "_clv_avg")
+    return out
+
+
+def _render_cal_tier_breakdown(bets: pl.DataFrame, st) -> None:
+    """Per-tier breakdown with All row at top, tier order matching backtest."""
+    if "cal_tier" not in bets.columns:
+        st.info("No cal_tier data available (analysis.parquet may need a refresh).")
+        return
+
+    df = bets.with_columns(
+        pl.col("cal_tier").fill_null("(none)").alias("cal_tier")
+    )
+    if len(df) == 0:
+        st.info("No bets with cal_tier in current filter.")
+        return
+
+    agg = _aggregate_with_clv(df, ["cal_tier"]).rename({"cal_tier": "Tier"})
+
+    order_map = {v: i for i, v in enumerate(_TIER_ORDER + ["(none)"])}
+    agg = agg.with_columns(
+        pl.col("Tier").replace_strict(order_map, default=999).alias("_sort")
+    ).sort("_sort").drop("_sort")
+
+    totals = _aggregate_with_clv(
+        df.with_columns(pl.lit("All").alias("cal_tier")), ["cal_tier"],
+    ).rename({"cal_tier": "Tier"})
+    agg = pl.concat([totals, agg])
+
+    has_clv = "CLV+%" in agg.columns
+    cols = ["Tier", "Bets", "W", "L", "V", "Win %", "Stake", "P&L", "ROI %"]
+    if has_clv:
+        cols.extend(["CLV+%", "Avg CLV"])
+    pdf = agg.select(cols).to_pandas()
+
+    def _bold_all(row):
+        if row["Tier"] == "All":
+            return ["font-weight: bold; background-color: rgba(255,255,255,0.08)"] * len(row)
+        return [""] * len(row)
+
+    fmt = {
+        "Stake": "${:,.2f}", "P&L": "${:+,.2f}",
+        "Win %": "{:.1f}%", "ROI %": "{:+.1f}%",
+    }
+    if has_clv:
+        fmt["CLV+%"] = "{:.1f}%"
+        fmt["Avg CLV"] = "{:+.2f}pp"
+
+    styled = (
+        pdf.style.apply(_bold_all, axis=1)
+        .applymap(_color_negative, subset=["P&L", "ROI %"])
+        .format(fmt, na_rep="—")
+    )
+    st.dataframe(styled, use_container_width=True, hide_index=True)
+
+
+def _render_per_cell_table(bets: pl.DataFrame, st) -> None:
+    """Per-(circuit, round, tier) drill-down with kill-switch row highlighting.
+
+    Cells with `Bets >= _KILL_THRESHOLD_N` AND `ROI % < _KILL_THRESHOLD_ROI`
+    are highlighted red — these are the cells that would trigger a per-cell
+    kill in the dog-fade live test.
+    """
+    needed = {"cal_tier", "circuit", "round"}
+    if not needed.issubset(bets.columns):
+        st.info("Missing columns for per-cell view (need cal_tier, circuit, round).")
+        return
+
+    df = bets.filter(pl.col("cal_tier").is_not_null())
+    if len(df) == 0:
+        st.info("No bets with cal_tier in current filter.")
+        return
+
+    agg = _aggregate_with_clv(df, ["circuit", "round", "cal_tier"])
+
+    cell_cal_agg = (
+        df.group_by(["circuit", "round", "cal_tier"])
+        .agg(pl.col("cell_cal").cast(pl.Float64, strict=False).mean().alias("_cc"))
+    )
+    agg = agg.join(cell_cal_agg, on=["circuit", "round", "cal_tier"], how="left")
+    agg = agg.with_columns(
+        (pl.col("_cc") * 100).round(2).alias("Cell Cal")
+    ).drop("_cc")
+
+    tier_order_map = {v: i for i, v in enumerate(_TIER_ORDER + ["(none)"])}
+    agg = agg.with_columns(
+        pl.col("cal_tier").replace_strict(tier_order_map, default=999).alias("_tier_sort")
+    ).sort(["P&L", "_tier_sort"], descending=[True, False]).drop("_tier_sort")
+
+    agg = agg.rename({"circuit": "Circuit", "round": "Round", "cal_tier": "Tier"})
+
+    has_clv = "CLV+%" in agg.columns
+    cols = ["Circuit", "Round", "Tier", "Cell Cal",
+            "Bets", "W", "L", "V", "Win %", "Stake", "P&L", "ROI %"]
+    if has_clv:
+        cols.extend(["CLV+%", "Avg CLV"])
+    pdf = agg.select(cols).to_pandas()
+
+    def _kill_row(row):
+        n = row["Bets"]
+        roi = row["ROI %"]
+        if (
+            n is not None and roi is not None
+            and n >= _KILL_THRESHOLD_N and roi < _KILL_THRESHOLD_ROI
+        ):
+            return [
+                "background-color: rgba(231,76,60,0.20); font-weight: bold"
+            ] * len(row)
+        return [""] * len(row)
+
+    fmt = {
+        "Cell Cal": "{:+.2f}pp",
+        "Stake": "${:,.2f}", "P&L": "${:+,.2f}",
+        "Win %": "{:.1f}%", "ROI %": "{:+.1f}%",
+    }
+    if has_clv:
+        fmt["CLV+%"] = "{:.1f}%"
+        fmt["Avg CLV"] = "{:+.2f}pp"
+
+    styled = (
+        pdf.style.apply(_kill_row, axis=1)
+        .applymap(_color_negative, subset=["P&L", "ROI %"])
+        .format(fmt, na_rep="—")
+    )
+    st.caption(
+        f"Cells highlighted red: Bets ≥ {_KILL_THRESHOLD_N} AND ROI < "
+        f"{_KILL_THRESHOLD_ROI:.0f}% (per-cell kill threshold)."
+    )
+    st.dataframe(styled, use_container_width=True, hide_index=True)
+
+
 def _render_odds_breakdown(bets: pl.DataFrame, st) -> None:
     """Bucket bet_odds into bands and render breakdown."""
     from mvp.analysis.scanner import ODDS_BREAKS, ODDS_LABELS
@@ -806,6 +977,12 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
 
     st.subheader("By Edge Band")
     _render_edge_bands(bets, st)
+
+    st.subheader("By Calibration Tier")
+    _render_cal_tier_breakdown(bets, st)
+
+    st.subheader("By Cell (Circuit × Round × Tier)")
+    _render_per_cell_table(bets, st)
 
     # Edge-provenance matrix filters to bets placed after opening-odds
     # capture became reliable.
