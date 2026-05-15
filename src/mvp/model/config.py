@@ -6,7 +6,13 @@ from typing import Any, Literal
 
 import polars as pl
 import yaml
-from pydantic import BaseModel, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+
+
+class _StrictModel(BaseModel):
+    """Base model with extra='forbid' so typos in YAML configs surface as validation errors."""
+
+    model_config = ConfigDict(extra="forbid")
 
 
 def get_filter_feature_specs(filters: dict[str, Any] | None) -> list[str]:
@@ -71,7 +77,7 @@ def apply_filters(df: pl.DataFrame, filters: dict[str, Any]) -> pl.DataFrame:
     return df
 
 
-class DateRange(BaseModel):
+class DateRange(_StrictModel):
     """Date range for data selection."""
 
     start: date
@@ -87,7 +93,7 @@ class DateRange(BaseModel):
         raise ValueError(f"Cannot parse date: {v}")
 
 
-class DataConfig(BaseModel):
+class DataConfig(_StrictModel):
     """Data selection configuration."""
 
     date_range: DateRange
@@ -96,21 +102,21 @@ class DataConfig(BaseModel):
     eval_filters: dict[str, Any] | None = None  # Applied post-split to test fold only
 
 
-class FeaturesConfig(BaseModel):
+class FeaturesConfig(_StrictModel):
     """Feature selection configuration."""
 
     include: list[str]
     compute_only: list[str] = []
 
 
-class EnsembleBaseModelRef(BaseModel):
+class EnsembleBaseModelRef(_StrictModel):
     """Reference to a base model in an ensemble."""
 
     config: str
     weight: float = 1.0
 
 
-class EnsembleParams(BaseModel):
+class EnsembleParams(_StrictModel):
     """Ensemble-specific parameters."""
 
     strategy: Literal["average", "weighted_average", "stacking"] = "average"
@@ -138,14 +144,14 @@ class EnsembleParams(BaseModel):
         return self
 
 
-class ModelConfig(BaseModel):
+class ModelConfig(_StrictModel):
     """Model configuration."""
 
     type: Literal["xgboost", "logistic", "random_forest", "ensemble", "neural_net"]
     params: dict[str, Any] | None = None
 
 
-class ValidationConfig(BaseModel):
+class ValidationConfig(_StrictModel):
     """Validation strategy configuration."""
 
     type: Literal[
@@ -205,28 +211,28 @@ class ValidationConfig(BaseModel):
         return self
 
 
-class MetricsConfig(BaseModel):
+class MetricsConfig(_StrictModel):
     """Metrics configuration."""
 
     primary: str = "log_loss"
     secondary: list[str] = ["accuracy", "brier_score", "roc_auc"]
 
 
-class SampleWeightConfig(BaseModel):
+class SampleWeightConfig(_StrictModel):
     """Sample weighting configuration."""
 
     type: Literal["recency"] = "recency"
     half_life_days: int
 
 
-class CalibrationConfig(BaseModel):
+class CalibrationConfig(_StrictModel):
     """Calibration configuration. Absence of this block = pooled-only behavior."""
 
     segments: list[str] | None = None
     min_n: int = 200
 
 
-class ExperimentConfig(BaseModel):
+class ExperimentConfig(_StrictModel):
     """Complete experiment configuration."""
 
     description: str | None = None
@@ -250,6 +256,7 @@ class ExperimentConfig(BaseModel):
         """Parse config from YAML string."""
         data = yaml.safe_load(yaml_str)
         data.pop("name", None)  # Ignore legacy name field
+        data.pop("selection_history", None)  # Discovery-written metadata, not a config field
         return cls.model_validate(data)
 
     @classmethod

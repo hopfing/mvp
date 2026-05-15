@@ -184,6 +184,24 @@ model:
         assert config.data.train_filters == {"circuit": ["chal", "tour", "itf"]}
         assert config.data.eval_filters == {"circuit": ["chal", "tour"]}
 
+    def test_unknown_field_in_data_rejected(self):
+        """Typos in DataConfig field names surface as validation errors instead of being silently dropped."""
+        yaml_str = """
+data:
+  date_range:
+    start: "2020-01-01"
+    end: "2024-12-31"
+  train_fitlers:
+    circuit: [chal, tour]
+features:
+  include:
+    - win_rate(days=30)
+model:
+  type: logistic
+"""
+        with pytest.raises(ValueError, match="train_fitlers"):
+            ExperimentConfig.from_yaml(yaml_str)
+
     def test_filters_and_scoped_can_coexist(self):
         """filters, train_filters, eval_filters can all be set together."""
         yaml_str = """
