@@ -492,13 +492,17 @@ def _aggregate_with_clv(bets: pl.DataFrame, group_cols: list[str]) -> pl.DataFra
 
 
 def _render_cal_tier_breakdown(bets: pl.DataFrame, st) -> None:
-    """Per-tier breakdown with All row at top, tier order matching backtest."""
+    """Per-tier breakdown with All row at top, tier order matching backtest.
+
+    Blank/null cal_tier rows (pre-feature historical bets) are excluded —
+    the round-level table already covers the no-tier picture.
+    """
     if "cal_tier" not in bets.columns:
         st.info("No cal_tier data available (analysis.parquet may need a refresh).")
         return
 
-    df = bets.with_columns(
-        pl.col("cal_tier").fill_null("(none)").alias("cal_tier")
+    df = bets.filter(
+        pl.col("cal_tier").is_not_null() & (pl.col("cal_tier") != "")
     )
     if len(df) == 0:
         st.info("No bets with cal_tier in current filter.")
@@ -506,7 +510,7 @@ def _render_cal_tier_breakdown(bets: pl.DataFrame, st) -> None:
 
     agg = _aggregate_with_clv(df, ["cal_tier"]).rename({"cal_tier": "Tier"})
 
-    order_map = {v: i for i, v in enumerate(_TIER_ORDER + ["(none)"])}
+    order_map = {v: i for i, v in enumerate(_TIER_ORDER)}
     agg = agg.with_columns(
         pl.col("Tier").replace_strict(order_map, default=999).alias("_sort")
     ).sort("_sort").drop("_sort")
@@ -544,52 +548,54 @@ def _render_cal_tier_breakdown(bets: pl.DataFrame, st) -> None:
 
 
 def _render_per_cell_table(bets: pl.DataFrame, st) -> None:
-    """Per-(circuit, round, tier) drill-down with kill-switch row highlighting.
+    """Per-(round, tier) drill-down with kill-switch row highlighting.
+
+    Called per-circuit; the Circuit column is dropped since it's implicit
+    from the section. Blank/null cal_tier rows are excluded — the
+    round-level table covers the no-tier picture.
 
     Cells with `Bets >= _KILL_THRESHOLD_N` AND `ROI % < _KILL_THRESHOLD_ROI`
     are highlighted red — these are the cells that would trigger a per-cell
     kill in the dog-fade live test.
     """
-    needed = {"cal_tier", "circuit", "round"}
+    needed = {"cal_tier", "round"}
     if not needed.issubset(bets.columns):
-        st.info("Missing columns for per-cell view (need cal_tier, circuit, round).")
+        st.info("Missing columns for segment view (need cal_tier, round).")
         return
 
-    df = bets.filter(pl.col("cal_tier").is_not_null())
+    df = bets.filter(
+        pl.col("cal_tier").is_not_null() & (pl.col("cal_tier") != "")
+    )
     if len(df) == 0:
         st.info("No bets with cal_tier in current filter.")
         return
 
-    agg = _aggregate_with_clv(df, ["circuit", "round", "cal_tier"])
+    agg = _aggregate_with_clv(df, ["round", "cal_tier"])
 
     cell_cal_agg = (
-        df.group_by(["circuit", "round", "cal_tier"])
+        df.group_by(["round", "cal_tier"])
         .agg(pl.col("cell_cal").cast(pl.Float64, strict=False).mean().alias("_cc"))
     )
-    agg = agg.join(cell_cal_agg, on=["circuit", "round", "cal_tier"], how="left")
+    agg = agg.join(cell_cal_agg, on=["round", "cal_tier"], how="left")
     agg = agg.with_columns(
         (pl.col("_cc") * 100).round(2).alias("Cell Cal")
     ).drop("_cc")
 
-    tier_order_map = {v: i for i, v in enumerate(_TIER_ORDER + ["(none)"])}
-    circuit_order_map = {"tour": 0, "chal": 1}
+    tier_order_map = {v: i for i, v in enumerate(_TIER_ORDER)}
     round_order_map = {
         v: i for i, v in enumerate(
             ["Q1", "Q2", "R128", "R64", "R32", "R16", "QF", "SF", "F"]
         )
     }
     agg = agg.with_columns(
-        pl.col("circuit").replace_strict(circuit_order_map, default=999).alias("_circ_sort"),
         pl.col("round").replace_strict(round_order_map, default=999).alias("_round_sort"),
         pl.col("cal_tier").replace_strict(tier_order_map, default=999).alias("_tier_sort"),
-    ).sort(["_circ_sort", "_round_sort", "_tier_sort"]).drop(
-        "_circ_sort", "_round_sort", "_tier_sort"
-    )
+    ).sort(["_round_sort", "_tier_sort"]).drop("_round_sort", "_tier_sort")
 
-    agg = agg.rename({"circuit": "Circuit", "round": "Round", "cal_tier": "Tier"})
+    agg = agg.rename({"round": "Round", "cal_tier": "Tier"})
 
     has_clv = "CLV+%" in agg.columns
-    cols = ["Circuit", "Round", "Tier", "Cell Cal",
+    cols = ["Round", "Tier", "Cell Cal",
             "Bets", "W", "L", "V", "Win %", "Stake", "P&L", "ROI %"]
     if has_clv:
         cols.extend(["CLV+%", "Avg CLV"])
@@ -988,11 +994,14 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
     st.subheader("By Edge Band")
     _render_edge_bands(bets, st)
 
-    st.subheader("By Calibration Tier")
-    _render_cal_tier_breakdown(bets, st)
-
-    st.subheader("By Calibration Segment")
-    _render_per_cell_table(bets, st)
+    for circuit_val, circuit_label in [("tour", "Tour"), ("chal", "Challenger")]:
+        circuit_bets = bets.filter(pl.col("circuit") == circuit_val)
+        if len(circuit_bets) == 0:
+            continue
+        st.subheader(f"{circuit_label} — By Calibration Tier")
+        _render_cal_tier_breakdown(circuit_bets, st)
+        st.subheader(f"{circuit_label} — By Calibration Segment")
+        _render_per_cell_table(circuit_bets, st)
 
     # Edge-provenance matrix filters to bets placed after opening-odds
     # capture became reliable.
