@@ -581,9 +581,12 @@ def merge_predictions(
 
         merged = merged.with_columns(pl.Series("fav_edge_open", new_fav_open))
 
-    # 3c3. Populate cell_cal + cal_tier from the production lead's sidecar.
-    # Frozen once set — the tier you saw at decision time stays on the row
-    # even if the model is retrained later and the cells shift.
+    # 3c3. Populate cell_cal + cal_tier from the production lead's sidecar —
+    # but ONLY for matches that are first appearing this sync (`truly_new`).
+    # For pre-existing rows, whatever value is already on the row is preserved
+    # (frozen-once-set). Crucially we must NOT fill blanks on pre-existing
+    # rows: those bets were placed under earlier model state, and stamping
+    # them with today's sidecar values poisons the historical analysis.
     sidecar_path = _resolve_lead_sidecar_path()
     cal_lookup = load_cal_tiers_from_path(sidecar_path) if sidecar_path else {}
     if len(merged) > 0:
@@ -591,7 +594,10 @@ def merge_predictions(
         new_cal_tier: list[str] = []
         for row in merged.iter_rows(named=True):
             current_tier = (row.get("cal_tier") or "").strip()
-            if current_tier:
+            uid = row.get("match_uid") or ""
+            if current_tier or uid not in truly_new:
+                # Preserve whatever's there. Pre-existing rows without a tier
+                # stay null — they predate the feature and have no honest tier.
                 new_cell_cal.append(row.get("cell_cal") or "")
                 new_cal_tier.append(current_tier)
                 continue

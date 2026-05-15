@@ -550,6 +550,49 @@ class TestMergePredictions:
         assert m1["cal_tier"][0] == "Risky"
         assert m1["cell_cal"][0] == "-0.0080"
 
+    def test_cal_tier_not_backfilled_on_preexisting_blank_rows(self, tmp_path, monkeypatch):
+        # Regression: pre-existing rows with blank cal_tier must NOT get filled
+        # from the current sidecar — that would stamp historical bets (placed
+        # under earlier model state) with today's tier values, poisoning the
+        # historical analysis. Only matches first appearing in this sync should
+        # get populated from the current sidecar.
+        sidecar = tmp_path / "lead_cal_tiers.json"
+        sidecar.write_text(json.dumps({
+            "segments": {
+                "by_circuit": {
+                    "tour": {"round": {"R32": {"signed_calibration": -0.0073}}},
+                },
+            },
+        }))
+        monkeypatch.setattr(
+            "mvp.gsheets.base._resolve_lead_sidecar_path", lambda: sidecar
+        )
+
+        # Pre-existing row from before the cal_tier feature shipped: blank
+        # cal_tier and cell_cal, but the match would map to tour/R32 which IS
+        # in the sidecar. The fix must leave it alone.
+        old_row = _make_sheet_row(
+            match_uid="OLD_MATCH",
+            circuit="ATP",
+            round="R32",
+            cal_tier="",
+            cell_cal="",
+        )
+        existing = _sheet_df([old_row])
+        new = prepare_predictions(_make_predictions(match_uid="OTHER"))
+        matches = _matches_df({
+            "match_uid": [],
+            "won": [],
+            "player_id": [],
+            "opp_id": [],
+        })
+        result = merge_predictions(existing, new, matches)
+        old = result.filter(pl.col("match_uid") == "OLD_MATCH")
+        assert old["cal_tier"][0] == "", (
+            f"pre-existing blank row was backfilled to {old['cal_tier'][0]!r}"
+        )
+        assert old["cell_cal"][0] == ""
+
     def test_cal_tier_blank_when_no_sidecar(self, monkeypatch):
         monkeypatch.setattr(
             "mvp.gsheets.base._resolve_lead_sidecar_path", lambda: None
