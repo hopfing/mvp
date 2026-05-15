@@ -1,6 +1,7 @@
 """Production model: train, save, load, and predict."""
 
 
+import json
 import logging
 import warnings
 from datetime import UTC, datetime
@@ -21,11 +22,13 @@ from mvp.model.config import (
     apply_filters,
     get_filter_feature_specs,
 )
+from mvp.model.diagnostics import Diagnostics
 from mvp.model.engine import FeatureEngine, get_feature_columns
 from mvp.model.features.elo import surface_elo_expr
 from mvp.model.imputation import apply_imputation, build_imputation, fit_imputation
 from mvp.model.models import EnsembleModel, get_model
 from mvp.model.registry import get_registry
+from mvp.model.splitters import make_splitter
 from mvp.model.weighting import compute_sample_weights
 
 logger = logging.getLogger(__name__)
@@ -287,37 +290,181 @@ class ProductionPredictor:
             model.configure(base_model_specs)
         model.fit(X, y, sample_weight=sample_weights)
 
-        # Fit Platt calibrator via 5-fold CV on OOF predictions
-        from sklearn.model_selection import StratifiedKFold
-
-        oof_probs = np.zeros(len(y))
-        skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-        for train_idx, val_idx in skf.split(X, y):
-            fold_model = get_model(config.model.type, config.model.params or {})
-            if is_ensemble and base_model_specs is not None:
-                assert isinstance(fold_model, EnsembleModel)
-                fold_model.configure(base_model_specs)
-            fold_weights = sample_weights[train_idx] if sample_weights is not None else None
-            fold_model.fit(X[train_idx], y[train_idx], sample_weight=fold_weights)
-            oof_probs[val_idx] = fold_model.predict_proba(X[val_idx])
+        # Fit Platt calibrator on OOF predictions. Prefer the same temporal CV
+        # that `mvp model` uses (per the validation block in the model YAML)
+        # so the calibrator and the cal_tiers sidecar align with what
+        # diagnostics evaluate. Fall back to random K-fold for ensembles or
+        # embedding-using configs where per-fold prep would need extra wiring.
         cal_cfg = config.calibration
-        if cal_cfg and cal_cfg.segments:
-            calibrator = SegmentedPlattCalibrator(
-                segments=cal_cfg.segments, min_n=cal_cfg.min_n,
+        val_cfg = config.validation
+        can_temporal_cv = (
+            val_cfg is not None
+            and val_cfg.type
+            in {"expanding_window", "sliding_window", "date_sliding", "date_expanding"}
+            and not is_ensemble
+            and embedding_col is None
+        )
+
+        calibrated_preds: list[dict[str, Any]] | None = None
+
+        if can_temporal_cv:
+            splitter = make_splitter(
+                val_type=val_cfg.type,
+                n_splits=val_cfg.n_splits,
+                min_train_size=val_cfg.min_train_size,
+                test_size=val_cfg.test_size,
+                initial_train_size=val_cfg.initial_train_size,
+                step_size=val_cfg.step_size,
+                train_size=val_cfg.train_size,
+                test_start=val_cfg.test_start,
+                train_months=val_cfg.train_months,
+                initial_train_months=val_cfg.initial_train_months,
+                test_months=val_cfg.test_months,
             )
-            calibrator.fit(oof_probs, y, df)
-            logger.info(
-                "Segmented Platt: %d per-segment fits + global fallback",
-                calibrator.n_segments,
+            fold_predictions: list[dict[str, Any]] = []
+            for fold_idx, (train_idx, test_idx) in enumerate(splitter.split(df)):
+                train_df = df[train_idx]
+                test_df = df[test_idx]
+
+                X_train_raw = train_df.select(
+                    pl.col(c).cast(pl.Float64) for c in augmented_cols
+                ).to_numpy()
+                y_train_fold = train_df[target_col].to_numpy().astype(int)
+                X_test_raw = test_df.select(
+                    pl.col(c).cast(pl.Float64) for c in augmented_cols
+                ).to_numpy()
+                y_test_fold = test_df[target_col].to_numpy().astype(int)
+
+                circuit_train_fold = train_df["circuit"].to_numpy()
+                circuit_test_fold = test_df["circuit"].to_numpy()
+                impute_fold = fit_imputation(
+                    X_train_raw, circuit_train_fold, build_result.specs
+                )
+
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", RuntimeWarning)
+                    mean_fold = np.nanmean(X_train_raw[:, :n_model], axis=0)
+                    std_fold = np.nanstd(X_train_raw[:, :n_model], axis=0)
+                mean_fold = np.where(np.isnan(mean_fold), 0.0, mean_fold)
+                std_fold = np.where(np.isnan(std_fold), 1.0, std_fold)
+                std_fold[std_fold == 0] = 1.0
+
+                X_train_fold = apply_imputation(
+                    X_train_raw, circuit_train_fold, impute_fold
+                )
+                X_test_fold = apply_imputation(
+                    X_test_raw, circuit_test_fold, impute_fold
+                )
+                X_train_fold = X_train_fold[:, :n_model]
+                X_test_fold = X_test_fold[:, :n_model]
+                X_train_fold = (X_train_fold - mean_fold) / std_fold
+                X_test_fold = (X_test_fold - mean_fold) / std_fold
+
+                fold_weights = None
+                if config.sample_weight is not None:
+                    train_dates_fold = train_df["effective_match_date"].to_numpy()
+                    fold_weights = compute_sample_weights(
+                        train_dates_fold, config.sample_weight
+                    )
+
+                fold_model = get_model(config.model.type, config.model.params or {})
+                fold_model.fit(
+                    X_train_fold, y_train_fold, sample_weight=fold_weights
+                )
+                y_prob_test = fold_model.predict_proba(X_test_fold)
+
+                fold_predictions.append({
+                    "df": test_df,
+                    "y_true": y_test_fold,
+                    "y_prob": y_prob_test,
+                })
+                logger.info(
+                    "Temporal CV fold %d: train=%d, test=%d",
+                    fold_idx + 1, len(train_df), len(test_df),
+                )
+
+            if not fold_predictions:
+                raise RuntimeError(
+                    f"Temporal CV ({val_cfg.type}) produced no folds"
+                )
+
+            combined_y_true_oof = np.concatenate(
+                [p["y_true"] for p in fold_predictions]
             )
+            combined_y_prob_oof = np.concatenate(
+                [p["y_prob"] for p in fold_predictions]
+            )
+            combined_df_oof = pl.concat(
+                [p["df"] for p in fold_predictions], how="diagonal_relaxed"
+            )
+
+            if cal_cfg and cal_cfg.segments:
+                calibrator = SegmentedPlattCalibrator(
+                    segments=cal_cfg.segments, min_n=cal_cfg.min_n,
+                )
+                calibrator.fit(
+                    combined_y_prob_oof, combined_y_true_oof, combined_df_oof
+                )
+                logger.info(
+                    "Segmented Platt (temporal CV): %d per-segment fits + global fallback",
+                    calibrator.n_segments,
+                )
+                for pred_dict in fold_predictions:
+                    pred_dict["y_prob"] = calibrator.transform(
+                        pred_dict["y_prob"], pred_dict["df"]
+                    )
+            else:
+                calibrator = PlattCalibrator()
+                calibrator.fit(combined_y_prob_oof, combined_y_true_oof)
+                logger.info(
+                    "Platt calibrator (temporal CV): slope=%.4f, intercept=%.4f",
+                    calibrator.slope, calibrator.intercept,
+                )
+                for pred_dict in fold_predictions:
+                    pred_dict["y_prob"] = calibrator.transform(pred_dict["y_prob"])
+
+            calibrated_preds = fold_predictions
         else:
-            calibrator = PlattCalibrator()
-            calibrator.fit(oof_probs, y)
-            logger.info(
-                "Platt calibrator: slope=%.4f, intercept=%.4f",
-                calibrator.slope,
-                calibrator.intercept,
+            fallback_reason = (
+                "no validation block" if val_cfg is None
+                else "ensemble model" if is_ensemble
+                else "embedding configured" if embedding_col is not None
+                else f"validation type '{val_cfg.type}' unsupported here"
             )
+            logger.warning(
+                "Falling back to random K-fold for Platt fit (reason: %s); "
+                "cal_tiers sidecar will not be written",
+                fallback_reason,
+            )
+            from sklearn.model_selection import StratifiedKFold
+
+            oof_probs = np.zeros(len(y))
+            skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+            for train_idx, val_idx in skf.split(X, y):
+                fold_model = get_model(config.model.type, config.model.params or {})
+                if is_ensemble and base_model_specs is not None:
+                    assert isinstance(fold_model, EnsembleModel)
+                    fold_model.configure(base_model_specs)
+                fold_weights = sample_weights[train_idx] if sample_weights is not None else None
+                fold_model.fit(X[train_idx], y[train_idx], sample_weight=fold_weights)
+                oof_probs[val_idx] = fold_model.predict_proba(X[val_idx])
+            if cal_cfg and cal_cfg.segments:
+                calibrator = SegmentedPlattCalibrator(
+                    segments=cal_cfg.segments, min_n=cal_cfg.min_n,
+                )
+                calibrator.fit(oof_probs, y, df)
+                logger.info(
+                    "Segmented Platt: %d per-segment fits + global fallback",
+                    calibrator.n_segments,
+                )
+            else:
+                calibrator = PlattCalibrator()
+                calibrator.fit(oof_probs, y)
+                logger.info(
+                    "Platt calibrator: slope=%.4f, intercept=%.4f",
+                    calibrator.slope,
+                    calibrator.intercept,
+                )
 
         # Save artifact
         artifact_path = Path(entry["artifact"])
@@ -337,6 +484,31 @@ class ProductionPredictor:
             artifact_data["embedding_vocab"] = embedding_vocab
             artifact_data["embedding_col"] = embedding_col
         joblib.dump(artifact_data, artifact_path)
+
+        # Write cal_tiers sidecar from temporal CV predictions (when available)
+        sidecar_path = artifact_path.with_name(
+            f"{artifact_path.stem}_cal_tiers.json"
+        )
+        if calibrated_preds is not None:
+            diag = Diagnostics()
+            diag_results = diag.compute_all(
+                calibrated_preds, calibration_segments=["circuit", "round"]
+            )
+            sidecar_data = {
+                "segments": diag_results.segments,
+                "calibration_by_segment": diag_results.calibration_by_segment,
+                "config_stem": artifact_path.stem,
+                "trained_at": datetime.now(UTC).isoformat(),
+            }
+            with open(sidecar_path, "w") as f:
+                json.dump(sidecar_data, f, indent=2, default=str)
+            logger.info("Wrote cal_tiers sidecar to %s", sidecar_path)
+        elif sidecar_path.exists():
+            sidecar_path.unlink()
+            logger.info(
+                "Removed stale cal_tiers sidecar at %s (no temporal CV this run)",
+                sidecar_path,
+            )
 
         # Update trained_at in config
         entry["trained_at"] = datetime.now(UTC).isoformat()

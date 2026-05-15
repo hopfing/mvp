@@ -147,19 +147,40 @@ def _find_diagnostics_json(config_stem: str) -> Path | None:
 
 
 def _load_tier_lookup(config_stem: str) -> tuple[dict[tuple[str, str], float], str | None]:
-    """Return {(circuit, round): signed_calibration} from the latest diagnostics JSON.
+    """Return {(circuit, round): signed_calibration} from the latest cal_tiers source.
 
-    Second value is the diagnostics path stem for the summary header (or None).
+    Prefer a `<artifact_dir>/lead_cal_tiers.json` sidecar emitted alongside the
+    backtest's lead artifact (produced by predictor._train_single when the model
+    config has a temporal validation block). Fall back to the latest mlruns
+    diagnostics JSON for that config when no sidecar exists.
+
+    Second value is a short identifier of the source for the summary header
+    (or None when nothing was found).
     """
+    sidecar_path = ARTIFACT_ROOT / config_stem / "lead_cal_tiers.json"
+    if sidecar_path.exists():
+        with open(sidecar_path) as f:
+            diag = json.load(f)
+        lookup = _extract_circuit_round_lookup(diag)
+        return lookup, "sidecar"
+
     diag_path = _find_diagnostics_json(config_stem)
     if diag_path is None:
         logger.warning(
-            "No diagnostics JSON found for %s — cal_tier will be null in CSV output",
+            "No cal_tiers sidecar or diagnostics JSON for %s — cal_tier will be null in CSV output",
             config_stem,
         )
         return {}, None
     with open(diag_path) as f:
         diag = json.load(f)
+    lookup = _extract_circuit_round_lookup(diag)
+    # Run id is the parent directory of artifacts/
+    run_id = diag_path.parent.parent.name[:8]
+    return lookup, run_id
+
+
+def _extract_circuit_round_lookup(diag: dict) -> dict[tuple[str, str], float]:
+    """Pull (circuit, round) -> signed_calibration from a diagnostics-shaped dict."""
     lookup: dict[tuple[str, str], float] = {}
     by_circuit = diag.get("segments", {}).get("by_circuit", {})
     for circuit, circuit_data in by_circuit.items():
@@ -171,9 +192,7 @@ def _load_tier_lookup(config_stem: str) -> tuple[dict[tuple[str, str], float], s
             if cal is None:
                 continue
             lookup[(circuit, round_name)] = float(cal)
-    # Run id is the parent directory of artifacts/
-    run_id = diag_path.parent.parent.name[:8] if diag_path else None
-    return lookup, run_id
+    return lookup
 
 
 def _build_bet_rows(
