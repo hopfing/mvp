@@ -572,9 +572,19 @@ def _render_per_cell_table(bets: pl.DataFrame, st) -> None:
     ).drop("_cc")
 
     tier_order_map = {v: i for i, v in enumerate(_TIER_ORDER + ["(none)"])}
+    circuit_order_map = {"tour": 0, "chal": 1}
+    round_order_map = {
+        v: i for i, v in enumerate(
+            ["Q1", "Q2", "R128", "R64", "R32", "R16", "QF", "SF", "F"]
+        )
+    }
     agg = agg.with_columns(
-        pl.col("cal_tier").replace_strict(tier_order_map, default=999).alias("_tier_sort")
-    ).sort(["P&L", "_tier_sort"], descending=[True, False]).drop("_tier_sort")
+        pl.col("circuit").replace_strict(circuit_order_map, default=999).alias("_circ_sort"),
+        pl.col("round").replace_strict(round_order_map, default=999).alias("_round_sort"),
+        pl.col("cal_tier").replace_strict(tier_order_map, default=999).alias("_tier_sort"),
+    ).sort(["_circ_sort", "_round_sort", "_tier_sort"]).drop(
+        "_circ_sort", "_round_sort", "_tier_sort"
+    )
 
     agg = agg.rename({"circuit": "Circuit", "round": "Round", "cal_tier": "Tier"})
 
@@ -981,7 +991,7 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
     st.subheader("By Calibration Tier")
     _render_cal_tier_breakdown(bets, st)
 
-    st.subheader("By Cell (Circuit × Round × Tier)")
+    st.subheader("By Calibration Segment")
     _render_per_cell_table(bets, st)
 
     # Edge-provenance matrix filters to bets placed after opening-odds
