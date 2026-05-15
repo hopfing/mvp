@@ -91,7 +91,9 @@ class DataConfig(BaseModel):
     """Data selection configuration."""
 
     date_range: DateRange
-    filters: dict[str, Any] | None = None  # Applied in Phase 3 (Diagnostics)
+    filters: dict[str, Any] | None = None  # Applied pre-split to the whole dataset
+    train_filters: dict[str, Any] | None = None  # Applied post-split to train fold only
+    eval_filters: dict[str, Any] | None = None  # Applied post-split to test fold only
 
 
 class FeaturesConfig(BaseModel):

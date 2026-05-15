@@ -1280,6 +1280,7 @@ def _run_voter_confidence(args: argparse.Namespace, config_path: Path) -> int:
             voter_feature_specs = voter_cfg.features.include
             compute_only = voter_cfg.features.compute_only if voter_cfg.features.compute_only else []
             filter_specs = get_filter_feature_specs(voter_cfg.data.filters)
+            filter_specs.extend(get_filter_feature_specs(voter_cfg.data.train_filters))
             extra = compute_only + filter_specs
             all_specs = voter_feature_specs + [s for s in extra if s not in voter_feature_specs]
 
@@ -1326,10 +1327,11 @@ def _run_voter_confidence(args: argparse.Namespace, config_path: Path) -> int:
                 test_fold = voter_df[test_idx]
 
                 # Apply voter's own filters to training data only
+                train_filtered = train_fold
                 if voter_cfg.data.filters:
-                    train_filtered = apply_filters(train_fold, voter_cfg.data.filters)
-                else:
-                    train_filtered = train_fold
+                    train_filtered = apply_filters(train_filtered, voter_cfg.data.filters)
+                if voter_cfg.data.train_filters:
+                    train_filtered = apply_filters(train_filtered, voter_cfg.data.train_filters)
 
                 X_train = train_filtered.select(
                     pl.col(c).cast(pl.Float64) for c in voter_augmented_cols
@@ -1386,8 +1388,14 @@ def _run_voter_confidence(args: argparse.Namespace, config_path: Path) -> int:
             # Scoped voters: null out predictions for out-of-scope matches
             # Use the voter's full DataFrame (which has all columns including
             # computed features) to determine scope, then map back by key.
-            if voter_entry.get("scoped") and voter_cfg.data.filters:
-                in_scope_keys = apply_filters(voter_df, voter_cfg.data.filters).select(
+            # Scope = filters ∩ train_filters (the voter's effective training scope).
+            if voter_entry.get("scoped") and (voter_cfg.data.filters or voter_cfg.data.train_filters):
+                scope_df = voter_df
+                if voter_cfg.data.filters:
+                    scope_df = apply_filters(scope_df, voter_cfg.data.filters)
+                if voter_cfg.data.train_filters:
+                    scope_df = apply_filters(scope_df, voter_cfg.data.train_filters)
+                in_scope_keys = scope_df.select(
                     "match_uid", "player_id"
                 ).with_columns(pl.lit(True).alias("_in_scope"))
                 voter_col = f"_voter_{name}"

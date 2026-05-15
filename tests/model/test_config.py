@@ -144,6 +144,70 @@ model:
         config = ExperimentConfig.from_yaml(yaml_str)
         assert config.features.compute_only == []
 
+    def test_scoped_filters_default_none(self):
+        """train_filters and eval_filters default to None."""
+        yaml_str = """
+data:
+  date_range:
+    start: "2020-01-01"
+    end: "2024-12-31"
+features:
+  include:
+    - win_rate(days=30)
+model:
+  type: logistic
+"""
+        config = ExperimentConfig.from_yaml(yaml_str)
+        assert config.data.filters is None
+        assert config.data.train_filters is None
+        assert config.data.eval_filters is None
+
+    def test_scoped_filters_parsed(self):
+        """train_filters and eval_filters parse independently."""
+        yaml_str = """
+data:
+  date_range:
+    start: "2020-01-01"
+    end: "2024-12-31"
+  train_filters:
+    circuit: [chal, tour, itf]
+  eval_filters:
+    circuit: [chal, tour]
+features:
+  include:
+    - win_rate(days=30)
+model:
+  type: logistic
+"""
+        config = ExperimentConfig.from_yaml(yaml_str)
+        assert config.data.filters is None
+        assert config.data.train_filters == {"circuit": ["chal", "tour", "itf"]}
+        assert config.data.eval_filters == {"circuit": ["chal", "tour"]}
+
+    def test_filters_and_scoped_can_coexist(self):
+        """filters, train_filters, eval_filters can all be set together."""
+        yaml_str = """
+data:
+  date_range:
+    start: "2020-01-01"
+    end: "2024-12-31"
+  filters:
+    draw_type: singles
+  train_filters:
+    circuit: [chal, tour, itf]
+  eval_filters:
+    circuit: [chal, tour]
+features:
+  include:
+    - win_rate(days=30)
+model:
+  type: logistic
+"""
+        config = ExperimentConfig.from_yaml(yaml_str)
+        assert config.data.filters == {"draw_type": "singles"}
+        assert config.data.train_filters == {"circuit": ["chal", "tour", "itf"]}
+        assert config.data.eval_filters == {"circuit": ["chal", "tour"]}
+
 
 class TestDateValidationSplitterParams:
     """Cross-type validators for date_sliding / date_expanding params."""

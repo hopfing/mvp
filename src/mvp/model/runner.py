@@ -257,6 +257,8 @@ class ExperimentRunner:
             else []
         )
         filter_specs = get_filter_feature_specs(self.config.data.filters)
+        filter_specs.extend(get_filter_feature_specs(self.config.data.train_filters))
+        filter_specs.extend(get_filter_feature_specs(self.config.data.eval_filters))
         if is_ensemble and model_filters:
             for filt in model_filters:
                 if filt is not None:
@@ -274,10 +276,15 @@ class ExperimentRunner:
             "won", "reason", "sets_played", "best_of",
             "circuit", "surface", "round",
         ]
-        if self.config.data.filters:
-            for col in self.config.data.filters:
-                if col not in runner_columns:
-                    runner_columns.append(col)
+        for _scope_filt in (
+            self.config.data.filters,
+            self.config.data.train_filters,
+            self.config.data.eval_filters,
+        ):
+            if _scope_filt:
+                for col in _scope_filt:
+                    if col not in runner_columns:
+                        runner_columns.append(col)
         if is_ensemble and model_filters:
             for filt in model_filters:
                 if filt:
@@ -502,6 +509,10 @@ class ExperimentRunner:
                 t_fold = time.perf_counter()
                 train_df = df[train_idx]
                 test_df = df[test_idx]
+                if self.config.data.train_filters:
+                    train_df = apply_filters(train_df, self.config.data.train_filters)
+                if self.config.data.eval_filters:
+                    test_df = apply_filters(test_df, self.config.data.eval_filters)
                 run_logger.info(
                     "Iter %d/%d (outer fold %d): train=%d, test=%d",
                     fold_idx + 1, len(iteration_splits),
