@@ -162,6 +162,10 @@ def generate_formulas(row: int) -> dict[str, str]:
 
 
 CIRCUIT_LABELS = {"tour": "ATP", "chal": "CH"}
+# Reverse map for callers that need to translate the sheet's display label
+# back to the raw circuit value used by upstream artifacts (cal_tiers
+# sidecar keys on raw "tour" / "chal").
+CIRCUIT_LABELS_INVERSE = {v: k for k, v in CIRCUIT_LABELS.items()}
 
 
 def _format_date(val) -> str | None:
@@ -591,7 +595,10 @@ def merge_predictions(
                 new_cell_cal.append(row.get("cell_cal") or "")
                 new_cal_tier.append(current_tier)
                 continue
-            circuit = (row.get("circuit") or "").strip()
+            sheet_circuit = (row.get("circuit") or "").strip()
+            # Sheet stores display labels (ATP / CH); sidecar keys on raw
+            # circuit values (tour / chal). Translate before lookup.
+            circuit = CIRCUIT_LABELS_INVERSE.get(sheet_circuit, sheet_circuit)
             rnd = (row.get("round") or "").strip()
             cal = cal_lookup.get((circuit, rnd))
             tier = classify_cal_tier(cal)

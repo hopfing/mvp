@@ -481,6 +481,10 @@ class TestMergePredictions:
         assert result["fav_edge_open"][0] == "0.1234"
 
     def test_cal_tier_populated_from_sidecar(self, tmp_path, monkeypatch):
+        # Sidecar keys on raw circuit values ("tour"/"chal") because that's
+        # what diagnostics emits. The sheet rows store display labels
+        # ("ATP"/"CH") via prepare_predictions. The lookup must translate
+        # before matching — this test uses the display labels to lock that in.
         sidecar = tmp_path / "lead_cal_tiers.json"
         sidecar.write_text(json.dumps({
             "segments": {
@@ -495,17 +499,9 @@ class TestMergePredictions:
         )
 
         existing = _sheet_df([])
-        # Predictor emits the raw circuit ("tour") which prepare_predictions
-        # maps to "ATP" — but the sidecar lookup keys on the original "tour"
-        # value, which is what merge_predictions sees on the row's `circuit`
-        # column. The `_make_predictions` helper goes through prepare_predictions,
-        # which mutates circuit to "ATP". For this test we want the raw label
-        # to flow into merge_predictions, so we set circuit on the new rows
-        # directly (skipping the ATP mapping) by using a sheet row that already
-        # has "tour" in the circuit column.
         new = pl.DataFrame([{c: "" for c in COLUMN_NAMES}]).with_columns(
             pl.lit("M_NEW").alias("match_uid"),
-            pl.lit("tour").alias("circuit"),
+            pl.lit("ATP").alias("circuit"),  # display label, not raw "tour"
             pl.lit("R32").alias("round"),
         )
         matches = _matches_df({
@@ -536,7 +532,7 @@ class TestMergePredictions:
 
         row = _make_sheet_row(
             match_uid="M1",
-            circuit="tour",
+            circuit="ATP",  # sheet display label
             round="R32",
             cal_tier="Risky",
             cell_cal="-0.0080",
