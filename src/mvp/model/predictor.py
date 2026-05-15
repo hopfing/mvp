@@ -382,6 +382,8 @@ class ProductionPredictor:
         tournament_keys: list[tuple[str, int]] | None,
         match_uids: set[str],
         scoped: bool = False,
+        *,
+        include_settled: bool = False,
     ) -> dict[str, float]:
         """Generate raw uid->prob predictions for a single model entry.
 
@@ -429,10 +431,13 @@ class ProductionPredictor:
                 pl.col("effective_match_date").dt.year().alias("_year")
             ).join(keys_df, on=["tournament_id", "_year"], how="semi").drop("_year")
 
-        # Keep only pending matches in the production set
-        pending = df.filter(
-            pl.col("won").is_null() & pl.col("match_uid").is_in(list(match_uids))
-        )
+        # Keep matches in the production set (pending only, unless include_settled)
+        if include_settled:
+            pending = df.filter(pl.col("match_uid").is_in(list(match_uids)))
+        else:
+            pending = df.filter(
+                pl.col("won").is_null() & pl.col("match_uid").is_in(list(match_uids))
+            )
 
         if len(pending) == 0:
             return {}
@@ -534,6 +539,8 @@ class ProductionPredictor:
         self,
         tournament_keys: list[tuple[str, int]] | None,
         predictions: pl.DataFrame,
+        *,
+        include_settled: bool = False,
     ) -> pl.DataFrame:
         """Add consensus and voter_count columns from voter models.
 
@@ -568,7 +575,11 @@ class ProductionPredictor:
         for voter in voters:
             is_scoped = voter.get("scoped", False)
             raw = self._predict_raw(
-                voter, tournament_keys, match_uids, scoped=is_scoped
+                voter,
+                tournament_keys,
+                match_uids,
+                scoped=is_scoped,
+                include_settled=include_settled,
             )
             picks = {uid: prob >= 0.5 for uid, prob in raw.items()}
             voter_picks.append(picks)
@@ -595,12 +606,22 @@ class ProductionPredictor:
         )
 
     def predict(
-        self, tournament_keys: list[tuple[str, int]] | None = None
+        self,
+        tournament_keys: list[tuple[str, int]] | None = None,
+        *,
+        include_settled: bool = False,
+        date_window: tuple[Any, Any] | None = None,
     ) -> pl.DataFrame:
         """Generate predictions for pending matches (won is null).
 
         Args:
             tournament_keys: If provided, only predict for these (tid, year) pairs.
+            include_settled: If True, also score matches with known outcomes
+                (used by lead backtest). Defaults to False so the live pipeline
+                continues to score only pending matches.
+            date_window: Optional (start_date, end_date) tuple restricting
+                predictions to matches whose effective_match_date falls in
+                [start, end] inclusive. Used by the lead backtest.
 
         Returns:
             DataFrame with one row per match, containing prediction columns.
@@ -644,11 +665,21 @@ class ProductionPredictor:
                 pl.col("effective_match_date").dt.year().alias("_year")
             ).join(keys_df, on=["tournament_id", "_year"], how="semi").drop("_year")
 
-        # Keep only pending matches
-        pending = df.filter(pl.col("won").is_null())
+        # Keep pending matches (unless caller asked for settled too — backtest path)
+        if include_settled:
+            pending = df
+        else:
+            pending = df.filter(pl.col("won").is_null())
+
+        if date_window is not None:
+            start, end = date_window
+            pending = pending.filter(
+                (pl.col("effective_match_date") >= start)
+                & (pl.col("effective_match_date") <= end)
+            )
 
         if len(pending) == 0:
-            logger.warning("No pending matches to predict")
+            logger.warning("No matches to predict")
             return pl.DataFrame()
 
         # Extract features and predict

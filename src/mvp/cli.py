@@ -938,6 +938,36 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         help="Force retrain even if a saved artifact exists",
     )
 
+    # backtest subcommand - simulate a lead model's bets on a window with odds data
+    bt_parser = subparsers.add_parser(
+        "backtest",
+        help="Backtest a lead model: simulate predictions + bets on a window with odds data",
+    )
+    bt_parser.add_argument(
+        "config", type=str, help="Config name or path (resolved under models/)"
+    )
+    bt_parser.add_argument(
+        "--retrain", action="store_true",
+        help="Force retrain of lead and voters even if artifacts exist",
+    )
+    bt_parser.add_argument(
+        "--start", type=str, default=None,
+        help="Window start YYYY-MM-DD (default: day after lead's data.date_range.end)",
+    )
+    bt_parser.add_argument(
+        "--end", type=str, default=None,
+        help="Window end YYYY-MM-DD (default: today)",
+    )
+    bt_parser.add_argument(
+        "--voters", type=str, default=None,
+        help="Path to alternate production-shaped YAML for voter override "
+             "(default: production.yaml's voters)",
+    )
+    bt_parser.add_argument(
+        "--memory-limit", type=int, default=None,
+        help="Override memory limit %% (0 to disable, default 75)",
+    )
+
     # analysis subcommand
     analysis_parser = subparsers.add_parser(
         "analysis", help="Build analysis dataset with odds, CLV, and simulations"
@@ -2296,6 +2326,31 @@ def cmd_iid_backtest(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_backtest(args: argparse.Namespace) -> int:
+    """Backtest a lead model: simulate predictions + bets on a window with odds data."""
+    from datetime import date as _date
+
+    from mvp.model.backtest import run_backtest as run_lead_backtest
+
+    config_path = resolve_config_path(args.config, MODEL_DIR)
+    if not config_path.exists():
+        raise FileNotFoundError(
+            f"Config file not found: {args.config} (tried {config_path})"
+        )
+
+    start = _date.fromisoformat(args.start) if args.start else None
+    end = _date.fromisoformat(args.end) if args.end else None
+
+    run_lead_backtest(
+        config_path,
+        retrain=args.retrain,
+        start=start,
+        end=end,
+        voters_override_path=args.voters,
+    )
+    return 0
+
+
 def _fetch_book_quiet(book: BookConfig, run_at=None) -> int:
     """Run a book's odds fetch in background thread."""
     import importlib
@@ -2747,6 +2802,8 @@ def main(args: list[str] | None = None) -> int:
         return cmd_iid_project(parsed)
     elif parsed.command == "iid-backtest":
         return cmd_iid_backtest(parsed)
+    elif parsed.command == "backtest":
+        return cmd_backtest(parsed)
     elif parsed.command == "analysis":
         return cmd_analysis(parsed)
 
