@@ -975,33 +975,47 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
 
     # --- Performance Breakdowns ---
     round_order = ["Q1", "Q2", "R128", "R64", "R32", "R16", "QF", "SF", "F"]
-    for circuit_val, circuit_label in [("tour", "Tour"), ("chal", "Challenger")]:
-        circuit_bets = bets.filter(pl.col("circuit") == circuit_val)
-        if len(circuit_bets) == 0:
-            continue
-        st.subheader(circuit_label)
+
+    circuits = [
+        (val, label)
+        for val, label in [("tour", "Tour"), ("chal", "Challenger")]
+        if "circuit" in bets.columns
+        and len(bets.filter(pl.col("circuit") == val)) > 0
+    ]
+    circuit_dfs = {val: bets.filter(pl.col("circuit") == val) for val, _ in circuits}
+
+    st.subheader("By Round")
+    for val, label in circuits:
+        st.markdown(f"**{label}**")
         _render_breakdown(
-            circuit_bets, "round", "Round", st,
+            circuit_dfs[val], "round", "Round", st,
             sort_order=round_order, all_row=True,
         )
 
     st.subheader("By Book")
-    _render_breakdown(expand_by_book(bets), "book", "Book", st)
+    for val, label in circuits:
+        st.markdown(f"**{label}**")
+        _render_breakdown(expand_by_book(circuit_dfs[val]), "book", "Book", st)
 
     st.subheader("By Odds Band")
-    _render_odds_breakdown(bets, st)
+    for val, label in circuits:
+        st.markdown(f"**{label}**")
+        _render_odds_breakdown(circuit_dfs[val], st)
 
     st.subheader("By Edge Band")
-    _render_edge_bands(bets, st)
+    for val, label in circuits:
+        st.markdown(f"**{label}**")
+        _render_edge_bands(circuit_dfs[val], st)
 
-    for circuit_val, circuit_label in [("tour", "Tour"), ("chal", "Challenger")]:
-        circuit_bets = bets.filter(pl.col("circuit") == circuit_val)
-        if len(circuit_bets) == 0:
-            continue
-        st.subheader(f"{circuit_label} — By Calibration Tier")
-        _render_cal_tier_breakdown(circuit_bets, st)
-        st.subheader(f"{circuit_label} — By Calibration Segment")
-        _render_per_cell_table(circuit_bets, st)
+    st.subheader("By Calibration Tier")
+    for val, label in circuits:
+        st.markdown(f"**{label}**")
+        _render_cal_tier_breakdown(circuit_dfs[val], st)
+
+    st.subheader("By Calibration Segment")
+    for val, label in circuits:
+        st.markdown(f"**{label}**")
+        _render_per_cell_table(circuit_dfs[val], st)
 
     # Edge-provenance matrix filters to bets placed after opening-odds
     # capture became reliable.
@@ -1020,18 +1034,26 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
             f"Excludes {n_excluded} bets placed before {_OPENING_RELIABLE_AFTER} "
             "where opening-odds capture is unreliable."
         )
-    _render_provenance_matrix(prov_bets, st)
+    for val, label in circuits:
+        circuit_prov = prov_bets.filter(pl.col("circuit") == val)
+        if len(circuit_prov) == 0:
+            continue
+        st.markdown(f"**{label}**")
+        _render_provenance_matrix(circuit_prov, st)
 
     if "net" in bets.columns:
         st.subheader("Cumulative P&L by Bet #")
-        net_vals = (
-            bets.sort("effective_match_date")
-            ["net"].cast(pl.Float64, strict=False).drop_nulls()
-        )
-        if len(net_vals) > 0:
-            cumulative = net_vals.cum_sum()
+        for val, label in circuits:
+            st.markdown(f"**{label}**")
+            net_vals = (
+                circuit_dfs[val].sort("effective_match_date")
+                ["net"].cast(pl.Float64, strict=False).drop_nulls()
+            )
+            if len(net_vals) == 0:
+                continue
+            running = net_vals.cum_sum()
             chart_data = pl.DataFrame({
-                "Bet #": range(1, len(cumulative) + 1),
-                "Cumulative P&L": cumulative,
+                "Bet #": range(1, len(running) + 1),
+                "Cumulative P&L": running,
             })
             st.line_chart(chart_data.to_pandas(), x="Bet #", y="Cumulative P&L")
