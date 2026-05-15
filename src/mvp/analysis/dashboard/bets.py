@@ -451,6 +451,67 @@ _TIER_ORDER = ["UnderC", "Optimal", "Border", "Risky", "Danger"]
 _KILL_THRESHOLD_N = 15
 _KILL_THRESHOLD_ROI = -10.0
 
+_BET_SIDE_ORDER = ["All", "Model Fav", "Model Dog"]
+
+
+def _render_bet_side_breakdown(bets: pl.DataFrame, st) -> None:
+    """All / Model Fav / Model Dog breakdown with CLV columns.
+
+    "Model Fav" = bet on the model's predicted winner (bet_side == pred_side).
+    "Model Dog" = bet on the model's predicted loser (bet_side != pred_side).
+    Anchored to the model's call, not market odds.
+    """
+    if "pred_side" not in bets.columns or "bet_side" not in bets.columns:
+        st.info("Missing pred_side/bet_side — can't classify bets.")
+        return
+    if len(bets) == 0:
+        st.info("No bets in current filter.")
+        return
+
+    df = bets.with_columns(
+        pl.when(pl.col("bet_side") == pl.col("pred_side"))
+        .then(pl.lit("Model Fav"))
+        .otherwise(pl.lit("Model Dog"))
+        .alias("_pick_type")
+    )
+
+    agg = _aggregate_with_clv(df, ["_pick_type"]).rename({"_pick_type": "Bet Side"})
+    totals = _aggregate_with_clv(
+        df.with_columns(pl.lit("All").alias("_pick_type")), ["_pick_type"],
+    ).rename({"_pick_type": "Bet Side"})
+
+    full = pl.concat([totals, agg])
+    order_map = {v: i for i, v in enumerate(_BET_SIDE_ORDER)}
+    full = full.with_columns(
+        pl.col("Bet Side").replace_strict(order_map, default=999).alias("_sort")
+    ).sort("_sort").drop("_sort")
+
+    has_clv = "CLV+%" in full.columns
+    cols = ["Bet Side", "Bets", "W", "L", "V", "Win %", "Stake", "P&L", "ROI %"]
+    if has_clv:
+        cols.extend(["CLV+%", "Avg CLV"])
+    pdf = full.select(cols).to_pandas()
+
+    def _bold_all(row):
+        if row["Bet Side"] == "All":
+            return ["font-weight: bold; background-color: rgba(255,255,255,0.08)"] * len(row)
+        return [""] * len(row)
+
+    fmt = {
+        "Stake": "${:,.2f}", "P&L": "${:+,.2f}",
+        "Win %": "{:.1f}%", "ROI %": "{:+.1f}%",
+    }
+    if has_clv:
+        fmt["CLV+%"] = "{:.1f}%"
+        fmt["Avg CLV"] = "{:+.2f}pp"
+
+    styled = (
+        pdf.style.apply(_bold_all, axis=1)
+        .applymap(_color_negative, subset=["P&L", "ROI %"])
+        .format(fmt, na_rep="—")
+    )
+    st.dataframe(styled, use_container_width=True, hide_index=True)
+
 
 def _aggregate_with_clv(bets: pl.DataFrame, group_cols: list[str]) -> pl.DataFrame:
     """Aggregate by group_cols with the standard stats plus CLV+% / Avg CLV.
@@ -555,8 +616,8 @@ def _render_per_cell_table(bets: pl.DataFrame, st) -> None:
     round-level table covers the no-tier picture.
 
     Cells with `Bets >= _KILL_THRESHOLD_N` AND `ROI % < _KILL_THRESHOLD_ROI`
-    are highlighted red — these are the cells that would trigger a per-cell
-    kill in the dog-fade live test.
+    are highlighted red — the per-cell kill threshold for evaluating bets
+    against the model.
     """
     needed = {"cal_tier", "round"}
     if not needed.issubset(bets.columns):
@@ -707,31 +768,9 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
         return
 
     # --- Bet edge filter ---
-    # bet_edge = fav_edge when betting the model's predicted side, else dog_edge.
-    if "fav_edge" in bets.columns and "dog_edge" in bets.columns and "pred_side" in bets.columns:
-        bets = bets.with_columns(
-            pl.when(pl.col("bet_side") == pl.col("pred_side"))
-            .then(pl.col("fav_edge"))
-            .otherwise(pl.col("dog_edge"))
-            .alias("bet_edge")
-        )
-
-        # bet_edge_open mirrors bet_edge but uses best opening odds across
-        # books — drives the edge-provenance matrix.
-        if (
-            "best_opening_odds_p1" in bets.columns
-            and "best_opening_odds_p2" in bets.columns
-            and "p1_win_prob" in bets.columns
-            and "p2_win_prob" in bets.columns
-        ):
-            bets = bets.with_columns(
-                pl.when(pl.col("bet_side") == "P1")
-                .then(pl.col("p1_win_prob") - 1.0 / pl.col("best_opening_odds_p1"))
-                .when(pl.col("bet_side") == "P2")
-                .then(pl.col("p2_win_prob") - 1.0 / pl.col("best_opening_odds_p2"))
-                .otherwise(pl.lit(None, dtype=pl.Float64))
-                .alias("bet_edge_open")
-            )
+    from mvp.analysis.dataset import derive_bet_edge_cols
+    bets = derive_bet_edge_cols(bets)
+    if "bet_edge" in bets.columns:
         edge_vals = bets["bet_edge"].drop_nulls()
         if len(edge_vals) > 0:
             edge_min_pct = round(float(edge_vals.min()) * 100 - 0.5, 1)
@@ -992,6 +1031,11 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
             sort_order=round_order, all_row=True,
         )
 
+    st.subheader("By Bet Side")
+    for val, label in circuits:
+        st.markdown(f"**{label}**")
+        _render_bet_side_breakdown(circuit_dfs[val], st)
+
     st.subheader("By Book")
     for val, label in circuits:
         st.markdown(f"**{label}**")
@@ -1007,15 +1051,43 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
         st.markdown(f"**{label}**")
         _render_edge_bands(circuit_dfs[val], st)
 
-    st.subheader("By Calibration Tier")
-    for val, label in circuits:
-        st.markdown(f"**{label}**")
-        _render_cal_tier_breakdown(circuit_dfs[val], st)
+    # Cal tier / segment perf is side-dependent: a Danger cell means the
+    # model overestimates its pick, so Model Dog wins in a Danger cell are
+    # *expected* and would mislead if mixed with Model Fav rows. Split by
+    # Bet Side within each circuit.
+    side_splits: list[tuple[str, pl.Expr]] = [
+        ("Model Fav", pl.col("bet_side") == pl.col("pred_side")),
+        ("Model Dog", pl.col("bet_side") != pl.col("pred_side")),
+    ]
 
-    st.subheader("By Calibration Segment")
-    for val, label in circuits:
-        st.markdown(f"**{label}**")
-        _render_per_cell_table(circuit_dfs[val], st)
+    if "pred_side" in bets.columns:
+        st.subheader("By Calibration Tier")
+        for val, circ_label in circuits:
+            for side_label, side_expr in side_splits:
+                side_df = circuit_dfs[val].filter(side_expr)
+                if len(side_df) == 0:
+                    continue
+                st.markdown(f"**{circ_label} — {side_label}**")
+                _render_cal_tier_breakdown(side_df, st)
+
+        st.subheader("By Calibration Segment")
+        for val, circ_label in circuits:
+            for side_label, side_expr in side_splits:
+                side_df = circuit_dfs[val].filter(side_expr)
+                if len(side_df) == 0:
+                    continue
+                st.markdown(f"**{circ_label} — {side_label}**")
+                _render_per_cell_table(side_df, st)
+    else:
+        st.subheader("By Calibration Tier")
+        for val, circ_label in circuits:
+            st.markdown(f"**{circ_label}**")
+            _render_cal_tier_breakdown(circuit_dfs[val], st)
+
+        st.subheader("By Calibration Segment")
+        for val, circ_label in circuits:
+            st.markdown(f"**{circ_label}**")
+            _render_per_cell_table(circuit_dfs[val], st)
 
     # Edge-provenance matrix filters to bets placed after opening-odds
     # capture became reliable.

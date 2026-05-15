@@ -314,16 +314,18 @@ _BET_EDGE_BUCKETS = [
 
 
 def _prep_edge_df(ds: pl.DataFrame) -> pl.DataFrame | None:
-    """Filter to bets with CLV columns and derive bet_edge / bet_edge_open.
+    """Filter to bets with CLV columns and add bet_edge / bet_edge_open.
 
-    bet_edge mirrors bets.py: fav_edge when bet_side == pred_side else dog_edge.
-    bet_edge_open uses best_opening_odds_p1/p2 on the bet side.
+    Bet-edge derivation is delegated to ``derive_bet_edge_cols`` (the
+    single source of truth — see dataset.py).
 
     Filters out bets placed before _BET_PLACED_AT_RELIABLE_AFTER: pre-floor
     bets are excluded because the staged-odds capture wasn't comprehensive
     enough for "opening odds" to be reliable on those matches, which would
     contaminate the matrix.
     """
+    from mvp.analysis.dataset import derive_bet_edge_cols
+
     bets = _get_bets(ds)
     if (
         len(bets) == 0
@@ -339,30 +341,15 @@ def _prep_edge_df(ds: pl.DataFrame) -> pl.DataFrame | None:
     if len(bets) == 0:
         return None
 
-    needed = {
-        "fav_edge", "dog_edge", "pred_side", "bet_side",
-        "best_opening_odds_p1", "best_opening_odds_p2",
-        "p1_win_prob", "p2_win_prob",
-    }
-    if not needed.issubset(bets.columns):
+    df = derive_bet_edge_cols(bets)
+    if "bet_edge" not in df.columns or "bet_edge_open" not in df.columns:
         return None
 
-    df = _with_wld(bets, _CLOSE_COL)
+    df = _with_wld(df, _CLOSE_COL)
     if len(df) == 0:
         return None
 
-    return df.with_columns(
-        pl.when(pl.col("bet_side") == pl.col("pred_side"))
-        .then(pl.col("fav_edge"))
-        .otherwise(pl.col("dog_edge"))
-        .alias("_bet_edge"),
-        pl.when(pl.col("bet_side") == "P1")
-        .then(pl.col("p1_win_prob") - 1.0 / pl.col("best_opening_odds_p1"))
-        .when(pl.col("bet_side") == "P2")
-        .then(pl.col("p2_win_prob") - 1.0 / pl.col("best_opening_odds_p2"))
-        .otherwise(pl.lit(None, dtype=pl.Float64))
-        .alias("_bet_edge_open"),
-    )
+    return df
 
 
 def _clv_cell(subset: pl.DataFrame) -> dict:
@@ -403,7 +390,7 @@ def render_provenance_matrix(ds: pl.DataFrame, st) -> None:
         st.info("No edge-provenance data available (bet_edge_open missing).")
         return
 
-    df = df.filter(pl.col("_bet_edge_open").is_not_null() & pl.col("_bet_edge").is_not_null())
+    df = df.filter(pl.col("bet_edge_open").is_not_null() & pl.col("bet_edge").is_not_null())
     if len(df) == 0:
         st.info("No edge-provenance data available.")
         return
@@ -418,10 +405,10 @@ def render_provenance_matrix(ds: pl.DataFrame, st) -> None:
         color_row: list[float | None] = []
         for _, f_lo, f_hi in _BET_EDGE_BUCKETS:
             sub = df.filter(
-                (pl.col("_bet_edge_open") >= o_lo)
-                & (pl.col("_bet_edge_open") < o_hi)
-                & (pl.col("_bet_edge") >= f_lo)
-                & (pl.col("_bet_edge") < f_hi)
+                (pl.col("bet_edge_open") >= o_lo)
+                & (pl.col("bet_edge_open") < o_hi)
+                & (pl.col("bet_edge") >= f_lo)
+                & (pl.col("bet_edge") < f_hi)
             )
             cell = _clv_cell(sub)
             n = cell["n"]

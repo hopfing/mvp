@@ -576,6 +576,53 @@ def _compute_pred_side_metrics(ds: pl.DataFrame) -> pl.DataFrame:
     return ds
 
 
+def derive_bet_edge_cols(ds: pl.DataFrame) -> pl.DataFrame:
+    """Add ``bet_edge`` and ``bet_edge_open`` columns derived from ``bet_side``.
+
+    ``bet_edge``: ``fav_edge`` when ``bet_side == pred_side`` (betting on
+    the model's pick — "Model Fav"), else ``dog_edge`` (betting against the
+    model's pick — "Model Dog"). Requires ``fav_edge``, ``dog_edge``,
+    ``pred_side``, ``bet_side``. "Fav"/"Dog" here are anchored to the
+    model's call, not market odds.
+
+    ``bet_edge_open``: bet-side open edge, ``p<side>_win_prob - 1/best_opening_odds_p<side>``.
+    Requires ``bet_side``, ``p1_win_prob``, ``p2_win_prob``,
+    ``best_opening_odds_p1``, ``best_opening_odds_p2``.
+
+    Each column is added only when its source columns are all present; the
+    DataFrame is returned unchanged otherwise. The single source of truth
+    for bet-side conditioning — anything per-bet (CLV, edge, etc.) should
+    consume these columns rather than reaching for ``fav_edge``/``dog_edge``
+    or ``pred_*`` directly.
+    """
+    edge_sources = {"fav_edge", "dog_edge", "pred_side", "bet_side"}
+    if edge_sources.issubset(ds.columns):
+        ds = ds.with_columns(
+            pl.when(~pl.col("bet_side").is_in(["P1", "P2"]))
+            .then(pl.lit(None, dtype=pl.Float64))
+            .when(pl.col("bet_side") == pl.col("pred_side"))
+            .then(pl.col("fav_edge"))
+            .otherwise(pl.col("dog_edge"))
+            .alias("bet_edge")
+        )
+
+    open_sources = {
+        "bet_side", "p1_win_prob", "p2_win_prob",
+        "best_opening_odds_p1", "best_opening_odds_p2",
+    }
+    if open_sources.issubset(ds.columns):
+        ds = ds.with_columns(
+            pl.when(pl.col("bet_side") == "P1")
+            .then(pl.col("p1_win_prob") - 1.0 / pl.col("best_opening_odds_p1"))
+            .when(pl.col("bet_side") == "P2")
+            .then(pl.col("p2_win_prob") - 1.0 / pl.col("best_opening_odds_p2"))
+            .otherwise(pl.lit(None, dtype=pl.Float64))
+            .alias("bet_edge_open")
+        )
+
+    return ds
+
+
 def _compute_clv(ds: pl.DataFrame) -> pl.DataFrame:
     """Compute closing line value for rows with bets."""
     if "bet_side" not in ds.columns:

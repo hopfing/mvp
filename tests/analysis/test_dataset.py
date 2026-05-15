@@ -285,3 +285,115 @@ class TestUnifiedDataset:
         # m2 has no live snapshots — should be null
         m2 = ds.filter(pl.col("match_uid") == "m2")
         assert m2["first_live_fetched_at"][0] is None
+
+
+class TestBetEdgeDerivation:
+    """Contract tests for derive_bet_edge_cols.
+
+    Locks the bet_side-aware derivation: betting on the model's pick
+    ("Model Fav") consumes fav_edge; betting against ("Model Dog")
+    consumes dog_edge. Same conditioning applies to bet_edge_open.
+    """
+
+    def _frame(self) -> pl.DataFrame:
+        # m1: bet_side == pred_side (Model Fav). pred_side=P1 because
+        #     p1_win_prob > 0.5.
+        # m2: bet_side != pred_side (Model Dog). pred_side=P1, bet_side=P2.
+        # m3: pred_side=P2 (p2_win_prob > 0.5), bet on P2 → Model Fav.
+        return pl.DataFrame({
+            "match_uid": ["m1", "m2", "m3"],
+            "pred_side": ["P1", "P1", "P2"],
+            "bet_side": ["P1", "P2", "P2"],
+            "fav_edge": [0.05, 0.03, 0.04],
+            "dog_edge": [-0.02, -0.04, -0.01],
+            "p1_win_prob": [0.65, 0.55, 0.30],
+            "p2_win_prob": [0.35, 0.45, 0.70],
+            "best_opening_odds_p1": [2.00, 1.90, 3.50],
+            "best_opening_odds_p2": [2.10, 2.20, 1.40],
+        })
+
+    def test_bet_edge_picks_fav_when_betting_model_pick(self):
+        from mvp.analysis.dataset import derive_bet_edge_cols
+
+        ds = derive_bet_edge_cols(self._frame())
+
+        assert "bet_edge" in ds.columns
+        m1 = ds.filter(pl.col("match_uid") == "m1")
+        assert m1["bet_edge"][0] == pytest.approx(0.05)
+        m3 = ds.filter(pl.col("match_uid") == "m3")
+        assert m3["bet_edge"][0] == pytest.approx(0.04)
+
+    def test_bet_edge_picks_dog_when_betting_against_model(self):
+        from mvp.analysis.dataset import derive_bet_edge_cols
+
+        ds = derive_bet_edge_cols(self._frame())
+
+        m2 = ds.filter(pl.col("match_uid") == "m2")
+        assert m2["bet_edge"][0] == pytest.approx(-0.04)
+
+    def test_bet_edge_open_uses_bet_side_columns(self):
+        from mvp.analysis.dataset import derive_bet_edge_cols
+
+        ds = derive_bet_edge_cols(self._frame())
+
+        assert "bet_edge_open" in ds.columns
+        # m1: bet_side=P1 → p1_win_prob - 1/best_opening_odds_p1
+        m1 = ds.filter(pl.col("match_uid") == "m1")
+        assert m1["bet_edge_open"][0] == pytest.approx(0.65 - 1.0 / 2.00)
+        # m2: bet_side=P2 → p2_win_prob - 1/best_opening_odds_p2
+        m2 = ds.filter(pl.col("match_uid") == "m2")
+        assert m2["bet_edge_open"][0] == pytest.approx(0.45 - 1.0 / 2.20)
+        # m3: bet_side=P2 → p2_win_prob - 1/best_opening_odds_p2
+        m3 = ds.filter(pl.col("match_uid") == "m3")
+        assert m3["bet_edge_open"][0] == pytest.approx(0.70 - 1.0 / 1.40)
+
+    def test_returns_unchanged_when_edge_sources_missing(self):
+        from mvp.analysis.dataset import derive_bet_edge_cols
+
+        df = pl.DataFrame({
+            "match_uid": ["m1"],
+            "bet_side": ["P1"],
+            # missing fav_edge, dog_edge, pred_side
+        })
+        out = derive_bet_edge_cols(df)
+        assert "bet_edge" not in out.columns
+        assert "bet_edge_open" not in out.columns
+
+    def test_edge_added_when_open_sources_missing(self):
+        """Partial inputs: bet_edge derives, bet_edge_open skipped."""
+        from mvp.analysis.dataset import derive_bet_edge_cols
+
+        df = pl.DataFrame({
+            "match_uid": ["m1"],
+            "pred_side": ["P1"],
+            "bet_side": ["P1"],
+            "fav_edge": [0.05],
+            "dog_edge": [-0.02],
+            # missing best_opening_odds_p1/p2 and win_prob cols
+        })
+        out = derive_bet_edge_cols(df)
+        assert "bet_edge" in out.columns
+        assert out["bet_edge"][0] == pytest.approx(0.05)
+        assert "bet_edge_open" not in out.columns
+
+    def test_bet_edge_null_when_bet_side_blank(self):
+        """No bet placed → both derived columns null for that row."""
+        from mvp.analysis.dataset import derive_bet_edge_cols
+
+        df = pl.DataFrame({
+            "match_uid": ["m1"],
+            "pred_side": ["P1"],
+            "bet_side": [""],
+            "fav_edge": [0.05],
+            "dog_edge": [-0.02],
+            "p1_win_prob": [0.65],
+            "p2_win_prob": [0.35],
+            "best_opening_odds_p1": [2.00],
+            "best_opening_odds_p2": [2.10],
+        })
+        out = derive_bet_edge_cols(df)
+        # bet_side not in {P1, P2} → both derived columns null.
+        # Guards against accidentally tagging non-bet rows with a
+        # meaningless dog_edge value.
+        assert out["bet_edge"][0] is None
+        assert out["bet_edge_open"][0] is None
