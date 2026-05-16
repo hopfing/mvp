@@ -16,24 +16,34 @@ def populated_study(tmp_path):
         direction="minimize",
     )
 
-    # Each trial has both tuning and holdout metrics. Values are arranged so
-    # in-fold and holdout orderings disagree:
-    #   in-fold log_loss best -> C=10.0 (0.61)
+    # Each trial has the full classification metric set (7 metrics) for both
+    # in-fold and holdout. Values are arranged so that different holdout
+    # metrics pick different winners, which lets us verify explicit `--sort`
+    # routes to the corresponding holdout metric:
     #   holdout_log_loss best -> C=1.0 (0.62)
-    # This lets us verify explicit `--sort log_loss` differs from the default
-    # holdout-sort, and that no auto-prefix happens post-refactor.
+    #   holdout_calibration_error best -> C=10.0 (0.012)
+    #   holdout_brier_score best -> C=1.0 (0.21)
     trial_data = [
         {
-            "C": 0.1, "ll": 0.65, "cal": 0.02, "scal": 0.01, "err80": 0.12,
-            "h_ll": 0.66, "h_cal": 0.025, "h_err80": 0.13,
+            "C": 0.1,
+            "ll": 0.65, "brier": 0.23, "auc": 0.70, "acc": 0.63,
+            "cal": 0.02, "scal": 0.01, "err80": 0.12,
+            "h_ll": 0.66, "h_brier": 0.24, "h_auc": 0.69, "h_acc": 0.62,
+            "h_cal": 0.025, "h_scal": 0.018, "h_err80": 0.13,
         },
         {
-            "C": 1.0, "ll": 0.63, "cal": 0.015, "scal": -0.005, "err80": 0.10,
-            "h_ll": 0.62, "h_cal": 0.018, "h_err80": 0.11,
+            "C": 1.0,
+            "ll": 0.63, "brier": 0.22, "auc": 0.74, "acc": 0.68,
+            "cal": 0.015, "scal": -0.005, "err80": 0.10,
+            "h_ll": 0.62, "h_brier": 0.21, "h_auc": 0.75, "h_acc": 0.69,
+            "h_cal": 0.018, "h_scal": -0.004, "h_err80": 0.11,
         },
         {
-            "C": 10.0, "ll": 0.61, "cal": 0.03, "scal": 0.02, "err80": 0.15,
-            "h_ll": 0.67, "h_cal": 0.012, "h_err80": 0.14,
+            "C": 10.0,
+            "ll": 0.61, "brier": 0.225, "auc": 0.72, "acc": 0.66,
+            "cal": 0.03, "scal": 0.02, "err80": 0.15,
+            "h_ll": 0.67, "h_brier": 0.23, "h_auc": 0.71, "h_acc": 0.65,
+            "h_cal": 0.012, "h_scal": 0.011, "h_err80": 0.14,
         },
     ]
 
@@ -45,11 +55,18 @@ def populated_study(tmp_path):
             user_attrs={
                 "_tuning_mode": "raw",
                 "log_loss": td["ll"],
+                "brier_score": td["brier"],
+                "roc_auc": td["auc"],
+                "accuracy": td["acc"],
                 "calibration_error": td["cal"],
                 "signed_calibration": td["scal"],
                 "error_rate_80plus": td["err80"],
                 "holdout_log_loss": td["h_ll"],
+                "holdout_brier_score": td["h_brier"],
+                "holdout_roc_auc": td["h_auc"],
+                "holdout_accuracy": td["h_acc"],
                 "holdout_calibration_error": td["h_cal"],
+                "holdout_signed_calibration": td["h_scal"],
                 "holdout_error_rate_80plus": td["h_err80"],
                 "duration_s": 5.0,
             },
@@ -94,32 +111,40 @@ class TestFormatLeaderboard:
         """Leaderboard sorts by holdout_log_loss by default (best holdout LL first)."""
         lines = format_leaderboard(populated_study, top_n=3)
         output = "\n".join(lines)
-        # Best holdout_log_loss is 0.62 (trial C=1.0) — should appear in first row
-        # Header now spans 4 lines (title + raw-mode note + separator). First
+        # Best holdout_log_loss is 0.62 (trial C=1.0) — should appear in first row.
+        # Header now spans 3 lines (title + raw-mode note + separator). First
         # trial row is at index 3.
-        assert "0.6200" in output.split("\n")[3]
+        assert "LL=0.6200" in output.split("\n")[3]
 
-    def test_explicit_sort_is_literal(self, populated_study):
-        """Passing --sort log_loss sorts by in-fold log_loss (no auto-prefix).
+    def test_bare_sort_auto_prefixes_to_holdout(self, populated_study):
+        """`--sort log_loss` is auto-prefixed to `holdout_log_loss`.
 
-        Post-refactor, the user types exactly the metric they want. With the
-        fixture's discriminating data, in-fold-best (C=10.0, LL=0.61) differs
-        from holdout-best (C=1.0, h_LL=0.62), so the first row under in-fold
-        sort reflects the in-fold winner.
+        The user picks a metric NAME; in-fold vs holdout is an implementation
+        detail. Ranking is always by the holdout measurement of that metric.
+        With the fixture, best holdout_log_loss is C=1.0 (0.62), so that
+        trial leads regardless of the in-fold ordering.
         """
         lines = format_leaderboard(populated_study, sort_by=["log_loss"], top_n=3)
         output = "\n".join(lines)
-        # In-fold log_loss=0.61 (trial C=10.0) should appear in the first row
-        assert "LL=0.6100" in output.split("\n")[3]
+        assert "LL=0.6200" in output.split("\n")[3]
 
-    def test_sort_by_holdout_calibration_explicit(self, populated_study):
-        """`--sort holdout_calibration_error` sorts by that metric explicitly."""
+    def test_bare_sort_by_calibration_auto_prefixes(self, populated_study):
+        """`--sort calibration_error` ranks by holdout_calibration_error."""
         lines = format_leaderboard(
-            populated_study, sort_by=["holdout_calibration_error"], top_n=3
+            populated_study, sort_by=["calibration_error"], top_n=3
         )
         output = "\n".join(lines)
-        # Best holdout cal is 0.012 = 1.20% (trial C=10.0) — should appear first
-        assert "1.20%" in output.split("\n")[3]
+        # Best holdout cal is 0.012 = 1.20% (trial C=10.0) — should lead.
+        assert "cal=1.20%" in output.split("\n")[3]
+
+    def test_already_holdout_prefixed_sort_passes_through(self, populated_study):
+        """`--sort holdout_brier_score` works literally (no double-prefix)."""
+        lines = format_leaderboard(
+            populated_study, sort_by=["holdout_brier_score"], top_n=3
+        )
+        output = "\n".join(lines)
+        # Best holdout brier is 0.21 (trial C=1.0) — should lead.
+        assert "brier=0.2100" in output.split("\n")[3]
 
     def test_top_n_limits_rows(self, populated_study):
         """Leaderboard respects top_n limit."""
@@ -127,14 +152,13 @@ class TestFormatLeaderboard:
         trial_lines = [l for l in lines if l.strip().startswith(("1.", "2.", "3."))]
         assert len(trial_lines) == 2
 
-    def test_shows_all_metrics(self, populated_study):
-        """Leaderboard displays both tuning and holdout LL plus cal/err80."""
+    def test_shows_all_holdout_metrics(self, populated_study):
+        """Each row surfaces every standard classification metric (holdout)."""
         lines = format_leaderboard(populated_study, top_n=1)
         output = "\n".join(lines)
-        assert "holdout_LL=" in output
-        assert "LL=" in output
-        assert "cal=" in output
-        assert "err80=" in output
+        # All 7 metrics should appear with their bare display labels.
+        for label in ("LL=", "brier=", "AUC=", "acc=", "cal=", "scal=", "err80="):
+            assert label in output
 
     def test_legacy_study_is_refused(self, legacy_study):
         """Pre-refactor studies (no `_tuning_mode`) are refused with clear guidance."""

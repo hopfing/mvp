@@ -22,6 +22,22 @@ def _is_raw_mode_study(trials: list[optuna.trial.FrozenTrial]) -> bool:
     return any(t.user_attrs.get("_tuning_mode") == "raw" for t in trials)
 
 
+def _to_holdout(metric: str) -> str:
+    """Prefix a bare metric name with ``holdout_`` for ranking.
+
+    Optuna optimizes against an in-fold measurement during each trial (the
+    only signal available inside the trial); tune-review ranks across
+    completed trials using the holdout measurement (the generalization-
+    honest version of the same metric). The user shouldn't have to think
+    about that split — they pass a metric name, we always rank by the
+    holdout version of it. Already-prefixed names pass through unchanged
+    so power users can override if needed.
+    """
+    if metric.startswith("holdout_"):
+        return metric
+    return f"holdout_{metric}"
+
+
 def format_leaderboard(
     study: optuna.Study,
     sort_by: list[str] | None = None,
@@ -57,15 +73,19 @@ def format_leaderboard(
     is_projection = "mae" in first_ua and "log_loss" not in first_ua
 
     # Default sort: the honest (holdout) metric for this config family.
-    # When the user passes an explicit `--sort`, respect it literally — no
-    # silent `holdout_` rewriting. If they want holdout, they type holdout.
+    # When the user passes a bare metric name (e.g. `--sort log_loss`), we
+    # auto-prefix it to its holdout version — Optuna optimizes in-fold per
+    # trial, but ranking across completed trials should always use the
+    # holdout measurement of that same metric.
     if sort_by is None:
         if is_iid:
-            sort_by = ["holdout_iid_crps_total_games"]
+            sort_by = [_to_holdout("iid_crps_total_games")]
         elif is_projection:
-            sort_by = ["holdout_mae"]
+            sort_by = [_to_holdout("mae")]
         else:
-            sort_by = ["holdout_log_loss"]
+            sort_by = [_to_holdout("log_loss")]
+    else:
+        sort_by = [_to_holdout(m) for m in sort_by]
 
     # Confirm holdout metrics exist for the requested sort metric(s). Studies
     # tuned with holdout_folds=0 won't have them; the runner always uses
@@ -134,39 +154,30 @@ def format_leaderboard(
             )
             shown = {"mae", "rmse", "r_squared", "crps"}
         else:
-            ll = ua.get("log_loss", float("nan"))
-            holdout_ll = ua.get("holdout_log_loss")
-            # When holdout is available, lead with holdout values (the honest
-            # metrics driving the ranking) and show tuning LL alongside so
-            # divergence is visible. Otherwise show the tuning-fold metrics.
-            if holdout_ll is not None:
-                h_cal = ua.get("holdout_calibration_error", float("nan"))
-                h_err80 = ua.get("holdout_error_rate_80plus", float("nan"))
-                lines.append(
-                    f"  {i + 1:>2}. holdout_LL={holdout_ll:.4f}  "
-                    f"holdout_cal={h_cal * 100:.2f}%  "
-                    f"holdout_err80={h_err80 * 100:.1f}%  "
-                    f"LL={ll:.4f}  ({duration:.0f}s)"
-                )
-                shown = {
-                    "log_loss", "holdout_log_loss",
-                    "holdout_calibration_error", "holdout_error_rate_80plus",
-                }
-            else:
-                cal = ua.get("calibration_error", float("nan"))
-                scal = ua.get("signed_calibration")
-                err80 = ua.get("error_rate_80plus", float("nan"))
-                scal_str = (
-                    f"  scal={scal * 100:+.2f}%" if scal is not None else ""
-                )
-                lines.append(
-                    f"  {i + 1:>2}. LL={ll:.4f}  cal={cal * 100:.2f}%{scal_str}"
-                    f"  err80={err80 * 100:.1f}%  ({duration:.0f}s)"
-                )
-                shown = {
-                    "log_loss", "calibration_error", "signed_calibration",
-                    "error_rate_80plus",
-                }
+            # Classification leaderboard: one row per trial showing every
+            # standard holdout metric. The user picks a metric NAME — they
+            # don't pick in-fold vs holdout. In-fold is Optuna's internal
+            # signal during a trial; holdout is the ranking signal across
+            # trials. Both live in user_attrs but the leaderboard only
+            # surfaces holdout because that's the selection-relevant view.
+            ll = ua.get("holdout_log_loss", float("nan"))
+            brier = ua.get("holdout_brier_score", float("nan"))
+            auc = ua.get("holdout_roc_auc", float("nan"))
+            acc = ua.get("holdout_accuracy", float("nan"))
+            cal = ua.get("holdout_calibration_error", float("nan"))
+            scal = ua.get("holdout_signed_calibration", float("nan"))
+            err80 = ua.get("holdout_error_rate_80plus", float("nan"))
+            lines.append(
+                f"  {i + 1:>2}. LL={ll:.4f}  brier={brier:.4f}  "
+                f"AUC={auc:.3f}  acc={acc:.3f}  cal={cal * 100:.2f}%  "
+                f"scal={scal * 100:+.2f}%  err80={err80 * 100:.1f}%  "
+                f"({duration:.0f}s)"
+            )
+            shown = {
+                "holdout_log_loss", "holdout_brier_score", "holdout_roc_auc",
+                "holdout_accuracy", "holdout_calibration_error",
+                "holdout_signed_calibration", "holdout_error_rate_80plus",
+            }
 
         extra = [m for m in sort_by if m not in shown]
         if extra:
