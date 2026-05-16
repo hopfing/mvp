@@ -240,17 +240,22 @@ def _build_bet_rows(
     ).unique(subset=["match_uid", "player_id"])
     bets = bets.join(matches, on=["match_uid", "player_id"], how="left")
 
-    # P&L assuming flat 1u stake on this side
+    # P&L assuming flat 1u stake on this side. Null odds → null pnl on that
+    # side; a bet without a recorded price can't be settled to a real outcome.
     bets = bets.with_columns(
         (
-            pl.when(pl.col("won") == 1)
+            pl.when(pl.col("best_opening_odds").is_null())
+            .then(None)
+            .when(pl.col("won") == 1)
             .then(pl.col("best_opening_odds") - 1.0)
             .when(pl.col("won") == 0)
             .then(pl.lit(-1.0))
             .otherwise(None)
         ).alias("pnl_open"),
         (
-            pl.when(pl.col("won") == 1)
+            pl.when(pl.col("best_closing_odds").is_null())
+            .then(None)
+            .when(pl.col("won") == 1)
             .then(pl.col("best_closing_odds") - 1.0)
             .when(pl.col("won") == 0)
             .then(pl.lit(-1.0))
