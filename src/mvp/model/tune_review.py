@@ -9,17 +9,17 @@ from mvp.model.tuning import _MAXIMIZE_METRICS
 logger = logging.getLogger(__name__)
 
 
-def _to_holdout(metric: str) -> str:
-    """Return the holdout-prefixed version of a metric name.
+def _is_raw_mode_study(trials: list[optuna.trial.FrozenTrial]) -> bool:
+    """Return True if the study was tuned post-decoupling refactor.
 
-    Already-prefixed names pass through. The leaderboard always sorts on the
-    honest (holdout) metric — there's no legitimate use case for ranking
-    trials by the tuning-set metric they were optimized against, since that's
-    the noise-fitting signal we're trying to escape.
+    Raw-mode studies have `_tuning_mode == "raw"` set on every trial by
+    `HyperparamTuner._objective`. Legacy studies (pre-refactor) lack the
+    attr entirely; their metrics are Platt-calibrated and not comparable
+    to raw-mode trials, so `tune-review` refuses to display them.
     """
-    if metric.startswith("holdout_"):
-        return metric
-    return f"holdout_{metric}"
+    # Check the most recent completed trial: if a study was started pre-refactor
+    # and resumed post-refactor, segregation is impossible — fail loud.
+    return any(t.user_attrs.get("_tuning_mode") == "raw" for t in trials)
 
 
 def format_leaderboard(
@@ -36,42 +36,48 @@ def format_leaderboard(
     if not trials:
         return ["No completed trials found."]
 
+    # Refuse legacy (pre-decoupling-refactor) studies. Their metrics were
+    # Platt-calibrated during tuning, which conflated HP search with calibrator
+    # fit. The new pipeline tunes raw discrimination and post-hoc calibrates
+    # via `mvp model`. Mixing the two would silently rank apples against
+    # oranges; force a fresh study instead.
+    if not _is_raw_mode_study(trials):
+        return [
+            "This study was tuned before the calibration-decoupling refactor.",
+            "Trial metrics are post-Platt and not comparable to raw-mode tuning.",
+            "",
+            "Delete the study DB and start fresh:",
+            "  rm <data_root>/tuning/<config_name>.db",
+            "  poetry run py -m mvp tune <config>",
+        ]
+
     # Detect config type from first trial's metrics
     first_ua = trials[0].user_attrs
     is_iid = "iid_crps_total_games" in first_ua
     is_projection = "mae" in first_ua and "log_loss" not in first_ua
 
-    # Holdout metrics — look across ALL trials, since older trials from
-    # pre-holdout-support runs may sit alongside newer ones in the same study.
-    any_holdout_attrs: set[str] = set()
-    for t in trials:
-        any_holdout_attrs.update(
-            k for k in t.user_attrs if k.startswith("holdout_")
-        )
-
-    # The leaderboard always sorts on holdout (the honest metric). Any
-    # explicit sort_by is auto-prefixed so `--sort log_loss` and
-    # `--sort holdout_log_loss` both mean the same thing.
+    # Default sort: the honest (holdout) metric for this config family.
+    # When the user passes an explicit `--sort`, respect it literally — no
+    # silent `holdout_` rewriting. If they want holdout, they type holdout.
     if sort_by is None:
         if is_iid:
-            sort_by = [_to_holdout("iid_crps_total_games")]
+            sort_by = ["holdout_iid_crps_total_games"]
         elif is_projection:
-            sort_by = [_to_holdout("mae")]
+            sort_by = ["holdout_mae"]
         else:
-            sort_by = [_to_holdout("log_loss")]
-    else:
-        sort_by = [_to_holdout(m) for m in sort_by]
+            sort_by = ["holdout_log_loss"]
 
-    # If no trial has holdout metrics, the study predates this feature.
-    # Refuse to silently fall back to the tuning-set metric — that's the
-    # noise-fitting ranking we're trying to escape.
-    if not any_holdout_attrs:
+    # Confirm holdout metrics exist for the requested sort metric(s). Studies
+    # tuned with holdout_folds=0 won't have them; the runner always uses
+    # holdout_folds=1 for tuning, so this catches misconfigured studies only.
+    has_any_holdout = any(
+        any(k.startswith("holdout_") for k in t.user_attrs) for t in trials
+    )
+    if not has_any_holdout and any(m.startswith("holdout_") for m in sort_by):
         return [
             "No holdout metrics found on any trial in this study.",
-            "",
-            "This study was tuned before holdout support was added. Continue",
-            "running new trials (they will populate holdout_<metric>) and then",
-            "rerun tune-review.",
+            "Studies must be tuned with holdout_folds >= 1 (the default for",
+            "`mvp tune`). Start a fresh study and try again.",
         ]
 
     # Sort by the requested metrics — flip sign for maximize-direction metrics
@@ -92,7 +98,13 @@ def format_leaderboard(
 
     lines: list[str] = []
     sort_label = ", ".join(sort_by)
-    lines.append(f"TOP {top_n} TRIALS (sorted by {sort_label})")
+    lines.append(
+        f"TOP {top_n} TRIALS (raw discrimination, sorted by {sort_label})"
+    )
+    lines.append(
+        "Metrics below reflect uncalibrated predictor quality. Calibration "
+        "is applied separately by `mvp model` at training time."
+    )
     lines.append("=" * 100)
 
     for i, trial in enumerate(trials):

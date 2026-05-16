@@ -16,9 +16,12 @@ def populated_study(tmp_path):
         direction="minimize",
     )
 
-    # Each trial has both tuning and holdout metrics. Holdout values are
-    # arranged so the holdout ranking differs from the tuning ranking — this
-    # is what lets us verify that the leaderboard always sorts by holdout.
+    # Each trial has both tuning and holdout metrics. Values are arranged so
+    # in-fold and holdout orderings disagree:
+    #   in-fold log_loss best -> C=10.0 (0.61)
+    #   holdout_log_loss best -> C=1.0 (0.62)
+    # This lets us verify explicit `--sort log_loss` differs from the default
+    # holdout-sort, and that no auto-prefix happens post-refactor.
     trial_data = [
         {
             "C": 0.1, "ll": 0.65, "cal": 0.02, "scal": 0.01, "err80": 0.12,
@@ -29,7 +32,7 @@ def populated_study(tmp_path):
             "h_ll": 0.62, "h_cal": 0.018, "h_err80": 0.11,
         },
         {
-            "C": 10.0, "ll": 0.68, "cal": 0.03, "scal": 0.02, "err80": 0.15,
+            "C": 10.0, "ll": 0.61, "cal": 0.03, "scal": 0.02, "err80": 0.15,
             "h_ll": 0.67, "h_cal": 0.012, "h_err80": 0.14,
         },
     ]
@@ -40,6 +43,7 @@ def populated_study(tmp_path):
             distributions={"C": optuna.distributions.FloatDistribution(0.01, 100.0, log=True)},
             values=[td["ll"]],
             user_attrs={
+                "_tuning_mode": "raw",
                 "log_loss": td["ll"],
                 "calibration_error": td["cal"],
                 "signed_calibration": td["scal"],
@@ -56,8 +60,12 @@ def populated_study(tmp_path):
 
 
 @pytest.fixture
-def study_without_holdout(tmp_path):
-    """Study from before holdout support — no holdout_* user_attrs."""
+def legacy_study(tmp_path):
+    """Pre-decoupling-refactor study — no `_tuning_mode` attr.
+
+    Metrics on these trials were Platt-calibrated during tuning. tune-review
+    refuses to display them (rather than silently ranking apples vs oranges).
+    """
     storage = f"sqlite:///{tmp_path / 'legacy.db'}"
     study = optuna.create_study(
         study_name="legacy_review",
@@ -69,7 +77,11 @@ def study_without_holdout(tmp_path):
             params={"C": c},
             distributions={"C": optuna.distributions.FloatDistribution(0.01, 100.0, log=True)},
             values=[ll],
-            user_attrs={"log_loss": ll, "duration_s": 5.0},
+            user_attrs={
+                "log_loss": ll,
+                "holdout_log_loss": ll,
+                "duration_s": 5.0,
+            },
         )
         study.add_trial(trial)
     return study
@@ -83,23 +95,31 @@ class TestFormatLeaderboard:
         lines = format_leaderboard(populated_study, top_n=3)
         output = "\n".join(lines)
         # Best holdout_log_loss is 0.62 (trial C=1.0) — should appear in first row
-        assert "0.6200" in output.split("\n")[2]
+        # Header now spans 4 lines (title + raw-mode note + separator). First
+        # trial row is at index 3.
+        assert "0.6200" in output.split("\n")[3]
 
-    def test_explicit_log_loss_auto_prefixes_to_holdout(self, populated_study):
-        """Passing --sort log_loss still sorts by holdout_log_loss."""
+    def test_explicit_sort_is_literal(self, populated_study):
+        """Passing --sort log_loss sorts by in-fold log_loss (no auto-prefix).
+
+        Post-refactor, the user types exactly the metric they want. With the
+        fixture's discriminating data, in-fold-best (C=10.0, LL=0.61) differs
+        from holdout-best (C=1.0, h_LL=0.62), so the first row under in-fold
+        sort reflects the in-fold winner.
+        """
         lines = format_leaderboard(populated_study, sort_by=["log_loss"], top_n=3)
         output = "\n".join(lines)
-        # Same ranking as default — auto-prefixed to holdout_log_loss
-        assert "0.6200" in output.split("\n")[2]
+        # In-fold log_loss=0.61 (trial C=10.0) should appear in the first row
+        assert "LL=0.6100" in output.split("\n")[3]
 
-    def test_sort_by_calibration_uses_holdout(self, populated_study):
-        """`--sort calibration_error` auto-prefixes and sorts by holdout_calibration_error."""
+    def test_sort_by_holdout_calibration_explicit(self, populated_study):
+        """`--sort holdout_calibration_error` sorts by that metric explicitly."""
         lines = format_leaderboard(
-            populated_study, sort_by=["calibration_error"], top_n=3
+            populated_study, sort_by=["holdout_calibration_error"], top_n=3
         )
         output = "\n".join(lines)
         # Best holdout cal is 0.012 = 1.20% (trial C=10.0) — should appear first
-        assert "1.20%" in output.split("\n")[2]
+        assert "1.20%" in output.split("\n")[3]
 
     def test_top_n_limits_rows(self, populated_study):
         """Leaderboard respects top_n limit."""
@@ -116,12 +136,13 @@ class TestFormatLeaderboard:
         assert "cal=" in output
         assert "err80=" in output
 
-    def test_study_without_holdout_errors_clearly(self, study_without_holdout):
-        """Studies tuned before holdout support get a clear error, no silent fallback."""
-        lines = format_leaderboard(study_without_holdout, top_n=3)
+    def test_legacy_study_is_refused(self, legacy_study):
+        """Pre-refactor studies (no `_tuning_mode`) are refused with clear guidance."""
+        lines = format_leaderboard(legacy_study, top_n=3)
         output = "\n".join(lines)
-        assert "No holdout metrics" in output
-        # Should NOT silently rank by tuning log_loss
+        assert "before the calibration-decoupling refactor" in output
+        assert "Delete the study DB" in output
+        # Should NOT silently rank trials from the legacy study
         assert "0.6300" not in output
 
 

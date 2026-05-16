@@ -169,6 +169,18 @@ class HyperparamTuner:
         else:
             self.model_type = self.base_config["model"]["type"]
 
+        # Tuning ignores `calibration:` in the config — calibration is a
+        # deployment concern honored by `mvp model`, not an HP search concern.
+        # Co-tuning HPs with Platt produces brittle winners that "game" the
+        # calibrator. Warn the user so they don't expect the block to influence
+        # tuning results.
+        if not self.is_iid and self.base_config.get("calibration"):
+            logger.warning(
+                "config has a `calibration:` block — this is IGNORED during "
+                "tuning. Calibration applies only at `mvp model` training "
+                "time. Tuning evaluates raw predictor discrimination."
+            )
+
         if search_space is not None:
             self.search_space = dict(search_space)
         elif self.model_type in DEFAULT_SEARCH_SPACES:
@@ -233,6 +245,12 @@ class HyperparamTuner:
         params = _decode_params(params)
 
         result = self._run_one(params)
+
+        # Mark trials as raw-mode so `tune-review` can distinguish post-refactor
+        # studies (raw discrimination) from legacy studies (Platt-calibrated).
+        # IID / projection trials don't go through the Platt path either way,
+        # but flagging uniformly keeps the leaderboard logic simple.
+        trial.set_user_attr("_tuning_mode", "raw")
 
         # Store all metrics as user attrs for review
         for metric_name, metric_value in result["metrics"].items():
@@ -319,6 +337,11 @@ class HyperparamTuner:
                 else:
                     from mvp.model.runner import ExperimentRunner
 
+                    # calibrate=False: HP search optimizes raw discrimination.
+                    # Calibration is a deployment concern handled by `mvp model`
+                    # (ProductionPredictor), not an HP-tuning concern. The
+                    # projection / IID runners above don't fit Platt today so
+                    # they don't need an analogous flag.
                     runner = ExperimentRunner(
                         config_path=temp_path,
                         matches_path=self.matches_path,
@@ -327,6 +350,7 @@ class HyperparamTuner:
                         log_to_mlflow=False,
                         holdout_folds=1,
                         inner_cv_folds=4,
+                        calibrate=False,
                     )
                 result = runner.run()
                 metrics = dict(result["metrics"])

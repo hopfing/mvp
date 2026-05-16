@@ -226,7 +226,17 @@ class SampleWeightConfig(_StrictModel):
 
 
 class CalibrationConfig(_StrictModel):
-    """Calibration configuration. Absence of this block = pooled-only behavior."""
+    """Calibration configuration applied at training time and at inference.
+
+    Absence of this block = pooled-only behavior.
+
+    **Consumed only by `mvp model` (ProductionPredictor) and `mvp run`** —
+    `mvp tune` IGNORES this block. Tuning evaluates raw predictor
+    discrimination; including Platt in the HP search loop would conflate two
+    optimizations (HPs + calibrator fit) and produce brittle winners that
+    "game" the calibrator. Choose your calibration scheme separately from
+    HP search and let `mvp model` apply it post-hoc at training time.
+    """
 
     segments: list[str] | None = None
     min_n: int = 200

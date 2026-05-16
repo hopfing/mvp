@@ -48,6 +48,7 @@ class ExperimentRunner:
         log_to_mlflow: bool = True,
         holdout_folds: int = 0,
         inner_cv_folds: int = 0,
+        calibrate: bool = True,
     ) -> None:
         """Initialize runner.
 
@@ -70,6 +71,14 @@ class ExperimentRunner:
                 inner LL across outer folds (less noisy than a single per-fold
                 point estimate). Requires holdout_folds >= 1. Tuning sets this
                 to 4; normal model runs default to 0 (unchanged).
+            calibrate: When True (default), fit a Platt calibrator on tuning
+                OOF and apply it to all fold predictions before computing
+                metrics. When False, skip Platt entirely — `avg_metrics` and
+                `holdout_metrics` reflect raw predictor quality. Used by
+                `HyperparamTuner` so HP search optimizes raw discrimination,
+                not a calibrated objective (calibration scaffolding is a
+                deployment concern, not an HP search concern). Default True
+                preserves existing behavior for `mvp run` and `mvp model`.
         """
         if holdout_folds < 0:
             raise ValueError(f"holdout_folds must be >= 0, got {holdout_folds}")
@@ -97,6 +106,7 @@ class ExperimentRunner:
         self.log_to_mlflow = log_to_mlflow
         self.holdout_folds = holdout_folds
         self.inner_cv_folds = inner_cv_folds
+        self.calibrate = calibrate
 
         self.engine = make_fs_engine(
             matches_path=self.matches_path,
@@ -900,63 +910,78 @@ class ExperimentRunner:
                     pred_dict["y_prob"] = y_prob_stacked[offset:offset + n]
                     offset += n
 
-            # Platt scaling calibration. Fit on tuning preds' OOF only so the
-            # holdout is never seen by the calibrator. Apply the resulting
-            # calibrator to BOTH tuning and holdout preds so every fold gets a
-            # calibrated probability (the holdout's just hasn't seen its own
-            # labels). raw_metrics are also tuning-only — otherwise tuning on
-            # raw_log_loss would silently bypass the holdout.
+            # Concat tuning-fold OOF preds for calibrator fitting and/or
+            # raw-metric computation.
             combined_y_true_oof = np.concatenate(
                 [p["y_true"] for p in tuning_predictions]
             )
             combined_y_prob_oof = np.concatenate(
                 [p["y_prob"] for p in tuning_predictions]
             )
-            raw_metrics = compute_metrics(combined_y_true_oof, combined_y_prob_oof)
 
-            cal_cfg = self.config.calibration
-            if cal_cfg and cal_cfg.segments:
-                combined_df_oof = pl.concat(
-                    [p["df"] for p in tuning_predictions], how="diagonal_relaxed"
+            calibrator: PlattCalibrator | SegmentedPlattCalibrator | None = None
+            if self.calibrate:
+                # Platt scaling. Fit on tuning OOF only so the holdout is never
+                # seen by the calibrator. Apply the resulting calibrator to BOTH
+                # tuning and holdout preds so every fold gets a calibrated
+                # probability (the holdout's just hasn't seen its own labels).
+                # raw_metrics are computed pre-Platt for diagnostic visibility.
+                raw_metrics = compute_metrics(
+                    combined_y_true_oof, combined_y_prob_oof
                 )
-                calibrator = SegmentedPlattCalibrator(
-                    segments=cal_cfg.segments, min_n=cal_cfg.min_n,
-                )
-                calibrator.fit(
-                    combined_y_prob_oof, combined_y_true_oof, combined_df_oof
-                )
-                run_logger.info(
-                    "Segmented Platt: %d per-segment fits + global fallback",
-                    calibrator.n_segments,
-                )
-                for pred_dict in all_predictions:
-                    pred_dict["y_prob"] = calibrator.transform(
-                        pred_dict["y_prob"], pred_dict["df"]
+
+                cal_cfg = self.config.calibration
+                if cal_cfg and cal_cfg.segments:
+                    combined_df_oof = pl.concat(
+                        [p["df"] for p in tuning_predictions],
+                        how="diagonal_relaxed",
                     )
+                    calibrator = SegmentedPlattCalibrator(
+                        segments=cal_cfg.segments, min_n=cal_cfg.min_n,
+                    )
+                    calibrator.fit(
+                        combined_y_prob_oof, combined_y_true_oof, combined_df_oof
+                    )
+                    run_logger.info(
+                        "Segmented Platt: %d per-segment fits + global fallback",
+                        calibrator.n_segments,
+                    )
+                    for pred_dict in all_predictions:
+                        pred_dict["y_prob"] = calibrator.transform(
+                            pred_dict["y_prob"], pred_dict["df"]
+                        )
+                else:
+                    calibrator = PlattCalibrator()
+                    calibrator.fit(combined_y_prob_oof, combined_y_true_oof)
+                    for pred_dict in all_predictions:
+                        pred_dict["y_prob"] = calibrator.transform(
+                            pred_dict["y_prob"]
+                        )
+
+                # Recompute per-fold and avg metrics on calibrated predictions
+                # so the per-fold report matches the headline (both reflect the
+                # single calibrator that gets deployed).
+                all_metrics = [
+                    compute_metrics(p["y_true"], p["y_prob"])
+                    for p in tuning_predictions
+                ]
+                calibrated_y_prob = np.concatenate(
+                    [p["y_prob"] for p in tuning_predictions]
+                )
+                avg_metrics = compute_metrics(combined_y_true_oof, calibrated_y_prob)
+                for k, v in raw_metrics.items():
+                    avg_metrics[f"raw_{k}"] = v
             else:
-                calibrator = PlattCalibrator()
-                calibrator.fit(combined_y_prob_oof, combined_y_true_oof)
-
-                # Apply calibration to each fold's predictions (tuning + holdout)
-                for pred_dict in all_predictions:
-                    pred_dict["y_prob"] = calibrator.transform(pred_dict["y_prob"])
-
-            # Recompute per-fold and avg metrics on calibrated predictions so
-            # the per-fold report matches the headline (both reflect the single
-            # global calibrator that gets deployed). When holdout is on, the
-            # primary `all_metrics` / `avg_metrics` cover tuning folds only;
-            # holdout metrics are computed in parallel for separate reporting.
-            all_metrics = [
-                compute_metrics(p["y_true"], p["y_prob"]) for p in tuning_predictions
-            ]
-            calibrated_y_prob = np.concatenate(
-                [p["y_prob"] for p in tuning_predictions]
-            )
-            avg_metrics = compute_metrics(combined_y_true_oof, calibrated_y_prob)
-
-            # Merge raw (pre-calibration) metrics with raw_ prefix
-            for k, v in raw_metrics.items():
-                avg_metrics[f"raw_{k}"] = v
+                # No calibration: metrics ARE raw. Tuning passes calibrate=False
+                # so HP search optimizes raw discrimination. The `calibration:`
+                # block in config is ignored here; it's a deployment concern
+                # honored by `mvp model` (ProductionPredictor) not by tuning.
+                run_logger.info("Calibration disabled (calibrate=False)")
+                avg_metrics = compute_metrics(
+                    combined_y_true_oof, combined_y_prob_oof
+                )
+                # all_metrics already contains per-fold raw metrics from earlier
+                # in run(); no recomputation needed since y_prob was never mutated.
 
             holdout_metrics: dict[str, float] | None = None
             holdout_fold_metrics: list[dict[str, float]] | None = None
@@ -1060,7 +1085,7 @@ class ExperimentRunner:
                     logger.log_metrics(
                         {f"holdout_{k}": v for k, v in holdout_metrics.items()}
                     )
-                if calibrator.is_fitted:
+                if calibrator is not None and calibrator.is_fitted:
                     if isinstance(calibrator, SegmentedPlattCalibrator):
                         logger.log_params({
                             "platt_segmented": "true",
