@@ -1,0 +1,55 @@
+data:
+  date_range:
+    end: 2025-12-31
+    start: 2020-01-01
+  filters:
+    circuit:
+    - tour
+    - chal
+    draw_type: singles
+features:
+  include:
+  - player_glicko_diff
+  - player_days_since_surface_diff
+  - player_elo_surface_diff
+  - opp_tourn_sets_margin
+  - player_tourn_sets_margin
+  - opp_days_since_last_match
+  - opp_deciding_set_pct
+  - player_days_since_surface
+  - player_deciding_set_pct
+  - player_age_diff
+  - player_glicko_rd_diff
+  - player_venue_win_pct_diff
+  - player_deciding_set_win_pct_diff(days=180)
+  - player_surface_pts_service_won_pct_diff(days=90)
+metrics:
+  primary: log_loss
+model:
+  params:
+    colsample_bylevel: 0.7602617169290521
+    colsample_bynode: 0.7078151694206165
+    colsample_bytree: 0.9703276432183496
+    gamma: 0.2477861828529616
+    learning_rate: 0.0608357773446668
+    max_delta_step: 1
+    max_depth: 4
+    min_child_weight: 6
+    n_estimators: 400
+    reg_alpha: 0.22784415174105072
+    reg_lambda: 2.6416227519386513
+    scale_pos_weight: 0.9889731981899005
+    subsample: 0.9770627427169305
+    n_jobs: 12
+    random_state: 42
+  type: xgboost
+sample_weight:
+  half_life_days: 365
+  type: recency
+validation:
+  initial_train_months: 24
+  test_months: 12
+  type: date_expanding
+calibration:
+    segments: [surface]
+    min_n: 200
