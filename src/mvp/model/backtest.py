@@ -402,25 +402,37 @@ def _picks(bets: pl.DataFrame) -> pl.DataFrame:
 
 
 _LABEL_W = 16
-_SIDE_W = 52
+_SIDE_W = 71
 
 
 def _side_stats(sub: pl.DataFrame, price: str) -> str:
-    """Format n / hit% / ROI / units / CLV+% / avg CLV for one price side."""
+    """Format n / hit% / ROI / units / CLV+% / avg CLV / ME+% / avg ME for one price side.
+
+    ME = model edge at close (model_prob - closing_implied).
+    ME+% is the fraction of rows where the model still has positive edge vs
+    the closing best-of-books price; avg ME is the mean of that gap in pp.
+    """
     pnl_col = f"pnl_{price}"
     sub = sub.filter(pl.col(pnl_col).is_not_null())
     n = len(sub)
     if n == 0:
-        return f"{0:>6}  {'-':>6}  {'-':>7}  {'-':>8}  {'-':>6}  {'-':>9}"
+        return (
+            f"{0:>6}  {'-':>6}  {'-':>7}  {'-':>8}  "
+            f"{'-':>6}  {'-':>9}  {'-':>6}  {'-':>9}"
+        )
     hit = sub["won"].drop_nulls().mean() or 0.0
     pnl = sub[pnl_col].sum()
     roi = pnl / n
     clv = sub["clv"].drop_nulls()
     clv_win = (clv > 0).mean() if len(clv) else 0.0
     avg_clv = clv.mean() if len(clv) else 0.0
+    ce = sub["closing_edge"].drop_nulls()
+    me_win = (ce > 0).mean() if len(ce) else 0.0
+    avg_me = ce.mean() if len(ce) else 0.0
     return (
         f"{n:>6}  {hit:>6.1%}  {roi:>+7.2%}  {pnl:>+7.1f}u  "
-        f"{clv_win:>6.1%}  {avg_clv * 100:>+7.2f}pp"
+        f"{clv_win:>6.1%}  {avg_clv * 100:>+7.2f}pp  "
+        f"{me_win:>6.1%}  {avg_me * 100:>+7.2f}pp"
     )
 
 
@@ -429,7 +441,7 @@ def _wide_header_lines() -> tuple[str, str]:
     close_hdr = "---- CLOSE ----".center(_SIDE_W)
     side_cols = (
         f"{'n':>6}  {'hit%':>6}  {'ROI':>7}  {'units':>8}  "
-        f"{'CLV+%':>6}  {'avg CLV':>9}"
+        f"{'CLV+%':>6}  {'avg CLV':>9}  {'ME+%':>6}  {'avg ME':>9}"
     )
     label_blank = " " * _LABEL_W
     top = f"  {label_blank}  {open_hdr}    {close_hdr}"
