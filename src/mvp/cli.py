@@ -978,6 +978,19 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         help="Run pipeline only, skip dashboard",
     )
 
+    # model-report subcommand - single-model end-to-end review
+    mreport_parser = subparsers.add_parser(
+        "model-report",
+        help="Single-model deep dive across diagnostics, confidence, and backtest",
+    )
+    mreport_parser.add_argument(
+        "config", type=str, help="Model config name or path (resolved under models/)"
+    )
+    mreport_parser.add_argument(
+        "--no-refresh", action="store_true",
+        help="Skip the refresh pipeline; read existing artifacts only. Hard-fails if any are missing.",
+    )
+
     return parser.parse_args(args)
 
 
@@ -2326,6 +2339,21 @@ def cmd_iid_backtest(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_model_report(args: argparse.Namespace) -> int:
+    """Single-model end-to-end report across diagnostics, confidence, and backtest."""
+    from mvp.model.report import run_report
+
+    config_path = resolve_config_path(args.config, MODEL_DIR)
+    if not config_path.exists():
+        raise FileNotFoundError(
+            f"Config file not found: {args.config} (tried {config_path})"
+        )
+
+    report = run_report(config_path, no_refresh=args.no_refresh)
+    print(report)
+    return 0
+
+
 def cmd_backtest(args: argparse.Namespace) -> int:
     """Backtest a lead model: simulate predictions + bets on a window with odds data."""
     from datetime import date as _date
@@ -2806,6 +2834,8 @@ def main(args: list[str] | None = None) -> int:
         return cmd_backtest(parsed)
     elif parsed.command == "analysis":
         return cmd_analysis(parsed)
+    elif parsed.command == "model-report":
+        return cmd_model_report(parsed)
 
     return 1
 
