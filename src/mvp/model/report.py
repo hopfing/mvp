@@ -357,41 +357,16 @@ def _metrics_header(label: str = "slice", label_w: int = 10) -> list[str]:
     return [header, "  " + "-" * (len(header) - 2)]
 
 
-def format_section_d(art: ModelArtifacts, cfg: dict) -> str:
-    df = art.backtest
-    lines = [
-        "=" * 80,
-        "D. BETTING OUTCOMES (backtest, positive bet-time edge only)",
-        "=" * 80,
-    ]
+_EDGE_BANDS = (
+    (">=10%", 0.10, None),
+    ("5-10%", 0.05, 0.10),
+    ("2-5%",  0.02, 0.05),
+    ("0-2%",  0.0,  0.02),
+)
 
-    # Scope = day after training end -> today
-    train_end = cfg.get("data", {}).get("date_range", {}).get("end")
-    scope_start = None
-    if train_end is not None:
-        if isinstance(train_end, (_dt.date, _dt.datetime)):
-            scope_start = (train_end + _dt.timedelta(days=1)).isoformat()[:10]
-        else:
-            scope_start = (
-                _dt.date.fromisoformat(str(train_end)) + _dt.timedelta(days=1)
-            ).isoformat()
 
-    if "effective_match_date" in df.columns and scope_start:
-        df = df.filter(pl.col("effective_match_date") >= scope_start)
-    if "opening_edge" in df.columns:
-        df = df.filter(pl.col("opening_edge") > 0)
-
-    if len(df) == 0:
-        lines.append(f"  No rows pass filter (scope >= {scope_start}, opening_edge > 0).")
-        return "\n".join(lines)
-
-    period_lo = df["effective_match_date"].min() if "effective_match_date" in df.columns else "?"
-    period_hi = df["effective_match_date"].max() if "effective_match_date" in df.columns else "?"
-    period_lo = str(period_lo)[:10]
-    period_hi = str(period_hi)[:10]
-    lines.append(f"  Period:  {period_lo} -> {period_hi}    N (filtered): {len(df):,}")
-
-    # By cal tier
+def _render_breakdowns(df: pl.DataFrame, edge_col: str, lines: list[str]) -> None:
+    """Append by-tier + by-edge-band breakdowns for `df` filtered on `edge_col > 0`."""
     if "cal_tier" in df.columns:
         lines.append("")
         lines.append("  By cal tier:")
@@ -399,7 +374,6 @@ def format_section_d(art: ModelArtifacts, cfg: dict) -> str:
         for tier in _TIER_ORDER:
             sub = df.filter(pl.col("cal_tier") == tier)
             lines.append(_fmt_metrics_row(tier, _slice_metrics(sub)))
-        # Catch any unknown tiers
         seen = set(_TIER_ORDER)
         other_tiers = (
             df.filter(~pl.col("cal_tier").is_in(list(seen)))
@@ -414,24 +388,81 @@ def format_section_d(art: ModelArtifacts, cfg: dict) -> str:
             lines.append(_fmt_metrics_row(str(tier), _slice_metrics(sub)))
         lines.append(_fmt_metrics_row("ALL", _slice_metrics(df)))
 
-    # By edge band
-    if "opening_edge" in df.columns:
+    lines.append("")
+    lines.append(f"  By edge band ({edge_col}):")
+    lines.extend(_metrics_header("band"))
+    for label, lo, hi in _EDGE_BANDS:
+        if hi is None:
+            sub = df.filter(pl.col(edge_col) >= lo)
+        else:
+            sub = df.filter((pl.col(edge_col) >= lo) & (pl.col(edge_col) < hi))
+        lines.append(_fmt_metrics_row(label, _slice_metrics(sub)))
+    lines.append(_fmt_metrics_row("ALL", _slice_metrics(df)))
+
+
+def format_section_d(art: ModelArtifacts, cfg: dict) -> str:
+    df = art.backtest
+    lines = ["=" * 80, "D. BETTING OUTCOMES (backtest)", "=" * 80]
+
+    # Scope = day after training end -> today
+    train_end = cfg.get("data", {}).get("date_range", {}).get("end")
+    scope_start = None
+    if train_end is not None:
+        if isinstance(train_end, (_dt.date, _dt.datetime)):
+            scope_start = (train_end + _dt.timedelta(days=1)).isoformat()[:10]
+        else:
+            scope_start = (
+                _dt.date.fromisoformat(str(train_end)) + _dt.timedelta(days=1)
+            ).isoformat()
+
+    if "effective_match_date" in df.columns and scope_start:
+        df = df.filter(pl.col("effective_match_date") >= scope_start)
+
+    if len(df) == 0:
+        lines.append(f"  No rows in scope >= {scope_start}.")
+        return "\n".join(lines)
+
+    period_lo = str(df["effective_match_date"].min())[:10] if "effective_match_date" in df.columns else "?"
+    period_hi = str(df["effective_match_date"].max())[:10] if "effective_match_date" in df.columns else "?"
+    lines.append(f"  Period: {period_lo} -> {period_hi}    Rows in scope: {len(df):,}")
+
+    # The CSV has two rows per match (one per side). The model only "bets"
+    # the side it favors (model_prob > 0.5); the opponent-side row exists
+    # in the CSV so we can see the loss it would have taken on the wrong
+    # side, but it is not part of the model's evaluation. Restrict to the
+    # model's chosen side before any edge filter.
+    if "model_prob" in df.columns:
+        df = df.filter(pl.col("model_prob") > 0.5)
+    lines.append(f"  Model-side rows: {len(df):,}")
+
+    # Add adj_edge = opening_edge + cell_cal column where cell_cal is present
+    has_cell_cal = "cell_cal" in df.columns
+    if has_cell_cal and "opening_edge" in df.columns:
+        df = df.with_columns(
+            (pl.col("opening_edge") + pl.col("cell_cal")).alias("adj_edge")
+        )
+
+    # Raw edge filter
+    raw_df = df.filter(pl.col("opening_edge") > 0) if "opening_edge" in df.columns else df
+    lines.append("")
+    lines.append("-" * 80)
+    lines.append(f"  RAW edge filter (opening_edge > 0)    N: {len(raw_df):,}")
+    lines.append("-" * 80)
+    _render_breakdowns(raw_df, "opening_edge", lines)
+
+    # Cal-adjusted edge filter
+    if has_cell_cal:
+        with_cal = df.filter(pl.col("cell_cal").is_not_null())
+        n_missing_cal = len(df) - len(with_cal)
+        adj_df = with_cal.filter(pl.col("adj_edge") > 0)
         lines.append("")
-        lines.append("  By edge band (opening_edge):")
-        lines.extend(_metrics_header("band"))
-        bands = [
-            (">=10%", 0.10, None),
-            ("5-10%", 0.05, 0.10),
-            ("2-5%",  0.02, 0.05),
-            ("0-2%",  0.0,  0.02),
-        ]
-        for label, lo, hi in bands:
-            if hi is None:
-                sub = df.filter(pl.col("opening_edge") >= lo)
-            else:
-                sub = df.filter((pl.col("opening_edge") >= lo) & (pl.col("opening_edge") < hi))
-            lines.append(_fmt_metrics_row(label, _slice_metrics(sub)))
-        lines.append(_fmt_metrics_row("ALL", _slice_metrics(df)))
+        lines.append("-" * 80)
+        header = f"  CAL-ADJUSTED edge filter (opening_edge + cell_cal > 0)    N: {len(adj_df):,}"
+        if n_missing_cal > 0:
+            header += f"  ({n_missing_cal:,} rows w/o cell_cal excluded)"
+        lines.append(header)
+        lines.append("-" * 80)
+        _render_breakdowns(adj_df, "adj_edge", lines)
 
     return "\n".join(lines)
 
