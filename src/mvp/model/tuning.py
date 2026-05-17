@@ -217,6 +217,9 @@ class HyperparamTuner:
             load_if_exists=True,
         )
 
+        if self.pinned_params:
+            self.study.set_user_attr("pinned_params", self.pinned_params)
+
         # Enqueue baseline trial from config params
         self._enqueue_baseline()
 

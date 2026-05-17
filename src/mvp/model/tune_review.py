@@ -52,6 +52,8 @@ def format_leaderboard(
     if not trials:
         return ["No completed trials found."]
 
+    pinned = study.user_attrs.get("pinned_params") or {}
+
     # Refuse legacy (pre-decoupling-refactor) studies. Their metrics were
     # Platt-calibrated during tuning, which conflated HP search with calibrator
     # fit. The new pipeline tunes raw discrimination and post-hoc calibrates
@@ -186,8 +188,10 @@ def format_leaderboard(
             )
             lines.append(f"      sort: {extra_str}")
 
-        for k, v in sorted(trial.params.items()):
-            lines.append(f"      {k}: {v}")
+        merged = {**trial.params, **pinned}
+        for k, v in sorted(merged.items()):
+            suffix = "  # pinned" if k in pinned else ""
+            lines.append(f"      {k}: {v}{suffix}")
 
     return lines
 
@@ -231,6 +235,8 @@ def format_best_trial(study: optuna.Study) -> list[str]:
     if not trials:
         return ["No completed trials found."]
 
+    pinned = study.user_attrs.get("pinned_params") or {}
+
     lines: list[str] = []
     lines.append("BEST TRIAL")
     lines.append("=" * 60)
@@ -249,8 +255,10 @@ def format_best_trial(study: optuna.Study) -> list[str]:
                 if k != "duration_s"
             )
             lines.append(f"  {i + 1}. {metrics_str}")
+            merged = {**trial.params, **pinned}
             params_str = ", ".join(
-                f"{k}={v}" for k, v in sorted(trial.params.items())
+                f"{k}={v}{'(pinned)' if k in pinned else ''}"
+                for k, v in sorted(merged.items())
             )
             lines.append(f"     {params_str}")
         return lines
@@ -266,8 +274,10 @@ def format_best_trial(study: optuna.Study) -> list[str]:
             lines.append(f"    {k}: {v:.4f}")
 
     lines.append("  Params:")
-    for k, v in sorted(best.params.items()):
-        lines.append(f"    {k}: {v}")
+    merged = {**best.params, **pinned}
+    for k, v in sorted(merged.items()):
+        suffix = "  # pinned" if k in pinned else ""
+        lines.append(f"    {k}: {v}{suffix}")
 
     return lines
 
