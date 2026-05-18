@@ -395,10 +395,17 @@ class HyperparamTuner:
 
     def run(self, n_trials: int, verbose: bool = True) -> optuna.Study:
         """Run Bayesian optimization for n_trials."""
-        already_done = len(self.study.trials)
+        completed = sum(
+            1 for t in self.study.trials
+            if t.state == optuna.trial.TrialState.COMPLETE
+        )
+        total = len(self.study.trials)
+        zombie = total - completed
         logger.info(
-            "Tuning %s (%s): %d trials requested, %d already done",
-            self.config_path.stem, self.model_type, n_trials, already_done,
+            "Tuning %s (%s): %d trials requested, %d completed "
+            "(%d total in study, %d zombie/incomplete)",
+            self.config_path.stem, self.model_type, n_trials,
+            completed, total, zombie,
         )
 
         # Suppress Optuna's own trial-level logging; we log ourselves

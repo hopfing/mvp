@@ -859,7 +859,14 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
     )
     tune_parser.add_argument(
         "--limit", type=int, default=None,
-        help="Stop after N runs",
+        help="Stop after N more runs (incremental cap from current state)",
+    )
+    tune_parser.add_argument(
+        "--cap", type=int, default=None,
+        help=(
+            "Stop when the study reaches N total completed runs "
+            "(auto-computes remainder; mutually exclusive with --limit)"
+        ),
     )
 
     # tune-review subcommand
@@ -1121,6 +1128,9 @@ def cmd_tune(args: argparse.Namespace) -> int:
 
     param_overrides = _parse_param_overrides(args.param)
 
+    if args.limit is not None and args.cap is not None:
+        raise ValueError("--limit and --cap are mutually exclusive")
+
     if args.strategy == "grid":
         from mvp.model.grid_tuning import GridTuner
 
@@ -1132,20 +1142,39 @@ def cmd_tune(args: argparse.Namespace) -> int:
 
         total = tuner._count_combos()
         already = len(tuner.state.results)
-        logger.info(
-            "Tuning %s (%s): %d in grid, %d done",
-            config_path.stem, tuner.model_type, total, already,
-        )
 
-        state = tuner.run(limit=args.limit)
+        if args.cap is not None:
+            if already >= args.cap:
+                logger.info(
+                    "%s at or above cap (%d completed, cap=%d); nothing to do",
+                    config_path.stem, already, args.cap,
+                )
+                return 0
+            limit = args.cap - already
+            logger.info(
+                "Tuning %s (%s): %d in grid, %d done, cap=%d -> running %d more",
+                config_path.stem, tuner.model_type, total, already, args.cap, limit,
+            )
+        else:
+            limit = args.limit
+            logger.info(
+                "Tuning %s (%s): %d in grid, %d done",
+                config_path.stem, tuner.model_type, total, already,
+            )
+
+        state = tuner.run(limit=limit)
         logger.info("Results saved to %s", tuner.state_path)
         logger.info("Total runs: %d", len(state.results))
 
     else:
+        import optuna
+
         from mvp.model.tuning import HyperparamTuner
 
-        if args.limit is None:
-            raise ValueError("--limit is required for bayesian strategy")
+        if args.limit is None and args.cap is None:
+            raise ValueError(
+                "--limit or --cap is required for bayesian strategy"
+            )
 
         tuner = HyperparamTuner(
             config_path=config_path,
@@ -1153,9 +1182,38 @@ def cmd_tune(args: argparse.Namespace) -> int:
             metrics=args.metric,
         )
 
-        study = tuner.run(n_trials=args.limit)
+        if args.cap is not None:
+            completed = sum(
+                1 for t in tuner.study.trials
+                if t.state == optuna.trial.TrialState.COMPLETE
+            )
+            total = len(tuner.study.trials)
+            zombie = total - completed
+            if completed >= args.cap:
+                logger.info(
+                    "%s at or above cap (%d completed, cap=%d); nothing to do",
+                    config_path.stem, completed, args.cap,
+                )
+                return 0
+            n_trials = args.cap - completed
+            logger.info(
+                "Tuning %s (cap=%d, completed=%d, total=%d, zombie=%d) "
+                "-> running %d more",
+                config_path.stem, args.cap, completed, total, zombie, n_trials,
+            )
+        else:
+            n_trials = args.limit
+
+        study = tuner.run(n_trials=n_trials)
         logger.info("Results saved to %s", tuner.db_path)
-        logger.info("Total trials: %d", len(study.trials))
+        completed_after = sum(
+            1 for t in study.trials
+            if t.state == optuna.trial.TrialState.COMPLETE
+        )
+        logger.info(
+            "Total trials: %d (%d completed)",
+            len(study.trials), completed_after,
+        )
 
     return 0
 
