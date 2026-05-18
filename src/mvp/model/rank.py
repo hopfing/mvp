@@ -409,7 +409,8 @@ def _all_mlruns_for_model(model_name: str) -> list[dict]:
                 if not run_dir.is_dir():
                     continue
                 artifacts = run_dir / "artifacts"
-                if not (artifacts / f"{model_name}.yaml").exists():
+                yaml_artifact = artifacts / f"{model_name}.yaml"
+                if not yaml_artifact.exists():
                     continue
                 json_files = list(artifacts.glob("*.json"))
                 if not json_files:
@@ -422,12 +423,22 @@ def _all_mlruns_for_model(model_name: str) -> list[dict]:
                     continue
                 if "segments" not in diag:
                     continue
+                # Compute fingerprint of this mlrun's stored YAML so we can
+                # dedup historical runs whose content matches the current YAML
+                # (or each other).
+                run_fp: str | None = None
+                try:
+                    run_cfg = ExperimentConfig.from_file(str(yaml_artifact))
+                    run_fp = compute_fingerprint(run_cfg, config_path=yaml_artifact)
+                except Exception:
+                    pass
                 mtime = json_path.stat().st_mtime
                 out.append({
                     "run_id": run_dir.name[:8],
                     "run_ts": _dt.datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M"),
                     "diagnostics": diag,
                     "mtime": mtime,
+                    "fp": run_fp,
                 })
     # Union with fp-dir entries (deduped on (mtime, source) since fp dirs are
     # the same diagnostics copied from mlruns — but the fp_dir copy may be
