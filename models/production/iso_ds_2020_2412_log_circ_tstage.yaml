@@ -1,0 +1,52 @@
+data:
+  date_range:
+    end: 2025-12-31
+    start: 2020-01-01
+  filters:
+    circuit:
+    - tour
+    - chal
+    draw_type: singles
+features:
+  include:
+  - player_glicko_diff
+  - opp_tourn_sets_margin
+  - player_days_since_surface
+  - player_quality_win_rate
+  - elo_diff_x_elo_avg
+  - opp_days_since_surface
+  - opp_quality_win_rate
+  - player_deciding_set_pct
+  - round_ordinal
+  - opp_deciding_set_pct
+  - player_glicko_rd_diff
+  - player_age_diff
+  - player_svc_ace_pct_diff(days=15)
+  - player_tour_match_pct_diff
+metrics:
+  primary: log_loss
+model:
+  type: xgboost
+  params:
+    colsample_bylevel: 0.9664749709103733
+    colsample_bynode: 0.8194891090398664
+    colsample_bytree: 0.9178428967994373
+    gamma: 0.3177202208454185
+    learning_rate: 0.030733046137573997
+    max_delta_step: 1
+    max_depth: 4
+    min_child_weight: 9
+    n_estimators: 900
+    reg_alpha: 0.42684170972112045
+    reg_lambda: 0.3627940098990286
+    scale_pos_weight: 0.9801965709879739
+    subsample: 0.9717240841417382
+    random_state: 42
+    n_jobs: 8
+validation:
+  test_months: 12
+  train_months: 24
+  type: date_sliding
+calibration:
+    method: isotonic
+    segments: [circuit, tournament_stage]

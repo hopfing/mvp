@@ -1,7 +1,7 @@
 winner:
   active:
-    artifact: data/models/ds_2020_2412_log_hl365_surface.joblib
-    config: models/production/ds_2020_2412_log_hl365_surface.yaml
+    artifact: data/models/iso_ds_2020_2412_log_circ_tstage.joblib
+    config: models/production/iso_ds_2020_2412_log_circ_tstage.yaml
     filters:
       circuit:
       - tour
