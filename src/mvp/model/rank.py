@@ -647,7 +647,7 @@ def _tier_symbol(cal: float | None, n: int | None) -> str:
 # Tables
 # ---------------------------------------------------------------------------
 
-LEADER_TOP_N = 10
+LEADER_TOP_N = 20
 
 
 @dataclass
