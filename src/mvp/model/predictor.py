@@ -4,7 +4,7 @@
 import json
 import logging
 import warnings
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +12,7 @@ import joblib
 import numpy as np
 import polars as pl
 import yaml
+from dateutil.relativedelta import relativedelta
 
 from mvp.common.base_job import get_data_root, get_local_data_root
 from mvp.model.calibration import (
@@ -234,18 +235,44 @@ class ProductionPredictor:
         # Drop rows without outcomes
         df = df.filter(pl.col(target_col).is_not_null())
 
+        # For date_sliding validation, the deployed model fits on the last
+        # train_months window — same shape as one sliding fold — while
+        # temporal CV continues to span the full pool. Matches live
+        # deployment: a re-trained sliding-window artifact in production
+        # only ever sees the last train_months of data, but the calibrator
+        # gets richer signal by fitting on OOF preds from many such folds.
+        val_cfg = config.validation
+        if (
+            val_cfg is not None
+            and val_cfg.type == "date_sliding"
+            and val_cfg.train_months
+        ):
+            deploy_start = (end + timedelta(days=1)) - relativedelta(
+                months=val_cfg.train_months
+            )
+            if deploy_start < start:
+                deploy_start = start
+            df_deploy = df.filter(pl.col("effective_match_date") >= deploy_start)
+            logger.info(
+                "Sliding-window deploy fit: %s..%s (%d rows); "
+                "full pool (%d rows) used for temporal CV calibration",
+                deploy_start.date(), end.date(), len(df_deploy), len(df),
+            )
+        else:
+            df_deploy = df
+
         feature_cols = get_feature_columns(feature_specs)
         build_result = build_imputation(feature_specs, get_registry())
         augmented_cols = feature_cols + build_result.aux_base_col_names
         n_model = build_result.n_model_features
 
-        X = df.select(pl.col(c).cast(pl.Float64) for c in augmented_cols).to_numpy()
-        y = df[target_col].to_numpy().astype(int)
+        X = df_deploy.select(pl.col(c).cast(pl.Float64) for c in augmented_cols).to_numpy()
+        y = df_deploy[target_col].to_numpy().astype(int)
 
         logger.info("Training on %d rows with %d features", len(y), len(feature_cols))
 
         # Impute using per-feature strategy with circuit-stratified medians
-        circuit = df["circuit"].to_numpy()
+        circuit = df_deploy["circuit"].to_numpy()
         impute_state = fit_imputation(X, circuit, build_result.specs)
 
         # Scaling stats from real data (before imputation), model cols only
@@ -268,14 +295,14 @@ class ProductionPredictor:
         if model_params.get("embedding_col"):
             embedding_col = model_params["embedding_col"]
             min_matches = model_params.get("min_player_matches", 10)
-            player_counts = df[embedding_col].value_counts()
+            player_counts = df_deploy[embedding_col].value_counts()
             eligible = player_counts.filter(pl.col("count") >= min_matches)
             embedding_vocab = {
                 pid: idx + 1
                 for idx, pid in enumerate(eligible[embedding_col].to_list())
             }
             emb_ids = np.array(
-                [embedding_vocab.get(p, 0) for p in df[embedding_col].to_list()]
+                [embedding_vocab.get(p, 0) for p in df_deploy[embedding_col].to_list()]
             ).reshape(-1, 1)
             X = np.hstack([X, emb_ids.astype(np.float64)])
             model_params["embedding_col_idx"] = X.shape[1] - 1
@@ -284,7 +311,7 @@ class ProductionPredictor:
         # Compute sample weights if configured
         sample_weights = None
         if config.sample_weight is not None:
-            train_dates = df["effective_match_date"].to_numpy()
+            train_dates = df_deploy["effective_match_date"].to_numpy()
             sample_weights = compute_sample_weights(
                 train_dates, config.sample_weight
             )
@@ -302,7 +329,6 @@ class ProductionPredictor:
         # diagnostics evaluate. Fall back to random K-fold for ensembles or
         # embedding-using configs where per-fold prep would need extra wiring.
         cal_cfg = config.calibration
-        val_cfg = config.validation
         can_temporal_cv = (
             val_cfg is not None
             and val_cfg.type
@@ -466,7 +492,7 @@ class ProductionPredictor:
                 calibrator,
                 (SegmentedPlattCalibrator, SegmentedIsotonicCalibrator),
             ):
-                calibrator.fit(oof_probs, y, df)
+                calibrator.fit(oof_probs, y, df_deploy)
                 logger.info(
                     "Segmented %s: %d per-segment fits + global fallback",
                     type(calibrator).__name__, calibrator.n_segments,
