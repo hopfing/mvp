@@ -74,6 +74,31 @@ def fp_diagnostics_path(config_path: Path) -> Path:
     return fingerprint_dir(fingerprint_for(config_path)) / "diagnostics.json"
 
 
+# Numeric columns in the per-row backtest CSV. Pinning these prevents polars
+# from inferring Utf8 when a short backtest window has all-null/blank values
+# in the first N rows (e.g. 2026 cutoff configs whose odds coverage is sparse).
+_BACKTEST_NUMERIC_COLS: dict[str, type] = {
+    "model_prob": pl.Float64,
+    "opening_edge": pl.Float64,
+    "closing_edge": pl.Float64,
+    "clv": pl.Float64,
+    "won": pl.Boolean,
+    "pnl_open": pl.Float64,
+    "pnl_close": pl.Float64,
+    "open_odds": pl.Float64,
+    "close_odds": pl.Float64,
+}
+
+
+def read_backtest_csv(path: Path) -> pl.DataFrame:
+    """Read the per-row backtest CSV with numeric columns pinned to Float64."""
+    return pl.read_csv(
+        path,
+        infer_schema_length=10000,
+        schema_overrides=_BACKTEST_NUMERIC_COLS,
+    )
+
+
 def find_latest_diagnostics(
     model_name: str,
     config_path: Path | None = None,
@@ -192,13 +217,13 @@ def load_backtest(
         try:
             fp_path = fp_backtest_path(config_path)
             if fp_path.exists():
-                return pl.read_csv(fp_path, infer_schema_length=10000), fp_path
+                return read_backtest_csv(fp_path), fp_path
         except Exception:
             logger.exception("Failed fingerprint backtest lookup for %s", config_path)
     path = backtest_path(model_name)
     if not path.exists():
         raise FileNotFoundError(f"Backtest CSV not found: {path}")
-    df = pl.read_csv(path, infer_schema_length=10000)
+    df = read_backtest_csv(path)
     return df, path
 
 

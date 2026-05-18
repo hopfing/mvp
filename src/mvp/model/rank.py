@@ -40,6 +40,7 @@ from mvp.model.evaluation import (
     fp_confidence_path,
     fp_diagnostics_path,
     fingerprint_for,
+    read_backtest_csv,
     refresh_pipeline,
 )
 
@@ -527,7 +528,7 @@ def _extract_backtest(
             p = legacy
     if p is None:
         return out
-    df = pl.read_csv(p, infer_schema_length=10000)
+    df = read_backtest_csv(p)
 
     # Scope = day after training end -> today
     if train_end is not None and "effective_match_date" in df.columns:
@@ -693,7 +694,7 @@ def _backtest_clv_at(fp_dir: Path) -> tuple[float | None, float | None]:
     if not p.exists():
         return None, None
     try:
-        df = pl.read_csv(p, infer_schema_length=10000)
+        df = read_backtest_csv(p)
     except Exception:
         return None, None
     if "model_prob" in df.columns:
