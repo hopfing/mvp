@@ -101,11 +101,15 @@ class TournamentDiscovery(BaseExtractor):
         """
         circuits = ["tour", "challenger"]
 
+        headers = {
+            "Origin": "https://www.atptour.com",
+            "Referer": "https://www.atptour.com/",
+        }
         results = []
         for circuit in circuits:
             url = f"{_SCORES_URL}?scoringTournamentLevel={circuit}"
             logger.info("Fetching %s tournaments", circuit.title())
-            data = self.fetch_json(url)
+            data = self.fetch_json(url, headers=headers)
             tournaments = data["Data"]["LiveMatchesTournamentsOrdered"]
             for t in tournaments:
                 event_id = t["EventId"]

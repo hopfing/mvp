@@ -73,9 +73,13 @@ class BaseExtractor(BaseJob):
                 if attempt == retries:
                     raise
 
-    def fetch_json(self, url: str) -> dict | list | None:
-        headers = {"Accept": "application/json"}
-        response = self._fetch(url, headers=headers)
+    def fetch_json(
+        self, url: str, headers: dict[str, str] | None = None
+    ) -> dict | list | None:
+        merged = {"Accept": "application/json"}
+        if headers:
+            merged.update(headers)
+        response = self._fetch(url, headers=merged)
         content_type = response.headers.get("content-type", "")
         if "application/json" not in content_type:
             raise ValueError(
