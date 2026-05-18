@@ -128,17 +128,35 @@ def _find_diagnostics_json(config_stem: str) -> Path | None:
     return candidates[0][1]
 
 
-def _load_tier_lookup(config_stem: str) -> tuple[dict[tuple[str, str], float], str | None]:
+def _load_tier_lookup(
+    config_stem: str,
+    *,
+    lead_cfg: ExperimentConfig | None = None,
+    config_path: Path | None = None,
+) -> tuple[dict[tuple[str, str], float], str | None]:
     """Return {(circuit, round): signed_calibration} from the latest cal_tiers source.
 
-    Prefer a `<artifact_dir>/lead_cal_tiers.json` sidecar emitted alongside the
-    backtest's lead artifact (produced by predictor._train_single when the model
-    config has a temporal validation block). Fall back to the latest mlruns
-    diagnostics JSON for that config when no sidecar exists.
+    Preference order:
+      1. `<fp_dir>/diagnostics.json` (when `lead_cfg` is provided) — fp-scoped,
+         guaranteed to match the current config content.
+      2. `<artifact_dir>/lead_cal_tiers.json` sidecar emitted alongside the
+         backtest's lead artifact (produced by predictor._train_single).
+      3. Latest mlruns diagnostics JSON for that config.
 
     Second value is a short identifier of the source for the summary header
     (or None when nothing was found).
     """
+    if lead_cfg is not None:
+        from mvp.common.config_hash import compute_fingerprint, fingerprint_dir
+
+        fp = compute_fingerprint(lead_cfg, config_path=config_path)
+        fp_diag = fingerprint_dir(fp) / "diagnostics.json"
+        if fp_diag.exists():
+            with open(fp_diag) as f:
+                diag = json.load(f)
+            lookup = extract_circuit_round_lookup(diag)
+            return lookup, f"fp:{fp}"
+
     sidecar_path = ARTIFACT_ROOT / config_stem / "lead_cal_tiers.json"
     if sidecar_path.exists():
         with open(sidecar_path) as f:
@@ -266,9 +284,17 @@ def _build_bet_rows(
     return bets.sort(["effective_match_date", "match_uid", "side"])
 
 
-def _attach_cal_tiers(bets: pl.DataFrame, config_stem: str) -> tuple[pl.DataFrame, str | None]:
+def _attach_cal_tiers(
+    bets: pl.DataFrame,
+    config_stem: str,
+    *,
+    lead_cfg: ExperimentConfig | None = None,
+    config_path: Path | None = None,
+) -> tuple[pl.DataFrame, str | None]:
     """Add cal_tier and cell_cal columns by lookup against the lead's diagnostics."""
-    lookup, run_id = _load_tier_lookup(config_stem)
+    lookup, run_id = _load_tier_lookup(
+        config_stem, lead_cfg=lead_cfg, config_path=config_path
+    )
     if not lookup:
         return (
             bets.with_columns(
@@ -362,10 +388,22 @@ def run_backtest(
 
         # Build per-side bet rows + odds + outcomes
         bets = _build_bet_rows(predictions, start, end)
-        bets, run_id = _attach_cal_tiers(bets, config_path.stem)
+        bets, run_id = _attach_cal_tiers(
+            bets, config_path.stem, lead_cfg=lead_cfg, config_path=config_path
+        )
 
-        out_path = output_path(config_path)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
+        from mvp.common.config_hash import (
+            compute_fingerprint,
+            fingerprint_dir,
+            write_config_snapshot,
+        )
+
+        fp = compute_fingerprint(lead_cfg, config_path=config_path)
+        fp_dir = fingerprint_dir(fp)
+        fp_dir.mkdir(parents=True, exist_ok=True)
+        write_config_snapshot(lead_cfg, fp, config_path=config_path)
+
+        out_path = fp_dir / "backtest.csv"
         bets.write_csv(out_path)
         logger.info("Wrote %d bet rows to %s", len(bets), out_path)
 
@@ -378,7 +416,7 @@ def run_backtest(
             diag_run_id=run_id,
         )
         print(summary_text)
-        summary_path(config_path).write_text(summary_text, encoding="utf-8")
+        (fp_dir / "backtest_summary.txt").write_text(summary_text, encoding="utf-8")
 
         return out_path
     finally:

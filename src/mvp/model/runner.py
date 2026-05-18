@@ -1109,6 +1109,34 @@ class ExperimentRunner:
                 logger.log_artifact(temp_path)
                 run_id = logger.run_id
 
+                # Mirror diagnostics + config snapshot to the fingerprint dir
+                # so evaluation artifacts can be looked up by content hash.
+                try:
+                    import shutil
+
+                    from mvp.common.config_hash import (
+                        append_source,
+                        compute_fingerprint,
+                        fingerprint_dir,
+                        write_config_snapshot,
+                    )
+
+                    fp = compute_fingerprint(
+                        self.config, config_path=self.config_path
+                    )
+                    fp_dir = fingerprint_dir(fp)
+                    fp_dir.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(temp_path, fp_dir / "diagnostics.json")
+                    write_config_snapshot(
+                        self.config, fp, config_path=self.config_path
+                    )
+                    append_source(fp, self.config_path.stem, run_id)
+                except Exception:
+                    run_logger.exception(
+                        "Failed to write fingerprint artifacts; mlflow "
+                        "diagnostics already logged"
+                    )
+
         finally:
             if run_context:
                 run_context.__exit__(None, None, None)

@@ -991,6 +991,20 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         help="Skip the refresh pipeline; read existing artifacts only. Hard-fails if any are missing.",
     )
 
+    # model-rank subcommand - cross-model survey
+    mrank_parser = subparsers.add_parser(
+        "model-rank",
+        help="Cross-model survey across diagnostics, confidence, and backtest",
+    )
+    mrank_parser.add_argument(
+        "--refresh", action="store_true",
+        help="Force refresh every model, overriding per-model freshness check",
+    )
+    mrank_parser.add_argument(
+        "--no-refresh", action="store_true",
+        help="Skip refresh entirely; read existing artifacts only",
+    )
+
     return parser.parse_args(args)
 
 
@@ -1504,8 +1518,20 @@ def cmd_confidence(args: argparse.Namespace) -> int:
         return _run_voter_confidence(args, config_path)
 
     config_name = config_path.stem
-    oof_dir = get_data_root() / "confidence" / config_name
-    oof_path = oof_dir / "oof.parquet"
+    from mvp.common.config_hash import (
+        compute_fingerprint,
+        fingerprint_dir,
+        write_config_snapshot,
+    )
+    from mvp.model.config import ExperimentConfig
+
+    fp = compute_fingerprint(
+        ExperimentConfig.from_file(str(config_path)),
+        config_path=config_path,
+    )
+    fp_dir = fingerprint_dir(fp)
+    oof_path = fp_dir / "oof.parquet"
+    legacy_oof_path = get_data_root() / "confidence" / config_name / "oof.parquet"
 
     # Resolve base model names for ensemble identity slices
     base_names = _get_ensemble_base_names(config_path)
@@ -1513,6 +1539,11 @@ def cmd_confidence(args: argparse.Namespace) -> int:
     if oof_path.exists() and args.no_refresh:
         logger.info("Loading cached OOF from %s", oof_path)
         oof_df = pl.read_parquet(oof_path)
+        validator = ConfidenceValidator.from_oof(oof_df, base_names=base_names)
+    elif legacy_oof_path.exists() and args.no_refresh:
+        # Transitional fallback: use legacy name-scoped cache if fp cache absent
+        logger.info("Loading legacy OOF from %s", legacy_oof_path)
+        oof_df = pl.read_parquet(legacy_oof_path)
         validator = ConfidenceValidator.from_oof(oof_df, base_names=base_names)
     else:
         logger.info("Running model to generate OOF predictions...")
@@ -1530,7 +1561,11 @@ def cmd_confidence(args: argparse.Namespace) -> int:
             base_names=base_names,
         )
 
-        oof_dir.mkdir(parents=True, exist_ok=True)
+        fp_dir.mkdir(parents=True, exist_ok=True)
+        # Ensure config snapshot is present even when only `mvp confidence`
+        # has been run (e.g., model command hasn't been re-run since YAML
+        # changed but cache invalidated).
+        write_config_snapshot(runner.config, fp, config_path=config_path)
         validator._oof.write_parquet(oof_path)
         logger.info("Cached OOF to %s", oof_path)
 
@@ -1540,7 +1575,8 @@ def cmd_confidence(args: argparse.Namespace) -> int:
     report = format_report(result, model_name=config_name)
     print(report)
 
-    results_path = oof_dir / "validation_results.json"
+    fp_dir.mkdir(parents=True, exist_ok=True)
+    results_path = fp_dir / "validation_results.json"
     _save_validation_json(result, results_path)
     logger.info("Saved detailed results to %s", results_path)
 
@@ -2354,6 +2390,15 @@ def cmd_model_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_model_rank(args: argparse.Namespace) -> int:
+    """Cross-model survey: discover, smart-refresh, print four tables."""
+    from mvp.model.rank import run_rank
+
+    out = run_rank(force_refresh=args.refresh, no_refresh=args.no_refresh)
+    print(out)
+    return 0
+
+
 def cmd_backtest(args: argparse.Namespace) -> int:
     """Backtest a lead model: simulate predictions + bets on a window with odds data."""
     from datetime import date as _date
@@ -2836,6 +2881,8 @@ def main(args: list[str] | None = None) -> int:
         return cmd_analysis(parsed)
     elif parsed.command == "model-report":
         return cmd_model_report(parsed)
+    elif parsed.command == "model-rank":
+        return cmd_model_rank(parsed)
 
     return 1
 
