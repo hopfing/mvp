@@ -478,15 +478,33 @@ def print_run_summary(results: dict[str, Any], name: str | None = None) -> None:
 
         calibrator = results.get("calibrator")
         if calibrator is not None and calibrator.is_fitted:
-            from mvp.model.calibration import SegmentedPlattCalibrator
+            from mvp.model.calibration import (
+                IsotonicCalibrator,
+                PlattCalibrator,
+                SegmentedIsotonicCalibrator,
+                SegmentedPlattCalibrator,
+            )
             if isinstance(calibrator, SegmentedPlattCalibrator):
                 print(
                     f"  Platt: segmented ({calibrator.n_segments} per-segment "
                     f"fits + global slope={calibrator._global.slope:.4f}, "
                     f"intercept={calibrator._global.intercept:.4f})"
                 )
-            else:
+            elif isinstance(calibrator, PlattCalibrator):
                 print(f"  Platt: slope={calibrator.slope:.4f}, intercept={calibrator.intercept:.4f}")
+            elif isinstance(calibrator, SegmentedIsotonicCalibrator):
+                g = calibrator._global
+                print(
+                    f"  Isotonic: segmented ({calibrator.n_segments} per-segment fits + "
+                    f"global n_thresholds={g.n_thresholds}, y range=[{g.y_min:.4f}, {g.y_max:.4f}], "
+                    f"grid=[{', '.join(f'{v:.3f}' for v in g.grid_sample())}])"
+                )
+            elif isinstance(calibrator, IsotonicCalibrator):
+                print(
+                    f"  Isotonic: n_thresholds={calibrator.n_thresholds}, "
+                    f"y range=[{calibrator.y_min:.4f}, {calibrator.y_max:.4f}], "
+                    f"grid=[{', '.join(f'{v:.3f}' for v in calibrator.grid_sample())}]"
+                )
 
     # High-confidence errors
     errors = diagnostics.errors

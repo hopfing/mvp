@@ -14,7 +14,14 @@ import polars as pl
 
 run_logger = logging.getLogger(__name__)
 
-from mvp.model.calibration import PlattCalibrator, SegmentedPlattCalibrator
+from mvp.model.calibration import (
+    IsotonicCalibrator,
+    PlattCalibrator,
+    SegmentedIsotonicCalibrator,
+    SegmentedPlattCalibrator,
+    fit_calibrator_with_nested_cv,
+    make_calibrator,
+)
 from mvp.model.config import (
     DateRange,
     EnsembleParams,
@@ -919,41 +926,49 @@ class ExperimentRunner:
                 [p["y_prob"] for p in tuning_predictions]
             )
 
-            calibrator: PlattCalibrator | SegmentedPlattCalibrator | None = None
+            calibrator: (
+                PlattCalibrator
+                | SegmentedPlattCalibrator
+                | IsotonicCalibrator
+                | SegmentedIsotonicCalibrator
+                | None
+            ) = None
             if self.calibrate:
-                # Platt scaling. Fit on tuning OOF only so the holdout is never
+                # Calibration. Fit on tuning OOF only so the holdout is never
                 # seen by the calibrator. Apply the resulting calibrator to BOTH
                 # tuning and holdout preds so every fold gets a calibrated
                 # probability (the holdout's just hasn't seen its own labels).
-                # raw_metrics are computed pre-Platt for diagnostic visibility.
+                # raw_metrics are computed pre-calibration for diagnostic visibility.
                 raw_metrics = compute_metrics(
                     combined_y_true_oof, combined_y_prob_oof
                 )
 
                 cal_cfg = self.config.calibration
-                if cal_cfg and cal_cfg.segments:
-                    combined_df_oof = pl.concat(
-                        [p["df"] for p in tuning_predictions],
-                        how="diagonal_relaxed",
-                    )
-                    calibrator = SegmentedPlattCalibrator(
-                        segments=cal_cfg.segments, min_n=cal_cfg.min_n,
-                    )
-                    calibrator.fit(
-                        combined_y_prob_oof, combined_y_true_oof, combined_df_oof
-                    )
+                # Nested CV for honest diagnostics: each tuning fold's preds
+                # get calibrated by a fitter that didn't see them. Helper
+                # returns the deployed calibrator (fit on all tuning OOF), which
+                # is what we apply to holdout preds and what gets saved.
+                calibrator = fit_calibrator_with_nested_cv(
+                    tuning_predictions, cal_cfg
+                )
+                is_segmented = isinstance(
+                    calibrator,
+                    (SegmentedPlattCalibrator, SegmentedIsotonicCalibrator),
+                )
+                if is_segmented:
                     run_logger.info(
-                        "Segmented Platt: %d per-segment fits + global fallback",
+                        "Segmented %s: %d per-segment fits + global fallback "
+                        "(deployed); diagnostics use nested fold-out fits",
+                        type(calibrator).__name__,
                         calibrator.n_segments,
                     )
-                    for pred_dict in all_predictions:
+                # Holdout: deployed calibrator (never saw holdout data)
+                for pred_dict in holdout_predictions:
+                    if is_segmented:
                         pred_dict["y_prob"] = calibrator.transform(
                             pred_dict["y_prob"], pred_dict["df"]
                         )
-                else:
-                    calibrator = PlattCalibrator()
-                    calibrator.fit(combined_y_prob_oof, combined_y_true_oof)
-                    for pred_dict in all_predictions:
+                    else:
                         pred_dict["y_prob"] = calibrator.transform(
                             pred_dict["y_prob"]
                         )
@@ -998,9 +1013,13 @@ class ExperimentRunner:
                     for p in holdout_predictions
                 ]
 
-            # Compute diagnostics on tuning preds only — the calibrator was fit
-            # there, so segment cal / global cal bins / error conditions all
-            # reflect what's actually deployed and unbiased by the holdout.
+            # Compute diagnostics on tuning preds only. Tuning preds were
+            # calibrated by nested-CV (fold-i-out) calibrators, so segment cal /
+            # global cal bins / error conditions are unbiased: every pred was
+            # transformed by a calibrator that hasn't seen it. The deployed
+            # calibrator (fit on all tuning OOF) is what gets logged and used at
+            # prediction time; the nested ones exist only to produce fair
+            # diagnostic numbers.
             run_logger.info("Computing diagnostics...")
             diagnostics = Diagnostics()
             cal_segments = (
@@ -1088,15 +1107,44 @@ class ExperimentRunner:
                 if calibrator is not None and calibrator.is_fitted:
                     if isinstance(calibrator, SegmentedPlattCalibrator):
                         logger.log_params({
-                            "platt_segmented": "true",
-                            "platt_n_segments": str(calibrator.n_segments),
-                            "platt_global_slope": f"{calibrator._global.slope:.6f}",
-                            "platt_global_intercept": f"{calibrator._global.intercept:.6f}",
+                            "cal_method": "platt",
+                            "cal_segmented": "true",
+                            "cal_n_segments": str(calibrator.n_segments),
+                            "cal_global_slope": f"{calibrator._global.slope:.6f}",
+                            "cal_global_intercept": f"{calibrator._global.intercept:.6f}",
                         })
-                    else:
+                    elif isinstance(calibrator, PlattCalibrator):
                         logger.log_params({
-                            "platt_slope": f"{calibrator.slope:.6f}",
-                            "platt_intercept": f"{calibrator.intercept:.6f}",
+                            "cal_method": "platt",
+                            "cal_segmented": "false",
+                            "cal_slope": f"{calibrator.slope:.6f}",
+                            "cal_intercept": f"{calibrator.intercept:.6f}",
+                        })
+                    elif isinstance(calibrator, SegmentedIsotonicCalibrator):
+                        g = calibrator._global
+                        logger.log_params({
+                            "cal_method": "isotonic",
+                            "cal_segmented": "true",
+                            "cal_n_segments": str(calibrator.n_segments),
+                            "cal_global_n_thresholds": str(g.n_thresholds),
+                            "cal_global_y_min": f"{g.y_min:.6f}",
+                            "cal_global_y_max": f"{g.y_max:.6f}",
+                            "cal_global_grid": ",".join(
+                                f"{v:.4f}" for v in g.grid_sample()
+                            ),
+                            "cal_mean_n_thresholds": f"{calibrator.mean_n_thresholds():.1f}",
+                            "cal_max_n_thresholds": str(calibrator.max_n_thresholds()),
+                        })
+                    elif isinstance(calibrator, IsotonicCalibrator):
+                        logger.log_params({
+                            "cal_method": "isotonic",
+                            "cal_segmented": "false",
+                            "cal_n_thresholds": str(calibrator.n_thresholds),
+                            "cal_y_min": f"{calibrator.y_min:.6f}",
+                            "cal_y_max": f"{calibrator.y_max:.6f}",
+                            "cal_grid": ",".join(
+                                f"{v:.4f}" for v in calibrator.grid_sample()
+                            ),
                         })
 
                 # Log diagnostic JSON artifact

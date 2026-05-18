@@ -238,6 +238,7 @@ class CalibrationConfig(_StrictModel):
     HP search and let `mvp model` apply it post-hoc at training time.
     """
 
+    method: Literal["platt", "isotonic"] = "platt"
     segments: list[str] | None = None
     min_n: int = 200
 

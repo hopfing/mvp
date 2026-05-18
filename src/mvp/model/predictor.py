@@ -14,7 +14,13 @@ import polars as pl
 import yaml
 
 from mvp.common.base_job import get_data_root, get_local_data_root
-from mvp.model.calibration import PlattCalibrator, SegmentedPlattCalibrator
+from mvp.model.calibration import (
+    IsotonicCalibrator,
+    PlattCalibrator,
+    SegmentedIsotonicCalibrator,
+    SegmentedPlattCalibrator,
+    make_calibrator,
+)
 from mvp.model.confidence.dimensions import MODIFIERS
 from mvp.model.config import (
     EnsembleParams,
@@ -398,28 +404,35 @@ class ProductionPredictor:
                 [p["df"] for p in fold_predictions], how="diagonal_relaxed"
             )
 
-            if cal_cfg and cal_cfg.segments:
-                calibrator = SegmentedPlattCalibrator(
-                    segments=cal_cfg.segments, min_n=cal_cfg.min_n,
-                )
+            calibrator = make_calibrator(cal_cfg) if cal_cfg else PlattCalibrator()
+            is_segmented = isinstance(
+                calibrator, (SegmentedPlattCalibrator, SegmentedIsotonicCalibrator)
+            )
+            if is_segmented:
                 calibrator.fit(
                     combined_y_prob_oof, combined_y_true_oof, combined_df_oof
                 )
                 logger.info(
-                    "Segmented Platt (temporal CV): %d per-segment fits + global fallback",
-                    calibrator.n_segments,
+                    "Segmented %s (temporal CV): %d per-segment fits + global fallback",
+                    type(calibrator).__name__, calibrator.n_segments,
                 )
                 for pred_dict in fold_predictions:
                     pred_dict["y_prob"] = calibrator.transform(
                         pred_dict["y_prob"], pred_dict["df"]
                     )
             else:
-                calibrator = PlattCalibrator()
                 calibrator.fit(combined_y_prob_oof, combined_y_true_oof)
-                logger.info(
-                    "Platt calibrator (temporal CV): slope=%.4f, intercept=%.4f",
-                    calibrator.slope, calibrator.intercept,
-                )
+                if isinstance(calibrator, PlattCalibrator):
+                    logger.info(
+                        "Platt calibrator (temporal CV): slope=%.4f, intercept=%.4f",
+                        calibrator.slope, calibrator.intercept,
+                    )
+                else:
+                    logger.info(
+                        "Isotonic calibrator (temporal CV): n_thresholds=%d, "
+                        "y range=[%.4f, %.4f]",
+                        calibrator.n_thresholds, calibrator.y_min, calibrator.y_max,
+                    )
                 for pred_dict in fold_predictions:
                     pred_dict["y_prob"] = calibrator.transform(pred_dict["y_prob"])
 
@@ -448,23 +461,28 @@ class ProductionPredictor:
                 fold_weights = sample_weights[train_idx] if sample_weights is not None else None
                 fold_model.fit(X[train_idx], y[train_idx], sample_weight=fold_weights)
                 oof_probs[val_idx] = fold_model.predict_proba(X[val_idx])
-            if cal_cfg and cal_cfg.segments:
-                calibrator = SegmentedPlattCalibrator(
-                    segments=cal_cfg.segments, min_n=cal_cfg.min_n,
-                )
+            calibrator = make_calibrator(cal_cfg) if cal_cfg else PlattCalibrator()
+            if isinstance(
+                calibrator,
+                (SegmentedPlattCalibrator, SegmentedIsotonicCalibrator),
+            ):
                 calibrator.fit(oof_probs, y, df)
                 logger.info(
-                    "Segmented Platt: %d per-segment fits + global fallback",
-                    calibrator.n_segments,
+                    "Segmented %s: %d per-segment fits + global fallback",
+                    type(calibrator).__name__, calibrator.n_segments,
                 )
             else:
-                calibrator = PlattCalibrator()
                 calibrator.fit(oof_probs, y)
-                logger.info(
-                    "Platt calibrator: slope=%.4f, intercept=%.4f",
-                    calibrator.slope,
-                    calibrator.intercept,
-                )
+                if isinstance(calibrator, PlattCalibrator):
+                    logger.info(
+                        "Platt calibrator: slope=%.4f, intercept=%.4f",
+                        calibrator.slope, calibrator.intercept,
+                    )
+                else:
+                    logger.info(
+                        "Isotonic calibrator: n_thresholds=%d, y range=[%.4f, %.4f]",
+                        calibrator.n_thresholds, calibrator.y_min, calibrator.y_max,
+                    )
 
         # Save artifact
         artifact_path = Path(entry["artifact"])
@@ -665,7 +683,10 @@ class ProductionPredictor:
 
         probs = model.predict_proba(X)
         if calibrator is not None:
-            if isinstance(calibrator, SegmentedPlattCalibrator):
+            if isinstance(
+                calibrator,
+                (SegmentedPlattCalibrator, SegmentedIsotonicCalibrator),
+            ):
                 probs = calibrator.transform(probs, canonical)
             else:
                 probs = calibrator.transform(probs)
@@ -882,7 +903,10 @@ class ProductionPredictor:
 
         probs = model.predict_proba(X)
         if calibrator is not None:
-            if isinstance(calibrator, SegmentedPlattCalibrator):
+            if isinstance(
+                calibrator,
+                (SegmentedPlattCalibrator, SegmentedIsotonicCalibrator),
+            ):
                 probs = calibrator.transform(probs, pending)
             else:
                 probs = calibrator.transform(probs)
