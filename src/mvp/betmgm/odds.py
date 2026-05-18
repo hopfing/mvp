@@ -484,6 +484,8 @@ class BetMGMOddsScraper(BaseExtractor):
             stage_dir = self.build_path("stage", market)
             existing_by_market[market] = {
                 p.stem for p in self.list_files(stage_dir, "*.parquet")
+            } | {
+                p.stem for p in self.list_files(stage_dir, "*.empty")
             }
 
         staged: list[Path] = []
@@ -507,17 +509,17 @@ class BetMGMOddsScraper(BaseExtractor):
             file_ts = datetime.strptime(parts, "%Y%m%d_%H%M%S")
 
             entries = _parse_all_markets(all_fixtures, file_ts)
-            if not entries:
-                continue
 
             for market in markets:
                 if raw_path.stem in existing_by_market[market]:
                     continue
+                stage_dir = self.build_path("stage", market)
                 market_entries = [e for e in entries if e.market == market]
                 if not market_entries:
+                    stage_dir.mkdir(parents=True, exist_ok=True)
+                    (stage_dir / f"{raw_path.stem}.empty").touch()
                     continue
                 df = _entries_to_df(market_entries, file_ts)
-                stage_dir = self.build_path("stage", market)
                 out_path = stage_dir / f"{raw_path.stem}.parquet"
                 result = self.save_parquet(df, out_path)
                 if result:
