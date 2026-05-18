@@ -897,6 +897,10 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         "--no-refresh", action="store_true",
         help="Use cached OOF if available (skip model re-run)"
     )
+    conf_parser.add_argument(
+        "--memory-limit", type=int, default=None,
+        help="Override memory limit %% (0 to disable, default 75)",
+    )
 
     # project subcommand - game projection from projections/ directory
     proj_parser = subparsers.add_parser(
@@ -990,6 +994,10 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         "--no-refresh", action="store_true",
         help="Skip the refresh pipeline; read existing artifacts only. Hard-fails if any are missing.",
     )
+    mreport_parser.add_argument(
+        "--memory-limit", type=int, default=None,
+        help="Override memory limit %% (0 to disable, default 75)",
+    )
 
     # model-rank subcommand - cross-model survey
     mrank_parser = subparsers.add_parser(
@@ -1003,6 +1011,10 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
     mrank_parser.add_argument(
         "--no-refresh", action="store_true",
         help="Skip refresh entirely; read existing artifacts only",
+    )
+    mrank_parser.add_argument(
+        "--memory-limit", type=int, default=None,
+        help="Override memory limit %% (0 to disable, default 75)",
     )
 
     return parser.parse_args(args)
