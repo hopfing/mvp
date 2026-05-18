@@ -569,11 +569,23 @@ def _kind_subsection(
         )
 
     # Monthly slices — same slice for both sides since the temporal cut
-    # is independent of which price we're scoring.
-    monthly = views.by_month(sub)
+    # is independent of which price we're scoring. For picks, scope to
+    # opening_edge > 0 so the cumulative trailer is a meaningful "what
+    # bankroll would have looked like" number on actually-placed bets.
+    # Non-picks keep the full scope (opening_edge > 0 doesn't make sense
+    # for the opponent-side of a model pick).
+    monthly_input = (
+        sub.filter(pl.col("opening_edge") > 0)
+        if label_word == "picks" and "opening_edge" in sub.columns
+        else sub
+    )
+    monthly = views.by_month(monthly_input)
     if monthly:
+        scope_note = (
+            "  (opening_edge > 0)" if label_word == "picks" else ""
+        )
         lines.append("")
-        lines.append("BY MONTH")
+        lines.append(f"BY MONTH{scope_note}")
         lines.append(top)
         lines.append(bottom)
         for month, stats in monthly:
