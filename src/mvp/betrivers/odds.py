@@ -29,7 +29,13 @@ _INCLUDE_TERM_KEYS = {
     "atp",
     "challenger",
     "challenger_qual_",
+    "grand_slam",
 }
+
+# path[2] termKey substrings that disqualify an event within an included
+# top-level category (currently only relevant inside grand_slam, which mixes
+# men's, women's, and doubles draws under one circuit key).
+_PATH_EXCLUDE_SUBSTRINGS = ("women", "doubles")
 
 MONEYLINE_CRITERION_ID = 1001159551
 
@@ -60,8 +66,26 @@ class BetRiversOddsEntry:
 
 
 def _is_atp_challenger(term_key: str) -> bool:
-    """Check if a Kambi path termKey is ATP or Challenger men's singles."""
+    """Check if a Kambi path[1] termKey is an included men's-singles category."""
     return term_key in _INCLUDE_TERM_KEYS
+
+
+def _is_included_path(path: list[dict]) -> bool:
+    """Decide whether a Kambi event path should be included.
+
+    path[1].termKey identifies the top-level tour category; for the Grand Slam
+    branch we additionally reject sub-paths that surface women's or doubles
+    draws (the atp/challenger branches don't currently mix those in).
+    """
+    if len(path) < 2:
+        return False
+    if not _is_atp_challenger(path[1].get("termKey", "")):
+        return False
+    if len(path) >= 3:
+        sub_key = path[2].get("termKey", "").lower()
+        if any(s in sub_key for s in _PATH_EXCLUDE_SUBSTRINGS):
+            return False
+    return True
 
 
 def _parse_kambi_response(
@@ -78,11 +102,9 @@ def _parse_kambi_response(
         event = event_wrapper.get("event", {})
         path = event.get("path", [])
 
-        if len(path) < 2:
+        if not _is_included_path(path):
             continue
         circuit_key = path[1].get("termKey", "")
-        if not _is_atp_challenger(circuit_key):
-            continue
 
         event_id = str(event.get("id", ""))
         home_name = event.get("homeName", "")
@@ -134,11 +156,9 @@ def _extract_group_ids(data: dict) -> dict[int, dict]:
     for event_wrapper in data.get("events", []):
         event = event_wrapper.get("event", {})
         path = event.get("path", [])
-        if len(path) < 2:
+        if not _is_included_path(path):
             continue
         circuit_key = path[1].get("termKey", "")
-        if not _is_atp_challenger(circuit_key):
-            continue
         gid = event.get("groupId")
         if gid and gid not in groups:
             groups[gid] = {

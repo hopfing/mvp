@@ -14,9 +14,9 @@ def _make_fixture(
     p1_odds=1.08,
     p2_odds=7.25,
     competition_id=6,
-    competition_name="ATP",
-    tournament_name="ATP Masters Indian Wells (USA) - Hard",
-    tournament_id=123,
+    competition_name="ATP Masters Indian Wells (USA) - Hard",
+    tournament_name="ATP",
+    tournament_id=6,
     stage="PreMatch",
     is_open=True,
 ):
@@ -93,18 +93,50 @@ class TestParseFixtures:
         from mvp.betmgm.odds import _parse_fixtures
 
         now = datetime(2026, 3, 11, 12, 0, tzinfo=timezone.utc)
-        atp = _parse_fixtures([_make_fixture(competition_name="ATP Masters Indian Wells (USA) - Hard")], now)
-        chal = _parse_fixtures([_make_fixture(competition_name="ATP Challenger Phoenix (USA) - Hard")], now)
+        atp = _parse_fixtures([_make_fixture(
+            competition_name="ATP Masters Indian Wells (USA) - Hard",
+            tournament_name="ATP",
+        )], now)
+        chal = _parse_fixtures([_make_fixture(
+            competition_name="ATP Challenger Phoenix (USA) - Hard",
+            tournament_name="Challenger",
+        )], now)
 
         assert atp[0].circuit == "atp"
         assert chal[0].circuit == "challenger"
+
+    def test_grand_slam_mens_singles_included(self):
+        from mvp.betmgm.odds import _parse_fixtures
+
+        now = datetime(2026, 5, 18, 12, 0, tzinfo=timezone.utc)
+        entries = _parse_fixtures([_make_fixture(
+            competition_name="French Open - Men - Qualification - Clay",
+            tournament_name="Grand Slam Tournaments",
+        )], now)
+
+        assert len(entries) == 2
+        assert entries[0].circuit == "grand_slam"
+
+    def test_grand_slam_womens_singles_excluded(self):
+        from mvp.betmgm.odds import _parse_fixtures
+
+        now = datetime(2026, 5, 18, 12, 0, tzinfo=timezone.utc)
+        entries = _parse_fixtures([_make_fixture(
+            competition_name="French Open - Women - Qualification - Clay",
+            tournament_name="Grand Slam Tournaments",
+        )], now)
+
+        assert len(entries) == 0
 
     def test_filters_non_atp_challenger(self):
         from mvp.betmgm.odds import _parse_fixtures
 
         now = datetime(2026, 3, 11, 12, 0, tzinfo=timezone.utc)
         entries = _parse_fixtures([
-            _make_fixture(competition_name="WTA 1000 Indian Wells (USA) - Hard"),
+            _make_fixture(
+                competition_name="WTA 1000 Indian Wells (USA) - Hard",
+                tournament_name="WTA",
+            ),
         ], now)
 
         assert len(entries) == 0
@@ -114,7 +146,10 @@ class TestParseFixtures:
 
         now = datetime(2026, 3, 11, 12, 0, tzinfo=timezone.utc)
         entries = _parse_fixtures([
-            _make_fixture(competition_name="ATP Challenger Cherbourg (FRA), Doubles - Hard"),
+            _make_fixture(
+                competition_name="ATP Challenger Cherbourg (FRA), Doubles - Hard",
+                tournament_name="Challenger",
+            ),
         ], now)
 
         assert len(entries) == 0

@@ -8,7 +8,8 @@ import polars as pl
 from mvp.betrivers.odds import (
     BetRiversOddsScraper,
     _is_atp_challenger,
-    _parse_response,
+    _is_included_path,
+    _parse_kambi_response as _parse_response,
 )
 
 
@@ -48,6 +49,42 @@ class TestCircuitFiltering:
 
     def test_unknown_excluded(self):
         assert _is_atp_challenger("some_new_category") is False
+
+    def test_grand_slam_included(self):
+        assert _is_atp_challenger("grand_slam") is True
+
+
+def _path(*term_keys: str) -> list[dict]:
+    return [{"termKey": k} for k in term_keys]
+
+
+class TestIncludedPath:
+    def test_atp_path_included(self):
+        assert _is_included_path(_path("tennis", "atp", "hamburg")) is True
+
+    def test_challenger_path_included(self):
+        assert _is_included_path(_path("tennis", "challenger", "bengaluru")) is True
+
+    def test_grand_slam_mens_included(self):
+        assert _is_included_path(
+            _path("tennis", "grand_slam", "french_open_qualifiers"),
+        ) is True
+
+    def test_grand_slam_womens_excluded(self):
+        assert _is_included_path(
+            _path("tennis", "grand_slam", "french_open_women_qualifiers"),
+        ) is False
+
+    def test_grand_slam_doubles_excluded(self):
+        assert _is_included_path(
+            _path("tennis", "grand_slam", "french_open_doubles"),
+        ) is False
+
+    def test_wta_excluded(self):
+        assert _is_included_path(_path("tennis", "wta", "rabat")) is False
+
+    def test_short_path_rejected(self):
+        assert _is_included_path(_path("tennis")) is False
 
 
 SAMPLE_RESPONSE = {

@@ -41,15 +41,26 @@ _API_HEADERS = {
     "x-device-type": "desktop",
 }
 
-def _classify_circuit(comp_name: str) -> str | None:
-    """Classify competition name into circuit, or None to skip."""
-    name = comp_name.lower()
-    if "doubles" in name:
+def _classify_circuit(tournament_name: str, comp_name: str) -> str | None:
+    """Classify a fixture into a circuit, or None to skip.
+
+    Uses the structural fixture.tournament.name bucket as the primary signal
+    (e.g. "ATP", "Challenger", "Grand Slam Tournaments") and the competition
+    name as a secondary filter for doubles and (within Grand Slam) gender.
+    """
+    comp_lower = comp_name.lower()
+    if "doubles" in comp_lower:
         return None
-    if "atp challenger" in name:
-        return "challenger"
-    if name.startswith("atp"):
+    if tournament_name == "ATP":
         return "atp"
+    if tournament_name == "Challenger":
+        return "challenger"
+    if tournament_name == "Grand Slam Tournaments":
+        if " - women" in comp_lower:
+            return None
+        if " - men" in comp_lower:
+            return "grand_slam"
+        return None
     return None
 
 _STAGE_MAP = {
@@ -103,7 +114,9 @@ def _parse_fixtures(
     for fixture in fixtures:
         competition = fixture.get("competition", {})
         comp_name = competition.get("name", {}).get("value", "")
-        circuit = _classify_circuit(comp_name)
+        tournament_meta = fixture.get("tournament", {})
+        tournament_name = tournament_meta.get("name", {}).get("value", "")
+        circuit = _classify_circuit(tournament_name, comp_name)
         if circuit is None:
             continue
 
@@ -134,8 +147,8 @@ def _parse_fixtures(
             continue
 
         event_id = str(fixture.get("id", ""))
-        tournament = competition.get("name", {}).get("value", "") or fixture.get("tournament", {}).get("name", {}).get("value", "")
-        tournament_id = str(fixture.get("tournament", {}).get("id", ""))
+        tournament = comp_name or tournament_name
+        tournament_id = str(tournament_meta.get("id", ""))
         stage = fixture.get("stage", "")
         event_status = _STAGE_MAP.get(stage, "NOT_STARTED")
 
@@ -189,7 +202,9 @@ def _parse_all_markets(
     for fixture in fixtures:
         competition = fixture.get("competition", {})
         comp_name = competition.get("name", {}).get("value", "")
-        circuit = _classify_circuit(comp_name)
+        tournament_meta = fixture.get("tournament", {})
+        tournament_name = tournament_meta.get("name", {}).get("value", "")
+        circuit = _classify_circuit(tournament_name, comp_name)
         if circuit is None:
             continue
 
@@ -206,8 +221,8 @@ def _parse_all_markets(
         p2_name = _strip_country_code(p2_full)
 
         event_id = str(fixture.get("id", ""))
-        tournament = comp_name or fixture.get("tournament", {}).get("name", {}).get("value", "")
-        tournament_id = str(fixture.get("tournament", {}).get("id", ""))
+        tournament = comp_name or tournament_name
+        tournament_id = str(tournament_meta.get("id", ""))
         stage = fixture.get("stage", "")
         event_status = _STAGE_MAP.get(stage, "NOT_STARTED")
 
