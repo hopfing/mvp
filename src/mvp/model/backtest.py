@@ -19,6 +19,7 @@ import polars as pl
 import yaml
 
 from mvp.common.base_job import get_data_root
+from mvp.model import backtest_views as views
 from mvp.model.cal_tiers import (
     classify_cal_tier,
     extract_circuit_round_lookup,
@@ -425,50 +426,49 @@ def run_backtest(
 
 # --- Summary formatting -----------------------------------------------------
 
-_EDGE_BANDS: list[tuple[str, float, float]] = [
-    (">= 10%", 0.10, float("inf")),
+# Use a wider edge-band table than report.py's RAW filter — this view shows
+# both edge>=0 and edge<0 rows since non-pick analysis is meaningful here.
+_SUMMARY_EDGE_BANDS: tuple[tuple[str, float, float | None], ...] = (
+    (">= 10%", 0.10, None),
     ("5-10%", 0.05, 0.10),
     ("2-5%", 0.02, 0.05),
     ("0-2%", 0.0, 0.02),
     ("< 0%", float("-inf"), 0.0),
-]
-_TIER_ORDER = ["UnderC", "Optimal", "Border", "Risky", "Danger", "unknown"]
+)
 
-
-def _picks(bets: pl.DataFrame) -> pl.DataFrame:
-    return bets.filter(pl.col("is_pick"))
+# Backtest summary shows additional tiers (UnderC, unknown=nulls) that
+# report.py's standard view doesn't surface.
+_SUMMARY_TIER_ORDER: tuple[str, ...] = (
+    "UnderC", "Optimal", "Border", "Risky", "Danger",
+)
 
 
 _LABEL_W = 16
 _SIDE_W = 71
 
 
-def _side_stats(sub: pl.DataFrame, price: str) -> str:
-    """Format n / hit% / ROI / units / CLV+% / avg CLV / ME+% / avg ME for one price side.
+def _render_side(stats: dict, price: str) -> str:
+    """Render the per-side cell from a slice_stats dict (n / hit% / ROI /
+    units / CLV+% / avg CLV / ME+% / avg ME for one price side).
 
-    ME = model edge at close (model_prob - closing_implied).
-    ME+% is the fraction of rows where the model still has positive edge vs
-    the closing best-of-books price; avg ME is the mean of that gap in pp.
+    Per-side n_open / n_close (priced subset size) is used for display so
+    "n" matches the row count that actually contributed to ROI.
     """
-    pnl_col = f"pnl_{price}"
-    sub = sub.filter(pl.col(pnl_col).is_not_null())
-    n = len(sub)
-    if n == 0:
+    n_p = stats.get(f"n_{price}", 0)
+    if n_p == 0:
         return (
             f"{0:>6}  {'-':>6}  {'-':>7}  {'-':>8}  "
             f"{'-':>6}  {'-':>9}  {'-':>6}  {'-':>9}"
         )
-    hit = sub["won"].drop_nulls().mean() or 0.0
-    pnl = sub[pnl_col].sum()
-    roi = pnl / n
-    clv = sub["clv"].drop_nulls()
-    clv_win = (clv > 0).mean() if len(clv) else 0.0
-    avg_clv = clv.mean() if len(clv) else 0.0
-    ce = sub["closing_edge"].drop_nulls()
-    me_win = (ce > 0).mean() if len(ce) else 0.0
-    avg_me = ce.mean() if len(ce) else 0.0
+    hit = stats.get("hit") or 0.0
+    pnl = stats.get(f"pnl_{price}") or 0.0
+    roi = stats.get(f"roi_{price}") or 0.0
+    clv_win = stats.get("clv_pos") or 0.0
+    avg_clv = stats.get("avg_clv") or 0.0
+    me_win = stats.get(f"me_{price}_pos") or 0.0
+    avg_me = stats.get(f"avg_me_{price}") or 0.0
     return (
-        f"{n:>6}  {hit:>6.1%}  {roi:>+7.2%}  {pnl:>+7.1f}u  "
+        f"{n_p:>6}  {hit:>6.1%}  {roi:>+7.2%}  {pnl:>+7.1f}u  "
         f"{clv_win:>6.1%}  {avg_clv * 100:>+7.2f}pp  "
         f"{me_win:>6.1%}  {avg_me * 100:>+7.2f}pp"
     )
@@ -487,46 +487,54 @@ def _wide_header_lines() -> tuple[str, str]:
     return top, bottom
 
 
-def _wide_row(label: str, open_sub: pl.DataFrame, close_sub: pl.DataFrame) -> str:
+def _wide_row(label: str, open_stats: dict, close_stats: dict) -> str:
+    """Render one wide row from pre-computed open/close stats dicts.
+    Pass the same dict twice when both sides come from the same slice.
+    """
     return (
         f"  {label:<{_LABEL_W}}  "
-        f"{_side_stats(open_sub, 'open')}    "
-        f"{_side_stats(close_sub, 'close')}"
+        f"{_render_side(open_stats, 'open')}    "
+        f"{_render_side(close_stats, 'close')}"
     )
 
 
-def _filter_band(sub: pl.DataFrame, col: str, lo: float, hi: float) -> pl.DataFrame:
-    if hi == float("inf"):
-        return sub.filter(pl.col(col) >= lo)
-    if lo == float("-inf"):
-        return sub.filter(pl.col(col) < hi)
-    return sub.filter((pl.col(col) >= lo) & (pl.col(col) < hi))
+def _tier_sub(s: pl.DataFrame, tier: str) -> pl.DataFrame:
+    """Backtest-summary tier extraction, including the implicit "unknown"
+    bucket for rows with null cal_tier (report.py's by_tier doesn't surface
+    this since report's filter already drops null tiers).
+    """
+    if tier == "unknown":
+        return s.filter(pl.col("cal_tier").is_null())
+    return s.filter(pl.col("cal_tier") == tier)
+
+
+def _edge_sign_sub(s: pl.DataFrame, col: str, yes: bool) -> pl.DataFrame:
+    """Filter to edge>=0 (yes) or edge<0 (no) on the named edge column."""
+    return s.filter(pl.col(col) >= 0) if yes else s.filter(pl.col(col) < 0)
 
 
 def _kind_subsection(
     sub: pl.DataFrame, label_word: str, diag_run_id: str | None
 ) -> list[str]:
-    """Emit HEADLINE / EDGE × TIER / BY EDGE BAND for one kind (picks or non-picks)."""
+    """Emit HEADLINE / EDGE × TIER / BY EDGE BAND / BY MONTH for one kind
+    (picks or non-picks). All numeric aggregation goes through
+    `backtest_views.slice_stats`; this function owns only layout.
+    """
     top, bottom = _wide_header_lines()
     n = len(sub)
     lines: list[str] = [f"--- {label_word.upper()}  ({n:,}) ---"]
 
-    def tier_sub(s: pl.DataFrame, tier: str) -> pl.DataFrame:
-        if tier == "unknown":
-            return s.filter(pl.col("cal_tier").is_null())
-        return s.filter(pl.col("cal_tier") == tier)
-
-    def edge_sub(s: pl.DataFrame, col: str, yes: bool) -> pl.DataFrame:
-        return s.filter(pl.col(col) >= 0) if yes else s.filter(pl.col(col) < 0)
-
     diag_suffix = f"  (tiers from diagnostics {diag_run_id})" if diag_run_id else ""
-    tiers_present = [t for t in _TIER_ORDER if len(tier_sub(sub, t)) > 0]
+    tiers_present = [t for t in _SUMMARY_TIER_ORDER if len(_tier_sub(sub, t)) > 0]
+    if len(_tier_sub(sub, "unknown")) > 0:
+        tiers_present.append("unknown")
 
+    sub_stats = views.slice_stats(sub)
     lines.append("")
     lines.append("HEADLINE")
     lines.append(top)
     lines.append(bottom)
-    lines.append(_wide_row(f"all {label_word}", sub, sub))
+    lines.append(_wide_row(f"all {label_word}", sub_stats, sub_stats))
 
     lines.append("")
     lines.append(f"EDGE × TIER{diag_suffix}")
@@ -534,23 +542,50 @@ def _kind_subsection(
     lines.append(bottom)
     for yes_flag, edge_label in [(True, "yes"), (False, "no")]:
         for tier in tiers_present:
-            t_sub = tier_sub(sub, tier)
-            lines.append(
-                _wide_row(
-                    f"{edge_label} / {tier}",
-                    edge_sub(t_sub, "opening_edge", yes_flag),
-                    edge_sub(t_sub, "closing_edge", yes_flag),
-                )
+            t_sub = _tier_sub(sub, tier)
+            open_stats = views.slice_stats(
+                _edge_sign_sub(t_sub, "opening_edge", yes_flag)
             )
+            close_stats = views.slice_stats(
+                _edge_sign_sub(t_sub, "closing_edge", yes_flag)
+            )
+            lines.append(_wide_row(f"{edge_label} / {tier}", open_stats, close_stats))
 
     lines.append("")
     lines.append("BY EDGE BAND  (all tiers)")
     lines.append(top)
     lines.append(bottom)
-    for label, lo, hi in _EDGE_BANDS:
-        open_sub = _filter_band(sub, "opening_edge", lo, hi)
-        close_sub = _filter_band(sub, "closing_edge", lo, hi)
-        lines.append(_wide_row(label, open_sub, close_sub))
+    for label, lo, hi in _SUMMARY_EDGE_BANDS:
+        # Negative-edge band needs a custom lower bound; views.filter_band
+        # handles `hi is None` (upper-open) but not `lo == -inf`.
+        if lo == float("-inf"):
+            open_sub = sub.filter(pl.col("opening_edge") < hi)
+            close_sub = sub.filter(pl.col("closing_edge") < hi)
+        else:
+            open_sub = views.filter_band(sub, "opening_edge", lo, hi)
+            close_sub = views.filter_band(sub, "closing_edge", lo, hi)
+        lines.append(
+            _wide_row(label, views.slice_stats(open_sub), views.slice_stats(close_sub))
+        )
+
+    # Monthly slices — same slice for both sides since the temporal cut
+    # is independent of which price we're scoring.
+    monthly = views.by_month(sub)
+    if monthly:
+        lines.append("")
+        lines.append("BY MONTH")
+        lines.append(top)
+        lines.append(bottom)
+        for month, stats in monthly:
+            lines.append(_wide_row(month, stats, stats))
+        # Cumulative trailer — open/close running totals at end of window.
+        last_stats = monthly[-1][1]
+        cum_open = last_stats.get("cum_open", 0.0)
+        cum_close = last_stats.get("cum_close", 0.0)
+        lines.append(
+            f"  {'cumulative':<{_LABEL_W}}  open: {cum_open:>+7.1f}u    "
+            f"close: {cum_close:>+7.1f}u"
+        )
 
     return lines
 
@@ -600,20 +635,23 @@ def _format_summary(
 
 
 def print_backtest_summary(csv_path: Path) -> None:
-    """Re-render the summary from an existing CSV (for ad-hoc inspection)."""
-    bets = pl.read_csv(csv_path, infer_schema_length=10000)
-    if "effective_match_date" in bets.columns:
-        bets = bets.with_columns(
-            pl.col("effective_match_date").cast(pl.Date, strict=False)
-        )
+    """Re-render the summary from an existing CSV (for ad-hoc inspection).
+
+    Reads via the shared evaluation helper which pins numeric dtypes but
+    leaves `effective_match_date` as String — `backtest_views.by_month`
+    handles String dates natively via slice(0, 7). A cast(Date, strict=False)
+    here would silently produce all-nulls on the CSV's ISO-with-time format.
+    """
+    from mvp.model.evaluation import read_backtest_csv
+
+    bets = read_backtest_csv(csv_path)
     window = (
         bets["effective_match_date"].min(),
         bets["effective_match_date"].max(),
     )
-    config_stem = csv_path.stem
     text = _format_summary(
         bets,
-        config_stem=config_stem,
+        config_stem=csv_path.stem,
         window=window,
         csv_path=csv_path,
         diag_run_id=None,

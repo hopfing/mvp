@@ -15,6 +15,7 @@ from typing import Any
 import polars as pl
 import yaml
 
+from mvp.model import backtest_views as views
 from mvp.model.evaluation import (
     ModelArtifacts,
     load_artifacts,
@@ -282,34 +283,6 @@ def format_section_c(art: ModelArtifacts) -> str:
     return "\n".join(lines)
 
 
-_TIER_ORDER = ("Optimal", "Border", "Risky", "Danger")
-
-
-def _slice_metrics(sub: pl.DataFrame) -> dict[str, Any]:
-    """Compute the standard betting metrics on a filtered slice."""
-    n = len(sub)
-    if n == 0:
-        return {"n": 0}
-    hit = sub["won"].mean() if "won" in sub.columns else None
-    pnl_o = sub["pnl_open"].sum() if "pnl_open" in sub.columns else None
-    pnl_c = sub["pnl_close"].sum() if "pnl_close" in sub.columns else None
-    roi_o = (pnl_o / n) if pnl_o is not None else None
-    roi_c = (pnl_c / n) if pnl_c is not None else None
-    clv_pos = (sub["clv"] > 0).mean() if "clv" in sub.columns else None
-    avg_clv = sub["clv"].mean() if "clv" in sub.columns else None
-    me_o_pos = (sub["opening_edge"] > 0).mean() if "opening_edge" in sub.columns else None
-    avg_me_o = sub["opening_edge"].mean() if "opening_edge" in sub.columns else None
-    me_c_pos = (sub["closing_edge"] > 0).mean() if "closing_edge" in sub.columns else None
-    avg_me_c = sub["closing_edge"].mean() if "closing_edge" in sub.columns else None
-    return {
-        "n": n, "hit": hit, "pnl_o": pnl_o, "pnl_c": pnl_c,
-        "roi_o": roi_o, "roi_c": roi_c,
-        "clv_pos": clv_pos, "avg_clv": avg_clv,
-        "me_o_pos": me_o_pos, "avg_me_o": avg_me_o,
-        "me_c_pos": me_c_pos, "avg_me_c": avg_me_c,
-    }
-
-
 def _fmt_metrics_row(label: str, m: dict[str, Any], label_w: int = 10) -> str:
     """Render one metrics row aligned with the table header."""
     if m["n"] == 0:
@@ -321,20 +294,23 @@ def _fmt_metrics_row(label: str, m: dict[str, Any], label_w: int = 10) -> str:
         fmt = f"+{w-1}.2f" if signed else f"{w-1}.2f"
         return f"{x * 100:{fmt}}"
 
+    def units(x):
+        return f"{(x or 0.0):>+7.1f}u"
+
     return (
         f"  {label:<{label_w}} "
         f"{m['n']:>6}  "
         f"{pct(m['hit'], 5):>5}  "
-        f"{pct(m['roi_o'], 7, signed=True):>7}  "
-        f"{pct(m['roi_c'], 7, signed=True):>7}  "
-        f"{m['pnl_o']:>+7.1f}u  "
-        f"{m['pnl_c']:>+7.1f}u  "
+        f"{pct(m['roi_open'], 7, signed=True):>7}  "
+        f"{pct(m['roi_close'], 7, signed=True):>7}  "
+        f"{units(m['pnl_open'])}  "
+        f"{units(m['pnl_close'])}  "
         f"{pct(m['clv_pos'], 5):>5}  "
         f"{pct(m['avg_clv'], 6, signed=True):>6}  "
-        f"{pct(m['me_o_pos'], 5):>5}  "
-        f"{pct(m['avg_me_o'], 6, signed=True):>6}  "
-        f"{pct(m['me_c_pos'], 5):>5}  "
-        f"{pct(m['avg_me_c'], 6, signed=True):>6}"
+        f"{pct(m['me_open_pos'], 5):>5}  "
+        f"{pct(m['avg_me_open'], 6, signed=True):>6}  "
+        f"{pct(m['me_close_pos'], 5):>5}  "
+        f"{pct(m['avg_me_close'], 6, signed=True):>6}"
     )
 
 
@@ -357,47 +333,20 @@ def _metrics_header(label: str = "slice", label_w: int = 10) -> list[str]:
     return [header, "  " + "-" * (len(header) - 2)]
 
 
-_EDGE_BANDS = (
-    (">=10%", 0.10, None),
-    ("5-10%", 0.05, 0.10),
-    ("2-5%",  0.02, 0.05),
-    ("0-2%",  0.0,  0.02),
-)
-
-
 def _render_breakdowns(df: pl.DataFrame, edge_col: str, lines: list[str]) -> None:
     """Append by-tier + by-edge-band breakdowns for `df` filtered on `edge_col > 0`."""
     if "cal_tier" in df.columns:
         lines.append("")
         lines.append("  By cal tier:")
         lines.extend(_metrics_header("tier"))
-        for tier in _TIER_ORDER:
-            sub = df.filter(pl.col("cal_tier") == tier)
-            lines.append(_fmt_metrics_row(tier, _slice_metrics(sub)))
-        seen = set(_TIER_ORDER)
-        other_tiers = (
-            df.filter(~pl.col("cal_tier").is_in(list(seen)))
-            .get_column("cal_tier")
-            .unique()
-            .to_list()
-        )
-        for tier in other_tiers:
-            if tier is None:
-                continue
-            sub = df.filter(pl.col("cal_tier") == tier)
-            lines.append(_fmt_metrics_row(str(tier), _slice_metrics(sub)))
-        lines.append(_fmt_metrics_row("ALL", _slice_metrics(df)))
+        for label, stats in views.by_tier(df):
+            lines.append(_fmt_metrics_row(label, stats))
 
     lines.append("")
     lines.append(f"  By edge band ({edge_col}):")
     lines.extend(_metrics_header("band"))
-    for label, lo, hi in _EDGE_BANDS:
-        if hi is None:
-            sub = df.filter(pl.col(edge_col) >= lo)
-        else:
-            sub = df.filter((pl.col(edge_col) >= lo) & (pl.col(edge_col) < hi))
-        lines.append(_fmt_metrics_row(label, _slice_metrics(sub)))
-    lines.append(_fmt_metrics_row("ALL", _slice_metrics(df)))
+    for label, stats in views.by_edge_band(df, edge_col):
+        lines.append(_fmt_metrics_row(label, stats))
 
 
 def format_section_d(art: ModelArtifacts, cfg: dict) -> str:
@@ -492,15 +441,8 @@ def format_section_d(art: ModelArtifacts, cfg: dict) -> str:
 
 def _render_monthly_slices(df: pl.DataFrame, lines: list[str]) -> None:
     """Append a monthly breakdown table (n, hit%, units, ROI, CLV) + cumulative."""
-    monthly = (
-        df.with_columns(
-            pl.col("effective_match_date").cast(pl.Utf8)
-            .str.slice(0, 7).alias("_month")
-        )
-        .filter(pl.col("_month").is_not_null() & (pl.col("_month").str.len_chars() == 7))
-    )
-    months = sorted(m for m in monthly["_month"].unique().to_list() if m is not None)
-    if not months:
+    rows = views.by_month(df)
+    if not rows:
         return
 
     header = (
@@ -512,24 +454,18 @@ def _render_monthly_slices(df: pl.DataFrame, lines: list[str]) -> None:
     lines.append(header)
     lines.append("  " + "-" * (len(header) - 2))
 
-    cum_o = 0.0
-    cum_c = 0.0
-    for m in months:
-        sub = monthly.filter(pl.col("_month") == m)
-        s = _slice_metrics(sub)
-        if s["n"] == 0:
-            continue
-        pnl_o = float(s.get("pnl_o") or 0.0)
-        pnl_c = float(s.get("pnl_c") or 0.0)
-        cum_o += pnl_o
-        cum_c += pnl_c
+    for month, s in rows:
+        pnl_o = float(s.get("pnl_open") or 0.0)
+        pnl_c = float(s.get("pnl_close") or 0.0)
         hit = s.get("hit") or 0.0
-        roi_o = s.get("roi_o") or 0.0
-        roi_c = s.get("roi_c") or 0.0
+        roi_o = s.get("roi_open") or 0.0
+        roi_c = s.get("roi_close") or 0.0
         clv_pos = s.get("clv_pos") or 0.0
         avg_clv = s.get("avg_clv") or 0.0
+        cum_o = s.get("cum_open", 0.0)
+        cum_c = s.get("cum_close", 0.0)
         lines.append(
-            f"  {m:<8}  {s['n']:>5}  {hit * 100:>4.1f}  "
+            f"  {month:<8}  {s['n']:>5}  {hit * 100:>4.1f}  "
             f"{pnl_o:>+7.1f}u  {roi_o * 100:>+6.2f}  "
             f"{pnl_c:>+7.1f}u  {roi_c * 100:>+6.2f}  "
             f"{clv_pos * 100:>4.1f}  {avg_clv * 100:>+6.2f}pp  "
