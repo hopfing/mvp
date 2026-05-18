@@ -20,10 +20,12 @@ from mvp.model.calibration import (
     PlattCalibrator,
     SegmentedIsotonicCalibrator,
     SegmentedPlattCalibrator,
+    fit_calibrator_with_nested_cv,
     make_calibrator,
 )
 from mvp.model.confidence.dimensions import MODIFIERS
 from mvp.model.config import (
+    CalibrationConfig,
     EnsembleParams,
     ExperimentConfig,
     apply_filters,
@@ -420,47 +422,39 @@ class ProductionPredictor:
                     f"Temporal CV ({val_cfg.type}) produced no folds"
                 )
 
-            combined_y_true_oof = np.concatenate(
-                [p["y_true"] for p in fold_predictions]
+            # Nested-CV calibration for honest diagnostics. Each fold's
+            # preds get transformed by a calibrator fit on the OTHER folds —
+            # the cal_tiers sidecar emitted below uses these honest preds
+            # rather than in-sample-fit ones. Critical for high-DoF
+            # calibrators (isotonic) which would otherwise trivially
+            # produce near-zero per-cell residuals via overfit. The
+            # returned deployed calibrator (fit on all OOF) is saved on
+            # the artifact for inference-time use.
+            effective_cal_cfg = cal_cfg if cal_cfg is not None else CalibrationConfig()
+            calibrator = fit_calibrator_with_nested_cv(
+                fold_predictions, effective_cal_cfg
             )
-            combined_y_prob_oof = np.concatenate(
-                [p["y_prob"] for p in fold_predictions]
-            )
-            combined_df_oof = pl.concat(
-                [p["df"] for p in fold_predictions], how="diagonal_relaxed"
-            )
-
-            calibrator = make_calibrator(cal_cfg) if cal_cfg else PlattCalibrator()
-            is_segmented = isinstance(
-                calibrator, (SegmentedPlattCalibrator, SegmentedIsotonicCalibrator)
-            )
-            if is_segmented:
-                calibrator.fit(
-                    combined_y_prob_oof, combined_y_true_oof, combined_df_oof
-                )
+            if isinstance(
+                calibrator,
+                (SegmentedPlattCalibrator, SegmentedIsotonicCalibrator),
+            ):
                 logger.info(
-                    "Segmented %s (temporal CV): %d per-segment fits + global fallback",
+                    "Segmented %s (temporal CV, nested): "
+                    "%d per-segment fits + global fallback",
                     type(calibrator).__name__, calibrator.n_segments,
                 )
-                for pred_dict in fold_predictions:
-                    pred_dict["y_prob"] = calibrator.transform(
-                        pred_dict["y_prob"], pred_dict["df"]
-                    )
-            else:
-                calibrator.fit(combined_y_prob_oof, combined_y_true_oof)
-                if isinstance(calibrator, PlattCalibrator):
-                    logger.info(
-                        "Platt calibrator (temporal CV): slope=%.4f, intercept=%.4f",
-                        calibrator.slope, calibrator.intercept,
-                    )
-                else:
-                    logger.info(
-                        "Isotonic calibrator (temporal CV): n_thresholds=%d, "
-                        "y range=[%.4f, %.4f]",
-                        calibrator.n_thresholds, calibrator.y_min, calibrator.y_max,
-                    )
-                for pred_dict in fold_predictions:
-                    pred_dict["y_prob"] = calibrator.transform(pred_dict["y_prob"])
+            elif isinstance(calibrator, PlattCalibrator):
+                logger.info(
+                    "Platt calibrator (temporal CV, nested): "
+                    "slope=%.4f, intercept=%.4f",
+                    calibrator.slope, calibrator.intercept,
+                )
+            elif isinstance(calibrator, IsotonicCalibrator):
+                logger.info(
+                    "Isotonic calibrator (temporal CV, nested): "
+                    "n_thresholds=%d, y range=[%.4f, %.4f]",
+                    calibrator.n_thresholds, calibrator.y_min, calibrator.y_max,
+                )
 
             calibrated_preds = fold_predictions
         else:
