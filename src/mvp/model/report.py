@@ -464,7 +464,77 @@ def format_section_d(art: ModelArtifacts, cfg: dict) -> str:
         lines.append("-" * 80)
         _render_breakdowns(adj_df, "adj_edge", lines)
 
+    # Monthly temporal slices of RAW filter — answers "is the edge consistent
+    # across the window or front/back-loaded?" Cumulative columns show where
+    # the totals come from row-by-row. Second block filters to Optimal tier
+    # only so we can see whether temporal swings are concentrated in the
+    # sizing-grade cells or driven by the rougher tiers.
+    if "effective_match_date" in raw_df.columns and len(raw_df) > 0:
+        lines.append("")
+        lines.append("-" * 80)
+        lines.append(f"  MONTHLY SLICES (RAW edge filter)    N: {len(raw_df):,}")
+        lines.append("-" * 80)
+        _render_monthly_slices(raw_df, lines)
+
+        if "cal_tier" in raw_df.columns:
+            opt_df = raw_df.filter(pl.col("cal_tier") == "Optimal")
+            if len(opt_df) > 0:
+                lines.append("")
+                lines.append("-" * 80)
+                lines.append(
+                    f"  MONTHLY SLICES (Optimal tier only)    N: {len(opt_df):,}"
+                )
+                lines.append("-" * 80)
+                _render_monthly_slices(opt_df, lines)
+
     return "\n".join(lines)
+
+
+def _render_monthly_slices(df: pl.DataFrame, lines: list[str]) -> None:
+    """Append a monthly breakdown table (n, hit%, units, ROI, CLV) + cumulative."""
+    monthly = (
+        df.with_columns(
+            pl.col("effective_match_date").cast(pl.Utf8)
+            .str.slice(0, 7).alias("_month")
+        )
+        .filter(pl.col("_month").is_not_null() & (pl.col("_month").str.len_chars() == 7))
+    )
+    months = sorted(m for m in monthly["_month"].unique().to_list() if m is not None)
+    if not months:
+        return
+
+    header = (
+        f"  {'month':<8}  {'n':>5}  {'hit%':>5}  "
+        f"{'unitso':>8}  {'ROIo%':>7}  {'unitsc':>8}  {'ROIc%':>7}  "
+        f"{'CLV+%':>5}  {'avgCLV':>7}  {'cum_o':>8}  {'cum_c':>8}"
+    )
+    lines.append("")
+    lines.append(header)
+    lines.append("  " + "-" * (len(header) - 2))
+
+    cum_o = 0.0
+    cum_c = 0.0
+    for m in months:
+        sub = monthly.filter(pl.col("_month") == m)
+        s = _slice_metrics(sub)
+        if s["n"] == 0:
+            continue
+        pnl_o = float(s.get("pnl_o") or 0.0)
+        pnl_c = float(s.get("pnl_c") or 0.0)
+        cum_o += pnl_o
+        cum_c += pnl_c
+        hit = s.get("hit") or 0.0
+        roi_o = s.get("roi_o") or 0.0
+        roi_c = s.get("roi_c") or 0.0
+        clv_pos = s.get("clv_pos") or 0.0
+        avg_clv = s.get("avg_clv") or 0.0
+        lines.append(
+            f"  {m:<8}  {s['n']:>5}  {hit * 100:>4.1f}  "
+            f"{pnl_o:>+7.1f}u  {roi_o * 100:>+6.2f}  "
+            f"{pnl_c:>+7.1f}u  {roi_c * 100:>+6.2f}  "
+            f"{clv_pos * 100:>4.1f}  {avg_clv * 100:>+6.2f}pp  "
+            f"{cum_o:>+7.1f}u  {cum_c:>+7.1f}u"
+        )
 
 
 def run_report(config_path: Path, no_refresh: bool = False) -> str:
