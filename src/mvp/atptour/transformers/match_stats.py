@@ -8,6 +8,7 @@ from pathlib import Path
 import polars as pl
 
 from mvp.atptour.mappings import (
+    CORRUPT_MATCH_STATS,
     map_player_id,
     parse_duration,
     parse_seed_entry,
@@ -66,6 +67,18 @@ class MatchStatsTransformer(BaseJob):
                 continue
 
             record = self._build_record(data, source_file, parsed_at)
+
+            skip_key = (record.tournament_id, record.year, record.match_id)
+            bad_match_uid = CORRUPT_MATCH_STATS.get(skip_key)
+            if bad_match_uid is not None and record.match_uid == bad_match_uid:
+                logger.warning(
+                    "Skipping corrupt match_stats %s (match_uid %s still matches "
+                    "registered bad value)",
+                    source_file,
+                    bad_match_uid,
+                )
+                continue
+
             records.append(record)
 
         if not records:

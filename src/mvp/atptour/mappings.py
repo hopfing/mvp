@@ -84,6 +84,15 @@ SR_ID_MAPPING: dict[str, str] = {
     "SR:COMPETITOR:873695": "B0NO",
 }
 
+# Raw match_stats files that ATP serves with the wrong stats payload. Keyed by
+# (tournament_id, year, match_id); value is the known-bad match_uid the file
+# currently produces. The transformer skips the file only while it still
+# produces that exact match_uid, so an upstream fix flows through naturally.
+CORRUPT_MATCH_STATS: dict[tuple[str, int, str], str] = {
+    # Virtanen/Holmgren metadata wrapping de Jong vs Sun stats; real V/H match is QS124.
+    ("520", 2026, "QS064"): "2026_520_SGL_Q1_H09N_V0AM",
+}
+
 _SR_PREFIX = "SR:COMPETITOR:"
 
 
