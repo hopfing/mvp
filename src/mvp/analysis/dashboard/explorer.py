@@ -23,6 +23,11 @@ _EDGE_SLICES = [("All", None), ("Edge", True), ("No Edge", False)]
 _PROB_BREAKS = [0.6, 0.7, 0.8, 0.9]
 _PROB_LABELS = ["50-60%", "60-70%", "70-80%", "80-90%", "90-100%"]
 
+# Bet Performance keeps these in sync; match the row ordering so model-side
+# and bet-side tier views read identically.
+_TIER_ORDER = ["UnderC", "Optimal", "Border", "Risky", "Danger"]
+_ROUND_ORDER = ["Q1", "Q2", "R128", "R64", "R32", "R16", "QF", "SF", "F"]
+
 
 def _filter_resolved(ds: pl.DataFrame) -> pl.DataFrame:
     """Filter to resolved predictions with available close odds."""
@@ -195,6 +200,116 @@ def _style_breakdown(df: pl.DataFrame, label_col: str, st) -> None:
         .format(
             {"Acc %": "{:.1f}%", "ROI %": "{:+.1f}%", "P&L": "${:+,.2f}"},
             na_rep="\u2014",
+        )
+    )
+    st.dataframe(styled, use_container_width=True, hide_index=True)
+
+
+def _render_cal_tier_breakdown(df: pl.DataFrame, st) -> None:
+    """Per-tier breakdown with All / Edge / No Edge slices.
+
+    Matches the rest of the Model Performance page: each tier gets three
+    rows (All / Edge / No Edge) styled by Edge column.
+    """
+    if "cal_tier" not in df.columns:
+        st.info("No cal_tier data available.")
+        return
+    tiered = df.filter(
+        pl.col("cal_tier").is_not_null() & (pl.col("cal_tier") != "")
+    )
+    if len(tiered) == 0:
+        st.info("No resolved predictions with cal_tier in current filter.")
+        return
+
+    table = _aggregate_by(tiered, "cal_tier", sort_order=_TIER_ORDER).rename(
+        {"cal_tier": "Tier"}
+    )
+    _style_breakdown(table, "Tier", st)
+
+
+def _render_per_cell_table(df: pl.DataFrame, st) -> None:
+    """Per-(round, tier) drill-down with All / Edge / No Edge slices.
+
+    Each (round, tier) cell expands to three rows mirroring the page-wide
+    Edge slicing pattern. Cell Cal is the cell-mean of the cell_cal column.
+    """
+    needed = {"cal_tier", "round"}
+    if not needed.issubset(df.columns):
+        st.info("Missing columns for segment view (need cal_tier, round).")
+        return
+    tiered = df.filter(
+        pl.col("cal_tier").is_not_null() & (pl.col("cal_tier") != "")
+    )
+    if len(tiered) == 0:
+        st.info("No resolved predictions with cal_tier in current filter.")
+        return
+
+    rows: list[dict] = []
+    for rnd in _ROUND_ORDER:
+        for tier in _TIER_ORDER:
+            cell_df = tiered.filter(
+                (pl.col("round") == rnd) & (pl.col("cal_tier") == tier)
+            )
+            if len(cell_df) == 0:
+                continue
+            cell_cal_vals = (
+                cell_df["cell_cal"].cast(pl.Float64, strict=False).drop_nulls()
+                if "cell_cal" in cell_df.columns
+                else None
+            )
+            cell_cal_pp = (
+                round(float(cell_cal_vals.mean()) * 100, 2)
+                if cell_cal_vals is not None and len(cell_cal_vals) > 0
+                else None
+            )
+            for label, flag in _EDGE_SLICES:
+                stats = _flat_bet_stats(
+                    _edge_subset(cell_df, flag), _BEST_CLOSE
+                )
+                stats["Round"] = rnd
+                stats["Tier"] = tier
+                stats["Cell Cal"] = cell_cal_pp
+                stats["Edge"] = label
+                rows.append(stats)
+
+    if not rows:
+        st.info("No (round, tier) cells with data in current filter.")
+        return
+
+    table = pl.DataFrame(rows).select(
+        "Round", "Tier", "Cell Cal", "Edge",
+        "N", "W", "L", "Acc %", "ROI %", "P&L",
+    )
+    pdf = table.to_pandas()
+
+    def _color_negative(val):
+        if isinstance(val, (int, float)) and val < 0:
+            return "color: #e74c3c"
+        return ""
+
+    def _row_style(row):
+        edge = row["Edge"]
+        if edge == "All":
+            return [
+                "font-weight: bold; background-color: rgba(255,255,255,0.08)"
+            ] * len(row)
+        if edge == "Edge":
+            return ["background-color: rgba(46,204,113,0.10)"] * len(row)
+        if edge == "No Edge":
+            return ["background-color: rgba(231,76,60,0.10)"] * len(row)
+        return [""] * len(row)
+
+    styled = (
+        pdf.style.apply(_row_style, axis=1)
+        .applymap(_color_negative, subset=["P&L", "ROI %"])
+        .format(
+            {
+                "Cell Cal": "{:+.2f}pp",
+                "Acc %": "{:.1f}%",
+                "ROI %": "{:+.1f}%",
+                "P&L": "${:+,.2f}",
+            },
+            na_rep="—",
         )
     )
     st.dataframe(styled, use_container_width=True, hide_index=True)
@@ -449,11 +564,7 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
     # --- Charts ---
     _render_charts(resolved, granularity, st)
 
-    # --- Edge band table ---
-    st.subheader("By Edge Band")
-    _render_edge_bands(resolved, st)
-
-    # --- Per-circuit breakdowns ---
+    # --- Per-circuit prep (also used by the breakdowns further down) ---
     from mvp.analysis.scanner import ODDS_BREAKS, ODDS_LABELS
 
     books = _detect_books(resolved.columns)
@@ -488,6 +599,24 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
     circuit_dfs = {
         val: resolved.filter(pl.col("circuit") == val) for val, _ in circuits
     }
+
+    # --- By Calibration Tier / Segment — mirrors Bet Performance sections,
+    # surfaced first so the cells driving sizing decisions are visible above
+    # the line. ---
+    if "cal_tier" in resolved.columns:
+        st.subheader("By Calibration Tier")
+        for val, label in circuits:
+            st.markdown(f"**{label}**")
+            _render_cal_tier_breakdown(circuit_dfs[val], st)
+
+        st.subheader("By Calibration Segment")
+        for val, label in circuits:
+            st.markdown(f"**{label}**")
+            _render_per_cell_table(circuit_dfs[val], st)
+
+    # --- Edge band table ---
+    st.subheader("By Edge Band")
+    _render_edge_bands(resolved, st)
 
     # By Probability Band
     if "prob_band" in resolved.columns:
