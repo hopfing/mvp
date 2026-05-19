@@ -67,6 +67,23 @@ PREDICTION_TOLERANCE = 1e-4
 DRIFT_THRESHOLD = 0.05
 
 
+def _resolve_artifact_path(raw: str | Path) -> Path:
+    """Resolve an artifact path so `data/...` always means the data root.
+
+    production.yaml carries paths like `data/models/X.joblib`. On boxes where
+    MVP_DATA_ROOT points elsewhere (e.g., B:/), a literal `data/` would write
+    to the repo's local dir and miss the shared location the live pipeline
+    reads from.
+    """
+    p = Path(raw)
+    if p.is_absolute():
+        return p
+    parts = p.parts
+    if parts and parts[0] == "data":
+        return get_data_root().joinpath(*parts[1:])
+    return p
+
+
 class ProductionPredictor:
     """Train, save, load, and predict with the production model."""
 
@@ -505,7 +522,7 @@ class ProductionPredictor:
                     )
 
         # Save artifact
-        artifact_path = Path(entry["artifact"])
+        artifact_path = _resolve_artifact_path(entry["artifact"])
         artifact_path.parent.mkdir(parents=True, exist_ok=True)
         artifact_data = {
             "model": model,
@@ -568,7 +585,7 @@ class ProductionPredictor:
         Raises:
             FileNotFoundError: If no trained artifact exists.
         """
-        artifact_path = Path(self.config["active"]["artifact"])
+        artifact_path = _resolve_artifact_path(self.config["active"]["artifact"])
         if not artifact_path.exists():
             raise FileNotFoundError(
                 f"No trained model at {artifact_path}. Run with --train first."
@@ -581,7 +598,7 @@ class ProductionPredictor:
 
     def _load_single(self, entry: dict) -> dict[str, Any]:
         """Load a trained model artifact from an entry dict."""
-        artifact_path = Path(entry["artifact"])
+        artifact_path = _resolve_artifact_path(entry["artifact"])
         if not artifact_path.exists():
             raise FileNotFoundError(f"No trained model at {artifact_path}")
         return joblib.load(artifact_path)
