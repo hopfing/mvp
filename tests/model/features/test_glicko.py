@@ -130,6 +130,46 @@ class TestGlickoMuRaw:
         assert feat.mirror is True
 
 
+class TestGlickoRdXMatchCount:
+    def test_alltime(self):
+        from mvp.model.features.glicko import glicko_rd_x_match_count
+        df = pl.DataFrame({
+            "player_glicko_rd": [100.0],
+            "opp_glicko_rd": [120.0],
+            "player_match_count": [20.0],
+            "opp_match_count": [15.0],
+        })
+        result = df.select(glicko_rd_x_match_count().alias("val"))
+        # (100 + 120) * (20 + 15) = 220 * 35 = 7700
+        assert result["val"][0] == pytest.approx(7700.0)
+
+    def test_windowed(self):
+        from mvp.model.features.glicko import glicko_rd_x_match_count
+        df = pl.DataFrame({
+            "player_glicko_rd": [100.0],
+            "opp_glicko_rd": [120.0],
+            "player_match_count_90d": [5.0],
+            "opp_match_count_90d": [3.0],
+        })
+        result = df.select(glicko_rd_x_match_count(days=90).alias("val"))
+        # (100 + 120) * (5 + 3) = 220 * 8 = 1760
+        assert result["val"][0] == pytest.approx(1760.0)
+
+
+class TestGlickoRdXDaysSinceLastMatch:
+    def test_basic(self):
+        from mvp.model.features.glicko import glicko_rd_x_days_since_last_match
+        df = pl.DataFrame({
+            "player_glicko_rd": [100.0],
+            "opp_glicko_rd": [120.0],
+            "player_days_since_last_match": [10.0],
+            "opp_days_since_last_match": [5.0],
+        })
+        result = df.select(glicko_rd_x_days_since_last_match().alias("val"))
+        # (100 + 120) * (10 + 5) = 220 * 15 = 3300
+        assert result["val"][0] == pytest.approx(3300.0)
+
+
 class TestGlickoFeaturesRegistered:
     def test_all_features_in_registry(self):
         registry = get_registry()
@@ -138,6 +178,7 @@ class TestGlickoFeaturesRegistered:
             "glicko_diff", "glicko_diff_abs", "glicko_diff_sq",
             "glicko_rd_sum", "glicko_rd_diff", "glicko_sigma_diff",
             "glicko_surface_rd_sum", "glicko_diff_x_rd_sum",
+            "glicko_rd_x_match_count", "glicko_rd_x_days_since_last_match",
         ]
         registered = registry.list_features()
         for name in expected:

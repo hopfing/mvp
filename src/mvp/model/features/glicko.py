@@ -139,3 +139,41 @@ def glicko_diff_x_rd_sum() -> pl.Expr:
     diff = pl.col("player_glicko_mu") - pl.col("opp_glicko_mu")
     rd_sum = pl.col("player_glicko_rd") + pl.col("opp_glicko_rd")
     return diff * rd_sum
+
+
+@feature(
+    name="glicko_rd_x_match_count",
+    params=["days"],
+    description="Combined RD multiplied by combined recent-match count",
+    depends_on=["match_count"],
+    mirror=False,
+    match_level=True,
+    impute=0,
+)
+def glicko_rd_x_match_count(days: int | None = None) -> pl.Expr:
+    rd_sum = pl.col("player_glicko_rd") + pl.col("opp_glicko_rd")
+    if days is None:
+        mc_sum = pl.col("player_match_count") + pl.col("opp_match_count")
+    else:
+        mc_sum = (
+            pl.col(f"player_match_count_{days}d")
+            + pl.col(f"opp_match_count_{days}d")
+        )
+    return rd_sum * mc_sum
+
+
+@feature(
+    name="glicko_rd_x_days_since_last_match",
+    description="Combined RD multiplied by combined days-since-last-match",
+    depends_on=["days_since_last_match"],
+    mirror=False,
+    match_level=True,
+    impute=0,
+)
+def glicko_rd_x_days_since_last_match() -> pl.Expr:
+    rd_sum = pl.col("player_glicko_rd") + pl.col("opp_glicko_rd")
+    dsl_sum = (
+        pl.col("player_days_since_last_match")
+        + pl.col("opp_days_since_last_match")
+    )
+    return rd_sum * dsl_sum
