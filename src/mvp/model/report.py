@@ -391,6 +391,34 @@ def format_section_d(art: ModelArtifacts, cfg: dict) -> str:
             (pl.col("opening_edge") + pl.col("cell_cal")).alias("adj_edge")
         )
 
+    if "circuit" not in df.columns:
+        lines.append("")
+        lines.append("  (no circuit column — combined view)")
+        _render_circuit_breakdowns(df, has_cell_cal, lines)
+        return "\n".join(lines)
+
+    for circuit in CIRCUITS:
+        circ_df = df.filter(pl.col("circuit") == circuit)
+        lines.append("")
+        lines.append("=" * 80)
+        lines.append(f"  CIRCUIT: {circuit}  ({len(circ_df):,} model-side rows)")
+        lines.append("=" * 80)
+        if len(circ_df) == 0:
+            lines.append("  No rows for this circuit.")
+            continue
+        _render_circuit_breakdowns(circ_df, has_cell_cal, lines)
+
+    return "\n".join(lines)
+
+
+def _render_circuit_breakdowns(
+    df: pl.DataFrame, has_cell_cal: bool, lines: list[str]
+) -> None:
+    """Append RAW / CAL-ADJUSTED / MONTHLY blocks for a model-side dataframe.
+
+    Caller is responsible for any upstream filtering (scope, model_prob > 0.5,
+    adj_edge derivation, circuit selection).
+    """
     # Raw edge filter
     raw_df = df.filter(pl.col("opening_edge") > 0) if "opening_edge" in df.columns else df
     lines.append("")
@@ -435,8 +463,6 @@ def format_section_d(art: ModelArtifacts, cfg: dict) -> str:
                 )
                 lines.append("-" * 80)
                 _render_monthly_slices(opt_df, lines)
-
-    return "\n".join(lines)
 
 
 def _render_monthly_slices(df: pl.DataFrame, lines: list[str]) -> None:

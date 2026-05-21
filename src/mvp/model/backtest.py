@@ -635,13 +635,39 @@ def _format_summary(
         f"Window: {window[0]} → {window[1]} "
         f"({n_matches:,} matches, {len(bets):,} prediction rows)"
     )
-    consensus_values = sorted(
-        {v for v in bets["consensus"].drop_nulls().to_list()},
-        reverse=True,
-    )
     sections: list[str] = [header]
-    for v in consensus_values:
-        sections.append(_consensus_section(bets, v, diag_run_id))
+
+    if "circuit" in bets.columns:
+        circuits = sorted(
+            {c for c in bets["circuit"].drop_nulls().to_list()}
+        )
+    else:
+        circuits = []
+
+    if not circuits:
+        # Fall back to combined view when circuit column is missing/empty
+        consensus_values = sorted(
+            {v for v in bets["consensus"].drop_nulls().to_list()},
+            reverse=True,
+        )
+        for v in consensus_values:
+            sections.append(_consensus_section(bets, v, diag_run_id))
+    else:
+        bar = "=" * 80
+        for circuit in circuits:
+            circ_bets = bets.filter(pl.col("circuit") == circuit)
+            circ_matches = circ_bets["match_uid"].n_unique()
+            sections.append(
+                f"{bar}\nCIRCUIT = {circuit}  "
+                f"({circ_matches:,} matches, {len(circ_bets):,} rows)\n{bar}"
+            )
+            consensus_values = sorted(
+                {v for v in circ_bets["consensus"].drop_nulls().to_list()},
+                reverse=True,
+            )
+            for v in consensus_values:
+                sections.append(_consensus_section(circ_bets, v, diag_run_id))
+
     sections.append(f"Full CSV: {csv_path}  ({len(bets):,} rows)")
     return "\n\n".join(sections)
 
