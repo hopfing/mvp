@@ -833,6 +833,24 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         help="Override checkpoint write frequency (candidates per checkpoint)",
     )
 
+    # shap-rank subcommand - one-shot SHAP-based feature ranking
+    shap_parser = subparsers.add_parser(
+        "shap-rank",
+        help="SHAP-based one-shot feature ranking on the full feature pool",
+    )
+    shap_parser.add_argument(
+        "config", type=str,
+        help="Discovery config name or path (looks in experiments/ by default)",
+    )
+    shap_parser.add_argument(
+        "--output", "-o", type=str, required=True,
+        help="Output CSV stem (saved to B:/experiments/<stem>_shap_ranking.csv)",
+    )
+    shap_parser.add_argument(
+        "--memory-limit", type=int, default=None,
+        help="Override memory limit %% (0 to disable, default 75)",
+    )
+
     # tune subcommand - hyperparameter optimization
     tune_parser = subparsers.add_parser(
         "tune", help="Tune model hyperparameters"
@@ -1841,6 +1859,55 @@ def _is_serve_discovery(config_path: Path) -> bool:
     if isinstance(features.get("base_point_level_features"), list):
         return True
     return False
+
+
+def cmd_shap_rank(args: argparse.Namespace) -> int:
+    """Run SHAP-based one-shot feature ranking on the full feature pool."""
+    from mvp.common.base_job import get_data_root
+    from mvp.model.discovery.config import DiscoveryConfig
+    from mvp.model.discovery.discover import get_all_feature_specs
+    from mvp.model.discovery.shap_ranking import ShapRanker
+
+    config_path = resolve_config_path(args.config, EXPERIMENT_DIR)
+    if not config_path.exists():
+        raise FileNotFoundError(
+            f"Config file not found: {args.config} (tried {config_path})"
+        )
+
+    config = DiscoveryConfig.from_file(config_path)
+    feat_cfg = config.discovery.features
+
+    all_features = get_all_feature_specs(window_sizes=feat_cfg.window_sizes)
+    if feat_cfg.include:
+        included = set(feat_cfg.include)
+        all_features = [f for f in all_features if f in included]
+    if feat_cfg.compute_only:
+        compute_only = set(feat_cfg.compute_only)
+        all_features = [f for f in all_features if f not in compute_only]
+    if feat_cfg.exclude:
+        excluded = set(feat_cfg.exclude)
+        all_features = [f for f in all_features if f not in excluded]
+
+    logger.info("SHAP ranker: %d features after filtering", len(all_features))
+
+    ranker = ShapRanker(config=config, all_feature_specs=all_features)
+    ranker.precompute()
+    ranking = ranker.rank()
+
+    output_dir = get_data_root() / "experiments"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_stem = args.output.removesuffix(".csv")
+    output_path = output_dir / f"{output_stem}_shap_ranking.csv"
+    ranking.write_csv(output_path)
+
+    print(f"\nSaved SHAP ranking to: {output_path}")
+    print("\nTop 30 features:")
+    for row in ranking.head(30).iter_rows(named=True):
+        print(
+            f"  {row['rank']:>4d}. {row['feature_spec']:<60s} "
+            f"{row['mean_abs_shap']:.4f}"
+        )
+    return 0
 
 
 def cmd_experiment(args: argparse.Namespace) -> int:
@@ -2949,6 +3016,8 @@ def main(args: list[str] | None = None) -> int:
         return cmd_tune_review(parsed)
     elif parsed.command == "experiment":
         return cmd_experiment(parsed)
+    elif parsed.command == "shap-rank":
+        return cmd_shap_rank(parsed)
     elif parsed.command == "live":
         try:
             return cmd_live(parsed)
