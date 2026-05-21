@@ -463,6 +463,22 @@ def elo_grass_specialist() -> pl.Expr:
 
 
 @feature(
+    name="elo_hard_specialist",
+    params=[],
+    description="Hard adjustment minus clay adjustment (hard preference)",
+    mirror=True,
+)
+def elo_hard_specialist() -> pl.Expr:
+    """Hard court specialization indicator.
+
+    Positive = player performs better on hard relative to clay.
+    Inverse of elo_clay_specialist; registered separately so the is_hard_specialist
+    label can apply a top-quartile threshold to it directly.
+    """
+    return pl.col("player_hard_adj") - pl.col("player_clay_adj")
+
+
+@feature(
     name="elo_surface_consistency",
     params=[],
     description="Variance in surface adjustments (low = consistent across surfaces)",
