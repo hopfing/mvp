@@ -293,6 +293,13 @@ class ExperimentRunner:
             "won", "reason", "sets_played", "best_of",
             "circuit", "surface", "round",
         ]
+        # Sequence model needs raw history columns from matches.parquet
+        # so they're available for the per-player history dict.
+        if self.config.model.type == "sequence":
+            from mvp.model.sequence_model import HISTORY_RAW_COLUMNS
+            for col in HISTORY_RAW_COLUMNS:
+                if col not in runner_columns:
+                    runner_columns.append(col)
         for _scope_filt in (
             self.config.data.filters,
             self.config.data.train_filters,
@@ -342,6 +349,15 @@ class ExperimentRunner:
                     & (pl.col("effective_match_date") <= self.config.data.date_range.end)
                     & (pl.col(target_col).is_not_null())
                 )
+
+        # Capture the pre-date-filter df for sequence-model history seeding
+        # (includes pre-config.date_range.start matches that won't be in
+        # train/test but serve as anti-cold-start context).
+        df_history_seed = None
+        if self.config.model.type == "sequence":
+            df_history_seed = df.filter(
+                pl.col("effective_match_date") < self.config.data.date_range.start
+            )
 
         # Filter by ensemble's date range (evaluation window)
         df = df.filter(
@@ -569,6 +585,7 @@ class ExperimentRunner:
                 X_test = (X_test - train_mean) / train_std
 
                 # Append embedding column (integer-encoded, not scaled)
+                vocab: dict[Any, int] | None = None
                 if embedding_col and embedding_col in train_df.columns:
                     # Build vocab from player column (and opp column if dual)
                     player_ids = train_df[embedding_col].to_list()
@@ -608,6 +625,35 @@ class ExperimentRunner:
                         self.config.model.params["opp_embedding_col_idx"] = X_train.shape[1] - 1
 
                     self.config.model.params["n_players"] = len(vocab)
+
+                # Sequence model: append match_date column and resolve identifier
+                # indices. Requires embedding_col + opp_embedding_col in config so
+                # vocab is built above.
+                if self.config.model.type == "sequence":
+                    if vocab is None:
+                        raise ValueError(
+                            "SequenceModel requires embedding_col and opp_embedding_col "
+                            "in model.params so player_id / opp_id can be vocab-encoded "
+                            "(history dict keys must match X column values)"
+                        )
+                    train_dates_int = (
+                        train_df["effective_match_date"].cast(pl.Date).cast(pl.Int64)
+                        .to_numpy().reshape(-1, 1)
+                    )
+                    test_dates_int = (
+                        test_df["effective_match_date"].cast(pl.Date).cast(pl.Int64)
+                        .to_numpy().reshape(-1, 1)
+                    )
+                    X_train = np.hstack([X_train, train_dates_int.astype(np.float64)])
+                    X_test = np.hstack([X_test, test_dates_int.astype(np.float64)])
+                    self.config.model.params["match_date_col_idx"] = X_train.shape[1] - 1
+                    # Alias embedding indices to sequence model's expected names
+                    self.config.model.params["player_id_col_idx"] = (
+                        self.config.model.params["embedding_col_idx"]
+                    )
+                    self.config.model.params["opp_id_col_idx"] = (
+                        self.config.model.params["opp_embedding_col_idx"]
+                    )
 
                 # Compute sample weights if configured
                 train_weights = None
@@ -660,6 +706,38 @@ class ExperimentRunner:
                     self.config.model.type,
                     self.config.model.params or {},
                 )
+                if self.config.model.type == "sequence":
+                    # Build per-fold history DataFrame: pre-start seed (anti-cold-start)
+                    # plus this fold's training rows. Encode player_id with the same
+                    # vocab used for X columns so history dict keys align.
+                    from mvp.model.sequence_model import (
+                        HISTORY_RAW_COLUMNS,
+                        SequenceModel,
+                    )
+                    assert isinstance(model, SequenceModel)
+                    assert vocab is not None  # enforced above
+                    history_parts = [train_df.select(HISTORY_RAW_COLUMNS)]
+                    if df_history_seed is not None and df_history_seed.height > 0:
+                        # The seed df may not have all HISTORY_RAW_COLUMNS if some
+                        # were not part of runner_columns at compute time; but we
+                        # added them above so this should be a no-op.
+                        seed_cols_present = [
+                            c for c in HISTORY_RAW_COLUMNS
+                            if c in df_history_seed.columns
+                        ]
+                        if seed_cols_present == list(HISTORY_RAW_COLUMNS):
+                            history_parts.insert(0, df_history_seed.select(HISTORY_RAW_COLUMNS))
+                    history_df = pl.concat(history_parts)
+                    # Encode player_id via vocab; unknown players → 0 (cold-start at lookup)
+                    encoded = np.array(
+                        [vocab.get(p, 0) for p in history_df["player_id"].to_list()],
+                        dtype=np.int64,
+                    )
+                    history_df = history_df.with_columns(
+                        pl.Series("player_id", encoded)
+                    )
+                    model.set_history_features(history_df)
+
                 if is_ensemble and base_model_specs is not None:
                     assert isinstance(model, EnsembleModel)
                     model.configure(base_model_specs)

@@ -723,5 +723,8 @@ def get_model(model_type: str, params: dict[str, Any]) -> BaseModel:
         return EnsembleModel(params)
     elif model_type == "neural_net":
         return NeuralNetModel(params)
+    elif model_type == "sequence":
+        from mvp.model.sequence_model import SequenceModel
+        return SequenceModel(params)
     else:
         raise ValueError(f"Unknown model type: {model_type}")

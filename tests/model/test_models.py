@@ -37,6 +37,14 @@ class TestModelFactory:
         assert hasattr(model, "fit")
         assert hasattr(model, "predict_proba")
 
+    def test_get_sequence_model(self):
+        """Get sequence model wrapper."""
+        model = get_model("sequence", {"seq_len": 5, "encoder_hidden": 16})
+        assert model is not None
+        assert hasattr(model, "fit")
+        assert hasattr(model, "predict_proba")
+        assert hasattr(model, "set_history_features")
+
     def test_unknown_model_raises(self):
         """Unknown model type raises ValueError."""
         with pytest.raises(ValueError, match="Unknown model type"):
