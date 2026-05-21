@@ -529,6 +529,25 @@ class FeatureEngine:
         }
         self._save_manifest()
 
+    def _compute_and_cache_feature(
+        self,
+        df: pl.DataFrame,
+        base_name: str,
+        cache_spec: str,
+        col_name: str,
+        params: dict[str, Any],
+        cache_key: str,
+    ) -> pl.DataFrame:
+        """Compute a feature's expression, add to df, cache it, log timing."""
+        feature_def = self._registry.get(base_name)
+        t0 = time.perf_counter()
+        expr = feature_def.func(**params)
+        df = df.with_columns(expr.alias(col_name))
+        elapsed = time.perf_counter() - t0
+        logger.info("Computed %s in %.2fs", cache_spec, elapsed)
+        self._cache_feature(cache_spec, df, [col_name], cache_key)
+        return df
+
     def _batch_join_cached(
         self, df: pl.DataFrame, cache_specs: list[str]
     ) -> pl.DataFrame:
@@ -765,10 +784,9 @@ class FeatureEngine:
                 param_str = ",".join(f"{k}={v}" for k, v in params.items())
                 cache_spec = f"{base_name}({param_str})"
             if not self._is_cached(cache_spec, cache_key):
-                feature_def = self._registry.get(base_name)
-                expr = feature_def.func(**params)
-                df = df.with_columns(expr.alias(col_name))
-                self._cache_feature(cache_spec, df, [col_name], cache_key)
+                df = self._compute_and_cache_feature(
+                    df, base_name, cache_spec, col_name, params, cache_key,
+                )
 
         if match_level_specs:
             logger.info("Phase 0: %d match-level cached", len(match_level_specs))
@@ -799,10 +817,9 @@ class FeatureEngine:
         for i in range(0, len(uncached_base), batch_size):
             batch = uncached_base[i : i + batch_size]
             for base_name, cache_spec, player_col, params in batch:
-                feature_def = self._registry.get(base_name)
-                expr = feature_def.func(**params)
-                df = df.with_columns(expr.alias(player_col))
-                self._cache_feature(cache_spec, df, [player_col], cache_key)
+                df = self._compute_and_cache_feature(
+                    df, base_name, cache_spec, player_col, params, cache_key,
+                )
             # Drop computed columns before next batch, but preserve raw
             # parquet columns that other features may reference directly
             cols_to_drop = [
@@ -874,9 +891,9 @@ class FeatureEngine:
             if player_dep_cols:
                 df = self._mirror_features(df, player_dep_cols)
 
-            expr = feature_def.func(**params)
-            df = df.with_columns(expr.alias(col_name))
-            self._cache_feature(cache_spec, df, [col_name], cache_key)
+            df = self._compute_and_cache_feature(
+                df, base_name, cache_spec, col_name, params, cache_key,
+            )
 
             # Drop everything we added
             added_cols = [c for c in df.columns if c not in dep_cols_before]
@@ -926,9 +943,9 @@ class FeatureEngine:
             if player_dep_cols:
                 df = self._mirror_features(df, player_dep_cols)
 
-            expr = feature_def.func(**params)
-            df = df.with_columns(expr.alias(col_name))
-            self._cache_feature(cache_spec, df, [col_name], cache_key)
+            df = self._compute_and_cache_feature(
+                df, base_name, cache_spec, col_name, params, cache_key,
+            )
             added_cols = [c for c in df.columns if c not in dep_cols_before]
             if added_cols:
                 df = df.drop(added_cols)
@@ -1137,10 +1154,9 @@ class FeatureEngine:
 
         df = self._batch_join_cached(df, cached_specs_p0)
         for base_name, cache_spec, col_name, params in uncached_p0:
-            feature_def = self._registry.get(base_name)
-            expr = feature_def.func(**params)
-            df = df.with_columns(expr.alias(col_name))
-            self._cache_feature(cache_spec, df, [col_name], cache_key)
+            df = self._compute_and_cache_feature(
+                df, base_name, cache_spec, col_name, params, cache_key,
+            )
 
         if match_level_specs:
             logger.info(
@@ -1177,10 +1193,9 @@ class FeatureEngine:
 
         df = self._batch_join_cached(df, cached_specs_p1)
         for base_name, cache_spec, player_col, params in uncached_p1:
-            feature_def = self._registry.get(base_name)
-            expr = feature_def.func(**params)
-            df = df.with_columns(expr.alias(player_col))
-            self._cache_feature(cache_spec, df, [player_col], cache_key)
+            df = self._compute_and_cache_feature(
+                df, base_name, cache_spec, player_col, params, cache_key,
+            )
 
         logger.info(
             "Phase 1: %d base features (%d cached, %d computed)",
@@ -1252,9 +1267,9 @@ class FeatureEngine:
             ]
             if derived_deps_to_mirror:
                 df = self._mirror_features(df, derived_deps_to_mirror)
-            expr = feature_def.func(**params)
-            df = df.with_columns(expr.alias(col_name))
-            self._cache_feature(cache_spec, df, [col_name], cache_key)
+            df = self._compute_and_cache_feature(
+                df, base_name, cache_spec, col_name, params, cache_key,
+            )
             computed_player_cols.add(col_name)
 
         if derived_specs:
@@ -1291,10 +1306,9 @@ class FeatureEngine:
 
         df = self._batch_join_cached(df, cached_specs_p5)
         for base_name, cache_spec, col_name, params in uncached_p5:
-            feature_def = self._registry.get(base_name)
-            expr = feature_def.func(**params)
-            df = df.with_columns(expr.alias(col_name))
-            self._cache_feature(cache_spec, df, [col_name], cache_key)
+            df = self._compute_and_cache_feature(
+                df, base_name, cache_spec, col_name, params, cache_key,
+            )
             computed_player_cols.add(col_name)
 
         # Phase 6: compute match-level derived features (no prefix, has depends_on).
@@ -1318,10 +1332,9 @@ class FeatureEngine:
 
         df = self._batch_join_cached(df, cached_specs_p6)
         for base_name, cache_spec, col_name, params in uncached_p6:
-            feature_def = self._registry.get(base_name)
-            expr = feature_def.func(**params)
-            df = df.with_columns(expr.alias(col_name))
-            self._cache_feature(cache_spec, df, [col_name], cache_key)
+            df = self._compute_and_cache_feature(
+                df, base_name, cache_spec, col_name, params, cache_key,
+            )
 
         elapsed = time.perf_counter() - t0
         logger.info("Feature computation complete in %.1fs", elapsed)
