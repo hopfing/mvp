@@ -28,6 +28,24 @@ def _rolling(expr: pl.Expr, days: int | None = None) -> pl.Expr:
     )
 
 
+_THRESHOLD_WINDOW_DAYS = 730
+
+
+def _rolling_threshold(col: str, q: float) -> pl.Expr:
+    """Time-aware threshold: rolling quantile of `col` over past 730d, excluding current row.
+
+    Replaces population-wide `.quantile(q)` to avoid future-data leakage in label
+    and matchup thresholds. Each row's threshold is computed from the prior 730d
+    of the dataset's distribution of `col` (across all rows / all players).
+    """
+    return pl.col(col).rolling_quantile_by(
+        by=_DATE,
+        window_size=f"{_THRESHOLD_WINDOW_DAYS}d",
+        closed="left",
+        quantile=q,
+    )
+
+
 # =============================================================================
 # Layer 1: Raw Style Metrics — Serve (match_beats)
 # =============================================================================
@@ -552,8 +570,8 @@ for _m in _STYLE_MATCHUP_PAIRS:
     mirror=True,
 )
 def is_power_server() -> pl.Expr:
-    speed_p50 = pl.col("player_style_avg_1st_serve_speed").quantile(0.50)
-    ace_p50 = pl.col("player_svc_ace_pct").quantile(0.50)
+    speed_p50 = _rolling_threshold("player_style_avg_1st_serve_speed", 0.50)
+    ace_p50 = _rolling_threshold("player_svc_ace_pct", 0.50)
     return (
         (pl.col("player_style_avg_1st_serve_speed") > speed_p50)
         & (pl.col("player_svc_ace_pct") > ace_p50)
@@ -568,8 +586,8 @@ def is_power_server() -> pl.Expr:
     mirror=True,
 )
 def is_placement_server() -> pl.Expr:
-    speed_p50 = pl.col("player_style_avg_1st_serve_speed").quantile(0.50)
-    ace_p50 = pl.col("player_svc_ace_pct").quantile(0.50)
+    speed_p50 = _rolling_threshold("player_style_avg_1st_serve_speed", 0.50)
+    ace_p50 = _rolling_threshold("player_svc_ace_pct", 0.50)
     return (
         (pl.col("player_svc_ace_pct") > ace_p50)
         & (pl.col("player_style_avg_1st_serve_speed") <= speed_p50)
@@ -584,9 +602,9 @@ def is_placement_server() -> pl.Expr:
     mirror=True,
 )
 def is_counterpuncher() -> pl.Expr:
-    rally_p50 = pl.col("player_style_long_rally_win_pct").quantile(0.50)
-    ue_p50 = pl.col("player_style_ue_rate").quantile(0.50)
-    ret_p50 = pl.col("player_ret_first_serve_win_pct").quantile(0.50)
+    rally_p50 = _rolling_threshold("player_style_long_rally_win_pct", 0.50)
+    ue_p50 = _rolling_threshold("player_style_ue_rate", 0.50)
+    ret_p50 = _rolling_threshold("player_ret_first_serve_win_pct", 0.50)
     return (
         (pl.col("player_style_long_rally_win_pct") > rally_p50)
         & (pl.col("player_style_ue_rate") < ue_p50)
@@ -602,9 +620,9 @@ def is_counterpuncher() -> pl.Expr:
     mirror=True,
 )
 def is_aggressive_baseliner() -> pl.Expr:
-    wr_p50 = pl.col("player_style_winner_rate").quantile(0.50)
-    wur_p50 = pl.col("player_style_winner_ue_ratio").quantile(0.50)
-    gswr_p50 = pl.col("player_style_ground_stroke_winner_rate").quantile(0.50)
+    wr_p50 = _rolling_threshold("player_style_winner_rate", 0.50)
+    wur_p50 = _rolling_threshold("player_style_winner_ue_ratio", 0.50)
+    gswr_p50 = _rolling_threshold("player_style_ground_stroke_winner_rate", 0.50)
     return (
         (pl.col("player_style_winner_rate") > wr_p50)
         & (pl.col("player_style_winner_ue_ratio") > wur_p50)
@@ -620,7 +638,7 @@ def is_aggressive_baseliner() -> pl.Expr:
     mirror=True,
 )
 def is_net_rusher() -> pl.Expr:
-    p75 = pl.col("player_style_net_approach_frequency").quantile(0.75)
+    p75 = _rolling_threshold("player_style_net_approach_frequency", 0.75)
     return (pl.col("player_style_net_approach_frequency") > p75).cast(pl.Int8)
 
 
@@ -632,8 +650,20 @@ def is_net_rusher() -> pl.Expr:
     mirror=True,
 )
 def is_clay_specialist() -> pl.Expr:
-    p75 = pl.col("player_elo_clay_specialist").quantile(0.75)
+    p75 = _rolling_threshold("player_elo_clay_specialist", 0.75)
     return (pl.col("player_elo_clay_specialist") > p75).cast(pl.Int8)
+
+
+@feature(
+    name="is_hard_specialist",
+    params=[],
+    description="Strong hard Elo adjustment (existing elo_hard_specialist > threshold)",
+    depends_on=["elo_hard_specialist"],
+    mirror=True,
+)
+def is_hard_specialist() -> pl.Expr:
+    p75 = _rolling_threshold("player_elo_hard_specialist", 0.75)
+    return (pl.col("player_elo_hard_specialist") > p75).cast(pl.Int8)
 
 
 @feature(
@@ -644,8 +674,8 @@ def is_clay_specialist() -> pl.Expr:
     mirror=True,
 )
 def is_clutch_player() -> pl.Expr:
-    bp_save_p50 = pl.col("player_svc_bp_save_pct").quantile(0.50)
-    bp_conv_p50 = pl.col("player_ret_bp_convert_pct").quantile(0.50)
+    bp_save_p50 = _rolling_threshold("player_svc_bp_save_pct", 0.50)
+    bp_conv_p50 = _rolling_threshold("player_ret_bp_convert_pct", 0.50)
     return (
         (pl.col("player_svc_bp_save_pct") > bp_save_p50)
         & (pl.col("player_ret_bp_convert_pct") > bp_conv_p50)
@@ -665,7 +695,7 @@ def is_clutch_player() -> pl.Expr:
     mirror=True,
 )
 def matchup_power_serve_vs_strong_return() -> pl.Expr:
-    ret_p75 = pl.col("opp_ret_first_serve_win_pct").quantile(0.75)
+    ret_p75 = _rolling_threshold("opp_ret_first_serve_win_pct", 0.75)
     return (
         (pl.col("player_is_power_server") == 1)
         & (pl.col("opp_ret_first_serve_win_pct") > ret_p75)
@@ -680,7 +710,7 @@ def matchup_power_serve_vs_strong_return() -> pl.Expr:
     mirror=True,
 )
 def matchup_placement_serve_vs_strong_return() -> pl.Expr:
-    ret_p75 = pl.col("opp_ret_first_serve_win_pct").quantile(0.75)
+    ret_p75 = _rolling_threshold("opp_ret_first_serve_win_pct", 0.75)
     return (
         (pl.col("player_is_placement_server") == 1)
         & (pl.col("opp_ret_first_serve_win_pct") > ret_p75)
@@ -753,7 +783,7 @@ def matchup_both_counterpunchers() -> pl.Expr:
     mirror=True,
 )
 def matchup_net_rusher_vs_passer() -> pl.Expr:
-    pass_p75 = pl.col("opp_style_passing_frequency").quantile(0.75)
+    pass_p75 = _rolling_threshold("opp_style_passing_frequency", 0.75)
     return (
         (pl.col("player_is_net_rusher") == 1)
         & (pl.col("opp_style_passing_frequency") > pass_p75)
