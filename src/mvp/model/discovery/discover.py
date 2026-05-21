@@ -377,6 +377,13 @@ class FeatureDiscovery:
                 window_sizes=feat_cfg.window_sizes
             )
 
+        if feat_cfg.paramed_only:
+            n_before = len(all_features)
+            all_features = [f for f in all_features if "(days=" in f]
+            self._log(
+                f"paramed_only=True: filtered {n_before} → {len(all_features)} features (kept only specs with days param)"
+            )
+
         if feat_cfg.include:
             included = set(feat_cfg.include)
             all_features = [f for f in all_features if f in included]

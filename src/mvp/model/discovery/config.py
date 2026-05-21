@@ -51,6 +51,7 @@ class DiscoveryFeaturesConfig(BaseModel):
     min: int = 5
     max: int | None = None
     window_sizes: list[int] | None = None  # None = all defaults, 0 = alltime variant
+    paramed_only: bool = False  # When True, restrict candidate pool to features that take a `days` param
 
 
 class DiscoveryOptions(BaseModel):
