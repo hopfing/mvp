@@ -63,7 +63,7 @@ DEFAULT_SEARCH_SPACES: dict[str, dict[str, dict[str, Any]]] = {
         "scale_pos_weight": {"type": "float", "low": 0.9, "high": 1.1},
     },
     "logistic": {
-        "C": {"type": "float", "low": 0.01, "high": 10.0, "log": True},
+        "C": {"type": "float", "low": 0.0001, "high": 10.0, "log": True},
     },
     "random_forest": {
         "n_estimators": {"type": "int", "low": 100, "high": 500, "step": 50},
