@@ -1242,6 +1242,16 @@ class FeatureEngine:
         df = self._batch_join_cached(df, cached_specs_p3)
         for base_name, cache_spec, col_name, params in uncached_p3:
             feature_def = self._registry.get(base_name)
+            # Mirror player_<derived_dep> to opp_<derived_dep> so the feature's
+            # body can reference opp_ of derived deps. Phase 4's mirror runs
+            # after this loop, but matchup-style features (mirror=True with
+            # derived deps) need opp_<dep> available at compute time.
+            derived_deps_to_mirror = [
+                f"player_{dep}" for dep in feature_def.depends_on
+                if dep in opp_derived_bases
+            ]
+            if derived_deps_to_mirror:
+                df = self._mirror_features(df, derived_deps_to_mirror)
             expr = feature_def.func(**params)
             df = df.with_columns(expr.alias(col_name))
             self._cache_feature(cache_spec, df, [col_name], cache_key)
