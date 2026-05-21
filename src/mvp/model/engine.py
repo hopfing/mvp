@@ -554,7 +554,9 @@ class FeatureEngine:
         """Resolve feature dependencies and return ordered list.
 
         Ensures that if feature A depends on feature B, B is computed first.
-        Dependencies inherit the same parameters (e.g., days) from the dependent.
+        Dependencies inherit only those parameters the dep itself accepts —
+        a parameterized feature can depend on a non-parameterized one and
+        the param will not be propagated.
 
         For diff-style features that need both player and opponent versions,
         dependencies are added for both prefixes.
@@ -579,9 +581,21 @@ class FeatureEngine:
             # Recursively add dependencies first
             # Add BOTH player_ and opp_ versions since diff features need both
             for dep_name in feature_def.depends_on:
+                dep_def = self._registry.get(dep_name)
+                # Only propagate params the dep accepts. This allows a
+                # parameterized feature (e.g. params=["days"]) to depend on
+                # a non-parameterized one without crashing the dep's func.
+                if params:
+                    dep_params = {
+                        k: v for k, v in params.items() if k in dep_def.params
+                    }
+                else:
+                    dep_params = {}
                 for dep_prefix in ["player", "opp"]:
-                    if params:
-                        param_str = ", ".join(f"{k}={v}" for k, v in params.items())
+                    if dep_params:
+                        param_str = ", ".join(
+                            f"{k}={v}" for k, v in dep_params.items()
+                        )
                         dep_spec = f"{dep_prefix}_{dep_name}({param_str})"
                     else:
                         dep_spec = f"{dep_prefix}_{dep_name}"
@@ -833,14 +847,21 @@ class FeatureEngine:
             # Load dependencies from cache onto df
             dep_cache_specs = []
             for dep_name in feature_def.depends_on:
-                for dep_prefix in ["player", "opp"]:
-                    if params:
-                        param_str = ",".join(f"{k}={v}" for k, v in params.items())
-                    player_dep_spec = f"player_{dep_name}"
-                    if params:
-                        player_dep_spec = f"player_{dep_name}({param_str})"
-                    if player_dep_spec not in dep_cache_specs:
-                        dep_cache_specs.append(player_dep_spec)
+                dep_def = self._registry.get(dep_name)
+                if params:
+                    dep_params = {
+                        k: v for k, v in params.items() if k in dep_def.params
+                    }
+                else:
+                    dep_params = {}
+                player_dep_spec = f"player_{dep_name}"
+                if dep_params:
+                    param_str = ",".join(
+                        f"{k}={v}" for k, v in dep_params.items()
+                    )
+                    player_dep_spec = f"player_{dep_name}({param_str})"
+                if player_dep_spec not in dep_cache_specs:
+                    dep_cache_specs.append(player_dep_spec)
 
             # Join deps, compute, cache, drop
             dep_cols_before = set(df.columns)
@@ -882,13 +903,21 @@ class FeatureEngine:
             dep_cols_before = set(df.columns)
             dep_cache_specs = []
             for dep_name in feature_def.depends_on:
-                for dep_prefix in ["player", "opp"]:
-                    player_dep_spec = f"player_{dep_name}"
-                    if params:
-                        param_str = ",".join(f"{k}={v}" for k, v in params.items())
-                        player_dep_spec = f"player_{dep_name}({param_str})"
-                    if player_dep_spec not in dep_cache_specs:
-                        dep_cache_specs.append(player_dep_spec)
+                dep_def = self._registry.get(dep_name)
+                if params:
+                    dep_params = {
+                        k: v for k, v in params.items() if k in dep_def.params
+                    }
+                else:
+                    dep_params = {}
+                player_dep_spec = f"player_{dep_name}"
+                if dep_params:
+                    param_str = ",".join(
+                        f"{k}={v}" for k, v in dep_params.items()
+                    )
+                    player_dep_spec = f"player_{dep_name}({param_str})"
+                if player_dep_spec not in dep_cache_specs:
+                    dep_cache_specs.append(player_dep_spec)
             df = self._batch_join_cached(df, dep_cache_specs)
             player_dep_cols = [
                 c for c in df.columns
