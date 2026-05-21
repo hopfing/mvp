@@ -454,6 +454,13 @@ class FeatureDiscovery:
                 )
             elif step.get("action") == "stop":
                 self._log(f"  Stopped: {step.get('reason', 'no improvement')}")
+                best_cand = step.get("best_candidate")
+                best_cand_metric = step.get("best_candidate_metric")
+                if best_cand is not None and best_cand_metric is not None:
+                    self._log(
+                        f"  Best rejected candidate: {best_cand} "
+                        f"-> {self.config.discovery.metric}={best_cand_metric:.4f}"
+                    )
 
         return result
 

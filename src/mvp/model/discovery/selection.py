@@ -249,11 +249,20 @@ class FeatureSelector:
                     else f"improvement {delta:.6f} < min_delta {self.min_delta:.6f}"
                 )
                 logger.info("FS halting: %s", reason)
+                if best_feature is not None:
+                    logger.info(
+                        "  best rejected candidate: %s -> %.4f",
+                        best_feature, best_feature_metric,
+                    )
                 history.append({
                     "step": len(history) + 1,
                     "action": "stop",
                     "reason": reason,
                     "metric": best_metric,
+                    "best_candidate": best_feature,
+                    "best_candidate_metric": (
+                        best_feature_metric if best_feature is not None else None
+                    ),
                 })
                 break
 
