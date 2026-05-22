@@ -22,7 +22,7 @@ the dataset-wide quantile previously used (leakage was fixed alongside this modu
 
 import polars as pl
 
-from mvp.model.primitives import cumulative_sum
+from mvp.model.primitives import cumulative_sum, rolling_sum
 from mvp.model.registry import feature, register_diff
 
 # Universal style labels — apply cross-surface; no surface conditioning.
@@ -69,7 +69,10 @@ def _build_universal(label: str):
     return matches_vs, wins_vs, losses_vs, winpct_vs
 
 
-def _surface_aligned_cum(value_per_match: pl.Expr) -> pl.Expr:
+def _surface_aligned_cum(
+    value_per_match: pl.Expr,
+    days: int | None = None,
+) -> pl.Expr:
     """Cumulative count of value_per_match, restricted to prior matches where:
 
       - opp was a specialist of the CURRENT match's surface, AND
@@ -77,6 +80,9 @@ def _surface_aligned_cum(value_per_match: pl.Expr) -> pl.Expr:
 
     Returns a per-row value that varies based on the current row's surface.
     Non-zero only on hard or clay matches; grass / indoor / carpet returns 0.
+
+    If `days` is given, accumulation is over the last `days` days only (rolling);
+    otherwise career-cumulative.
     """
     hard_mask = (
         pl.col("opp_is_hard_specialist").cast(pl.Int64)
@@ -87,8 +93,12 @@ def _surface_aligned_cum(value_per_match: pl.Expr) -> pl.Expr:
         * (pl.col("surface") == "Clay").cast(pl.Int64)
     )
 
-    cum_hard = cumulative_sum(value_per_match * hard_mask, group_by="player_id")
-    cum_clay = cumulative_sum(value_per_match * clay_mask, group_by="player_id")
+    if days is None:
+        cum_hard = cumulative_sum(value_per_match * hard_mask, group_by="player_id")
+        cum_clay = cumulative_sum(value_per_match * clay_mask, group_by="player_id")
+    else:
+        cum_hard = rolling_sum(value_per_match * hard_mask, days=days, group_by="player_id")
+        cum_clay = rolling_sum(value_per_match * clay_mask, days=days, group_by="player_id")
 
     return (
         pl.when(pl.col("surface") == "Hard").then(cum_hard)
@@ -102,21 +112,21 @@ def _build_surface_specialist_composite():
 
     For each, the value for row R is computed against prior matches where the opp was a
     specialist of R's surface AND the prior match was on R's surface. On grass/indoor/
-    carpet matches the value is 0.
+    carpet matches the value is 0. `days` selects the rolling window; None = career.
     """
 
-    def matches_vs() -> pl.Expr:
-        return _surface_aligned_cum(pl.lit(1, dtype=pl.Int64))
+    def matches_vs(days: int | None = None) -> pl.Expr:
+        return _surface_aligned_cum(pl.lit(1, dtype=pl.Int64), days=days)
 
-    def wins_vs() -> pl.Expr:
-        return _surface_aligned_cum(pl.col("won").cast(pl.Int64))
+    def wins_vs(days: int | None = None) -> pl.Expr:
+        return _surface_aligned_cum(pl.col("won").cast(pl.Int64), days=days)
 
-    def losses_vs() -> pl.Expr:
-        return _surface_aligned_cum(1 - pl.col("won").cast(pl.Int64))
+    def losses_vs(days: int | None = None) -> pl.Expr:
+        return _surface_aligned_cum(1 - pl.col("won").cast(pl.Int64), days=days)
 
-    def winpct_vs() -> pl.Expr:
-        cum_w = _surface_aligned_cum(pl.col("won").cast(pl.Int64))
-        cum_n = _surface_aligned_cum(pl.lit(1, dtype=pl.Int64))
+    def winpct_vs(days: int | None = None) -> pl.Expr:
+        cum_w = _surface_aligned_cum(pl.col("won").cast(pl.Int64), days=days)
+        cum_n = _surface_aligned_cum(pl.lit(1, dtype=pl.Int64), days=days)
         return pl.when(cum_n > 0).then(cum_w / cum_n).otherwise(0.5)
 
     return matches_vs, wins_vs, losses_vs, winpct_vs
@@ -164,42 +174,46 @@ _matches_ssp, _wins_ssp, _losses_ssp, _winpct_ssp = _build_surface_specialist_co
 
 feature(
     name="matches_vs_surface_specialists",
-    params=[], mirror=True, impute=0,
+    params=["days"], mirror=True, impute=0,
     depends_on=["is_hard_specialist", "is_clay_specialist"],
     description=(
-        "Career matches vs surface specialists in same-surface conditions: "
-        "counts prior matches where opp was a specialist of the CURRENT match's "
-        "surface AND the prior match was on that surface. 0 on non-hard/clay matches."
+        "Matches vs surface specialists in same-surface conditions: counts prior "
+        "matches where opp was a specialist of the CURRENT match's surface AND "
+        "the prior match was on that surface. 0 on non-hard/clay matches. "
+        "`days` = rolling window in days; omit for career-cumulative."
     ),
 )(_matches_ssp)
 
 feature(
     name="wins_vs_surface_specialists",
-    params=[], mirror=True, impute=0,
+    params=["days"], mirror=True, impute=0,
     depends_on=["is_hard_specialist", "is_clay_specialist"],
     description=(
-        "Career wins vs surface specialists in same-surface conditions "
-        "(see matches_vs_surface_specialists for gating logic)."
+        "Wins vs surface specialists in same-surface conditions; `days` = "
+        "rolling window, omit for career. See matches_vs_surface_specialists "
+        "for gating logic."
     ),
 )(_wins_ssp)
 
 feature(
     name="losses_vs_surface_specialists",
-    params=[], mirror=True, impute=0,
+    params=["days"], mirror=True, impute=0,
     depends_on=["is_hard_specialist", "is_clay_specialist"],
     description=(
-        "Career losses vs surface specialists in same-surface conditions "
-        "(see matches_vs_surface_specialists for gating logic)."
+        "Losses vs surface specialists in same-surface conditions; `days` = "
+        "rolling window, omit for career. See matches_vs_surface_specialists "
+        "for gating logic."
     ),
 )(_losses_ssp)
 
 feature(
     name="winpct_vs_surface_specialists",
-    params=[], mirror=True, impute=0.5,
+    params=["days"], mirror=True, impute=0.5,
     depends_on=["is_hard_specialist", "is_clay_specialist"],
     description=(
-        "Career win pct vs surface specialists in same-surface conditions; "
-        "impute 0.5 when no prior. See matches_vs_surface_specialists for gating."
+        "Win pct vs surface specialists in same-surface conditions; impute 0.5 "
+        "when no prior. `days` = rolling window, omit for career. See "
+        "matches_vs_surface_specialists for gating."
     ),
 )(_winpct_ssp)
 

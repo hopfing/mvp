@@ -46,7 +46,7 @@ class TestStyleHistoryRegistration:
             name = f"{stat}_vs_surface_specialists"
             feat = registry.get(name)
             assert feat.mirror is True
-            assert feat.params == []
+            assert feat.params == ["days"]
             assert "is_hard_specialist" in feat.depends_on
             assert "is_clay_specialist" in feat.depends_on
             if stat == "winpct":
@@ -64,7 +64,7 @@ class TestStyleHistoryRegistration:
         for stat in STATS:
             feat = registry.get(f"{stat}_vs_surface_specialists_diff")
             assert feat.mirror is False
-            assert feat.params == []
+            assert feat.params == ["days"]
 
     def test_total_count(self):
         registry = get_registry()
