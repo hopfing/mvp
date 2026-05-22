@@ -167,17 +167,21 @@ def format_leaderboard(
             auc = ua.get("holdout_roc_auc", float("nan"))
             acc = ua.get("holdout_accuracy", float("nan"))
             cal = ua.get("holdout_calibration_error", float("nan"))
+            cal_max = ua.get("holdout_calibration_error_max", float("nan"))
+            oc_max = ua.get("holdout_overconfidence_max", float("nan"))
             scal = ua.get("holdout_signed_calibration", float("nan"))
             err80 = ua.get("holdout_error_rate_80plus", float("nan"))
             lines.append(
                 f"  {i + 1:>2}. LL={ll:.4f}  brier={brier:.4f}  "
                 f"AUC={auc:.3f}  acc={acc:.3f}  cal={cal * 100:.2f}%  "
+                f"cal_max={cal_max * 100:.2f}%  oc_max={oc_max * 100:.2f}%  "
                 f"scal={scal * 100:+.2f}%  err80={err80 * 100:.1f}%  "
                 f"({duration:.0f}s)"
             )
             shown = {
                 "holdout_log_loss", "holdout_brier_score", "holdout_roc_auc",
                 "holdout_accuracy", "holdout_calibration_error",
+                "holdout_calibration_error_max", "holdout_overconfidence_max",
                 "holdout_signed_calibration", "holdout_error_rate_80plus",
             }
 

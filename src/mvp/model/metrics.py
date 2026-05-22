@@ -10,27 +10,23 @@ from sklearn.metrics import (
 )
 
 
-def _bucketed_calibration(
+def _bucket_errors(
     y_true: np.ndarray, y_prob: np.ndarray, signed: bool
-) -> float:
-    """Compute weighted calibration over probability buckets >= 0.50.
+) -> tuple[list[float], list[int]]:
+    """Per-bucket calibration errors and counts for probabilities >= 0.50.
 
-    Args:
-        y_true: True binary labels.
-        y_prob: Predicted probabilities for positive class.
-        signed: If True, return signed error (positive = underconfident).
-                If False, return absolute error.
+    Returns parallel lists of (errors, counts) — one entry per non-empty bucket.
     """
     mask = y_prob >= 0.50
     y_true_filtered = y_true[mask]
     y_prob_filtered = y_prob[mask]
 
     if len(y_true_filtered) == 0:
-        return 0.0
+        return [], []
 
     bucket_edges = [0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95, 1.00]
-    errors = []
-    weights = []
+    errors: list[float] = []
+    weights: list[int] = []
 
     for i in range(len(bucket_edges) - 1):
         low, high = bucket_edges[i], bucket_edges[i + 1]
@@ -50,14 +46,15 @@ def _bucketed_calibration(
         errors.append(error)
         weights.append(n)
 
-    if not errors:
-        return 0.0
-    return float(np.average(errors, weights=weights))
+    return errors, weights
 
 
 def compute_calibration_error(y_true: np.ndarray, y_prob: np.ndarray) -> float:
     """Compute weighted mean calibration error for probabilities >= 0.50."""
-    return _bucketed_calibration(y_true, y_prob, signed=False)
+    errors, weights = _bucket_errors(y_true, y_prob, signed=False)
+    if not errors:
+        return 0.0
+    return float(np.average(errors, weights=weights))
 
 
 def compute_signed_calibration(y_true: np.ndarray, y_prob: np.ndarray) -> float:
@@ -66,7 +63,37 @@ def compute_signed_calibration(y_true: np.ndarray, y_prob: np.ndarray) -> float:
     Positive = underconfident (actual win rate > predicted).
     Negative = overconfident (actual win rate < predicted).
     """
-    return _bucketed_calibration(y_true, y_prob, signed=True)
+    errors, weights = _bucket_errors(y_true, y_prob, signed=True)
+    if not errors:
+        return 0.0
+    return float(np.average(errors, weights=weights))
+
+
+def compute_calibration_error_max(y_true: np.ndarray, y_prob: np.ndarray) -> float:
+    """Worst-bucket calibration error for probabilities >= 0.50.
+
+    Tuning target for flattening the worst-offending bucket rather than the
+    weighted average, which can hide a wildly miscalibrated bucket behind
+    well-calibrated ones.
+    """
+    errors, _ = _bucket_errors(y_true, y_prob, signed=False)
+    if not errors:
+        return 0.0
+    return float(max(errors))
+
+
+def compute_overconfidence_max(y_true: np.ndarray, y_prob: np.ndarray) -> float:
+    """Worst overconfident-bucket magnitude for probabilities >= 0.50.
+
+    Returns the largest amount by which any bucket's predicted mean exceeds
+    its actual win rate (i.e. the worst overconfidence). 0 if every bucket
+    is underconfident. Asymmetric counterpart to calibration_error_max that
+    penalizes only the side of miscalibration that loses real money.
+    """
+    errors, _ = _bucket_errors(y_true, y_prob, signed=True)
+    if not errors:
+        return 0.0
+    return float(max(0.0, -min(errors)))
 
 
 def compute_error_rate_80plus(y_true: np.ndarray, y_prob: np.ndarray) -> float:
@@ -107,6 +134,8 @@ def compute_metrics(
         "brier_score": float(brier_score_loss(y_true, y_prob)),
         "roc_auc": float(roc_auc_score(y_true, y_prob)),
         "calibration_error": compute_calibration_error(y_true, y_prob),
+        "calibration_error_max": compute_calibration_error_max(y_true, y_prob),
+        "overconfidence_max": compute_overconfidence_max(y_true, y_prob),
         "signed_calibration": compute_signed_calibration(y_true, y_prob),
         "error_rate_80plus": compute_error_rate_80plus(y_true, y_prob),
     }
