@@ -33,7 +33,7 @@ class TestStyleHistoryRegistration:
                 name = f"{stat}_vs_{label}"
                 feat = registry.get(name)
                 assert feat.mirror is True
-                assert feat.params == []
+                assert feat.params == ["days"]
                 assert f"is_{label}" in feat.depends_on
                 if stat == "winpct":
                     assert feat.impute == 0.5
@@ -60,7 +60,7 @@ class TestStyleHistoryRegistration:
             for stat in STATS:
                 feat = registry.get(f"{stat}_vs_{label}_diff")
                 assert feat.mirror is False
-                assert feat.params == []
+                assert feat.params == ["days"]
         for stat in STATS:
             feat = registry.get(f"{stat}_vs_surface_specialists_diff")
             assert feat.mirror is False

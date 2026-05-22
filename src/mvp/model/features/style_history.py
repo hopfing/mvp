@@ -44,26 +44,35 @@ SURFACE_SPECIALISTS = [
 
 
 def _build_universal(label: str):
-    """Build 4 unconditioned career features for a universal label."""
+    """Build 4 unconditioned matchup features for a universal label.
+
+    Each returned function takes an optional `days` window: None for career-
+    cumulative, an int for rolling over the last `days` days.
+    """
     opp_label_col = f"opp_is_{label}"
 
-    def matches_vs() -> pl.Expr:
+    def _accum(expr: pl.Expr, days: int | None) -> pl.Expr:
+        if days is None:
+            return cumulative_sum(expr, group_by="player_id")
+        return rolling_sum(expr, days=days, group_by="player_id")
+
+    def matches_vs(days: int | None = None) -> pl.Expr:
         cond = pl.col(opp_label_col).cast(pl.Int64)
-        return cumulative_sum(cond, group_by="player_id")
+        return _accum(cond, days)
 
-    def wins_vs() -> pl.Expr:
+    def wins_vs(days: int | None = None) -> pl.Expr:
         cond = pl.col("won").cast(pl.Int64) * pl.col(opp_label_col).cast(pl.Int64)
-        return cumulative_sum(cond, group_by="player_id")
+        return _accum(cond, days)
 
-    def losses_vs() -> pl.Expr:
+    def losses_vs(days: int | None = None) -> pl.Expr:
         cond = (1 - pl.col("won").cast(pl.Int64)) * pl.col(opp_label_col).cast(pl.Int64)
-        return cumulative_sum(cond, group_by="player_id")
+        return _accum(cond, days)
 
-    def winpct_vs() -> pl.Expr:
+    def winpct_vs(days: int | None = None) -> pl.Expr:
         wins_expr = pl.col("won").cast(pl.Int64) * pl.col(opp_label_col).cast(pl.Int64)
         matches_expr = pl.col(opp_label_col).cast(pl.Int64)
-        cum_w = cumulative_sum(wins_expr, group_by="player_id")
-        cum_n = cumulative_sum(matches_expr, group_by="player_id")
+        cum_w = _accum(wins_expr, days)
+        cum_n = _accum(matches_expr, days)
         return pl.when(cum_n > 0).then(cum_w / cum_n).otherwise(0.5)
 
     return matches_vs, wins_vs, losses_vs, winpct_vs
@@ -138,30 +147,42 @@ for _label in UNIVERSAL_LABELS:
 
     feature(
         name=f"matches_vs_{_label}",
-        params=[], mirror=True, impute=0,
+        params=["days"], mirror=True, impute=0,
         depends_on=[f"is_{_label}"],
-        description=f"Career count of prior matches vs opponents flagged is_{_label}",
+        description=(
+            f"Prior matches vs opponents flagged is_{_label}; "
+            "`days` = rolling window, omit for career-cumulative."
+        ),
     )(_matches)
 
     feature(
         name=f"wins_vs_{_label}",
-        params=[], mirror=True, impute=0,
+        params=["days"], mirror=True, impute=0,
         depends_on=[f"is_{_label}"],
-        description=f"Career count of prior wins vs opponents flagged is_{_label}",
+        description=(
+            f"Prior wins vs opponents flagged is_{_label}; "
+            "`days` = rolling window, omit for career-cumulative."
+        ),
     )(_wins)
 
     feature(
         name=f"losses_vs_{_label}",
-        params=[], mirror=True, impute=0,
+        params=["days"], mirror=True, impute=0,
         depends_on=[f"is_{_label}"],
-        description=f"Career count of prior losses vs opponents flagged is_{_label}",
+        description=(
+            f"Prior losses vs opponents flagged is_{_label}; "
+            "`days` = rolling window, omit for career-cumulative."
+        ),
     )(_losses)
 
     feature(
         name=f"winpct_vs_{_label}",
-        params=[], mirror=True, impute=0.5,
+        params=["days"], mirror=True, impute=0.5,
         depends_on=[f"is_{_label}"],
-        description=f"Career win pct vs opponents flagged is_{_label} (impute 0.5 when no prior)",
+        description=(
+            f"Win pct vs opponents flagged is_{_label} (impute 0.5 when no prior); "
+            "`days` = rolling window, omit for career-cumulative."
+        ),
     )(_winpct)
 
     for _stat in ("matches", "wins", "losses", "winpct"):
