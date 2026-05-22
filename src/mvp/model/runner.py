@@ -705,6 +705,7 @@ class ExperimentRunner:
                 model = get_model(
                     self.config.model.type,
                     self.config.model.params or {},
+                    feature_names=feature_cols,
                 )
                 if self.config.model.type == "sequence":
                     # Build per-fold history DataFrame: pre-start seed (anti-cold-start)

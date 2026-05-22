@@ -24,6 +24,42 @@ def _default_n_jobs() -> int:
     return max(1, cpu_count - 2)
 
 
+def _resolve_monotone_constraints(
+    params: dict[str, Any],
+    feature_names: list[str] | None,
+) -> dict[str, Any]:
+    """Resolve dict-form `monotone_constraints` to a positional tuple.
+
+    XGBoost accepts `monotone_constraints` as a Mapping[str, int] only when
+    training data carries column names. Our pipeline passes nameless numpy
+    arrays (runner builds X via `to_numpy()`), so dict-by-name never binds.
+    This converts {feat_name: ±1} into a tuple aligned with `feature_names`.
+
+    Pass-through when monotone_constraints is absent, already positional
+    (tuple/list/str), or feature_names is None and the value isn't a dict.
+    """
+    if "monotone_constraints" not in params:
+        return params
+    mc = params["monotone_constraints"]
+    if not isinstance(mc, dict):
+        return params
+    if feature_names is None:
+        raise ValueError(
+            "monotone_constraints dict form requires feature_names; "
+            "use a positional tuple/string if feature_names is unavailable"
+        )
+    unknown = [k for k in mc if k not in feature_names]
+    if unknown:
+        raise ValueError(
+            f"monotone_constraints references unknown features: {unknown}. "
+            f"Available: {feature_names}"
+        )
+    tuple_form = tuple(int(mc.get(name, 0)) for name in feature_names)
+    out = dict(params)
+    out["monotone_constraints"] = tuple_form
+    return out
+
+
 class BaseModel(ABC):
     """Base class for model wrappers."""
 
@@ -41,13 +77,18 @@ class BaseModel(ABC):
 class XGBoostModel(BaseModel):
     """XGBoost classifier wrapper."""
 
-    def __init__(self, params: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        params: dict[str, Any],
+        feature_names: list[str] | None = None,
+    ) -> None:
+        resolved = _resolve_monotone_constraints(params, feature_names)
         self.params = {
             "objective": "binary:logistic",
             "eval_metric": "logloss",
             "n_jobs": _default_n_jobs(),
             "random_state": 42,
-            **params,
+            **resolved,
         }
         self._model = None
 
@@ -700,12 +741,18 @@ class NeuralNetModel(BaseModel):
             self._module.eval()
 
 
-def get_model(model_type: str, params: dict[str, Any]) -> BaseModel:
+def get_model(
+    model_type: str,
+    params: dict[str, Any],
+    feature_names: list[str] | None = None,
+) -> BaseModel:
     """Factory function to get model wrapper.
 
     Args:
         model_type: Type of model ("xgboost", "logistic", "random_forest").
         params: Model parameters.
+        feature_names: Feature names in training-matrix column order. Only
+            consumed by XGBoost to resolve dict-form `monotone_constraints`.
 
     Returns:
         Model wrapper instance.
@@ -714,7 +761,7 @@ def get_model(model_type: str, params: dict[str, Any]) -> BaseModel:
         ValueError: If model type is unknown.
     """
     if model_type == "xgboost":
-        return XGBoostModel(params)
+        return XGBoostModel(params, feature_names=feature_names)
     elif model_type == "logistic":
         return LogisticModel(params)
     elif model_type == "random_forest":

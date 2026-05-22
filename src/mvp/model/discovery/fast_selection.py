@@ -326,7 +326,7 @@ class FastForwardSelector:
                     model.fit(X_train, y_train, sample_weight=sw)
                     y_prob = model.predict_proba(X_test)[:, 1]
                 else:
-                    model = get_model(model_type, model_params)
+                    model = get_model(model_type, model_params, feature_names=col_names)
                     fit_kwargs: dict = {}
                     if sample_weights is not None:
                         fit_kwargs["sample_weight"] = sample_weights[train_idx]

@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from mvp.model.models import get_model
+from mvp.model.models import _resolve_monotone_constraints, get_model
 
 
 class TestModelFactory:
@@ -49,6 +49,53 @@ class TestModelFactory:
         """Unknown model type raises ValueError."""
         with pytest.raises(ValueError, match="Unknown model type"):
             get_model("unknown_model", {})
+
+
+class TestMonotoneConstraintsResolver:
+    """Tests for `_resolve_monotone_constraints`."""
+
+    def test_passthrough_when_absent(self):
+        params = {"max_depth": 3}
+        out = _resolve_monotone_constraints(params, ["a", "b"])
+        assert out == params
+
+    def test_passthrough_when_already_positional(self):
+        params = {"monotone_constraints": (1, 0, -1)}
+        out = _resolve_monotone_constraints(params, ["a", "b", "c"])
+        assert out["monotone_constraints"] == (1, 0, -1)
+
+    def test_passthrough_when_string_form(self):
+        params = {"monotone_constraints": "(1,0,0)"}
+        out = _resolve_monotone_constraints(params, ["a", "b", "c"])
+        assert out["monotone_constraints"] == "(1,0,0)"
+
+    def test_dict_resolves_to_tuple_in_feature_order(self):
+        params = {"monotone_constraints": {"b": 1, "d": -1}}
+        out = _resolve_monotone_constraints(params, ["a", "b", "c", "d"])
+        assert out["monotone_constraints"] == (0, 1, 0, -1)
+
+    def test_dict_form_errors_without_feature_names(self):
+        params = {"monotone_constraints": {"a": 1}}
+        with pytest.raises(ValueError, match="requires feature_names"):
+            _resolve_monotone_constraints(params, None)
+
+    def test_dict_form_errors_on_unknown_feature(self):
+        params = {"monotone_constraints": {"a": 1, "missing": 1}}
+        with pytest.raises(ValueError, match="unknown features"):
+            _resolve_monotone_constraints(params, ["a", "b"])
+
+    def test_get_model_xgboost_resolves_dict_form(self):
+        model = get_model(
+            "xgboost",
+            {"monotone_constraints": {"foo": 1, "baz": -1}, "max_depth": 3},
+            feature_names=["foo", "bar", "baz"],
+        )
+        assert model.params["monotone_constraints"] == (1, 0, -1)
+
+    def test_original_params_not_mutated(self):
+        params = {"monotone_constraints": {"a": 1}}
+        _resolve_monotone_constraints(params, ["a", "b"])
+        assert params["monotone_constraints"] == {"a": 1}
 
 
 class TestModelTraining:

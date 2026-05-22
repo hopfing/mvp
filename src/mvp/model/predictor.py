@@ -336,7 +336,11 @@ class ProductionPredictor:
             )
 
         # Train
-        model = get_model(config.model.type, config.model.params or {})
+        model = get_model(
+            config.model.type,
+            config.model.params or {},
+            feature_names=feature_cols,
+        )
         if is_ensemble and base_model_specs is not None:
             assert isinstance(model, EnsembleModel)
             model.configure(base_model_specs)
@@ -418,7 +422,11 @@ class ProductionPredictor:
                         train_dates_fold, config.sample_weight
                     )
 
-                fold_model = get_model(config.model.type, config.model.params or {})
+                fold_model = get_model(
+                    config.model.type,
+                    config.model.params or {},
+                    feature_names=feature_cols,
+                )
                 fold_model.fit(
                     X_train_fold, y_train_fold, sample_weight=fold_weights
                 )
@@ -491,7 +499,11 @@ class ProductionPredictor:
             oof_probs = np.zeros(len(y))
             skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
             for train_idx, val_idx in skf.split(X, y):
-                fold_model = get_model(config.model.type, config.model.params or {})
+                fold_model = get_model(
+                    config.model.type,
+                    config.model.params or {},
+                    feature_names=feature_cols,
+                )
                 if is_ensemble and base_model_specs is not None:
                     assert isinstance(fold_model, EnsembleModel)
                     fold_model.configure(base_model_specs)

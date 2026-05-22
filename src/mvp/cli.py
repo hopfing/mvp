@@ -1528,7 +1528,11 @@ def _run_voter_confidence(args: argparse.Namespace, config_path: Path) -> int:
                 X_train = (X_train - train_mean) / train_std
                 X_test = (X_test - train_mean) / train_std
 
-                model = get_model(voter_cfg.model.type, voter_cfg.model.params or {})
+                model = get_model(
+                    voter_cfg.model.type,
+                    voter_cfg.model.params or {},
+                    feature_names=voter_feature_cols,
+                )
                 model.fit(X_train, y_train)
                 y_prob = model.predict_proba(X_test)
 
