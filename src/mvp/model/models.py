@@ -74,6 +74,36 @@ class BaseModel(ABC):
         pass
 
 
+def _sigmoid(z: np.ndarray) -> np.ndarray:
+    return 1.0 / (1.0 + np.exp(-z))
+
+
+def _asymmetric_logloss(
+    y_true: np.ndarray, y_pred: np.ndarray, lambda_over: float
+) -> tuple[np.ndarray, np.ndarray]:
+    """XGB custom objective: log-loss with the overconfident side weighted
+    by `lambda_over` (>=1). y_pred arrives as raw margin (logit) under
+    XGB's custom-objective contract; we apply sigmoid here.
+
+    Overconfident = sigmoid(pred) > y (predicting high when actual is low).
+
+    Module-level (not a closure) so functools.partial wrapping is picklable —
+    XGBClassifier stores the objective on the booster and joblib must
+    serialize it when we save the trained model artifact.
+    """
+    p = _sigmoid(y_pred)
+    weight = np.where(p > y_true, lambda_over, 1.0)
+    grad = (p - y_true) * weight
+    hess = p * (1.0 - p) * weight
+    return grad, hess
+
+
+def _asymmetric_logloss_factory(lambda_over: float):
+    """Return a picklable callable bound to lambda_over for XGB's `objective=`."""
+    import functools
+    return functools.partial(_asymmetric_logloss, lambda_over=lambda_over)
+
+
 class XGBoostModel(BaseModel):
     """XGBoost classifier wrapper."""
 
@@ -83,6 +113,15 @@ class XGBoostModel(BaseModel):
         feature_names: list[str] | None = None,
     ) -> None:
         resolved = _resolve_monotone_constraints(params, feature_names)
+        # Custom objective: keep "objective": "asymmetric_logloss" as a string
+        # in self.params so the config snapshot can yaml-dump it. Stash
+        # lambda_over separately; we materialize the callable only at fit
+        # time when building XGBClassifier kwargs.
+        self._lambda_over: float | None = None
+        if resolved.get("objective") == "asymmetric_logloss":
+            # dict(resolved) so we don't mutate the caller's params
+            resolved = dict(resolved)
+            self._lambda_over = float(resolved.pop("lambda_over", 2.0))
         self.params = {
             "objective": "binary:logistic",
             "eval_metric": "logloss",
@@ -102,7 +141,14 @@ class XGBoostModel(BaseModel):
     ) -> None:
         import xgboost as xgb
 
-        self._model = xgb.XGBClassifier(**self.params)
+        # Build XGB kwargs separately so self.params stays serializable —
+        # the callable lives only on the XGBClassifier (and gets pickled
+        # with it via functools.partial, which IS picklable since it wraps
+        # a module-level function).
+        xgb_params = dict(self.params)
+        if self._lambda_over is not None:
+            xgb_params["objective"] = _asymmetric_logloss_factory(self._lambda_over)
+        self._model = xgb.XGBClassifier(**xgb_params)
         fit_kwargs: dict[str, Any] = {"sample_weight": sample_weight}
         if eval_set is not None:
             fit_kwargs["eval_set"] = eval_set
@@ -114,6 +160,12 @@ class XGBoostModel(BaseModel):
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
         if self._model is None:
             raise RuntimeError("Model not fitted")
+        # With a custom objective, XGBClassifier's predict_proba returns raw
+        # margin (logits) rather than probabilities, because XGB no longer
+        # knows the output space. Apply sigmoid ourselves in that case.
+        if self._lambda_over is not None:
+            raw = self._model.predict(X, output_margin=True)
+            return _sigmoid(raw)
         return self._model.predict_proba(X)[:, 1]
 
 

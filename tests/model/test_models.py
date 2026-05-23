@@ -145,6 +145,61 @@ class TestModelTraining:
         with pytest.raises(RuntimeError, match="Model not fitted"):
             model.predict_proba(np.random.randn(5, 3))
 
+    def test_xgboost_asymmetric_logloss_fit_predict(self, sample_data):
+        """XGBoost with asymmetric_logloss wires through end-to-end: fit
+        completes, predict_proba returns valid probabilities, lambda_over
+        is consumed (not passed to XGB), and predictions differ from the
+        default-objective baseline (proves the custom callable fired)."""
+        X, y = sample_data
+        baseline = get_model("xgboost", {
+            "max_depth": 3, "n_estimators": 20,
+        })
+        asym = get_model("xgboost", {
+            "max_depth": 3, "n_estimators": 20,
+            "objective": "asymmetric_logloss",
+            "lambda_over": 3.0,
+        })
+        baseline.fit(X, y)
+        asym.fit(X, y)
+
+        probs_base = baseline.predict_proba(X)
+        probs_asym = asym.predict_proba(X)
+
+        assert probs_asym.shape == (100,)
+        assert all(0 <= p <= 1 for p in probs_asym)
+        # lambda_over consumed before reaching XGB (else XGBClassifier errors)
+        assert "lambda_over" not in asym.params
+        # self.params still has the string objective (not the callable) — the
+        # config snapshot writer yaml-dumps this dict and would error on a
+        # function object.
+        assert asym.params["objective"] == "asymmetric_logloss"
+        # Custom objective produced a different predictor than default
+        assert not np.allclose(probs_base, probs_asym), (
+            "asymmetric_logloss predictions identical to default — objective "
+            "callable likely not wired through"
+        )
+
+    def test_xgboost_asymmetric_logloss_pickles(self, sample_data, tmp_path):
+        """The fitted XGBoost model with a custom objective survives a joblib
+        round-trip — the backtest path saves the trained model to disk."""
+        import joblib
+
+        X, y = sample_data
+        model = get_model("xgboost", {
+            "max_depth": 3, "n_estimators": 20,
+            "objective": "asymmetric_logloss",
+            "lambda_over": 2.0,
+        })
+        model.fit(X, y)
+        probs_before = model.predict_proba(X)
+
+        path = tmp_path / "asym_model.pkl"
+        joblib.dump(model, path)
+        loaded = joblib.load(path)
+        probs_after = loaded.predict_proba(X)
+
+        np.testing.assert_array_almost_equal(probs_before, probs_after)
+
     def test_logistic_predict_before_fit_raises(self):
         """Calling predict_proba before fit raises RuntimeError."""
         model = get_model("logistic", {})
