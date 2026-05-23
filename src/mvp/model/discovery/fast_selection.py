@@ -37,7 +37,11 @@ def _make_metric_fn(metric: str) -> Callable[[np.ndarray, np.ndarray], float]:
         roc_auc_score,
     )
 
-    from mvp.model.metrics import compute_calibration_error, compute_error_rate_80plus
+    from mvp.model.metrics import (
+        compute_asymmetric_logloss,
+        compute_calibration_error,
+        compute_error_rate_80plus,
+    )
 
     metric_fns: dict[str, Callable[[np.ndarray, np.ndarray], float]] = {
         "log_loss": lambda yt, yp: float(
@@ -50,6 +54,7 @@ def _make_metric_fn(metric: str) -> Callable[[np.ndarray, np.ndarray], float]:
         "roc_auc": lambda yt, yp: float(roc_auc_score(yt, yp)),
         "calibration_error": lambda yt, yp: compute_calibration_error(yt, yp),
         "error_rate_80plus": lambda yt, yp: compute_error_rate_80plus(yt, yp),
+        "asymmetric_logloss": lambda yt, yp: compute_asymmetric_logloss(yt, yp),
     }
     if metric not in metric_fns:
         # Fall back to full compute_metrics for unknown metrics

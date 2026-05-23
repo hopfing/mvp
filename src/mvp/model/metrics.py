@@ -108,6 +108,21 @@ def compute_error_rate_80plus(y_true: np.ndarray, y_prob: np.ndarray) -> float:
     return tier_errors / tier_total
 
 
+def compute_asymmetric_logloss(
+    y_true: np.ndarray, y_prob: np.ndarray, lambda_over: float = 2.0
+) -> float:
+    """Asymmetric log-loss with overconfident-side penalty weighted by lambda_over.
+
+    Mirrors the training objective in `XGBoostModel._asymmetric_logloss` so
+    HP tuning can target the same loss surface the model is trained against.
+    Overconfident = predicted prob > actual outcome.
+    """
+    p = np.clip(y_prob, 1e-15, 1 - 1e-15)
+    base = -(y_true * np.log(p) + (1 - y_true) * np.log(1 - p))
+    weight = np.where(p > y_true, lambda_over, 1.0)
+    return float(np.mean(base * weight))
+
+
 def compute_metrics(
     y_true: np.ndarray,
     y_prob: np.ndarray,
@@ -138,4 +153,5 @@ def compute_metrics(
         "overconfidence_max": compute_overconfidence_max(y_true, y_prob),
         "signed_calibration": compute_signed_calibration(y_true, y_prob),
         "error_rate_80plus": compute_error_rate_80plus(y_true, y_prob),
+        "asymmetric_logloss": compute_asymmetric_logloss(y_true, y_prob),
     }
