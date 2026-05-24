@@ -179,6 +179,57 @@ class TestModelTraining:
             "callable likely not wired through"
         )
 
+    def test_logistic_handles_nan_inputs(self):
+        """LogisticModel internally imputes NaN with training-fold median."""
+        from mvp.model.models import LogisticModel
+
+        rng = np.random.default_rng(0)
+        X = rng.normal(size=(100, 3))
+        # Inject NaN into column 1 of some rows
+        X[10:25, 1] = np.nan
+        y = (X[:, 0] + np.nan_to_num(X[:, 1]) > 0).astype(int)
+
+        model = LogisticModel({"C": 1.0})
+        model.fit(X, y)  # must not raise despite NaN
+        probs = model.predict_proba(X)
+        assert probs.shape == (100,)
+        assert all(0 <= p <= 1 for p in probs)
+        assert model._impute_medians is not None
+        assert not np.isnan(model._impute_medians).any()
+
+    def test_random_forest_handles_nan_inputs(self):
+        """RandomForestModel internally imputes NaN with training median."""
+        from mvp.model.models import RandomForestModel
+
+        rng = np.random.default_rng(0)
+        X = rng.normal(size=(100, 3))
+        X[10:25, 1] = np.nan
+        y = (X[:, 0] > 0).astype(int)
+
+        model = RandomForestModel({"n_estimators": 10})
+        model.fit(X, y)
+        probs = model.predict_proba(X)
+        assert probs.shape == (100,)
+        assert all(0 <= p <= 1 for p in probs)
+        assert model._impute_medians is not None
+
+    def test_neural_net_handles_nan_inputs(self):
+        """NeuralNetModel internally imputes NaN on the feature matrix."""
+        from mvp.model.models import NeuralNetModel
+
+        rng = np.random.default_rng(0)
+        X = rng.normal(size=(100, 4))
+        X[20:35, 2] = np.nan
+        y = (X[:, 0] > 0).astype(int)
+
+        model = NeuralNetModel({
+            "hidden_layers": [16], "epochs": 5, "patience": 3,
+        })
+        model.fit(X, y)
+        probs = model.predict_proba(X)
+        assert probs.shape == (100,)
+        assert all(0 <= p <= 1 for p in probs)
+
     def test_xgboost_asymmetric_logloss_pickles(self, sample_data, tmp_path):
         """The fitted XGBoost model with a custom objective survives a joblib
         round-trip — the backtest path saves the trained model to disk."""

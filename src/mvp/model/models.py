@@ -24,6 +24,27 @@ def _default_n_jobs() -> int:
     return max(1, cpu_count - 2)
 
 
+def _fit_median_imputer(X: np.ndarray) -> np.ndarray:
+    """Per-column training median (NaN-safe); all-NaN columns fall back to 0.
+
+    For wrappers around sklearn / PyTorch models that can't accept NaN input.
+    XGBoost handles NaN natively and does not need this.
+    """
+    medians = np.nanmedian(X, axis=0)
+    return np.where(np.isnan(medians), 0.0, medians)
+
+
+def _apply_median_imputer(X: np.ndarray, medians: np.ndarray) -> np.ndarray:
+    """Replace NaN with the corresponding column median. Returns a copy if
+    any NaN were present, else returns X unchanged."""
+    if not np.isnan(X).any():
+        return X
+    out = X.copy()
+    inds = np.where(np.isnan(out))
+    out[inds] = medians[inds[1]]
+    return out
+
+
 def _resolve_monotone_constraints(
     params: dict[str, Any],
     feature_names: list[str] | None,
@@ -170,40 +191,60 @@ class XGBoostModel(BaseModel):
 
 
 class LogisticModel(BaseModel):
-    """Logistic regression classifier wrapper."""
+    """Logistic regression classifier wrapper.
+
+    sklearn's LogisticRegression does not accept NaN inputs. When features
+    declared ``impute=None`` reach this wrapper, they arrive as NaN; the
+    wrapper computes per-column training medians and fills NaN internally
+    at both fit and predict time.
+    """
 
     def __init__(self, params: dict[str, Any]) -> None:
         self.params = {"random_state": 42, "max_iter": 1000, **params}
         self._model = None
+        self._impute_medians: np.ndarray | None = None
 
     def fit(self, X: np.ndarray, y: np.ndarray, sample_weight: np.ndarray | None = None) -> None:
         from sklearn.linear_model import LogisticRegression
 
+        self._impute_medians = _fit_median_imputer(X)
+        X = _apply_median_imputer(X, self._impute_medians)
         self._model = LogisticRegression(**self.params)
         self._model.fit(X, y, sample_weight=sample_weight)
 
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
         if self._model is None:
             raise RuntimeError("Model not fitted")
+        if self._impute_medians is not None:
+            X = _apply_median_imputer(X, self._impute_medians)
         return self._model.predict_proba(X)[:, 1]
 
 
 class RandomForestModel(BaseModel):
-    """Random forest classifier wrapper."""
+    """Random forest classifier wrapper.
+
+    sklearn's RandomForestClassifier does not accept NaN inputs. Same
+    internal median-imputation as LogisticModel — see that docstring.
+    """
 
     def __init__(self, params: dict[str, Any]) -> None:
         self.params = {"random_state": 42, "n_jobs": _default_n_jobs(), **params}
         self._model = None
+        self._impute_medians: np.ndarray | None = None
 
     def fit(self, X: np.ndarray, y: np.ndarray, sample_weight: np.ndarray | None = None) -> None:
         from sklearn.ensemble import RandomForestClassifier
 
+        self._impute_medians = _fit_median_imputer(X)
+        X = _apply_median_imputer(X, self._impute_medians)
         self._model = RandomForestClassifier(**self.params)
         self._model.fit(X, y, sample_weight=sample_weight)
 
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
         if self._model is None:
             raise RuntimeError("Model not fitted")
+        if self._impute_medians is not None:
+            X = _apply_median_imputer(X, self._impute_medians)
         return self._model.predict_proba(X)[:, 1]
 
 
@@ -452,6 +493,7 @@ class NeuralNetModel(BaseModel):
         self._module = None
         self._device = None
         self._n_features = None
+        self._impute_medians: np.ndarray | None = None
 
     @property
     def _has_embeddings(self) -> bool:
@@ -547,6 +589,11 @@ class NeuralNetModel(BaseModel):
 
         # Separate embedding column before counting features
         X_features, emb_ids, opp_emb_ids = self._split_embedding_col(X)
+        # Median-impute NaN on the feature matrix only (embedding IDs are
+        # integer keys and shouldn't be median-imputed). Medians fit once
+        # on training, reused at predict time.
+        self._impute_medians = _fit_median_imputer(X_features)
+        X_features = _apply_median_imputer(X_features, self._impute_medians)
         self._n_features = X_features.shape[1]
         self._module = self._build_module(self._n_features).to(self._device)
 
@@ -759,6 +806,8 @@ class NeuralNetModel(BaseModel):
         self._module.eval()
         with torch.no_grad():
             X_features, emb_ids, opp_emb_ids = self._split_embedding_col(X)
+            if self._impute_medians is not None:
+                X_features = _apply_median_imputer(X_features, self._impute_medians)
             X_t = torch.tensor(X_features, dtype=torch.float32, device=self._device)
             emb_t = None
             opp_emb_t = None

@@ -331,6 +331,7 @@ class SequenceModel(BaseModel):
         self._device = None
         self._n_match_features: int | None = None
         self._history: dict[int, np.ndarray] = {}  # player_id -> (M, HIST_FEAT_DIM_PROJECTED+1) sorted by date
+        self._impute_medians: np.ndarray | None = None  # per-feature training medians for NaN passthrough
 
     # ------------------------------------------------------------------
     # History dict construction (called by runner before fit)
@@ -496,6 +497,11 @@ class SequenceModel(BaseModel):
         self._device = self._get_device()
 
         X_features, player_ids, opp_ids, dates = self._split_id_cols(X)
+        # Median-impute NaN on the feature matrix (IDs/dates excluded). Fit
+        # once on training, reuse at predict time.
+        from mvp.model.models import _apply_median_imputer, _fit_median_imputer
+        self._impute_medians = _fit_median_imputer(X_features)
+        X_features = _apply_median_imputer(X_features, self._impute_medians)
         self._n_match_features = X_features.shape[1]
 
         SequenceModule = _make_sequence_module()
@@ -616,6 +622,9 @@ class SequenceModel(BaseModel):
         self._module.eval()
 
         X_features, player_ids, opp_ids, dates = self._split_id_cols(X)
+        if self._impute_medians is not None:
+            from mvp.model.models import _apply_median_imputer
+            X_features = _apply_median_imputer(X_features, self._impute_medians)
         player_seqs, player_masks, opp_seqs, opp_masks = self._build_batch_sequences(
             player_ids, opp_ids, dates,
         )

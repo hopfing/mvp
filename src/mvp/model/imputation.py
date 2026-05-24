@@ -245,73 +245,23 @@ def validate_impute_compat(
     model_type: str,
     base_model_specs: list[dict[str, "object"]] | None = None,
 ) -> None:
-    """Raise ValueError if passthrough (NaN) features reach a non-tolerant model.
+    """No-op kept for backwards compatibility.
 
-    Parameters
-    ----------
-    specs:
-        The full imputation spec list from :func:`build_imputation` (includes
-        both model-feature and auxiliary slots; only model-feature slots are
-        validated since aux columns are stripped before the model sees them).
-    feature_names:
-        Names of the model-feature columns, in order. ``feature_names[i]``
-        corresponds to ``ImputeSpec.col_index == i``.
-    model_type:
-        Top-level model type from the config (``config.model.type``).
-    base_model_specs:
-        For ``model_type == "ensemble"``: the resolved base-model spec list
-        each entry having ``type`` and ``feature_indices``. The runner builds
-        these from the config before model fit. ``None`` for non-ensemble.
+    Originally raised when ``impute=None`` features reached a non-XGB model,
+    on the theory that silent imputation undermines the "leave NaN" intent.
+    In practice this blocks legitimate workflows (e.g. a logistic voter
+    consuming a feature whose XGB-side semantics are NaN-aware).
 
-    Raises
-    ------
-    ValueError
-        If any model feature has ``strategy == "passthrough"`` and the model
-        (or, for ensembles, a sub-model receiving that feature) is in
-        :data:`_NON_NAN_TOLERANT_TYPES`. Message names the offending features.
+    The current contract: non-XGB model wrappers (Logistic / RandomForest /
+    NeuralNet / Sequence) detect NaN at fit time, fit a per-column training
+    median, and impute internally at fit and predict. The pipeline does not
+    centrally impute passthrough columns; each model is responsible for
+    handling NaN inputs in whatever way suits it.
+
+    This function remains so call sites in runner/predictor don't need to
+    change; it does nothing.
     """
-    n_model = len(feature_names)
-    passthrough_indices = [
-        s.col_index for s in specs
-        if s.strategy == "passthrough" and s.col_index < n_model
-    ]
-    if not passthrough_indices:
-        return
-
-    passthrough_names = [feature_names[i] for i in passthrough_indices]
-    passthrough_set = set(passthrough_indices)
-
-    if model_type == "ensemble":
-        if not base_model_specs:
-            raise ValueError(
-                "validate_impute_compat: ensemble model requires resolved "
-                "base_model_specs (with 'type' and 'feature_indices') "
-                "to validate per-sub-model NaN compatibility."
-            )
-        for sub in base_model_specs:
-            sub_type = sub["type"]
-            sub_indices = set(sub["feature_indices"])
-            sub_passthrough = passthrough_set & sub_indices
-            if sub_passthrough and sub_type in _NON_NAN_TOLERANT_TYPES:
-                offending = sorted(
-                    feature_names[i] for i in sub_passthrough
-                )
-                raise ValueError(
-                    f"Ensemble sub-model of type {sub_type!r} cannot accept "
-                    f"NaN inputs but receives passthrough feature(s): "
-                    f"{offending}. Either change the feature(s) to use "
-                    f"impute=<constant>/\"median\", or remove them from the "
-                    f"sub-model's feature list."
-                )
-        return
-
-    if model_type in _NON_NAN_TOLERANT_TYPES:
-        raise ValueError(
-            f"Model type {model_type!r} cannot accept NaN inputs but the "
-            f"following feature(s) declare impute=None (passthrough): "
-            f"{passthrough_names}. Either switch to model_type='xgboost', "
-            f"or change the feature(s) to use impute=<constant>/\"median\"."
-        )
+    return None
 
 
 # ---------------------------------------------------------------------------

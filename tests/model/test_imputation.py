@@ -848,97 +848,27 @@ class TestPassthroughSubsetImputeState:
         assert passthrough[0].col_index == 1  # was idx 1, still at position 1 after subset
 
 
-class TestValidateImputeCompat:
-    def _make_specs(self, strategies: list[str]) -> list:
-        from mvp.model.imputation import ImputeSpec
+class TestValidateImputeCompatNoOp:
+    """validate_impute_compat is a no-op kept for backwards compatibility.
 
-        return [
-            ImputeSpec(
-                col_index=i,
-                strategy=s,
-                constant=None if s != "constant" else 0.0,
-            )
-            for i, s in enumerate(strategies)
-        ]
+    Non-XGB model wrappers handle NaN internally via per-column training
+    median fitted at fit() time, so the central pipeline no longer needs
+    to enforce a compatibility contract.
+    """
 
-    def test_no_passthrough_passes(self):
-        from mvp.model.imputation import validate_impute_compat
-
-        specs = self._make_specs(["median", "constant"])
-        # Should not raise for any model type
-        for mt in ("xgboost", "logistic", "random_forest", "neural_net", "sequence"):
-            validate_impute_compat(specs, ["a", "b"], mt)
-
-    def test_passthrough_with_xgboost_passes(self):
-        from mvp.model.imputation import validate_impute_compat
-
-        specs = self._make_specs(["passthrough", "median"])
-        validate_impute_compat(specs, ["a", "b"], "xgboost")
-
-    def test_passthrough_with_logistic_raises(self):
-        from mvp.model.imputation import validate_impute_compat
-
-        specs = self._make_specs(["passthrough", "median"])
-        with pytest.raises(ValueError, match="logistic.*cannot accept NaN.*'a'"):
-            validate_impute_compat(specs, ["a", "b"], "logistic")
-
-    def test_passthrough_with_random_forest_raises(self):
-        from mvp.model.imputation import validate_impute_compat
-
-        specs = self._make_specs(["passthrough", "median"])
-        with pytest.raises(ValueError, match="random_forest.*cannot accept NaN"):
-            validate_impute_compat(specs, ["a", "b"], "random_forest")
-
-    def test_passthrough_with_neural_net_raises(self):
-        from mvp.model.imputation import validate_impute_compat
-
-        specs = self._make_specs(["passthrough", "median"])
-        with pytest.raises(ValueError, match="neural_net.*cannot accept NaN"):
-            validate_impute_compat(specs, ["a", "b"], "neural_net")
-
-    def test_aux_passthrough_columns_ignored(self):
-        """Aux-column passthrough (col_index >= n_model) should not trigger validation."""
+    def test_no_op_for_any_combination(self):
         from mvp.model.imputation import ImputeSpec, validate_impute_compat
 
         specs = [
-            ImputeSpec(col_index=0, strategy="median"),
-            ImputeSpec(col_index=1, strategy="passthrough"),  # aux, beyond feature_names
+            ImputeSpec(col_index=0, strategy="passthrough"),
+            ImputeSpec(col_index=1, strategy="median"),
         ]
-        # feature_names has only 1 entry; col_index 1 is aux and should be ignored
-        validate_impute_compat(specs, ["a"], "logistic")  # must not raise
-
-    def test_ensemble_xgb_subonly_passes(self):
-        from mvp.model.imputation import validate_impute_compat
-
-        specs = self._make_specs(["passthrough", "median", "median"])
-        base_specs = [
-            {"type": "xgboost", "feature_indices": [0, 1]},
-            {"type": "logistic", "feature_indices": [2]},
-        ]
-        # XGB gets the passthrough col, logistic doesn't — fine
-        validate_impute_compat(
-            specs, ["a", "b", "c"], "ensemble", base_model_specs=base_specs,
-        )
-
-    def test_ensemble_logistic_subreceives_passthrough_raises(self):
-        from mvp.model.imputation import validate_impute_compat
-
-        specs = self._make_specs(["passthrough", "median"])
-        base_specs = [
-            {"type": "xgboost", "feature_indices": [1]},
-            {"type": "logistic", "feature_indices": [0, 1]},  # gets passthrough col 0
-        ]
-        with pytest.raises(ValueError, match="logistic.*passthrough feature.*'a'"):
-            validate_impute_compat(
-                specs, ["a", "b"], "ensemble", base_model_specs=base_specs,
-            )
-
-    def test_ensemble_missing_base_specs_raises(self):
-        from mvp.model.imputation import validate_impute_compat
-
-        specs = self._make_specs(["passthrough"])
-        with pytest.raises(ValueError, match="ensemble model requires resolved"):
-            validate_impute_compat(specs, ["a"], "ensemble", base_model_specs=None)
+        # Never raises, regardless of model type
+        for mt in (
+            "xgboost", "logistic", "random_forest", "neural_net",
+            "sequence", "ensemble",
+        ):
+            validate_impute_compat(specs, ["a", "b"], mt)
 
 
 class TestPassthroughStateRoundTrip:
