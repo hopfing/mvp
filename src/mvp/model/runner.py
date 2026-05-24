@@ -379,6 +379,17 @@ class ExperimentRunner:
         augmented_cols = feature_cols + build_result.aux_base_col_names
         n_model = build_result.n_model_features
 
+        # Validate that any passthrough (NaN) features are only routed to
+        # NaN-tolerant models. base_model_specs is resolved earlier in run()
+        # for ensembles, so we can validate both cases here uniformly.
+        from mvp.model.imputation import validate_impute_compat
+        validate_impute_compat(
+            build_result.specs,
+            feature_cols,
+            self.config.model.type,
+            base_model_specs=base_model_specs,
+        )
+
         # Embedding configuration
         embedding_col = None
         opp_embedding_col = None

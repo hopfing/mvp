@@ -37,10 +37,18 @@ class RecomputeInfo:
 
 @dataclass
 class ImputeSpec:
-    """Per-feature imputation specification."""
+    """Per-feature imputation specification.
+
+    Strategies:
+      ``"median"``      — per-circuit median, computed at fit time.
+      ``"constant"``    — fill NaN with ``constant``.
+      ``"recompute"``   — derived diff/matchup recomputed as
+                          ``imputed_player_base - imputed_opp_base``.
+      ``"passthrough"`` — leave NaN; requires a NaN-tolerant model.
+    """
 
     col_index: int
-    strategy: Literal["median", "constant", "recompute"]
+    strategy: Literal["median", "constant", "recompute", "passthrough"]
     constant: float | None = None
     recompute: RecomputeInfo | None = None
 
@@ -83,7 +91,9 @@ def build_impute_specs(
         feature_def = registry.get(base_name)
         impute_val = feature_def.impute
 
-        if impute_val == "median":
+        if impute_val is None:
+            specs.append(ImputeSpec(col_index=idx, strategy="passthrough"))
+        elif impute_val == "median":
             specs.append(ImputeSpec(col_index=idx, strategy="median"))
         else:
             specs.append(
@@ -97,6 +107,24 @@ def build_impute_specs(
 # ---------------------------------------------------------------------------
 # build_imputation
 # ---------------------------------------------------------------------------
+
+def _spec_for(col_idx: int, impute_val: float | str | None) -> ImputeSpec:
+    """Build an ImputeSpec from a feature's declared impute value.
+
+    Used inside build_imputation for both the model-feature branch and the
+    auxiliary base-column branch so the three impute kinds (None / "median"
+    / numeric constant) are handled in one place.
+    """
+    if impute_val is None:
+        return ImputeSpec(col_index=col_idx, strategy="passthrough")
+    if impute_val == "median":
+        return ImputeSpec(col_index=col_idx, strategy="median")
+    return ImputeSpec(
+        col_index=col_idx,
+        strategy="constant",
+        constant=float(impute_val),
+    )
+
 
 def build_imputation(
     feature_specs: list[str],
@@ -132,10 +160,13 @@ def build_imputation(
         feature_def = registry.get(base_name)
         impute_val = feature_def.impute
 
-        # Check if this is a recomputable derived feature
+        # Check if this is a recomputable derived feature. Passthrough features
+        # (impute=None) MUST NOT be recomputed — recompute would overwrite the
+        # NaN we want to preserve with `imputed_player_base - imputed_opp_base`.
         is_recomputable = (
             feature_def.depends_on
             and not feature_def.mirror
+            and impute_val is not None
             and impute_val != "median"
         )
 
@@ -165,18 +196,7 @@ def build_imputation(
                 col_name_to_idx[player_col] = aux_idx
                 aux_col_names.append(player_col)
                 base_def = registry.get(player_dep)
-                if base_def.impute == "median":
-                    aux_specs.append(
-                        ImputeSpec(col_index=aux_idx, strategy="median")
-                    )
-                else:
-                    aux_specs.append(
-                        ImputeSpec(
-                            col_index=aux_idx,
-                            strategy="constant",
-                            constant=float(base_def.impute),
-                        )
-                    )
+                aux_specs.append(_spec_for(aux_idx, base_def.impute))
 
             # Resolve or add opp base column
             if opp_col not in col_name_to_idx:
@@ -184,18 +204,7 @@ def build_imputation(
                 col_name_to_idx[opp_col] = aux_idx
                 aux_col_names.append(opp_col)
                 base_def = registry.get(opp_dep)
-                if base_def.impute == "median":
-                    aux_specs.append(
-                        ImputeSpec(col_index=aux_idx, strategy="median")
-                    )
-                else:
-                    aux_specs.append(
-                        ImputeSpec(
-                            col_index=aux_idx,
-                            strategy="constant",
-                            constant=float(base_def.impute),
-                        )
-                    )
+                aux_specs.append(_spec_for(aux_idx, base_def.impute))
 
             model_specs.append(
                 ImputeSpec(
@@ -207,22 +216,102 @@ def build_imputation(
                     ),
                 )
             )
-        elif impute_val == "median":
-            model_specs.append(ImputeSpec(col_index=idx, strategy="median"))
         else:
-            model_specs.append(
-                ImputeSpec(
-                    col_index=idx,
-                    strategy="constant",
-                    constant=float(impute_val),
-                )
-            )
+            model_specs.append(_spec_for(idx, impute_val))
 
     return ImputeBuildResult(
         specs=model_specs + aux_specs,
         aux_base_col_names=aux_col_names,
         n_model_features=n_model,
     )
+
+
+# ---------------------------------------------------------------------------
+# validate_impute_compat
+# ---------------------------------------------------------------------------
+
+# Model types whose Python wrappers cannot accept NaN inputs at fit/predict.
+# sklearn RandomForestClassifier does not support NaN (HistGradientBoosting is
+# the only sklearn estimator that does, as of sklearn 1.4+). The PyTorch-based
+# neural_net and sequence wrappers also assume non-NaN tensors.
+_NON_NAN_TOLERANT_TYPES = frozenset({
+    "logistic", "random_forest", "neural_net", "sequence"
+})
+
+
+def validate_impute_compat(
+    specs: list[ImputeSpec],
+    feature_names: list[str],
+    model_type: str,
+    base_model_specs: list[dict[str, "object"]] | None = None,
+) -> None:
+    """Raise ValueError if passthrough (NaN) features reach a non-tolerant model.
+
+    Parameters
+    ----------
+    specs:
+        The full imputation spec list from :func:`build_imputation` (includes
+        both model-feature and auxiliary slots; only model-feature slots are
+        validated since aux columns are stripped before the model sees them).
+    feature_names:
+        Names of the model-feature columns, in order. ``feature_names[i]``
+        corresponds to ``ImputeSpec.col_index == i``.
+    model_type:
+        Top-level model type from the config (``config.model.type``).
+    base_model_specs:
+        For ``model_type == "ensemble"``: the resolved base-model spec list
+        each entry having ``type`` and ``feature_indices``. The runner builds
+        these from the config before model fit. ``None`` for non-ensemble.
+
+    Raises
+    ------
+    ValueError
+        If any model feature has ``strategy == "passthrough"`` and the model
+        (or, for ensembles, a sub-model receiving that feature) is in
+        :data:`_NON_NAN_TOLERANT_TYPES`. Message names the offending features.
+    """
+    n_model = len(feature_names)
+    passthrough_indices = [
+        s.col_index for s in specs
+        if s.strategy == "passthrough" and s.col_index < n_model
+    ]
+    if not passthrough_indices:
+        return
+
+    passthrough_names = [feature_names[i] for i in passthrough_indices]
+    passthrough_set = set(passthrough_indices)
+
+    if model_type == "ensemble":
+        if not base_model_specs:
+            raise ValueError(
+                "validate_impute_compat: ensemble model requires resolved "
+                "base_model_specs (with 'type' and 'feature_indices') "
+                "to validate per-sub-model NaN compatibility."
+            )
+        for sub in base_model_specs:
+            sub_type = sub["type"]
+            sub_indices = set(sub["feature_indices"])
+            sub_passthrough = passthrough_set & sub_indices
+            if sub_passthrough and sub_type in _NON_NAN_TOLERANT_TYPES:
+                offending = sorted(
+                    feature_names[i] for i in sub_passthrough
+                )
+                raise ValueError(
+                    f"Ensemble sub-model of type {sub_type!r} cannot accept "
+                    f"NaN inputs but receives passthrough feature(s): "
+                    f"{offending}. Either change the feature(s) to use "
+                    f"impute=<constant>/\"median\", or remove them from the "
+                    f"sub-model's feature list."
+                )
+        return
+
+    if model_type in _NON_NAN_TOLERANT_TYPES:
+        raise ValueError(
+            f"Model type {model_type!r} cannot accept NaN inputs but the "
+            f"following feature(s) declare impute=None (passthrough): "
+            f"{passthrough_names}. Either switch to model_type='xgboost', "
+            f"or change the feature(s) to use impute=<constant>/\"median\"."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -302,7 +391,10 @@ def fit_imputation(
     """
     n_cols = X_train.shape[1]
 
-    # Global medians (NaN-safe); replace any remaining NaN with 0.0
+    # Global medians (NaN-safe); replace any remaining NaN with 0.0.
+    # Note: medians are computed for ALL columns including passthrough ones,
+    # but apply_imputation never reads those entries — the resulting values
+    # are phantoms in ImputeState for passthrough columns.
     global_medians = np.nanmedian(X_train, axis=0)
     nan_mask = np.isnan(global_medians)
     global_medians[nan_mask] = 0.0

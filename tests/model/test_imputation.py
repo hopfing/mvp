@@ -694,3 +694,273 @@ class TestAugmentedColIndices:
 
         np.testing.assert_array_equal(aug, [0, 1, 2])
         assert n_model == 3
+
+
+# ===========================================================================
+# Passthrough strategy (impute=None) — added when impute=None was introduced
+# to let NaN values flow through to NaN-tolerant models (XGBoost).
+# ===========================================================================
+
+
+class TestPassthroughBuildImputeSpecs:
+    def test_none_impute_yields_passthrough(self):
+        from mvp.model.imputation import build_impute_specs
+
+        reg = _make_registry(("elo_diff", None))
+        specs = build_impute_specs(["player_elo_diff"], reg)
+
+        assert len(specs) == 1
+        assert specs[0].strategy == "passthrough"
+        assert specs[0].constant is None
+
+    def test_mixed_strategies_all_resolve(self):
+        from mvp.model.imputation import build_impute_specs
+
+        reg = _make_registry(
+            ("win_pct", "median"),
+            ("elo_diff", None),
+            ("h2h_win_pct", 0.5),
+        )
+        specs = build_impute_specs(
+            ["player_win_pct", "player_elo_diff", "player_h2h_win_pct"], reg
+        )
+
+        assert [s.strategy for s in specs] == ["median", "passthrough", "constant"]
+        assert specs[1].constant is None
+        assert specs[2].constant == 0.5
+
+
+class TestPassthroughBuildImputation:
+    def test_none_diff_not_recomputed(self):
+        """A diff feature with impute=None must NOT enter the recompute branch."""
+        from mvp.model.imputation import build_imputation
+
+        reg = _make_registry_ext(
+            ("elo", "median", [], True),
+            ("elo_diff", None, ["elo"], False),
+        )
+        result = build_imputation(["player_elo_diff"], reg)
+
+        model_specs = result.specs[: result.n_model_features]
+        assert model_specs[0].strategy == "passthrough"
+        # No aux base columns should have been added — recompute didn't fire
+        assert result.aux_base_col_names == []
+
+    def test_none_base_propagates_to_aux(self):
+        """A recompute that pulls in a passthrough base produces a passthrough aux spec."""
+        from mvp.model.imputation import build_imputation
+
+        # diff_a depends on base_a (impute=None), uses recompute path because
+        # impute_val=0 triggers recompute eligibility.
+        reg = _make_registry_ext(
+            ("base_a", None, [], True),
+            ("diff_a", 0, ["base_a"], False),
+        )
+        result = build_imputation(["player_diff_a"], reg)
+
+        model_specs = result.specs[: result.n_model_features]
+        aux_specs = result.specs[result.n_model_features :]
+
+        assert model_specs[0].strategy == "recompute"
+        # Two aux specs (player + opp base) both passthrough since base is None
+        assert len(aux_specs) == 2
+        assert all(s.strategy == "passthrough" for s in aux_specs)
+
+    def test_none_diff_skips_recompute_with_median_base(self):
+        """When the diff itself is impute=None, recompute is bypassed even if bases are median."""
+        from mvp.model.imputation import build_imputation
+
+        reg = _make_registry_ext(
+            ("base_a", "median", [], True),
+            ("diff_a", None, ["base_a"], False),
+        )
+        result = build_imputation(["player_diff_a"], reg)
+
+        # Should NOT have triggered recompute despite a recomputable shape
+        model_specs = result.specs[: result.n_model_features]
+        assert model_specs[0].strategy == "passthrough"
+        assert result.aux_base_col_names == []
+
+
+class TestPassthroughApplyImputation:
+    def test_passthrough_column_keeps_nan(self):
+        """A passthrough column must retain NaN end-to-end while neighbors are filled."""
+        from mvp.model.imputation import (
+            ImputeSpec,
+            apply_imputation,
+            fit_imputation,
+        )
+
+        X = np.array(
+            [
+                [1.0, np.nan, 100.0],
+                [2.0, np.nan, 200.0],
+                [np.nan, 5.0, np.nan],
+                [4.0, 6.0, 400.0],
+            ]
+        )
+        circuit = np.array(["tour", "tour", "chal", "chal"])
+        specs = [
+            ImputeSpec(col_index=0, strategy="median"),
+            ImputeSpec(col_index=1, strategy="constant", constant=0.0),
+            ImputeSpec(col_index=2, strategy="passthrough"),
+        ]
+
+        state = fit_imputation(X, circuit, specs, min_circuit_samples=1)
+        result = apply_imputation(X, circuit, state)
+
+        # Col 0: median-filled (no NaN)
+        assert not np.isnan(result[:, 0]).any()
+        # Col 1: constant-filled to 0
+        assert not np.isnan(result[:, 1]).any()
+        assert result[0, 1] == 0.0
+        # Col 2: passthrough — NaN preserved
+        assert np.isnan(result[2, 2])
+        # Non-NaN values in col 2 should be untouched
+        assert result[0, 2] == 100.0
+        assert result[3, 2] == 400.0
+
+
+class TestPassthroughSubsetImputeState:
+    def test_passthrough_spec_round_trips(self):
+        from mvp.model.imputation import (
+            ImputeSpec,
+            ImputeState,
+            subset_impute_state,
+        )
+
+        state = ImputeState(
+            specs=[
+                ImputeSpec(col_index=0, strategy="median"),
+                ImputeSpec(col_index=1, strategy="passthrough"),
+                ImputeSpec(col_index=2, strategy="constant", constant=0.5),
+            ],
+            circuit_medians={"tour": np.array([1.0, 2.0, 3.0])},
+            global_medians=np.array([1.0, 2.0, 3.0]),
+            circuit_labels=["tour"],
+        )
+        # Subset selects all 3 columns in a new order
+        new_state = subset_impute_state(state, np.array([2, 1, 0]))
+
+        # Passthrough spec carried over with the remapped col_index
+        passthrough = [s for s in new_state.specs if s.strategy == "passthrough"]
+        assert len(passthrough) == 1
+        assert passthrough[0].col_index == 1  # was idx 1, still at position 1 after subset
+
+
+class TestValidateImputeCompat:
+    def _make_specs(self, strategies: list[str]) -> list:
+        from mvp.model.imputation import ImputeSpec
+
+        return [
+            ImputeSpec(
+                col_index=i,
+                strategy=s,
+                constant=None if s != "constant" else 0.0,
+            )
+            for i, s in enumerate(strategies)
+        ]
+
+    def test_no_passthrough_passes(self):
+        from mvp.model.imputation import validate_impute_compat
+
+        specs = self._make_specs(["median", "constant"])
+        # Should not raise for any model type
+        for mt in ("xgboost", "logistic", "random_forest", "neural_net", "sequence"):
+            validate_impute_compat(specs, ["a", "b"], mt)
+
+    def test_passthrough_with_xgboost_passes(self):
+        from mvp.model.imputation import validate_impute_compat
+
+        specs = self._make_specs(["passthrough", "median"])
+        validate_impute_compat(specs, ["a", "b"], "xgboost")
+
+    def test_passthrough_with_logistic_raises(self):
+        from mvp.model.imputation import validate_impute_compat
+
+        specs = self._make_specs(["passthrough", "median"])
+        with pytest.raises(ValueError, match="logistic.*cannot accept NaN.*'a'"):
+            validate_impute_compat(specs, ["a", "b"], "logistic")
+
+    def test_passthrough_with_random_forest_raises(self):
+        from mvp.model.imputation import validate_impute_compat
+
+        specs = self._make_specs(["passthrough", "median"])
+        with pytest.raises(ValueError, match="random_forest.*cannot accept NaN"):
+            validate_impute_compat(specs, ["a", "b"], "random_forest")
+
+    def test_passthrough_with_neural_net_raises(self):
+        from mvp.model.imputation import validate_impute_compat
+
+        specs = self._make_specs(["passthrough", "median"])
+        with pytest.raises(ValueError, match="neural_net.*cannot accept NaN"):
+            validate_impute_compat(specs, ["a", "b"], "neural_net")
+
+    def test_aux_passthrough_columns_ignored(self):
+        """Aux-column passthrough (col_index >= n_model) should not trigger validation."""
+        from mvp.model.imputation import ImputeSpec, validate_impute_compat
+
+        specs = [
+            ImputeSpec(col_index=0, strategy="median"),
+            ImputeSpec(col_index=1, strategy="passthrough"),  # aux, beyond feature_names
+        ]
+        # feature_names has only 1 entry; col_index 1 is aux and should be ignored
+        validate_impute_compat(specs, ["a"], "logistic")  # must not raise
+
+    def test_ensemble_xgb_subonly_passes(self):
+        from mvp.model.imputation import validate_impute_compat
+
+        specs = self._make_specs(["passthrough", "median", "median"])
+        base_specs = [
+            {"type": "xgboost", "feature_indices": [0, 1]},
+            {"type": "logistic", "feature_indices": [2]},
+        ]
+        # XGB gets the passthrough col, logistic doesn't — fine
+        validate_impute_compat(
+            specs, ["a", "b", "c"], "ensemble", base_model_specs=base_specs,
+        )
+
+    def test_ensemble_logistic_subreceives_passthrough_raises(self):
+        from mvp.model.imputation import validate_impute_compat
+
+        specs = self._make_specs(["passthrough", "median"])
+        base_specs = [
+            {"type": "xgboost", "feature_indices": [1]},
+            {"type": "logistic", "feature_indices": [0, 1]},  # gets passthrough col 0
+        ]
+        with pytest.raises(ValueError, match="logistic.*passthrough feature.*'a'"):
+            validate_impute_compat(
+                specs, ["a", "b"], "ensemble", base_model_specs=base_specs,
+            )
+
+    def test_ensemble_missing_base_specs_raises(self):
+        from mvp.model.imputation import validate_impute_compat
+
+        specs = self._make_specs(["passthrough"])
+        with pytest.raises(ValueError, match="ensemble model requires resolved"):
+            validate_impute_compat(specs, ["a"], "ensemble", base_model_specs=None)
+
+
+class TestPassthroughStateRoundTrip:
+    def test_pickle_round_trip(self):
+        """ImputeState containing a passthrough spec survives pickle round-trip."""
+        import pickle
+
+        from mvp.model.imputation import ImputeSpec, ImputeState
+
+        state = ImputeState(
+            specs=[
+                ImputeSpec(col_index=0, strategy="median"),
+                ImputeSpec(col_index=1, strategy="passthrough"),
+                ImputeSpec(col_index=2, strategy="constant", constant=0.0),
+            ],
+            circuit_medians={"tour": np.array([1.0, 2.0, 3.0])},
+            global_medians=np.array([1.0, 2.0, 3.0]),
+            circuit_labels=["tour"],
+        )
+
+        restored = pickle.loads(pickle.dumps(state))
+        assert [s.strategy for s in restored.specs] == [
+            "median", "passthrough", "constant",
+        ]
+        assert restored.specs[1].constant is None

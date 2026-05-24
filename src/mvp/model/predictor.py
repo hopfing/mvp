@@ -285,6 +285,16 @@ class ProductionPredictor:
         augmented_cols = feature_cols + build_result.aux_base_col_names
         n_model = build_result.n_model_features
 
+        # Validate impute=None features only reach NaN-tolerant models.
+        # No-op when no feature declares impute=None.
+        from mvp.model.imputation import validate_impute_compat
+        validate_impute_compat(
+            build_result.specs,
+            feature_cols,
+            config.model.type,
+            base_model_specs=base_model_specs,
+        )
+
         X = df_deploy.select(pl.col(c).cast(pl.Float64) for c in augmented_cols).to_numpy()
         y = df_deploy[target_col].to_numpy().astype(int)
 
