@@ -444,29 +444,28 @@ _SUMMARY_TIER_ORDER: tuple[str, ...] = (
 
 
 _LABEL_W = 16
-_SIDE_W = 71
+_OPEN_W = 71
+_CLOSE_W = 52
 
 
-def _render_side(stats: dict, price: str) -> str:
-    """Render the per-side cell from a slice_stats dict (n / hit% / ROI /
-    units / CLV+% / avg CLV / ME+% / avg ME for one price side).
+def _render_open_side(stats: dict) -> str:
+    """Render the OPEN cell: n / hit% / ROI / units / CLV+% / avg CLV / ME+% / avg ME.
 
-    Per-side n_open / n_close (priced subset size) is used for display so
-    "n" matches the row count that actually contributed to ROI.
+    n_open (priced subset size) is the row count contributing to ROI.
     """
-    n_p = stats.get(f"n_{price}", 0)
+    n_p = stats.get("n_open", 0)
     if n_p == 0:
         return (
             f"{0:>6}  {'-':>6}  {'-':>7}  {'-':>8}  "
             f"{'-':>6}  {'-':>9}  {'-':>6}  {'-':>9}"
         )
     hit = stats.get("hit") or 0.0
-    pnl = stats.get(f"pnl_{price}") or 0.0
-    roi = stats.get(f"roi_{price}") or 0.0
+    pnl = stats.get("pnl_open") or 0.0
+    roi = stats.get("roi_open") or 0.0
     clv_win = stats.get("clv_pos") or 0.0
     avg_clv = stats.get("avg_clv") or 0.0
-    me_win = stats.get(f"me_{price}_pos") or 0.0
-    avg_me = stats.get(f"avg_me_{price}") or 0.0
+    me_win = stats.get("me_open_pos") or 0.0
+    avg_me = stats.get("avg_me_open") or 0.0
     return (
         f"{n_p:>6}  {hit:>6.1%}  {roi:>+7.2%}  {pnl:>+7.1f}u  "
         f"{clv_win:>6.1%}  {avg_clv * 100:>+7.2f}pp  "
@@ -474,16 +473,42 @@ def _render_side(stats: dict, price: str) -> str:
     )
 
 
+def _render_close_side(stats: dict) -> str:
+    """Render the CLOSE cell: n / hit% / ROI / units / ME+% / avg ME.
+
+    CLV is omitted — at the close line, CLV-vs-close is zero by definition.
+    """
+    n_p = stats.get("n_close", 0)
+    if n_p == 0:
+        return (
+            f"{0:>6}  {'-':>6}  {'-':>7}  {'-':>8}  "
+            f"{'-':>6}  {'-':>9}"
+        )
+    hit = stats.get("hit") or 0.0
+    pnl = stats.get("pnl_close") or 0.0
+    roi = stats.get("roi_close") or 0.0
+    me_win = stats.get("me_close_pos") or 0.0
+    avg_me = stats.get("avg_me_close") or 0.0
+    return (
+        f"{n_p:>6}  {hit:>6.1%}  {roi:>+7.2%}  {pnl:>+7.1f}u  "
+        f"{me_win:>6.1%}  {avg_me * 100:>+7.2f}pp"
+    )
+
+
 def _wide_header_lines() -> tuple[str, str]:
-    open_hdr = "---- OPEN ----".center(_SIDE_W)
-    close_hdr = "---- CLOSE ----".center(_SIDE_W)
-    side_cols = (
+    open_hdr = "---- OPEN ----".center(_OPEN_W)
+    close_hdr = "---- CLOSE ----".center(_CLOSE_W)
+    open_cols = (
         f"{'n':>6}  {'hit%':>6}  {'ROI':>7}  {'units':>8}  "
         f"{'CLV+%':>6}  {'avg CLV':>9}  {'ME+%':>6}  {'avg ME':>9}"
     )
+    close_cols = (
+        f"{'n':>6}  {'hit%':>6}  {'ROI':>7}  {'units':>8}  "
+        f"{'ME+%':>6}  {'avg ME':>9}"
+    )
     label_blank = " " * _LABEL_W
     top = f"  {label_blank}  {open_hdr}    {close_hdr}"
-    bottom = f"  {'label':<{_LABEL_W}}  {side_cols}    {side_cols}"
+    bottom = f"  {'label':<{_LABEL_W}}  {open_cols}    {close_cols}"
     return top, bottom
 
 
@@ -493,8 +518,8 @@ def _wide_row(label: str, open_stats: dict, close_stats: dict) -> str:
     """
     return (
         f"  {label:<{_LABEL_W}}  "
-        f"{_render_side(open_stats, 'open')}    "
-        f"{_render_side(close_stats, 'close')}"
+        f"{_render_open_side(open_stats)}    "
+        f"{_render_close_side(close_stats)}"
     )
 
 
