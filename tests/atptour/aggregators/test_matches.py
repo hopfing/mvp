@@ -563,6 +563,53 @@ class TestEffectiveMatchDate:
         assert f_date == datetime(2024, 3, 10)
         assert sf_date == datetime(2024, 3, 8)
 
+    def test_null_within_round_fills_from_peer_and_keeps_passthrough(self):
+        """A null schedule that has scheduled peers in its round is filled from
+        them, so the group stays on passthrough instead of being pushed to
+        estimation.
+
+        Mirrors an in-progress Slam where one early-round match lost its
+        schedule to a feed gap: without the peer fill, R128 (the latest round
+        present) gets estimated onto the tournament end date.
+        """
+        from mvp.atptour.aggregators.matches import add_effective_match_date
+
+        # Tournament Mar 8-15. Q1 (order 1) has one real time and one null;
+        # R128 (order 5) is fully scheduled on Mar 10.
+        df = pl.DataFrame({
+            "tournament_id": ["T1"] * 4,
+            "year": [2024] * 4,
+            "draw_type": ["singles"] * 4,
+            "round": ["Q1", "Q1", "R128", "R128"],
+            "round_order": [1, 1, 5, 5],
+            "tournament_start_date": [date(2024, 3, 8)] * 4,
+            "tournament_end_date": [date(2024, 3, 15)] * 4,
+            "scheduled_datetime": [
+                datetime(2024, 3, 8, 10, 0),
+                None,  # feed gap on a played match
+                datetime(2024, 3, 10, 11, 0),
+                datetime(2024, 3, 10, 14, 0),
+            ],
+        }).cast({
+            "scheduled_datetime": pl.Datetime,
+            "tournament_start_date": pl.Date,
+            "tournament_end_date": pl.Date,
+        })
+        result = add_effective_match_date(df)
+
+        r128_dates = result.filter(
+            pl.col("round") == "R128"
+        )["effective_match_date"].to_list()
+        q1_dates = sorted(
+            result.filter(pl.col("round") == "Q1")["effective_match_date"].to_list()
+        )
+
+        # R128 keeps its real Mar 10 schedule, NOT estimated onto the end date.
+        assert all(d.date() == date(2024, 3, 10) for d in r128_dates)
+        # The null Q1 row is filled from its round peer (Mar 8 10:00), not left
+        # null and not estimated.
+        assert q1_dates == [datetime(2024, 3, 8, 10, 0), datetime(2024, 3, 8, 10, 0)]
+
     def test_multiple_groups_independent(self):
         """Different tournament groups are computed independently."""
         from mvp.atptour.aggregators.matches import add_effective_match_date

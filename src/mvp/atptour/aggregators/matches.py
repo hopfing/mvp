@@ -314,32 +314,31 @@ def add_effective_match_date(df: pl.DataFrame) -> pl.DataFrame:
       Early rounds (Q1, R128) are placed near tournament_start_date, late rounds (F)
       near tournament_end_date. This handles both short Challengers and 2-week Slams.
 
-    Walkover rows have no real scheduled_datetime (match never played). They get
-    dated from the max scheduled_datetime of peer matches in the same
-    (tournament_id, year, draw_type, round), so they don't poison the group-level
-    passthrough gate and so they sort alongside their round.
+    Any row with a null scheduled_datetime (a walkover that was never played, or
+    a match whose schedule the feed dropped) is dated from the max
+    scheduled_datetime of peer matches in the same
+    (tournament_id, year, draw_type, round). Anchoring to round peers keeps the
+    fill inside the round's real window, so it sorts alongside its round and can
+    never slot after the winner's next-round match. This also means a single
+    missing schedule no longer poisons the group-level passthrough gate and
+    forces the whole tournament into round-offset estimation. A round where
+    *every* match is null has no peer to borrow from and stays null, so a
+    genuinely unscheduled tournament still falls through to estimation below.
     """
     group_keys = ["tournament_id", "year"]
 
-    # Resolved schedule: fill walkover nulls from peers in the same round so
-    # the group-level gate isn't poisoned by walkovers that were never scheduled.
-    if "result_type" in df.columns:
-        peer_sched = pl.col("scheduled_datetime").max().over(
-            ["tournament_id", "year", "draw_type", "round"]
-        )
-        df = df.with_columns(
-            pl.when(
-                (pl.col("result_type") == "walkover")
-                & pl.col("scheduled_datetime").is_null()
-            )
-            .then(peer_sched)
-            .otherwise(pl.col("scheduled_datetime"))
-            .alias("_resolved_sched"),
-        )
-    else:
-        df = df.with_columns(
-            pl.col("scheduled_datetime").alias("_resolved_sched"),
-        )
+    # Resolved schedule: fill any null scheduled_datetime from round peers (see
+    # docstring). result_type is no longer needed — walkovers are just one source
+    # of nulls and are covered by the same peer fill.
+    peer_sched = pl.col("scheduled_datetime").max().over(
+        ["tournament_id", "year", "draw_type", "round"]
+    )
+    df = df.with_columns(
+        pl.when(pl.col("scheduled_datetime").is_null())
+        .then(peer_sched)
+        .otherwise(pl.col("scheduled_datetime"))
+        .alias("_resolved_sched"),
+    )
 
     # Per-group flag: True if every row in the group has a non-null resolved sched
     df = df.with_columns(
