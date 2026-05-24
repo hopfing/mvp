@@ -22,7 +22,7 @@ def _player_retired() -> pl.Expr:
     params=["days"],
     description="Fraction of recent same-draw-type matches ending in player's own retirement",
     mirror=True,
-    impute=0,
+    impute=None,
 )
 def retirement_rate(days: int | None = None) -> pl.Expr:
     """Rolling rate of player's own retirements/walkovers (singles-only when filtered)."""
@@ -50,7 +50,7 @@ def retirement_rate(days: int | None = None) -> pl.Expr:
     params=[],
     description="1 if player's previous same-draw-type match ended in their own retirement",
     mirror=True,
-    impute=0,
+    impute=None,
 )
 def last_match_retirement() -> pl.Expr:
     """Whether the player retired/walked over in their most recent same-draw-type match."""

@@ -26,14 +26,21 @@ DATE_COL = "effective_match_date"
 TOURN_GROUP = ["player_id", "tournament_id", "year", "draw_type"]
 
 
-def _tourn_cumulative(expr: pl.Expr) -> pl.Expr:
-    """Cumulative sum shifted by 1, grouped by tournament context."""
-    return (
-        expr.cum_sum()
-        .shift(1)
-        .over(TOURN_GROUP, order_by=DATE_COL)
-        .fill_null(0)
-    )
+def _tourn_cumulative(expr: pl.Expr, fill_with: int | None = 0) -> pl.Expr:
+    """Cumulative sum shifted by 1, grouped by tournament context.
+
+    Args:
+        expr: Per-row value to accumulate.
+        fill_with: Value to fill the shift(1) null with for a player's first
+            match at the tournament. ``0`` is correct for true counts (sum of
+            an empty prior history is 0). ``None`` is correct for margin /
+            average features where "no prior data" is not the same as "net
+            zero" and should propagate as NaN to NaN-tolerant models.
+    """
+    cum = expr.cum_sum().shift(1).over(TOURN_GROUP, order_by=DATE_COL)
+    if fill_with is None:
+        return cum
+    return cum.fill_null(fill_with)
 
 
 # --- Base features ---
@@ -66,10 +73,10 @@ def tourn_sets_lost() -> pl.Expr:
     params=[],
     description="Cumulative sets won - lost in tournament",
     mirror=True,
-    impute=0,
+    impute=None,
 )
 def tourn_sets_margin() -> pl.Expr:
-    return _tourn_cumulative(_sets_won() - _sets_lost())
+    return _tourn_cumulative(_sets_won() - _sets_lost(), fill_with=None)
 
 
 @feature(
@@ -99,10 +106,12 @@ def tourn_games_lost() -> pl.Expr:
     params=[],
     description="Cumulative games won - lost in tournament",
     mirror=True,
-    impute=0,
+    impute=None,
 )
 def tourn_games_margin() -> pl.Expr:
-    return _tourn_cumulative(_total_games_won() - _total_games_lost())
+    return _tourn_cumulative(
+        _total_games_won() - _total_games_lost(), fill_with=None,
+    )
 
 
 @feature(
@@ -272,7 +281,7 @@ def tourn_history_games_lost() -> pl.Expr:
 
 @feature(
     name="tourn_history_matches_margin_sum",
-    params=[], mirror=True, impute=0,
+    params=[], mirror=True, impute=None,
     description="Prior (matches won − matches lost) at this tournament",
 )
 def tourn_history_matches_margin_sum() -> pl.Expr:
@@ -281,7 +290,7 @@ def tourn_history_matches_margin_sum() -> pl.Expr:
 
 @feature(
     name="tourn_history_sets_margin_sum",
-    params=[], mirror=True, impute=0,
+    params=[], mirror=True, impute=None,
     description="Prior sets margin (won − lost) at this tournament",
 )
 def tourn_history_sets_margin_sum() -> pl.Expr:
@@ -290,7 +299,7 @@ def tourn_history_sets_margin_sum() -> pl.Expr:
 
 @feature(
     name="tourn_history_games_margin_sum",
-    params=[], mirror=True, impute=0,
+    params=[], mirror=True, impute=None,
     description="Prior games margin (won − lost) at this tournament",
 )
 def tourn_history_games_margin_sum() -> pl.Expr:
@@ -317,7 +326,7 @@ def tourn_history_win_pct() -> pl.Expr:
 
 @feature(
     name="tourn_history_sets_won_avg_per_match",
-    params=[], mirror=True, impute=0,
+    params=[], mirror=True, impute=None,
     description="Per-prior-match average of sets won at this tournament",
 )
 def tourn_history_sets_won_avg_per_match() -> pl.Expr:
@@ -326,7 +335,7 @@ def tourn_history_sets_won_avg_per_match() -> pl.Expr:
 
 @feature(
     name="tourn_history_sets_lost_avg_per_match",
-    params=[], mirror=True, impute=0,
+    params=[], mirror=True, impute=None,
     description="Per-prior-match average of sets lost at this tournament",
 )
 def tourn_history_sets_lost_avg_per_match() -> pl.Expr:
@@ -335,7 +344,7 @@ def tourn_history_sets_lost_avg_per_match() -> pl.Expr:
 
 @feature(
     name="tourn_history_games_won_avg_per_match",
-    params=[], mirror=True, impute=0,
+    params=[], mirror=True, impute=None,
     description="Per-prior-match average of games won at this tournament",
 )
 def tourn_history_games_won_avg_per_match() -> pl.Expr:
@@ -344,7 +353,7 @@ def tourn_history_games_won_avg_per_match() -> pl.Expr:
 
 @feature(
     name="tourn_history_games_lost_avg_per_match",
-    params=[], mirror=True, impute=0,
+    params=[], mirror=True, impute=None,
     description="Per-prior-match average of games lost at this tournament",
 )
 def tourn_history_games_lost_avg_per_match() -> pl.Expr:
@@ -353,7 +362,7 @@ def tourn_history_games_lost_avg_per_match() -> pl.Expr:
 
 @feature(
     name="tourn_history_sets_margin_avg_per_match",
-    params=[], mirror=True, impute=0,
+    params=[], mirror=True, impute=None,
     description="Per-prior-match average of sets margin at this tournament",
 )
 def tourn_history_sets_margin_avg_per_match() -> pl.Expr:
@@ -362,7 +371,7 @@ def tourn_history_sets_margin_avg_per_match() -> pl.Expr:
 
 @feature(
     name="tourn_history_games_margin_avg_per_match",
-    params=[], mirror=True, impute=0,
+    params=[], mirror=True, impute=None,
     description="Per-prior-match average of games margin at this tournament",
 )
 def tourn_history_games_margin_avg_per_match() -> pl.Expr:
@@ -377,7 +386,7 @@ def tourn_history_games_margin_avg_per_match() -> pl.Expr:
 
 @feature(
     name="tourn_history_matches_won_avg_per_year",
-    params=[], mirror=True, impute=0,
+    params=[], mirror=True, impute=None,
     depends_on=["tourn_history_year_instances_completed"],
     description="Per-prior-year-instance average of yearly matches won at this tournament",
 )
@@ -387,7 +396,7 @@ def tourn_history_matches_won_avg_per_year() -> pl.Expr:
 
 @feature(
     name="tourn_history_matches_lost_avg_per_year",
-    params=[], mirror=True, impute=0,
+    params=[], mirror=True, impute=None,
     depends_on=["tourn_history_year_instances_completed"],
     description="Per-prior-year-instance average of yearly matches lost at this tournament",
 )
@@ -397,7 +406,7 @@ def tourn_history_matches_lost_avg_per_year() -> pl.Expr:
 
 @feature(
     name="tourn_history_matches_margin_avg_per_year",
-    params=[], mirror=True, impute=0,
+    params=[], mirror=True, impute=None,
     depends_on=["tourn_history_year_instances_completed"],
     description="Per-prior-year-instance average of yearly (W − L) at this tournament",
 )
@@ -407,7 +416,7 @@ def tourn_history_matches_margin_avg_per_year() -> pl.Expr:
 
 @feature(
     name="tourn_history_sets_won_avg_per_year",
-    params=[], mirror=True, impute=0,
+    params=[], mirror=True, impute=None,
     depends_on=["tourn_history_year_instances_completed"],
     description="Per-prior-year-instance average of yearly sets won at this tournament",
 )
@@ -417,7 +426,7 @@ def tourn_history_sets_won_avg_per_year() -> pl.Expr:
 
 @feature(
     name="tourn_history_sets_lost_avg_per_year",
-    params=[], mirror=True, impute=0,
+    params=[], mirror=True, impute=None,
     depends_on=["tourn_history_year_instances_completed"],
     description="Per-prior-year-instance average of yearly sets lost at this tournament",
 )
@@ -427,7 +436,7 @@ def tourn_history_sets_lost_avg_per_year() -> pl.Expr:
 
 @feature(
     name="tourn_history_sets_margin_avg_per_year",
-    params=[], mirror=True, impute=0,
+    params=[], mirror=True, impute=None,
     depends_on=["tourn_history_year_instances_completed"],
     description="Per-prior-year-instance average of yearly sets margin at this tournament",
 )
@@ -437,7 +446,7 @@ def tourn_history_sets_margin_avg_per_year() -> pl.Expr:
 
 @feature(
     name="tourn_history_games_won_avg_per_year",
-    params=[], mirror=True, impute=0,
+    params=[], mirror=True, impute=None,
     depends_on=["tourn_history_year_instances_completed"],
     description="Per-prior-year-instance average of yearly games won at this tournament",
 )
@@ -447,7 +456,7 @@ def tourn_history_games_won_avg_per_year() -> pl.Expr:
 
 @feature(
     name="tourn_history_games_lost_avg_per_year",
-    params=[], mirror=True, impute=0,
+    params=[], mirror=True, impute=None,
     depends_on=["tourn_history_year_instances_completed"],
     description="Per-prior-year-instance average of yearly games lost at this tournament",
 )
@@ -457,7 +466,7 @@ def tourn_history_games_lost_avg_per_year() -> pl.Expr:
 
 @feature(
     name="tourn_history_games_margin_avg_per_year",
-    params=[], mirror=True, impute=0,
+    params=[], mirror=True, impute=None,
     depends_on=["tourn_history_year_instances_completed"],
     description="Per-prior-year-instance average of yearly games margin at this tournament",
 )

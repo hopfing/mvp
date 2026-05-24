@@ -157,7 +157,7 @@ def is_seeded() -> pl.Expr:
     params=[],
     description="Player seed minus opponent seed (lower seed is better)",
     mirror=False,
-    impute=0,
+    impute=None,
 )
 def seed_diff() -> pl.Expr:
     """Seed difference (negative = player has better seed)."""
@@ -310,7 +310,7 @@ def is_qualifying() -> pl.Expr:
     params=[],
     description="Fractional year of match date (e.g. 2024.25 = April 2024)",
     match_level=True,
-    impute=0,
+    impute=None,
 )
 def match_period() -> pl.Expr:
     """Match date as fractional year at monthly resolution."""
@@ -323,7 +323,7 @@ def match_period() -> pl.Expr:
     params=[],
     description="Month of year as fraction (0.0 = Jan, 0.917 = Dec) — seasonal cycle",
     match_level=True,
-    impute=0,
+    impute=None,
 )
 def match_season() -> pl.Expr:
     """Month of year as fraction, capturing seasonal patterns."""
@@ -335,7 +335,7 @@ def match_season() -> pl.Expr:
     params=[],
     description="Fractional year at quarterly resolution (e.g. 2024.0, 2024.25)",
     match_level=True,
-    impute=0,
+    impute=None,
 )
 def match_period_qtr() -> pl.Expr:
     """Match date as fractional year at quarterly resolution."""
@@ -348,7 +348,7 @@ def match_period_qtr() -> pl.Expr:
     params=[],
     description="Quarter of year as fraction (0.0, 0.25, 0.5, 0.75) — seasonal cycle",
     match_level=True,
-    impute=0,
+    impute=None,
 )
 def match_season_qtr() -> pl.Expr:
     """Quarter of year as fraction, capturing seasonal patterns."""

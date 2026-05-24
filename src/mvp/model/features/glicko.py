@@ -40,7 +40,7 @@ def glicko_sigma() -> pl.Expr:
     name="glicko_diff",
     description="Base Glicko-2 mu difference (player - opponent)",
     mirror=False,
-    impute=0,
+    impute=None,
 )
 def glicko_diff() -> pl.Expr:
     return pl.col("player_glicko_mu") - pl.col("opp_glicko_mu")
@@ -60,7 +60,7 @@ def glicko_rd_sum() -> pl.Expr:
     name="glicko_rd_diff",
     description="Glicko-2 RD difference (asymmetric uncertainty)",
     mirror=False,
-    impute=0,
+    impute=None,
 )
 def glicko_rd_diff() -> pl.Expr:
     return pl.col("player_glicko_rd") - pl.col("opp_glicko_rd")
@@ -70,7 +70,7 @@ def glicko_rd_diff() -> pl.Expr:
     name="glicko_sigma_diff",
     description="Glicko-2 volatility difference (erratic vs consistent)",
     mirror=False,
-    impute=0,
+    impute=None,
 )
 def glicko_sigma_diff() -> pl.Expr:
     return pl.col("player_glicko_sigma") - pl.col("opp_glicko_sigma")
@@ -109,7 +109,7 @@ def glicko_surface_rd_sum() -> pl.Expr:
     description="Absolute Glicko-2 mu difference (match competitiveness)",
     mirror=False,
     match_level=True,
-    impute=0,
+    impute=None,
 )
 def glicko_diff_abs() -> pl.Expr:
     """Absolute Glicko gap — larger means more lopsided match."""
@@ -121,7 +121,7 @@ def glicko_diff_abs() -> pl.Expr:
     description="Squared Glicko-2 mu difference (nonlinear competitiveness)",
     mirror=False,
     match_level=True,
-    impute=0,
+    impute=None,
 )
 def glicko_diff_sq() -> pl.Expr:
     """Squared Glicko gap — captures diminishing marginal effect of skill gap."""
@@ -133,7 +133,7 @@ def glicko_diff_sq() -> pl.Expr:
     name="glicko_diff_x_rd_sum",
     description="Glicko diff weighted by combined uncertainty",
     mirror=False,
-    impute=0,
+    impute=None,
 )
 def glicko_diff_x_rd_sum() -> pl.Expr:
     diff = pl.col("player_glicko_mu") - pl.col("opp_glicko_mu")
@@ -148,7 +148,7 @@ def glicko_diff_x_rd_sum() -> pl.Expr:
     depends_on=["match_count"],
     mirror=False,
     match_level=True,
-    impute=0,
+    impute=None,
 )
 def glicko_rd_x_match_count(days: int | None = None) -> pl.Expr:
     rd_sum = pl.col("player_glicko_rd") + pl.col("opp_glicko_rd")
@@ -168,7 +168,7 @@ def glicko_rd_x_match_count(days: int | None = None) -> pl.Expr:
     depends_on=["days_since_last_match"],
     mirror=False,
     match_level=True,
-    impute=0,
+    impute=None,
 )
 def glicko_rd_x_days_since_last_match() -> pl.Expr:
     rd_sum = pl.col("player_glicko_rd") + pl.col("opp_glicko_rd")

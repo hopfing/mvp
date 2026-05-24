@@ -206,7 +206,7 @@ def _tier_ordinal_expr() -> pl.Expr:
         "CH175=5, 250=6, 500=7, 1000=8, GS=9"
     ),
     match_level=True,
-    impute=0,
+    impute=None,
 )
 def tournament_tier_ordinal() -> pl.Expr:
     return _tier_ordinal_expr()
@@ -217,7 +217,7 @@ def tournament_tier_ordinal() -> pl.Expr:
     params=[],
     description="log1p of prize_money; null prize -> null",
     match_level=True,
-    impute=0,
+    impute=None,
 )
 def prize_money_log() -> pl.Expr:
     return (

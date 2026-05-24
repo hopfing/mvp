@@ -12,7 +12,7 @@ from mvp.model.registry import feature
     params=[],
     description="Difference between player and opponent ranking points",
     mirror=False,
-    impute=0,
+    impute=None,
 )
 def ranking_points_diff() -> pl.Expr:
     """Difference between player and opponent ranking points.
@@ -30,7 +30,7 @@ def ranking_points_diff() -> pl.Expr:
     params=[],
     description="Difference between player and opponent ranking (lower is better)",
     mirror=False,
-    impute=0,
+    impute=None,
 )
 def ranking_rank_diff() -> pl.Expr:
     """Difference in rankings (player_rank - opp_rank).

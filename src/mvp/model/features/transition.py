@@ -28,7 +28,7 @@ def days_since_surface() -> pl.Expr:
     params=[],
     description="1 if player changed surfaces since last match, 0 if same",
     mirror=True,
-    impute=0,
+    impute=None,
 )
 def surface_switch() -> pl.Expr:
     """Whether player switched surfaces since their previous match."""
