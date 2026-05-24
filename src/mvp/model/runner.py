@@ -254,6 +254,16 @@ class ExperimentRunner:
 
         # Resolve ensemble or standard features
         is_ensemble = self.config.model.type == "ensemble"
+
+        # When the model is trained with asymmetric_logloss, mirror its
+        # lambda_over into compute_metrics so the tune metric evaluates the
+        # same loss surface the model was fit against. Ensemble top-level
+        # params don't carry lambda_over directly; fall back to default.
+        lambda_over_eval: float | None = None
+        if not is_ensemble and self.config.model.params:
+            lo = self.config.model.params.get("lambda_over")
+            if lo is not None:
+                lambda_over_eval = float(lo)
         base_model_specs: list[dict[str, Any]] | None = None
         model_date_ranges: list | None = None
         model_filters: list[dict[str, Any] | None] | None = None
@@ -775,11 +785,11 @@ class ExperimentRunner:
                 else:
                     y_prob = model.predict_proba(X_test)
                     y_prob_train = model.predict_proba(X_train)
-                metrics = compute_metrics(y_test, y_prob)
+                metrics = compute_metrics(y_test, y_prob, lambda_over=lambda_over_eval)
                 all_metrics.append(metrics)
 
                 # Predict and evaluate on train (for overfitting detection)
-                train_metrics = compute_metrics(y_train, y_prob_train)
+                train_metrics = compute_metrics(y_train, y_prob_train, lambda_over=lambda_over_eval)
                 all_train_metrics.append(train_metrics)
 
                 # Capture per-fold gain importance (tree, non-ensemble only)
@@ -864,7 +874,7 @@ class ExperimentRunner:
                         "y_prob": c_y_prob,
                         "df": c_df,
                     })
-                    regrouped_metrics.append(compute_metrics(c_y_true, c_y_prob))
+                    regrouped_metrics.append(compute_metrics(c_y_true, c_y_prob, lambda_over=lambda_over_eval))
 
                     train_keys = list(all_train_metrics[iter_idxs[0]].keys())
                     regrouped_train_metrics.append({
@@ -999,6 +1009,7 @@ class ExperimentRunner:
                 avg_metrics = compute_metrics(
                     y_meta[:n_tuning_samples],
                     y_prob_stacked[:n_tuning_samples],
+                    lambda_over=lambda_over_eval,
                 )
 
                 offset = 0
@@ -1030,7 +1041,7 @@ class ExperimentRunner:
                 # probability (the holdout's just hasn't seen its own labels).
                 # raw_metrics are computed pre-calibration for diagnostic visibility.
                 raw_metrics = compute_metrics(
-                    combined_y_true_oof, combined_y_prob_oof
+                    combined_y_true_oof, combined_y_prob_oof, lambda_over=lambda_over_eval
                 )
 
                 cal_cfg = self.config.calibration
@@ -1067,13 +1078,13 @@ class ExperimentRunner:
                 # so the per-fold report matches the headline (both reflect the
                 # single calibrator that gets deployed).
                 all_metrics = [
-                    compute_metrics(p["y_true"], p["y_prob"])
+                    compute_metrics(p["y_true"], p["y_prob"], lambda_over=lambda_over_eval)
                     for p in tuning_predictions
                 ]
                 calibrated_y_prob = np.concatenate(
                     [p["y_prob"] for p in tuning_predictions]
                 )
-                avg_metrics = compute_metrics(combined_y_true_oof, calibrated_y_prob)
+                avg_metrics = compute_metrics(combined_y_true_oof, calibrated_y_prob, lambda_over=lambda_over_eval)
                 for k, v in raw_metrics.items():
                     avg_metrics[f"raw_{k}"] = v
             else:
@@ -1083,7 +1094,7 @@ class ExperimentRunner:
                 # honored by `mvp model` (ProductionPredictor) not by tuning.
                 run_logger.info("Calibration disabled (calibrate=False)")
                 avg_metrics = compute_metrics(
-                    combined_y_true_oof, combined_y_prob_oof
+                    combined_y_true_oof, combined_y_prob_oof, lambda_over=lambda_over_eval
                 )
                 # all_metrics already contains per-fold raw metrics from earlier
                 # in run(); no recomputation needed since y_prob was never mutated.
@@ -1097,9 +1108,9 @@ class ExperimentRunner:
                 holdout_y_prob = np.concatenate(
                     [p["y_prob"] for p in holdout_predictions]
                 )
-                holdout_metrics = compute_metrics(holdout_y_true, holdout_y_prob)
+                holdout_metrics = compute_metrics(holdout_y_true, holdout_y_prob, lambda_over=lambda_over_eval)
                 holdout_fold_metrics = [
-                    compute_metrics(p["y_true"], p["y_prob"])
+                    compute_metrics(p["y_true"], p["y_prob"], lambda_over=lambda_over_eval)
                     for p in holdout_predictions
                 ]
 

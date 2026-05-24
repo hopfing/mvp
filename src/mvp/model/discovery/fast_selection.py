@@ -24,11 +24,18 @@ logger = logging.getLogger(__name__)
 warnings.filterwarnings("ignore", message="All-NaN slice encountered")
 
 
-def _make_metric_fn(metric: str) -> Callable[[np.ndarray, np.ndarray], float]:
+def _make_metric_fn(
+    metric: str,
+    lambda_over: float | None = None,
+) -> Callable[[np.ndarray, np.ndarray], float]:
     """Return a function that computes a single metric.
 
     Avoids the overhead of compute_metrics() which calculates all 6 metrics
     when only one is needed per iteration.
+
+    `lambda_over` mirrors `model.params.lambda_over` from the YAML so that
+    `asymmetric_logloss` evaluates the same loss surface used at training.
+    None falls back to compute_asymmetric_logloss's default.
     """
     from sklearn.metrics import (
         accuracy_score,
@@ -43,6 +50,8 @@ def _make_metric_fn(metric: str) -> Callable[[np.ndarray, np.ndarray], float]:
         compute_error_rate_80plus,
     )
 
+    asym_kwargs = {"lambda_over": lambda_over} if lambda_over is not None else {}
+
     metric_fns: dict[str, Callable[[np.ndarray, np.ndarray], float]] = {
         "log_loss": lambda yt, yp: float(
             log_loss(yt, np.clip(yp, 1e-15, 1 - 1e-15))
@@ -54,11 +63,11 @@ def _make_metric_fn(metric: str) -> Callable[[np.ndarray, np.ndarray], float]:
         "roc_auc": lambda yt, yp: float(roc_auc_score(yt, yp)),
         "calibration_error": lambda yt, yp: compute_calibration_error(yt, yp),
         "error_rate_80plus": lambda yt, yp: compute_error_rate_80plus(yt, yp),
-        "asymmetric_logloss": lambda yt, yp: compute_asymmetric_logloss(yt, yp),
+        "asymmetric_logloss": lambda yt, yp: compute_asymmetric_logloss(yt, yp, **asym_kwargs),
     }
     if metric not in metric_fns:
         # Fall back to full compute_metrics for unknown metrics
-        return lambda yt, yp: compute_metrics(yt, yp)[metric]
+        return lambda yt, yp: compute_metrics(yt, yp, lambda_over=lambda_over)[metric]
     return metric_fns[metric]
 
 
@@ -292,8 +301,9 @@ class FastForwardSelector:
             lr_params = {"random_state": 42, "max_iter": 1000, **model_params}
 
         # Build a single-metric function to avoid computing all 6 metrics
-        # when we only need one.
-        metric_fn = _make_metric_fn(metric)
+        # when we only need one. Pass lambda_over from model params so
+        # asymmetric_logloss mirrors the training-side objective.
+        metric_fn = _make_metric_fn(metric, lambda_over=model_params.get("lambda_over"))
 
         def scorer(features: list[str]) -> float:
             if not features:

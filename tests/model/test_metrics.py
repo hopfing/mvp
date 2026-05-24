@@ -42,3 +42,18 @@ class TestComputeMetrics:
         assert "log_loss" in metrics
         assert "brier_score" in metrics
         assert "roc_auc" in metrics
+
+    def test_asymmetric_logloss_lambda_override(self):
+        """lambda_over=None uses default (2.0); explicit override changes the value."""
+        # Overconfident-side error: y=0 but p=0.9 → weight = lambda_over.
+        y_true = np.array([0, 0, 1, 1])
+        y_prob = np.array([0.9, 0.9, 0.5, 0.5])
+
+        default = compute_metrics(y_true, y_prob)["asymmetric_logloss"]
+        higher = compute_metrics(y_true, y_prob, lambda_over=4.0)["asymmetric_logloss"]
+        lower = compute_metrics(y_true, y_prob, lambda_over=1.0)["asymmetric_logloss"]
+
+        # Larger lambda penalizes the overconfident wrong picks more heavily.
+        assert lower < default < higher
+        # None falls back to default 2.0 exactly.
+        assert compute_metrics(y_true, y_prob, lambda_over=None)["asymmetric_logloss"] == default

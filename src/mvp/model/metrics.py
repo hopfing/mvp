@@ -127,6 +127,7 @@ def compute_metrics(
     y_true: np.ndarray,
     y_prob: np.ndarray,
     threshold: float = 0.5,
+    lambda_over: float | None = None,
 ) -> dict[str, float]:
     """Compute classification metrics.
 
@@ -134,6 +135,10 @@ def compute_metrics(
         y_true: True binary labels.
         y_prob: Predicted probabilities for positive class.
         threshold: Classification threshold for accuracy.
+        lambda_over: Override for asymmetric_logloss's overconfidence penalty.
+            When None, uses compute_asymmetric_logloss's default (2.0). Callers
+            with a YAML-configured `model.params.lambda_over` should pass it
+            through so the tune metric mirrors the training objective.
 
     Returns:
         Dictionary of metric name -> value.
@@ -142,6 +147,8 @@ def compute_metrics(
 
     # Clip probabilities to avoid log(0)
     y_prob_clipped = np.clip(y_prob, 1e-15, 1 - 1e-15)
+
+    asym_kwargs = {"lambda_over": lambda_over} if lambda_over is not None else {}
 
     return {
         "accuracy": float(accuracy_score(y_true, y_pred)),
@@ -153,5 +160,5 @@ def compute_metrics(
         "overconfidence_max": compute_overconfidence_max(y_true, y_prob),
         "signed_calibration": compute_signed_calibration(y_true, y_prob),
         "error_rate_80plus": compute_error_rate_80plus(y_true, y_prob),
-        "asymmetric_logloss": compute_asymmetric_logloss(y_true, y_prob),
+        "asymmetric_logloss": compute_asymmetric_logloss(y_true, y_prob, **asym_kwargs),
     }
