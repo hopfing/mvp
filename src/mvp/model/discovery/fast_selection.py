@@ -1,6 +1,7 @@
 """Fast forward selection using precomputed feature matrix."""
 
 import logging
+import re
 import time
 import warnings
 from collections.abc import Callable
@@ -16,12 +17,58 @@ from mvp.model.engine import check_memory, get_feature_columns, make_fs_engine
 from mvp.model.imputation import build_imputation
 from mvp.model.metrics import compute_metrics
 from mvp.model.models import get_model
-from mvp.model.registry import get_registry
+from mvp.model.registry import FeatureRegistry, get_registry
 from mvp.model.splitters import make_splitter
 
 logger = logging.getLogger(__name__)
 
 warnings.filterwarnings("ignore", message="All-NaN slice encountered")
+
+# Model types that natively accept NaN inputs. impute=None features may only be
+# scored under these; passing NaN to any other model type is an FS contract
+# violation and surfaces as a ValueError at scorer construction time.
+NAN_TOLERANT_MODEL_TYPES = frozenset({"xgboost"})
+
+_WINDOWED_SUFFIX_RE = re.compile(r"^(.+)_(\d+)d$")
+
+
+def _resolve_column_impute(
+    col_name: str, registry: FeatureRegistry,
+) -> tuple[str, float]:
+    """Resolve a column name to (strategy, constant) for FS-time NaN handling.
+
+    Returns one of:
+      ("passthrough", 0.0)  — feature registered with impute=None; leave NaN
+      ("constant",    v)    — feature registered with impute=<float>; fill with v
+      ("median",      0.0)  — feature registered with impute="median" (default);
+                              fill with per-fold median (constant unused)
+
+    Aux base columns and unmapped names fall back to "median" — they're never
+    selected for scoring directly, but they sit in X_wide so a defensible fill
+    strategy is still needed.
+    """
+    if col_name.startswith("player_"):
+        feat_name = col_name[len("player_"):]
+    elif col_name.startswith("opp_"):
+        feat_name = col_name[len("opp_"):]
+    else:
+        feat_name = col_name
+
+    match = _WINDOWED_SUFFIX_RE.match(feat_name)
+    if match:
+        feat_name = match.group(1)
+
+    try:
+        feat_def = registry.get(feat_name)
+    except KeyError:
+        return ("median", 0.0)
+
+    impute = feat_def.impute
+    if impute is None:
+        return ("passthrough", 0.0)
+    if impute == "median":
+        return ("median", 0.0)
+    return ("constant", float(impute))
 
 
 def _make_metric_fn(
@@ -104,6 +151,12 @@ class FastForwardSelector:
         self.folds: list[tuple[np.ndarray, np.ndarray]] = []
         self.circuit: np.ndarray | None = None
         self.fold_medians: list[np.ndarray] = []
+        # Per-column FS-time fill strategy and constant value, indexed parallel
+        # to col_to_idx. Built in precompute() from the registry, consumed by
+        # the scorer to honor each feature's declared impute contract instead
+        # of blanket median-filling. See _resolve_column_impute.
+        self.fill_strategies: list[str] = []
+        self.fill_constants: np.ndarray | None = None
 
     def precompute(
         self,
@@ -213,9 +266,42 @@ class FastForwardSelector:
             df = apply_filters(df, self.config.data.filters)
 
         all_col_names = get_feature_columns(self.all_feature_specs)
-        self._build_result = build_imputation(self.all_feature_specs, get_registry())
+        registry = get_registry()
+        self._build_result = build_imputation(self.all_feature_specs, registry)
         augmented_col_names = all_col_names + self._build_result.aux_base_col_names
         self.col_to_idx = {c: i for i, c in enumerate(augmented_col_names)}
+
+        # Resolve each column's FS-time fill strategy from its registered
+        # impute setting. Done once here so the scorer hot loop only has to
+        # index into precomputed arrays.
+        self.fill_strategies = []
+        fill_constants_list: list[float] = []
+        passthrough_cols: list[str] = []
+        constant_cols: list[str] = []
+        for c in augmented_col_names:
+            strat, const = _resolve_column_impute(c, registry)
+            self.fill_strategies.append(strat)
+            fill_constants_list.append(const)
+            if strat == "passthrough":
+                passthrough_cols.append(c)
+            elif strat == "constant":
+                constant_cols.append(c)
+        self.fill_constants = np.asarray(fill_constants_list, dtype=np.float64)
+        n_median = len(augmented_col_names) - len(passthrough_cols) - len(constant_cols)
+        logger.info(
+            "FS fill strategies: %d passthrough (NaN-pass), %d constant, "
+            "%d median (default)",
+            len(passthrough_cols), len(constant_cols), n_median,
+        )
+        if passthrough_cols:
+            # List explicitly so the user can eyeball-verify the right
+            # features are being treated as NaN-passthrough — silent
+            # mismatches here would mean FS evaluates a different signal
+            # than production training. Capped at 50 names to avoid log
+            # spam; the count above is authoritative.
+            preview = passthrough_cols[:50]
+            suffix = f" (+{len(passthrough_cols) - 50} more)" if len(passthrough_cols) > 50 else ""
+            logger.info("FS passthrough columns: %s%s", preview, suffix)
 
         logger.info(
             "Extracting %d features (%d aux) x %d rows to numpy",
@@ -289,9 +375,25 @@ class FastForwardSelector:
         col_to_idx = self.col_to_idx
         folds = self.folds
         fold_medians = self.fold_medians
+        fill_strategies = self.fill_strategies
+        fill_constants = self.fill_constants
         model_type = self.config.model.type
         model_params = self.config.model.params or {}
         scale = model_type in ("logistic", "neural_net")
+        nan_tolerant = model_type in NAN_TOLERANT_MODEL_TYPES
+        # For non-NaN-tolerant models, impute=None features must be filled
+        # before the model sees them. Production training for these models
+        # applies a median imputer at the wrapper level (models._apply_median_imputer),
+        # so falling back to per-fold median here keeps FS evaluation
+        # consistent with production training behavior for that model type.
+        passthrough_fallback = None if nan_tolerant else "median"
+        if not nan_tolerant:
+            logger.info(
+                "Non-NaN-tolerant model '%s' selected for FS — impute=None "
+                "features will be median-filled at scoring time (matches "
+                "production wrapper behavior, not XGB-style NaN passthrough)",
+                model_type,
+            )
 
         # For logistic regression, bypass the LogisticModel wrapper to avoid
         # redundant scaling (the scorer already scales) and per-call import
@@ -316,15 +418,54 @@ class FastForwardSelector:
                 logger.warning("Column lookup failed for %s: %s", features, e)
                 return float("inf")
 
+            # Partition selected columns by FS-time fill strategy so the inner
+            # loop honors each feature's declared impute contract. A column
+            # registered as impute=None must reach an NaN-tolerant model still
+            # carrying NaN; for non-NaN-tolerant models it falls back to
+            # median-fill, mirroring the wrapper-level imputation those models
+            # do at production training time.
+            sel_strategies = [
+                fill_strategies[i] if fill_strategies[i] != "passthrough"
+                else (passthrough_fallback or "passthrough")
+                for i in col_indices
+            ]
+            passthrough_positions = [
+                p for p, s in enumerate(sel_strategies) if s == "passthrough"
+            ]
+            constant_positions = [
+                p for p, s in enumerate(sel_strategies) if s == "constant"
+            ]
+            median_positions = [
+                p for p, s in enumerate(sel_strategies) if s == "median"
+            ]
+            constant_values = (
+                fill_constants[col_indices[constant_positions]]
+                if constant_positions else None
+            )
+
             fold_metrics = []
             for fold_idx, (train_idx, test_idx) in enumerate(folds):
                 X_train = X_wide[np.ix_(train_idx, col_indices)].copy()
                 X_test = X_wide[np.ix_(test_idx, col_indices)].copy()
                 y_train, y_test = y[train_idx], y[test_idx]
 
-                medians = fold_medians[fold_idx][col_indices]
-                X_train = np.where(np.isnan(X_train), medians, X_train)
-                X_test = np.where(np.isnan(X_test), medians, X_test)
+                if constant_positions:
+                    for offset, pos in enumerate(constant_positions):
+                        val = constant_values[offset]
+                        col_train = X_train[:, pos]
+                        col_test = X_test[:, pos]
+                        col_train[np.isnan(col_train)] = val
+                        col_test[np.isnan(col_test)] = val
+                if median_positions:
+                    fold_med = fold_medians[fold_idx]
+                    for pos in median_positions:
+                        val = fold_med[col_indices[pos]]
+                        col_train = X_train[:, pos]
+                        col_test = X_test[:, pos]
+                        col_train[np.isnan(col_train)] = val
+                        col_test[np.isnan(col_test)] = val
+                # passthrough_positions: intentionally untouched — NaN is the
+                # contract for impute=None features; XGB consumes it natively.
 
                 if scale:
                     with warnings.catch_warnings():

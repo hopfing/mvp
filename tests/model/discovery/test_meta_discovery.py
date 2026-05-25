@@ -49,7 +49,9 @@ def sample_matches(tmp_path: Path) -> Path:
 def discovery_config(tmp_path: Path) -> Path:
     config_dict = {
         "data": {"date_range": {"start": "2024-01-01", "end": "2024-12-31"}},
-        "model": {"type": "logistic"},
+        # XGB: ranking_points_diff is impute=None; logistic would error on
+        # NaN passthrough (see fast_selection contract guard).
+        "model": {"type": "xgboost"},
         "validation": {
             "type": "walk_forward",
             "n_splits": 2,

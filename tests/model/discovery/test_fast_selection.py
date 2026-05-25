@@ -53,7 +53,42 @@ def sample_matches(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def discovery_config(tmp_path: Path) -> Path:
-    """Create discovery config YAML."""
+    """Create discovery config YAML.
+
+    Uses XGBoost so the test suite exercises the NaN-tolerant path. The
+    `ranking_points_diff` family used in fixtures is registered as
+    impute=None (post Phase 2 audit), which the FS scorer must surface as
+    NaN to the model — under non-NaN-tolerant models this is a contract
+    violation and the scorer raises.
+    """
+    config_dict = {
+        "data": {
+            "date_range": {
+                "start": "2024-01-01",
+                "end": "2024-12-31",
+            },
+        },
+        "model": {"type": "xgboost"},
+        "validation": {
+            "type": "walk_forward",
+            "n_splits": 2,
+            "min_train_size": 50,
+            "test_size": 25,
+        },
+        "discovery": {
+            "metric": "log_loss",
+            "direction": "minimize",
+        },
+    }
+    config_path = tmp_path / "discovery.yaml"
+    with open(config_path, "w") as f:
+        yaml.dump(config_dict, f)
+    return config_path
+
+
+@pytest.fixture
+def discovery_config_logistic(tmp_path: Path) -> Path:
+    """Logistic-model discovery config for the impute-contract guard test."""
     config_dict = {
         "data": {
             "date_range": {
@@ -73,7 +108,7 @@ def discovery_config(tmp_path: Path) -> Path:
             "direction": "minimize",
         },
     }
-    config_path = tmp_path / "discovery.yaml"
+    config_path = tmp_path / "discovery_logistic.yaml"
     with open(config_path, "w") as f:
         yaml.dump(config_dict, f)
     return config_path
@@ -276,6 +311,236 @@ class TestFastForwardSelector:
         ):
             assert list(fast_train) == run_train
             assert list(fast_test) == run_test
+
+
+class TestResolveColumnImpute:
+    """Tests for _resolve_column_impute — maps a column name to (strategy, value).
+
+    The function is the single source of truth for FS-time NaN handling: the
+    scorer reads its output and applies the chosen fill per column. A
+    regression here silently miscalibrates every FS run, so each impute
+    flavor (None / numeric constant / "median" / unknown) is asserted.
+    """
+
+    def test_passthrough_for_impute_none(self):
+        from mvp.model.discovery.fast_selection import _resolve_column_impute
+        from mvp.model.registry import FeatureDef, FeatureRegistry
+
+        registry = FeatureRegistry()
+        registry.register(FeatureDef(
+            name="my_feat", func=lambda: None, impute=None,
+        ))
+        assert _resolve_column_impute("player_my_feat", registry) == ("passthrough", 0.0)
+        assert _resolve_column_impute("opp_my_feat", registry) == ("passthrough", 0.0)
+
+    def test_constant_for_numeric_impute(self):
+        from mvp.model.discovery.fast_selection import _resolve_column_impute
+        from mvp.model.registry import FeatureDef, FeatureRegistry
+
+        registry = FeatureRegistry()
+        registry.register(FeatureDef(name="cnt", func=lambda: None, impute=0))
+        registry.register(FeatureDef(name="rate", func=lambda: None, impute=0.5))
+        assert _resolve_column_impute("player_cnt", registry) == ("constant", 0.0)
+        assert _resolve_column_impute("player_rate", registry) == ("constant", 0.5)
+
+    def test_median_default(self):
+        from mvp.model.discovery.fast_selection import _resolve_column_impute
+        from mvp.model.registry import FeatureDef, FeatureRegistry
+
+        registry = FeatureRegistry()
+        registry.register(FeatureDef(name="med_feat", func=lambda: None))
+        assert _resolve_column_impute("player_med_feat", registry) == ("median", 0.0)
+
+    def test_windowed_suffix_stripped(self):
+        from mvp.model.discovery.fast_selection import _resolve_column_impute
+        from mvp.model.registry import FeatureDef, FeatureRegistry
+
+        registry = FeatureRegistry()
+        registry.register(FeatureDef(
+            name="win_rate", func=lambda: None, impute="median", params=["days"],
+        ))
+        # player_win_rate_30d → strip player_ → strip _30d → win_rate
+        assert _resolve_column_impute("player_win_rate_30d", registry) == ("median", 0.0)
+
+    def test_unknown_column_falls_back_to_median(self):
+        from mvp.model.discovery.fast_selection import _resolve_column_impute
+        from mvp.model.registry import FeatureRegistry
+
+        registry = FeatureRegistry()
+        # Aux columns and unmapped names — defensive fallback, never selected
+        # for scoring directly but present in X_wide.
+        assert _resolve_column_impute("aux_unknown_col", registry) == ("median", 0.0)
+
+    def test_diff_inherits_via_its_own_registration(self):
+        """Diffs are registered under their own name (e.g., "x_diff"), not
+        looked up via the base. Resolver should hit the diff's own entry."""
+        from mvp.model.discovery.fast_selection import _resolve_column_impute
+        from mvp.model.registry import FeatureDef, FeatureRegistry
+
+        registry = FeatureRegistry()
+        registry.register(FeatureDef(
+            name="x_diff", func=lambda: None, mirror=False, impute=None,
+        ))
+        # Diff columns have no player_/opp_ prefix
+        assert _resolve_column_impute("x_diff", registry) == ("passthrough", 0.0)
+
+
+class TestFillStrategyContract:
+    """Tests for the FS scorer's per-strategy fill behavior.
+
+    XGB consumes NaN natively, so impute=None features must reach it as NaN
+    (matching its production training behavior). Logistic / RF / NN don't
+    consume NaN, but production training for those wrappers applies a
+    median-imputer (models._apply_median_imputer) — so FS median-fills
+    impute=None features for those models to match production.
+    """
+
+    def test_logistic_falls_back_to_median_for_passthrough(
+        self, discovery_config_logistic: Path, sample_matches: Path, tmp_path: Path
+    ):
+        """Logistic FS + impute=None feature: scorer falls back to per-fold
+        median (mirrors LogisticModel's training-time median imputer)."""
+        config = DiscoveryConfig.from_file(discovery_config_logistic)
+        # ranking_points_diff was flipped to impute=None in the Phase 2 audit.
+        features = ["player_ranking_points_diff"]
+        cache_dir = tmp_path / "cache"
+
+        fast = FastForwardSelector(
+            config=config,
+            all_feature_specs=features,
+            matches_path=sample_matches,
+            cache_dir=cache_dir,
+        )
+        fast.precompute()
+        scorer = fast.create_scorer("log_loss")
+
+        result = scorer(features)
+        assert isinstance(result, float)
+        assert np.isfinite(result)
+
+    def test_xgboost_accepts_passthrough_features(
+        self, discovery_config: Path, sample_matches: Path, tmp_path: Path
+    ):
+        """XGB FS + impute=None feature scores normally (no raise)."""
+        config = DiscoveryConfig.from_file(discovery_config)
+        features = ["player_ranking_points_diff"]
+        cache_dir = tmp_path / "cache"
+
+        fast = FastForwardSelector(
+            config=config,
+            all_feature_specs=features,
+            matches_path=sample_matches,
+            cache_dir=cache_dir,
+        )
+        fast.precompute()
+        scorer = fast.create_scorer("log_loss")
+
+        result = scorer(features)
+        assert isinstance(result, float)
+        assert np.isfinite(result)
+
+    def test_xgboost_scorer_actually_passes_nan_to_model(
+        self, discovery_config: Path, sample_matches: Path, tmp_path: Path,
+        monkeypatch,
+    ):
+        """End-to-end verification that the scorer's fill loop honors the
+        passthrough strategy: under XGB, an impute=None feature's NaN
+        values must survive all the way into model.fit().
+
+        Intercepts get_model so the fit call records X_train, then asserts
+        the recorded matrix still carries NaN. If anything regresses (a
+        stray fillna, a misrouted strategy, an over-broad median fill),
+        the assertion fails and the contract is restored visibly.
+        """
+        config = DiscoveryConfig.from_file(discovery_config)
+        # ranking_points_diff is impute=None post Phase 2 audit.
+        features = ["player_ranking_points_diff"]
+        cache_dir = tmp_path / "cache"
+
+        fast = FastForwardSelector(
+            config=config,
+            all_feature_specs=features,
+            matches_path=sample_matches,
+            cache_dir=cache_dir,
+        )
+        fast.precompute()
+
+        # Sanity: precompute classified the feature as passthrough.
+        idx = fast.col_to_idx["player_ranking_points_diff"]
+        assert fast.fill_strategies[idx] == "passthrough"
+
+        # The sample fixture doesn't produce NaN naturally (all rankings
+        # populated), so poison the column directly. The strategy is
+        # already passthrough, so the scorer must preserve these NaN
+        # values end-to-end. (polars→numpy gives read-only views; copy
+        # to a writable buffer first.)
+        fast.X_wide = np.array(fast.X_wide, copy=True)
+        fast.X_wide[:5, idx] = np.nan
+        # Recompute fold medians so the median entry for this column is
+        # finite (otherwise the fold_median fallback for non-passthrough
+        # strategies could propagate NaN unrelated to our test).
+        for fold_idx, (train_idx, _test_idx) in enumerate(fast.folds):
+            col_med = np.nanmedian(fast.X_wide[train_idx, idx])
+            if np.isnan(col_med):
+                col_med = 0.0
+            fast.fold_medians[fold_idx][idx] = col_med
+
+        captured: dict[str, np.ndarray] = {}
+
+        class _RecordingModel:
+            def fit(self, X, y, **kwargs):
+                captured["X_train"] = X.copy()
+            def predict_proba(self, X):
+                # Constant 0.5 — must be finite regardless of NaN in X so
+                # the downstream log_loss metric doesn't fail validation.
+                n = X.shape[0]
+                return np.column_stack([np.full(n, 0.5), np.full(n, 0.5)])
+
+        def _fake_get_model(model_type, params, feature_names=None):
+            return _RecordingModel()
+
+        monkeypatch.setattr(
+            "mvp.model.discovery.fast_selection.get_model", _fake_get_model
+        )
+
+        scorer = fast.create_scorer("log_loss")
+        _ = scorer(features)  # invoke for at least one fold
+
+        assert "X_train" in captured, "scorer did not invoke model.fit"
+        x = captured["X_train"]
+        # The passthrough contract: NaN must survive the fill loop. The
+        # sample fixture produces NaN on first-occurrence rows; if the
+        # scorer's fill loop incorrectly median-filled, this matrix would
+        # be NaN-free.
+        assert np.isnan(x).any(), (
+            "scorer median-filled an impute=None feature — passthrough "
+            "contract violated, FS evaluates a different signal than "
+            "production XGB training will."
+        )
+
+    def test_precompute_records_strategies(
+        self, discovery_config: Path, sample_matches: Path, tmp_path: Path
+    ):
+        """precompute() should populate fill_strategies and fill_constants
+        parallel to col_to_idx."""
+        config = DiscoveryConfig.from_file(discovery_config)
+        features = ["player_ranking_points_diff"]
+        cache_dir = tmp_path / "cache"
+
+        fast = FastForwardSelector(
+            config=config,
+            all_feature_specs=features,
+            matches_path=sample_matches,
+            cache_dir=cache_dir,
+        )
+        fast.precompute()
+
+        assert len(fast.fill_strategies) == len(fast.col_to_idx)
+        assert fast.fill_constants is not None
+        assert fast.fill_constants.shape == (len(fast.col_to_idx),)
+        # ranking_points_diff is impute=None
+        idx = fast.col_to_idx["player_ranking_points_diff"]
+        assert fast.fill_strategies[idx] == "passthrough"
 
 
 class TestMakeSplitter:
