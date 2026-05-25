@@ -18,6 +18,7 @@ def rolling_sum(
     days: int,
     group_by: str | list[str],
     date_col: str = "effective_match_date",
+    fill_with: int | None = 0,
 ) -> pl.Expr:
     """Sum of column over past N days, excluding current row.
 
@@ -26,6 +27,14 @@ def rolling_sum(
         days: Window size in days.
         group_by: Column(s) to group by (e.g., "player_id").
         date_col: Date column for temporal ordering.
+        fill_with: Value to fill the null on rows with no prior activity in
+            the window. ``0`` (default) is correct for opportunity counts
+            where 0 = "no qualifying events in window". Pass ``None`` for
+            result counts where the no-activity row must be distinguished
+            from a real 0 (e.g. "won 0 out of 5 prior matches vs power
+            servers" vs "had no prior such opponents"); the feature should
+            declare ``impute=None`` so the NaN survives to a NaN-tolerant
+            model.
 
     Returns:
         Polars expression computing the rolling sum.
@@ -34,7 +43,7 @@ def rolling_sum(
         group_by = [group_by]
 
     # Window is "Nd" meaning N days, closed="left" excludes current row's date
-    return (
+    rolling = (
         _to_expr(col)
         .rolling_sum_by(
             by=date_col,
@@ -42,8 +51,10 @@ def rolling_sum(
             closed="left",
         )
         .over(group_by)
-        .fill_null(0)
     )
+    if fill_with is None:
+        return rolling
+    return rolling.fill_null(fill_with)
 
 
 def rolling_mean(
