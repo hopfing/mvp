@@ -184,7 +184,11 @@ class XGBoostModel(BaseModel):
         # With a custom objective, XGBClassifier's predict_proba returns raw
         # margin (logits) rather than probabilities, because XGB no longer
         # knows the output space. Apply sigmoid ourselves in that case.
-        if self._lambda_over is not None:
+        # getattr fallback handles artifacts pickled before commit 77a69b3
+        # added _lambda_over to __init__ — old joblibs deserialize without
+        # the attribute and must default to the standard-logistic path.
+        lambda_over = getattr(self, "_lambda_over", None)
+        if lambda_over is not None:
             raw = self._model.predict(X, output_margin=True)
             return _sigmoid(raw)
         return self._model.predict_proba(X)[:, 1]
