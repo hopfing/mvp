@@ -219,8 +219,13 @@ class LogisticModel(BaseModel):
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
         if self._model is None:
             raise RuntimeError("Model not fitted")
-        if self._impute_medians is not None:
-            X = _apply_median_imputer(X, self._impute_medians)
+        # getattr fallback handles artifacts pickled before commit c405766
+        # added _impute_medians to __init__ — old joblibs deserialize without
+        # the attribute and must skip the imputer step (matches their original
+        # behavior before the wrapper-level imputation was added).
+        medians = getattr(self, "_impute_medians", None)
+        if medians is not None:
+            X = _apply_median_imputer(X, medians)
         return self._model.predict_proba(X)[:, 1]
 
 
@@ -247,8 +252,10 @@ class RandomForestModel(BaseModel):
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
         if self._model is None:
             raise RuntimeError("Model not fitted")
-        if self._impute_medians is not None:
-            X = _apply_median_imputer(X, self._impute_medians)
+        # See LogisticModel.predict_proba for the c405766 backward-compat note.
+        medians = getattr(self, "_impute_medians", None)
+        if medians is not None:
+            X = _apply_median_imputer(X, medians)
         return self._model.predict_proba(X)[:, 1]
 
 
@@ -810,8 +817,10 @@ class NeuralNetModel(BaseModel):
         self._module.eval()
         with torch.no_grad():
             X_features, emb_ids, opp_emb_ids = self._split_embedding_col(X)
-            if self._impute_medians is not None:
-                X_features = _apply_median_imputer(X_features, self._impute_medians)
+            # See LogisticModel.predict_proba for the c405766 backward-compat note.
+            medians = getattr(self, "_impute_medians", None)
+            if medians is not None:
+                X_features = _apply_median_imputer(X_features, medians)
             X_t = torch.tensor(X_features, dtype=torch.float32, device=self._device)
             emb_t = None
             opp_emb_t = None
