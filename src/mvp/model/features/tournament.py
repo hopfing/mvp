@@ -51,10 +51,10 @@ def _tourn_cumulative(expr: pl.Expr, fill_with: int | None = 0) -> pl.Expr:
     params=[],
     description="Cumulative sets won in tournament",
     mirror=True,
-    impute=0,
+    impute=None,
 )
 def tourn_sets_won() -> pl.Expr:
-    return _tourn_cumulative(_sets_won())
+    return _tourn_cumulative(_sets_won(), fill_with=None)
 
 
 @feature(
@@ -62,10 +62,10 @@ def tourn_sets_won() -> pl.Expr:
     params=[],
     description="Cumulative sets lost in tournament",
     mirror=True,
-    impute=0,
+    impute=None,
 )
 def tourn_sets_lost() -> pl.Expr:
-    return _tourn_cumulative(_sets_lost())
+    return _tourn_cumulative(_sets_lost(), fill_with=None)
 
 
 @feature(
@@ -84,10 +84,10 @@ def tourn_sets_margin() -> pl.Expr:
     params=[],
     description="Cumulative games won in tournament",
     mirror=True,
-    impute=0,
+    impute=None,
 )
 def tourn_games_won() -> pl.Expr:
-    return _tourn_cumulative(_total_games_won())
+    return _tourn_cumulative(_total_games_won(), fill_with=None)
 
 
 @feature(
@@ -95,10 +95,10 @@ def tourn_games_won() -> pl.Expr:
     params=[],
     description="Cumulative games lost in tournament",
     mirror=True,
-    impute=0,
+    impute=None,
 )
 def tourn_games_lost() -> pl.Expr:
-    return _tourn_cumulative(_total_games_lost())
+    return _tourn_cumulative(_total_games_lost(), fill_with=None)
 
 
 @feature(
@@ -119,10 +119,10 @@ def tourn_games_margin() -> pl.Expr:
     params=[],
     description="Matches won in this tournament so far",
     mirror=True,
-    impute=0,
+    impute=None,
 )
 def tourn_matches_won() -> pl.Expr:
-    return _tourn_cumulative(pl.col("won").cast(pl.Int64))
+    return _tourn_cumulative(pl.col("won").cast(pl.Int64), fill_with=None)
 
 
 # Cross-draw-type workload: counts ALL matches (singles + doubles + qualifying)
@@ -224,56 +224,64 @@ def tourn_history_matches_played() -> pl.Expr:
 
 @feature(
     name="tourn_history_matches_won",
-    params=[], mirror=True, impute=0,
+    params=[], mirror=True, impute=None,
     description="Prior matches won at this tournament (any year)",
 )
 def tourn_history_matches_won() -> pl.Expr:
-    return cumulative_sum(pl.col("won").cast(pl.Int64), group_by=TOURN_HISTORY_GROUP)
+    return cumulative_sum(
+        pl.col("won").cast(pl.Int64), group_by=TOURN_HISTORY_GROUP, fill_with=None,
+    )
 
 
 @feature(
     name="tourn_history_matches_lost",
-    params=[], mirror=True, impute=0,
+    params=[], mirror=True, impute=None,
     description="Prior matches lost at this tournament (any year)",
 )
 def tourn_history_matches_lost() -> pl.Expr:
-    return cumulative_sum(1 - pl.col("won").cast(pl.Int64), group_by=TOURN_HISTORY_GROUP)
+    return cumulative_sum(
+        1 - pl.col("won").cast(pl.Int64), group_by=TOURN_HISTORY_GROUP, fill_with=None,
+    )
 
 
 @feature(
     name="tourn_history_sets_won",
-    params=[], mirror=True, impute=0,
+    params=[], mirror=True, impute=None,
     description="Prior sets won at this tournament (any year)",
 )
 def tourn_history_sets_won() -> pl.Expr:
-    return cumulative_sum(_sets_won(), group_by=TOURN_HISTORY_GROUP)
+    return cumulative_sum(_sets_won(), group_by=TOURN_HISTORY_GROUP, fill_with=None)
 
 
 @feature(
     name="tourn_history_sets_lost",
-    params=[], mirror=True, impute=0,
+    params=[], mirror=True, impute=None,
     description="Prior sets lost at this tournament (any year)",
 )
 def tourn_history_sets_lost() -> pl.Expr:
-    return cumulative_sum(_sets_lost(), group_by=TOURN_HISTORY_GROUP)
+    return cumulative_sum(_sets_lost(), group_by=TOURN_HISTORY_GROUP, fill_with=None)
 
 
 @feature(
     name="tourn_history_games_won",
-    params=[], mirror=True, impute=0,
+    params=[], mirror=True, impute=None,
     description="Prior games won at this tournament (any year)",
 )
 def tourn_history_games_won() -> pl.Expr:
-    return cumulative_sum(_total_games_won(), group_by=TOURN_HISTORY_GROUP)
+    return cumulative_sum(
+        _total_games_won(), group_by=TOURN_HISTORY_GROUP, fill_with=None,
+    )
 
 
 @feature(
     name="tourn_history_games_lost",
-    params=[], mirror=True, impute=0,
+    params=[], mirror=True, impute=None,
     description="Prior games lost at this tournament (any year)",
 )
 def tourn_history_games_lost() -> pl.Expr:
-    return cumulative_sum(_total_games_lost(), group_by=TOURN_HISTORY_GROUP)
+    return cumulative_sum(
+        _total_games_lost(), group_by=TOURN_HISTORY_GROUP, fill_with=None,
+    )
 
 
 # --- Cumulative margin sums (won − lost) ---
@@ -285,7 +293,11 @@ def tourn_history_games_lost() -> pl.Expr:
     description="Prior (matches won − matches lost) at this tournament",
 )
 def tourn_history_matches_margin_sum() -> pl.Expr:
-    return cumulative_sum(2 * pl.col("won").cast(pl.Int64) - 1, group_by=TOURN_HISTORY_GROUP)
+    return cumulative_sum(
+        2 * pl.col("won").cast(pl.Int64) - 1,
+        group_by=TOURN_HISTORY_GROUP,
+        fill_with=None,
+    )
 
 
 @feature(
@@ -294,7 +306,11 @@ def tourn_history_matches_margin_sum() -> pl.Expr:
     description="Prior sets margin (won − lost) at this tournament",
 )
 def tourn_history_sets_margin_sum() -> pl.Expr:
-    return cumulative_sum(_sets_won() - _sets_lost(), group_by=TOURN_HISTORY_GROUP)
+    return cumulative_sum(
+        _sets_won() - _sets_lost(),
+        group_by=TOURN_HISTORY_GROUP,
+        fill_with=None,
+    )
 
 
 @feature(
@@ -306,6 +322,7 @@ def tourn_history_games_margin_sum() -> pl.Expr:
     return cumulative_sum(
         _total_games_won() - _total_games_lost(),
         group_by=TOURN_HISTORY_GROUP,
+        fill_with=None,
     )
 
 

@@ -50,24 +50,31 @@ class TestTournamentBaseFeatures:
 
     def test_all_base_features_registered(self):
         registry = get_registry()
-        base_names = [
+        # Result counts and margins use impute=None so first-occurrence rows
+        # remain NaN (distinguishable from "had data, result was 0"). Only
+        # tourn_matches_played stays at 0 (opportunity count).
+        passthrough_bases = [
             "tourn_sets_won", "tourn_sets_lost", "tourn_sets_margin",
             "tourn_games_won", "tourn_games_lost", "tourn_games_margin",
             "tourn_matches_won",
         ]
-        for name in base_names:
+        for name in passthrough_bases:
             feat = registry.get(name)
             assert feat.mirror is True
-            assert feat.impute == 0
+            assert feat.impute is None
             assert feat.params == []
+
+        played = registry.get("tourn_matches_played")
+        assert played.impute == 0
 
     def test_sets_won_cumulative(self):
         from mvp.model.features.tournament import tourn_sets_won
 
         df = _make_tournament_df()
         result = df.with_columns(tourn_sets_won().alias("val"))
-        # R32: first match -> 0 (no prior)
-        assert result["val"][0] == 0
+        # R32: first match -> None (no prior; "haven't played" distinguished
+        # from "played and won 0")
+        assert result["val"][0] is None
         # R16: prior = R32 (2 sets won) -> 2
         assert result["val"][1] == 2
         # QF: prior = R32 + R16 (2 + 2 = 4) -> 4
@@ -78,20 +85,38 @@ class TestTournamentBaseFeatures:
 
         df = _make_tournament_df()
         result = df.with_columns(tourn_sets_lost().alias("val"))
-        # R32: 0 (no prior)
-        assert result["val"][0] == 0
-        # R16: prior = R32 (0 sets lost) -> 0
+        # R32: None (no prior)
+        assert result["val"][0] is None
+        # R16: prior = R32 (won straight sets) -> 0 (REAL 0, not from no-data fill)
         assert result["val"][1] == 0
         # QF: prior = R32 + R16 (0 + 1 = 1) -> 1
         assert result["val"][2] == 1
+
+    def test_sets_lost_zero_after_straight_sets_win(self):
+        """A player on match 2 who won match 1 in straight sets must show
+        tourn_sets_lost = 0 (REAL 0), not None.
+
+        Regression guard for the impute=None + fill_with=None change: shift(1)
+        on row 2 returns the cumsum value through row 1 (which is 0 for a
+        player who lost 0 sets), and that 0 must NOT be conflated with the
+        first-row NaN.
+        """
+        from mvp.model.features.tournament import tourn_sets_lost
+
+        df = _make_tournament_df()
+        result = df.with_columns(tourn_sets_lost().alias("val"))
+        # Match 1 → no prior (NaN). Match 2 → 0 prior sets lost (REAL 0).
+        assert result["val"][0] is None
+        assert result["val"][1] == 0
+        assert result["val"][1] is not None
 
     def test_sets_margin_cumulative(self):
         from mvp.model.features.tournament import tourn_sets_margin
 
         df = _make_tournament_df()
         result = df.with_columns(tourn_sets_margin().alias("val"))
-        # R32: 0
-        assert result["val"][0] == 0
+        # R32: None (no prior)
+        assert result["val"][0] is None
         # R16: prior = R32 (2 - 0 = 2) -> 2
         assert result["val"][1] == 2
         # QF: prior = R32 + R16 ((2-0) + (2-1) = 3) -> 3
@@ -102,8 +127,8 @@ class TestTournamentBaseFeatures:
 
         df = _make_tournament_df()
         result = df.with_columns(tourn_games_won().alias("val"))
-        # R32: 0
-        assert result["val"][0] == 0
+        # R32: None (no prior)
+        assert result["val"][0] is None
         # R16: prior = R32 (6+6 = 12) -> 12
         assert result["val"][1] == 12
         # QF: prior = R32 + R16 (12 + 7+3+6 = 12+16 = 28) -> 28
@@ -114,8 +139,8 @@ class TestTournamentBaseFeatures:
 
         df = _make_tournament_df()
         result = df.with_columns(tourn_games_lost().alias("val"))
-        # R32: 0
-        assert result["val"][0] == 0
+        # R32: None (no prior)
+        assert result["val"][0] is None
         # R16: prior = R32 (3+4 = 7) -> 7
         assert result["val"][1] == 7
         # QF: prior = R32 + R16 (7 + 6+6+3 = 7+15 = 22) -> 22
@@ -126,8 +151,8 @@ class TestTournamentBaseFeatures:
 
         df = _make_tournament_df()
         result = df.with_columns(tourn_games_margin().alias("val"))
-        # R32: 0
-        assert result["val"][0] == 0
+        # R32: None (no prior)
+        assert result["val"][0] is None
         # R16: prior = R32 (12-7 = 5) -> 5
         assert result["val"][1] == 5
         # QF: prior = R32 + R16 (5 + 16-15 = 6) -> 6
@@ -138,8 +163,8 @@ class TestTournamentBaseFeatures:
 
         df = _make_tournament_df()
         result = df.with_columns(tourn_matches_won().alias("val"))
-        # R32: 0
-        assert result["val"][0] == 0
+        # R32: None (no prior)
+        assert result["val"][0] is None
         # R16: prior = R32 (1 win) -> 1
         assert result["val"][1] == 1
         # QF: prior = R32 + R16 (1 + 1 = 2) -> 2
@@ -173,8 +198,8 @@ class TestTournamentBaseFeatures:
         }).sort("effective_match_date")
 
         result = df.with_columns(tourn_games_won().alias("val"))
-        # T2 match: first in that tournament -> 0 (not 24)
-        assert result["val"][2] == 0
+        # T2 match: first in that tournament -> None (not 24, not 0)
+        assert result["val"][2] is None
 
 
 class TestTournamentDiffFeatures:
@@ -182,16 +207,22 @@ class TestTournamentDiffFeatures:
 
     def test_all_diffs_registered(self):
         registry = get_registry()
-        diff_names = [
+        # All seven diffs inherit impute=None from their bases (result counts +
+        # margins). matches_played_diff stays at 0 — same opportunity-count
+        # rationale as its base.
+        passthrough_diffs = [
             "tourn_sets_won_diff", "tourn_sets_lost_diff", "tourn_sets_margin_diff",
             "tourn_games_won_diff", "tourn_games_lost_diff", "tourn_games_margin_diff",
             "tourn_matches_won_diff",
         ]
-        for name in diff_names:
+        for name in passthrough_diffs:
             feat = registry.get(name)
             assert feat.mirror is False
-            assert feat.impute == 0
+            assert feat.impute is None
             assert len(feat.depends_on) == 1
+
+        played_diff = registry.get("tourn_matches_played_diff")
+        assert played_diff.impute == 0
 
     def test_sets_won_diff_computation(self):
         tourn_sets_won_diff = get_registry().get("tourn_sets_won_diff").func
@@ -331,11 +362,31 @@ class TestTournamentHistoryFeatures:
 
         df = self._make_cross_year_df()
         result = df.with_columns(tourn_history_matches_won().alias("val"))
-        # 2022: 0 prior wins
-        assert result["val"][0] == 0
+        # 2022: no prior appearance at T1 -> None
+        assert result["val"][0] is None
         # 2023: 1 prior win (the 2022 match)
         assert result["val"][1] == 1
         # 2024: 1 prior win (2022 won, 2023 lost)
+        assert result["val"][2] == 1
+
+    def test_matches_lost_zero_after_undefeated_history(self):
+        """Cross-year history: a player whose only prior appearance was a win
+        must show tourn_history_matches_lost = 0 (REAL 0), not None.
+
+        Regression guard for fill_with=None on cumulative_sum: shift(1) on row
+        2 returns the cumsum value through row 1 (= 0 losses), and that 0
+        must survive the no-fill path.
+        """
+        from mvp.model.features.tournament import tourn_history_matches_lost
+
+        df = self._make_cross_year_df()
+        result = df.with_columns(tourn_history_matches_lost().alias("val"))
+        # 2022: first appearance -> None
+        assert result["val"][0] is None
+        # 2023: 1 prior appearance, won it -> 0 losses (REAL 0)
+        assert result["val"][1] == 0
+        assert result["val"][1] is not None
+        # 2024: 1 prior loss (2023)
         assert result["val"][2] == 1
 
     def test_win_pct_crosses_years(self):
@@ -354,11 +405,11 @@ class TestTournamentHistoryFeatures:
 
         df = self._make_cross_year_df()
         result = df.with_columns(tourn_history_sets_margin_sum().alias("val"))
-        # 2022: 0
-        assert result["val"][0] == 0
+        # 2022: first appearance -> None (impute=None + fill_with=None)
+        assert result["val"][0] is None
         # 2023: prior = 2022 (2-0 = 2)
         assert result["val"][1] == 2
-        # 2024: prior = 2022 + 2023 (2 + -2 = 0)
+        # 2024: prior = 2022 + 2023 (2 + -2 = 0)  ← REAL 0, not first-row None
         assert result["val"][2] == 0
 
     def test_sets_margin_avg_per_match_crosses_years(self):

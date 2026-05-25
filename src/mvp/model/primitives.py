@@ -134,6 +134,7 @@ def cumulative_sum(
     col: str | pl.Expr,
     group_by: str | list[str],
     date_col: str = "effective_match_date",
+    fill_with: int | None = 0,
 ) -> pl.Expr:
     """Cumulative sum over all prior rows, excluding current row.
 
@@ -141,6 +142,12 @@ def cumulative_sum(
         col: Column name or expression to sum.
         group_by: Column(s) to group by (e.g., "player_id").
         date_col: Date column for temporal ordering.
+        fill_with: Value to fill the shift(1) null on the first row of each
+            group. ``0`` (default) is correct for true counts (sum of an empty
+            prior history is 0). Pass ``None`` for result counts where "no
+            prior data" must be distinguished from "had data, result was 0"
+            — the column carries NaN on first-occurrence rows and the feature
+            should declare ``impute=None``.
 
     Returns:
         Polars expression computing the cumulative sum.
@@ -148,7 +155,10 @@ def cumulative_sum(
     if isinstance(group_by, str):
         group_by = [group_by]
 
-    return _to_expr(col).cum_sum().shift(1).over(group_by, order_by=date_col).fill_null(0)
+    cum = _to_expr(col).cum_sum().shift(1).over(group_by, order_by=date_col)
+    if fill_with is None:
+        return cum
+    return cum.fill_null(fill_with)
 
 
 def cumulative_count(
