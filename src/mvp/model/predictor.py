@@ -359,14 +359,13 @@ class ProductionPredictor:
         # Fit Platt calibrator on OOF predictions. Prefer the same temporal CV
         # that `mvp model` uses (per the validation block in the model YAML)
         # so the calibrator and the cal_tiers sidecar align with what
-        # diagnostics evaluate. Fall back to random K-fold for ensembles or
-        # embedding-using configs where per-fold prep would need extra wiring.
+        # diagnostics evaluate. Fall back to random K-fold for configs
+        # (embedding-using) where per-fold prep would need extra wiring.
         cal_cfg = config.calibration
         can_temporal_cv = (
             val_cfg is not None
             and val_cfg.type
             in {"expanding_window", "sliding_window", "date_sliding", "date_expanding"}
-            and not is_ensemble
             and embedding_col is None
         )
 
@@ -387,6 +386,18 @@ class ProductionPredictor:
                 test_months=val_cfg.test_months,
             )
             fold_predictions: list[dict[str, Any]] = []
+            # Per-sub fold predictions (ensemble only). Outer index is sub
+            # idx; each entry is a list of fold dicts shaped for
+            # fit_calibrator_with_nested_cv. Populated in lockstep with
+            # fold_predictions so indexes align by fold position.
+            n_subs_ens = (
+                len(base_model_specs)
+                if (is_ensemble and base_model_specs is not None)
+                else 0
+            )
+            per_sub_fold_predictions: list[list[dict[str, Any]]] = [
+                [] for _ in range(n_subs_ens)
+            ]
             for fold_idx, (train_idx, test_idx) in enumerate(splitter.split(df)):
                 train_df = df[train_idx]
                 test_df = df[test_idx]
@@ -437,10 +448,28 @@ class ProductionPredictor:
                     config.model.params or {},
                     feature_names=feature_cols,
                 )
+                if is_ensemble and base_model_specs is not None:
+                    assert isinstance(fold_model, EnsembleModel)
+                    fold_model.configure(base_model_specs)
                 fold_model.fit(
                     X_train_fold, y_train_fold, sample_weight=fold_weights
                 )
-                y_prob_test = fold_model.predict_proba(X_test_fold)
+                if is_ensemble:
+                    assert isinstance(fold_model, EnsembleModel)
+                    y_prob_test = fold_model.predict_proba(
+                        X_test_fold, df=test_df
+                    )
+                    sub_preds = fold_model.predict_proba_per_model(
+                        X_test_fold, df=test_df
+                    )
+                    for s, sp in enumerate(sub_preds):
+                        per_sub_fold_predictions[s].append({
+                            "df": test_df,
+                            "y_true": y_test_fold,
+                            "y_prob": sp,
+                        })
+                else:
+                    y_prob_test = fold_model.predict_proba(X_test_fold)
 
                 fold_predictions.append({
                     "df": test_df,
@@ -456,6 +485,41 @@ class ProductionPredictor:
                 raise RuntimeError(
                     f"Temporal CV ({val_cfg.type}) produced no folds"
                 )
+
+            # Per-sub calibration (ensemble only). For each sub with a
+            # configured cal, run nested CV over its OOF: fit the deployed
+            # cal on all folds (attached for inference) AND mutate each
+            # fold's per-sub y_prob to a nested-CV-cal'd value. Then re-
+            # average ensemble fold y_prob from the now-cal'd per-sub
+            # outputs so the top-level nested CV below fits on deployment-
+            # shape values (raw sub → sub cal → average → top cal). This
+            # mirrors what the `mvp model` runner does for honest cal_tiers.
+            has_any_sub_cal = is_ensemble and any(
+                cfg is not None for cfg in getattr(model, "_sub_cal_configs", [])
+            )
+            if has_any_sub_cal:
+                assert isinstance(model, EnsembleModel)
+                for sub_idx in range(n_subs_ens):
+                    sub_cal_cfg = model._sub_cal_configs[sub_idx]
+                    if sub_cal_cfg is None:
+                        continue
+                    sub_deployed_cal = fit_calibrator_with_nested_cv(
+                        per_sub_fold_predictions[sub_idx], sub_cal_cfg
+                    )
+                    model.set_sub_calibrator(sub_idx, sub_deployed_cal)
+
+                strategy = (config.model.params or {}).get("strategy", "average")
+                for fold_idx, ensemble_pred_dict in enumerate(fold_predictions):
+                    sub_outs = np.array([
+                        per_sub_fold_predictions[s][fold_idx]["y_prob"]
+                        for s in range(n_subs_ens)
+                    ])
+                    if strategy == "weighted_average":
+                        ensemble_pred_dict["y_prob"] = np.average(
+                            sub_outs, axis=0, weights=model._weights
+                        )
+                    else:
+                        ensemble_pred_dict["y_prob"] = np.mean(sub_outs, axis=0)
 
             # Nested-CV calibration for honest diagnostics. Each fold's
             # preds get transformed by a calibrator fit on the OTHER folds —
@@ -495,7 +559,6 @@ class ProductionPredictor:
         else:
             fallback_reason = (
                 "no validation block" if val_cfg is None
-                else "ensemble model" if is_ensemble
                 else "embedding configured" if embedding_col is not None
                 else f"validation type '{val_cfg.type}' unsupported here"
             )
