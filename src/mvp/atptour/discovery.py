@@ -101,15 +101,15 @@ class TournamentDiscovery(BaseExtractor):
         """
         circuits = ["tour", "challenger"]
 
-        headers = {
-            "Origin": "https://www.atptour.com",
-            "Referer": "https://www.atptour.com/",
-        }
+        # NOTE: This endpoint's Cloudflare gating is volatile. As of 2026-05-18
+        # it returned 500 without Origin/Referer; by 2026-05-26 sending those
+        # headers triggered a Cloudflare JS challenge (403) while a bare
+        # chrome-impersonated request passed. Revisit if 403/500 recurs here.
         results = []
         for circuit in circuits:
             url = f"{_SCORES_URL}?scoringTournamentLevel={circuit}"
             logger.info("Fetching %s tournaments", circuit.title())
-            data = self.fetch_json(url, headers=headers)
+            data = self.fetch_json(url)
             tournaments = data["Data"]["LiveMatchesTournamentsOrdered"]
             for t in tournaments:
                 event_id = t["EventId"]
