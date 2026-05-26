@@ -1031,7 +1031,15 @@ class ProductionPredictor:
             ).reshape(-1, 1)
             X = np.hstack([X, emb_ids.astype(np.float64)])
 
-        probs = model.predict_proba(X, df=pending) if isinstance(model, EnsembleModel) else model.predict_proba(X)
+        # For ensemble lead models, also capture per-sub probs so consumers
+        # (backtest, analysis) can compute consensus stats. per_sub_probs are
+        # in the same orientation as `probs` (canonical-side, before flip).
+        per_sub_probs: list[np.ndarray] | None = None
+        if isinstance(model, EnsembleModel):
+            probs = model.predict_proba(X, df=pending)
+            per_sub_probs = model.predict_proba_per_model(X, df=pending)
+        else:
+            probs = model.predict_proba(X)
         if calibrator is not None:
             if isinstance(
                 calibrator,
@@ -1043,6 +1051,20 @@ class ProductionPredictor:
 
         # Add probabilities to pending matches
         pending = pending.with_columns(pl.Series("_prob", probs))
+
+        # Add per-sub probs and consensus count for ensembles. n_agree is the
+        # count of subs picking the same side as the ensemble (>=0.5 vs <0.5).
+        # Symmetric under canonical flip, so computed once here.
+        if per_sub_probs is not None:
+            ensemble_pick = (probs >= 0.5).astype(int)
+            sub_picks = np.array([(p >= 0.5).astype(int) for p in per_sub_probs])
+            n_agree = (sub_picks == ensemble_pick).sum(axis=0).astype(int)
+            # per_sub_probs: list of arrays → list of lists per row
+            per_sub_probs_rows = np.stack(per_sub_probs, axis=1).tolist()
+            pending = pending.with_columns(
+                pl.Series("_n_agree", n_agree),
+                pl.Series("_per_sub_probs", per_sub_probs_rows),
+            )
 
         is_deciding_set = self.target == "deciding_set"
 
@@ -1093,8 +1115,10 @@ class ProductionPredictor:
                         pl.col("_tmp_oln").alias("opp_last_name"),
                     )
                 else:
-                    # Winner prob is directional — flip prob and swap identities
-                    missing = missing.with_columns(
+                    # Winner prob is directional — flip prob and swap identities.
+                    # If per-sub probs are present (ensemble lead), flip each
+                    # element too so they remain aligned with _prob (winner-side).
+                    flip_cols = [
                         (1.0 - pl.col("_prob")).alias("_prob"),
                         pl.col("opp_id").alias("_tmp_player_id"),
                         pl.col("player_id").alias("_tmp_opp_id"),
@@ -1104,7 +1128,14 @@ class ProductionPredictor:
                         pl.col("player_last_name").alias("_tmp_oln"),
                         pl.col("_opp_surface_elo").alias("_tmp_player_elo"),
                         pl.col("_player_surface_elo").alias("_tmp_opp_elo"),
-                    ).with_columns(
+                    ]
+                    if "_per_sub_probs" in missing.columns:
+                        flip_cols.append(
+                            pl.col("_per_sub_probs")
+                              .list.eval(1.0 - pl.element())
+                              .alias("_per_sub_probs")
+                        )
+                    missing = missing.with_columns(flip_cols).with_columns(
                         pl.col("_tmp_player_id").alias("player_id"),
                         pl.col("_tmp_opp_id").alias("opp_id"),
                         pl.col("_tmp_pfn").alias("player_first_name"),
@@ -1186,6 +1217,11 @@ class ProductionPredictor:
             select_exprs.append(pl.col("match_date"))
         if "schedule_day" in canonical.columns:
             select_exprs.append(pl.col("schedule_day"))
+        # Per-ensemble-sub consensus signals (winner target only; ensemble lead)
+        if "_n_agree" in canonical.columns:
+            select_exprs.append(pl.col("_n_agree").alias("n_agree"))
+        if "_per_sub_probs" in canonical.columns:
+            select_exprs.append(pl.col("_per_sub_probs").alias("per_sub_probs"))
         if not is_deciding_set:
             for col in canonical.columns:
                 if col.startswith("conf_"):

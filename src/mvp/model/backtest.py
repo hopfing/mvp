@@ -208,6 +208,8 @@ def _build_bet_rows(
             "p1_win_prob",
             "consensus",
             "voter_count",
+            "n_agree",
+            "per_sub_probs",
         ]
         if c in predictions.columns
     ]
@@ -219,12 +221,23 @@ def _build_bet_rows(
         pl.col("p2_id").alias("opponent_id"),
         pl.col("p1_win_prob").alias("model_prob"),
     )
-    p2_rows = base.with_columns(
+    p2_extra_cols = [
         pl.lit("p2").alias("side"),
         pl.col("p2_id").alias("player_id"),
         pl.col("p1_id").alias("opponent_id"),
         (1.0 - pl.col("p1_win_prob")).alias("model_prob"),
-    )
+    ]
+    # per_sub_probs is in p1 orientation from predict(); flip element-wise
+    # for p2 rows so it aligns with model_prob. n_agree is symmetric under
+    # uniform flip and represents "subs agreeing with the ensemble pick",
+    # which is the same on both sides.
+    if "per_sub_probs" in base.columns:
+        p2_extra_cols.append(
+            pl.col("per_sub_probs")
+              .list.eval(1.0 - pl.element())
+              .alias("per_sub_probs")
+        )
+    p2_rows = base.with_columns(p2_extra_cols)
     bets = pl.concat([p1_rows, p2_rows]).drop(["p1_win_prob", "p1_id", "p2_id"])
     bets = bets.with_columns((pl.col("model_prob") >= 0.5).alias("is_pick"))
 
@@ -405,7 +418,18 @@ def run_backtest(
         write_config_snapshot(lead_cfg, fp, config_path=config_path)
 
         out_path = fp_dir / "backtest.csv"
-        bets.write_csv(out_path)
+        # CSV can't serialize nested list columns; stringify per_sub_probs
+        # for the on-disk output. In-memory `bets` keeps the list for the
+        # summary aggregation that follows.
+        bets_csv = bets
+        if "per_sub_probs" in bets_csv.columns:
+            bets_csv = bets_csv.with_columns(
+                pl.col("per_sub_probs")
+                .list.eval(pl.element().round(6).cast(pl.Utf8))
+                .list.join(",")
+                .alias("per_sub_probs")
+            )
+        bets_csv.write_csv(out_path)
         logger.info("Wrote %d bet rows to %s", len(bets), out_path)
 
         # Print + save summary
