@@ -506,7 +506,19 @@ class ProductionPredictor:
             )
             from sklearn.model_selection import StratifiedKFold
 
+            n_subs = (
+                len(base_model_specs)
+                if (is_ensemble and base_model_specs is not None)
+                else 0
+            )
             oof_probs = np.zeros(len(y))
+            # Per-sub OOF buffers (ensemble only). Each entry accumulates raw
+            # sub probabilities at val_idx positions across folds. After the
+            # loop, we fit each sub's deployed calibrator on its full OOF
+            # vector (in-sample fit — fallback path has no nested CV).
+            per_sub_oof_probs: list[np.ndarray] = (
+                [np.zeros(len(y)) for _ in range(n_subs)] if is_ensemble else []
+            )
             skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
             for train_idx, val_idx in skf.split(X, y):
                 fold_model = get_model(
@@ -519,7 +531,64 @@ class ProductionPredictor:
                     fold_model.configure(base_model_specs)
                 fold_weights = sample_weights[train_idx] if sample_weights is not None else None
                 fold_model.fit(X[train_idx], y[train_idx], sample_weight=fold_weights)
-                oof_probs[val_idx] = fold_model.predict_proba(X[val_idx])
+                if is_ensemble and n_subs > 0:
+                    assert isinstance(fold_model, EnsembleModel)
+                    sub_preds = fold_model.predict_proba_per_model(X[val_idx])
+                    for s, sp in enumerate(sub_preds):
+                        per_sub_oof_probs[s][val_idx] = sp
+                    # Ensemble OOF computed after per-sub cals are fit (below).
+                    # For now stash raw average; will be overwritten if sub-cal
+                    # is configured.
+                    oof_probs[val_idx] = np.mean(sub_preds, axis=0)
+                else:
+                    oof_probs[val_idx] = fold_model.predict_proba(X[val_idx])
+
+            # Per-sub calibration (ensemble-only). Fit each sub's deployed
+            # calibrator on its OOF and attach to model. Then recompute
+            # ensemble OOF = mean of sub-cal'd outputs so top-level cal fits
+            # on deployment-shape values (raw sub → sub cal → average → top cal).
+            # Fallback path uses in-sample fits (no nested CV) — matches the
+            # existing fallback semantics for top-level cal at this site.
+            has_any_sub_cal = is_ensemble and any(
+                cfg is not None for cfg in getattr(model, "_sub_cal_configs", [])
+            )
+            if has_any_sub_cal:
+                assert isinstance(model, EnsembleModel)
+                for sub_idx in range(n_subs):
+                    sub_cal_cfg = model._sub_cal_configs[sub_idx]
+                    if sub_cal_cfg is None:
+                        continue
+                    sub_cal = make_calibrator(sub_cal_cfg)
+                    if isinstance(
+                        sub_cal,
+                        (SegmentedPlattCalibrator, SegmentedIsotonicCalibrator),
+                    ):
+                        # df_deploy is aligned with per_sub_oof_probs (both
+                        # index by val_idx positions in df_deploy across folds)
+                        sub_cal.fit(per_sub_oof_probs[sub_idx], y, df_deploy)
+                    else:
+                        sub_cal.fit(per_sub_oof_probs[sub_idx], y)
+                    model.set_sub_calibrator(sub_idx, sub_cal)
+                # Recompute ensemble OOF with sub cals applied
+                strategy = (config.model.params or {}).get("strategy", "average")
+                calibrated_per_sub = []
+                for s in range(n_subs):
+                    cal = model._sub_calibrators[s]
+                    if cal is None:
+                        calibrated_per_sub.append(per_sub_oof_probs[s])
+                    elif isinstance(
+                        cal,
+                        (SegmentedPlattCalibrator, SegmentedIsotonicCalibrator),
+                    ):
+                        calibrated_per_sub.append(cal.transform(per_sub_oof_probs[s], df_deploy))
+                    else:
+                        calibrated_per_sub.append(cal.transform(per_sub_oof_probs[s]))
+                stacked = np.array(calibrated_per_sub)
+                if strategy == "weighted_average":
+                    oof_probs = np.average(stacked, axis=0, weights=model._weights)
+                else:
+                    oof_probs = np.mean(stacked, axis=0)
+
             calibrator = make_calibrator(cal_cfg) if cal_cfg else PlattCalibrator()
             if isinstance(
                 calibrator,
@@ -740,7 +809,9 @@ class ProductionPredictor:
             ).reshape(-1, 1)
             X = np.hstack([X, emb_ids.astype(np.float64)])
 
-        probs = model.predict_proba(X)
+        # df is passed for ensemble models with segmented sub calibrators
+        # (ignored by single models and ensembles with no/non-segmented sub cals)
+        probs = model.predict_proba(X, df=canonical) if isinstance(model, EnsembleModel) else model.predict_proba(X)
         if calibrator is not None:
             if isinstance(
                 calibrator,
@@ -960,7 +1031,7 @@ class ProductionPredictor:
             ).reshape(-1, 1)
             X = np.hstack([X, emb_ids.astype(np.float64)])
 
-        probs = model.predict_proba(X)
+        probs = model.predict_proba(X, df=pending) if isinstance(model, EnsembleModel) else model.predict_proba(X)
         if calibrator is not None:
             if isinstance(
                 calibrator,

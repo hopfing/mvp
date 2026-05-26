@@ -194,6 +194,7 @@ class ExperimentRunner:
         from mvp.model.config import DateRange, SampleWeightConfig
 
         ensemble_params = EnsembleParams.model_validate(self.config.model.params)
+        ensemble_strategy = (self.config.model.params or {}).get("strategy", "average")
 
         all_feature_specs: list[str] = []
         base_model_specs: list[dict[str, Any]] = []
@@ -205,6 +206,22 @@ class ExperimentRunner:
             base_config = ExperimentConfig.from_file(ref.config)
             if base_config.features is None:
                 raise ValueError(f"Base model {ref.config} has no features section")
+
+            sub_cal_cfg = base_config.calibration
+
+            # v1: reject stacking + sub-cal. EnsembleModel.predict_proba_per_model
+            # routes through _predict_all, which would apply sub cals to stacking
+            # meta-features once any sub has cal. That changes meta-model input
+            # distribution asymmetrically. Deferred to a follow-up PR.
+            if ensemble_strategy == "stacking" and sub_cal_cfg is not None:
+                raise ValueError(
+                    f"Base model {ref.config} has a calibration block, but "
+                    f"ensemble strategy is 'stacking'. Stacking + per-sub "
+                    f"calibration is not supported in v1 (would change stacking "
+                    f"meta-feature distribution). Use strategy='average' or "
+                    f"remove sub-cal blocks."
+                )
+
             for spec in base_config.features.include:
                 if spec not in all_feature_specs:
                     all_feature_specs.append(spec)
@@ -213,6 +230,7 @@ class ExperimentRunner:
                 "params": base_config.model.params or {},
                 "weight": ref.weight,
                 "feature_specs": base_config.features.include,
+                "calibration": sub_cal_cfg,
             })
             model_date_ranges.append(base_config.data.date_range)
             if base_config.data.filters != self.config.data.filters:
@@ -911,6 +929,29 @@ class ExperimentRunner:
                 if regrouped_importances is not None:
                     all_fold_importances = regrouped_importances
 
+            # Per-sub OOF transpose. Reshape all_per_model_predictions
+            # (list[fold][sub] → ndarray) into per_sub_predictions
+            # (list[sub][fold] → dict shaped for fit_calibrator_with_nested_cv).
+            # Built unconditionally for ensembles so the downstream cal logic
+            # can slice it by tuning/holdout without re-collection. The y_prob
+            # arrays are SHARED references with all_per_model_predictions;
+            # fit_calibrator_with_nested_cv mutates by dict-key reassignment
+            # (pred["y_prob"] = ...), not in-place array mutation, so the
+            # originals in all_per_model_predictions remain intact for any
+            # other downstream consumer that might want raw per-sub preds.
+            per_sub_predictions: list[list[dict[str, Any]]] = []
+            if is_ensemble and all_per_model_predictions:
+                n_subs = len(all_per_model_predictions[0])
+                for sub_idx in range(n_subs):
+                    sub_fold_preds = []
+                    for fold_idx, fold_pred_dict in enumerate(all_predictions):
+                        sub_fold_preds.append({
+                            "y_prob": all_per_model_predictions[fold_idx][sub_idx],
+                            "y_true": fold_pred_dict["y_true"],
+                            "df": fold_pred_dict["df"],
+                        })
+                    per_sub_predictions.append(sub_fold_preds)
+
             # Split predictions into tuning vs holdout. The trailing folds
             # become the holdout: they get calibrated probabilities using a
             # calibrator fit only on tuning preds, but they don't influence
@@ -932,6 +973,12 @@ class ExperimentRunner:
                 holdout_fold_indices = list(
                     range(n_folds_total - self.holdout_folds, n_folds_total)
                 )
+                per_sub_tuning_predictions = [
+                    s[:-self.holdout_folds] for s in per_sub_predictions
+                ]
+                per_sub_holdout_predictions = [
+                    s[-self.holdout_folds:] for s in per_sub_predictions
+                ]
             else:
                 tuning_predictions = all_predictions
                 holdout_predictions = []
@@ -939,6 +986,8 @@ class ExperimentRunner:
                 holdout_fold_meta = []
                 tuning_fold_indices = list(range(n_folds_total))
                 holdout_fold_indices = []
+                per_sub_tuning_predictions = per_sub_predictions
+                per_sub_holdout_predictions = [[] for _ in per_sub_predictions]
 
             # Average metrics across folds
             avg_metrics = {
@@ -1045,6 +1094,80 @@ class ExperimentRunner:
                 )
 
                 cal_cfg = self.config.calibration
+
+                # Per-sub calibration (ensemble-only). Fit each sub's own
+                # calibrator on its own OOF preds BEFORE the top-level cal
+                # so the top-level cal fits on sub-cal-applied averages, which
+                # mirrors deployment flow: raw sub → sub cal → average → top cal.
+                has_any_sub_cal = is_ensemble and any(
+                    cfg is not None for cfg in getattr(model, "_sub_cal_configs", [])
+                )
+                if has_any_sub_cal:
+                    assert isinstance(model, EnsembleModel)
+                    n_subs = len(model._sub_cal_configs)
+                    for sub_idx in range(n_subs):
+                        sub_cal_cfg = model._sub_cal_configs[sub_idx]
+                        if sub_cal_cfg is None:
+                            continue
+                        # fit_calibrator_with_nested_cv mutates
+                        # per_sub_tuning_predictions[sub_idx] in place: each
+                        # fold dict's y_prob key is REASSIGNED to nested-CV-
+                        # calibrated values. Dict-key reassignment overwrites
+                        # the reference (doesn't mutate the array), so original
+                        # raw arrays in all_per_model_predictions stay intact.
+                        # The returned deployed cal is what we attach for
+                        # inference.
+                        sub_deployed_cal = fit_calibrator_with_nested_cv(
+                            per_sub_tuning_predictions[sub_idx], sub_cal_cfg
+                        )
+                        model.set_sub_calibrator(sub_idx, sub_deployed_cal)
+
+                    # Re-average tuning ensemble preds to reflect the now-
+                    # nested-cal'd per-sub outputs. Subs without cal contribute
+                    # raw preds. Strategy is honored (stacking is rejected at
+                    # spec-build when sub-cal is present, so only average and
+                    # weighted_average can reach here).
+                    strategy = self.config.model.params.get("strategy", "average")
+                    for fold_idx, ensemble_pred_dict in enumerate(tuning_predictions):
+                        sub_outs = np.array([
+                            per_sub_tuning_predictions[s][fold_idx]["y_prob"]
+                            for s in range(n_subs)
+                        ])
+                        if strategy == "weighted_average":
+                            ensemble_pred_dict["y_prob"] = np.average(
+                                sub_outs, axis=0, weights=model._weights
+                            )
+                        else:
+                            ensemble_pred_dict["y_prob"] = np.mean(sub_outs, axis=0)
+
+                    # Re-average holdout ensemble preds. Holdout per-sub preds
+                    # weren't passed to fit_calibrator_with_nested_cv, so they
+                    # are still raw — apply each sub's DEPLOYED cal here to
+                    # get the deployment-flow holdout output. Segmented sub
+                    # cals get the per-fold df.
+                    for fold_idx, ensemble_pred_dict in enumerate(holdout_predictions):
+                        fold_df = ensemble_pred_dict["df"]
+                        sub_outs_list = []
+                        for s in range(n_subs):
+                            raw_holdout = per_sub_holdout_predictions[s][fold_idx]["y_prob"]
+                            cal = model._sub_calibrators[s]
+                            if cal is None:
+                                sub_outs_list.append(raw_holdout)
+                            elif isinstance(
+                                cal,
+                                (SegmentedPlattCalibrator, SegmentedIsotonicCalibrator),
+                            ):
+                                sub_outs_list.append(cal.transform(raw_holdout, fold_df))
+                            else:
+                                sub_outs_list.append(cal.transform(raw_holdout))
+                        sub_outs = np.array(sub_outs_list)
+                        if strategy == "weighted_average":
+                            ensemble_pred_dict["y_prob"] = np.average(
+                                sub_outs, axis=0, weights=model._weights
+                            )
+                        else:
+                            ensemble_pred_dict["y_prob"] = np.mean(sub_outs, axis=0)
+
                 # Nested CV for honest diagnostics: each tuning fold's preds
                 # get calibrated by a fitter that didn't see them. Helper
                 # returns the deployed calibrator (fit on all tuning OOF), which
@@ -1154,6 +1277,25 @@ class ExperimentRunner:
                 combined_y_prob = np.concatenate(
                     [p["y_prob"] for p in tuning_predictions]
                 )
+                # If per-sub calibrators are attached, replace per_model_preds
+                # with sub-cal-applied outputs so the Per-Model Comparison
+                # reflects what each sub actually contributes to the ensemble.
+                # Use per_sub_tuning_predictions which holds NESTED-CV-cal'd
+                # values (fit_calibrator_with_nested_cv mutated each fold's
+                # y_prob in place with fold-i-out calibration). Avoids the
+                # in-sample overfit that would result from applying the
+                # deployed cal (fit on all OOF) to its own training data.
+                # Subs with no cal block contribute raw values (no mutation
+                # happened) — same as the pre-PR per-model report.
+                if isinstance(model, EnsembleModel) and any(
+                    c is not None for c in getattr(model, "_sub_calibrators", [])
+                ):
+                    per_model_preds = [
+                        np.concatenate(
+                            [fold["y_prob"] for fold in per_sub_tuning_predictions[i]]
+                        )
+                        for i in range(n_base)
+                    ]
                 assert base_model_specs is not None
                 ensemble_params = EnsembleParams.model_validate(
                     self.config.model.params

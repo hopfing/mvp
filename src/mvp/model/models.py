@@ -303,22 +303,40 @@ class EnsembleModel(BaseModel):
         self._meta_feature_names: list[str] = []
         self._meta_feature_indices: list[int] = []
         self._meta_scaler: tuple[np.ndarray, np.ndarray] | None = None
+        self._sub_calibrators: list = []
+        self._sub_cal_configs: list = []
 
     def configure(self, base_model_specs: list[dict[str, Any]]) -> None:
         """Set up sub-models from resolved specs.
 
-        Each spec: {type, params, feature_indices: list[int]}
+        Each spec: {type, params, feature_indices: list[int], calibration?}
         """
         self._sub_models = []
         self._feature_indices = []
+        self._sub_calibrators = []
+        self._sub_cal_configs = []
         weights = []
         for spec in base_model_specs:
             sub = get_model(spec["type"], spec.get("params") or {})
             self._sub_models.append(sub)
             self._feature_indices.append(spec["feature_indices"])
+            self._sub_cal_configs.append(spec.get("calibration"))
+            self._sub_calibrators.append(None)
             weights.append(spec.get("weight", 1.0))
         w = np.array(weights, dtype=np.float64)
         self._weights = w / w.sum()
+
+    def set_sub_calibrator(self, idx: int, calibrator) -> None:
+        """Attach a fitted DEPLOYED calibrator to sub-model ``idx``.
+
+        Called by the runner after fitting each sub's nested-CV calibrators.
+        Only the deployed calibrator (fit on all OOF) is stored for inference;
+        the nested fold-i-out calibrators are used inside
+        ``fit_calibrator_with_nested_cv`` for honest diagnostics and discarded.
+
+        ``None`` means raw passthrough for that sub.
+        """
+        self._sub_calibrators[idx] = calibrator
 
     def fit(
         self,
@@ -370,10 +388,17 @@ class EnsembleModel(BaseModel):
             coefs[name] = float(coef)
         return intercept, coefs
 
-    def predict_proba(self, X: np.ndarray) -> np.ndarray:
+    def predict_proba(self, X: np.ndarray, df=None) -> np.ndarray:
+        """Ensemble prediction.
+
+        ``df`` is forwarded to ``_predict_all`` and is required when any
+        attached sub calibrator is segmented (segmented cal needs the
+        polars df to derive segment labels). Non-segmented sub cals
+        ignore ``df``.
+        """
         if not self._fitted:
             raise RuntimeError("Model not fitted")
-        preds = self._predict_all(X)
+        preds = self._predict_all(X, df=df)
         if self._strategy == "stacking":
             if self._meta_model is None:
                 raise RuntimeError("Meta-model not fitted. Call fit_meta() first.")
@@ -389,17 +414,55 @@ class EnsembleModel(BaseModel):
             return np.average(preds, axis=0, weights=self._weights)
         return np.mean(preds, axis=0)
 
-    def predict_proba_per_model(self, X: np.ndarray) -> list[np.ndarray]:
-        """Return individual predictions from each sub-model."""
+    def predict_proba_per_model(self, X: np.ndarray, df=None) -> list[np.ndarray]:
+        """Return individual predictions from each sub-model.
+
+        See ``predict_proba`` for ``df`` semantics.
+        """
         if not self._fitted:
             raise RuntimeError("Model not fitted")
-        return self._predict_all(X)
+        return self._predict_all(X, df=df)
 
-    def _predict_all(self, X: np.ndarray) -> list[np.ndarray]:
-        return [
-            sub.predict_proba(X[:, idx])
-            for sub, idx in zip(self._sub_models, self._feature_indices)
-        ]
+    def _predict_all(self, X: np.ndarray, df=None) -> list[np.ndarray]:
+        from mvp.model.calibration import (
+            SegmentedIsotonicCalibrator,
+            SegmentedPlattCalibrator,
+        )
+
+        outputs = []
+        for i, (sub, idx) in enumerate(zip(self._sub_models, self._feature_indices)):
+            raw = sub.predict_proba(X[:, idx])
+            cal = self._sub_calibrators[i]
+            if cal is None:
+                outputs.append(raw)
+                continue
+            if isinstance(cal, (SegmentedPlattCalibrator, SegmentedIsotonicCalibrator)):
+                if df is None:
+                    raise ValueError(
+                        f"Sub-model {i} has a segmented calibrator "
+                        f"({type(cal).__name__}) attached but predict_proba "
+                        "was called without df. Pass df=<polars df> to "
+                        "predict_proba / predict_proba_per_model."
+                    )
+                outputs.append(cal.transform(raw, df))
+            else:
+                outputs.append(cal.transform(raw))
+        return outputs
+
+    def __setstate__(self, state):
+        """Backward compat for joblib artifacts pickled before per-sub cal.
+
+        Old artifacts lack ``_sub_calibrators`` and ``_sub_cal_configs``.
+        Without this patch, ``_predict_all`` would AttributeError when
+        iterating ``self._sub_calibrators``. Initialize both to None-filled
+        lists matching the existing sub-model count so ``_predict_all`` falls
+        through to raw passthrough — i.e., bit-identical to pre-PR behavior.
+        """
+        self.__dict__.update(state)
+        if not hasattr(self, "_sub_calibrators") or self._sub_calibrators is None:
+            self._sub_calibrators = [None] * len(self._sub_models)
+        if not hasattr(self, "_sub_cal_configs") or self._sub_cal_configs is None:
+            self._sub_cal_configs = [None] * len(self._sub_models)
 
     @property
     def _model(self) -> _SklearnWrapper:
