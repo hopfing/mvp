@@ -600,6 +600,43 @@ def _kind_subsection(
             )
             lines.append(_wide_row(f"{edge_label} / {tier}", open_stats, close_stats))
 
+    # Ensemble consensus breakdowns (only when n_agree is present —
+    # backtest of single-model configs won't have this column).
+    if "n_agree" in sub.columns:
+        consensus_rows = views.by_consensus(sub)
+        if consensus_rows:
+            lines.append("")
+            lines.append("EDGE × CONSENSUS")
+            lines.append(top)
+            lines.append(bottom)
+            n_subs_max = int(sub["n_agree"].drop_nulls().max())
+            for yes_flag, edge_label in [(True, "yes"), (False, "no")]:
+                for n_agree in range(n_subs_max, 0, -1):
+                    n_disagree = n_subs_max - n_agree
+                    c_sub = sub.filter(pl.col("n_agree") == n_agree)
+                    if len(c_sub) == 0:
+                        continue
+                    open_stats = views.slice_stats(
+                        _edge_sign_sub(c_sub, "opening_edge", yes_flag)
+                    )
+                    close_stats = views.slice_stats(
+                        _edge_sign_sub(c_sub, "closing_edge", yes_flag)
+                    )
+                    lines.append(
+                        _wide_row(
+                            f"{edge_label} / {n_agree}-{n_disagree}",
+                            open_stats,
+                            close_stats,
+                        )
+                    )
+
+            lines.append("")
+            lines.append("BY CONSENSUS  (all edges)")
+            lines.append(top)
+            lines.append(bottom)
+            for label, stats in consensus_rows:
+                lines.append(_wide_row(label, stats, stats))
+
     lines.append("")
     lines.append("BY EDGE BAND  (all tiers)")
     lines.append(top)

@@ -168,6 +168,32 @@ def by_edge_band(
     return rows
 
 
+def by_consensus(df: pl.DataFrame) -> list[tuple[str, dict[str, Any]]]:
+    """Group by ensemble consensus (`n_agree` from per-sub picks).
+
+    Labels are ``"{n_agree}-{n_disagree}"`` to match the diagnostic table
+    convention (e.g. "5-0", "4-1", "3-2"). Buckets in descending
+    consensus order plus an ALL row. Returns empty list if `n_agree`
+    isn't present (non-ensemble backtest).
+    """
+    if "n_agree" not in df.columns:
+        return []
+    n_agree_col = df["n_agree"].drop_nulls()
+    if len(n_agree_col) == 0:
+        return []
+    n_subs = int(n_agree_col.max())
+    rows: list[tuple[str, dict[str, Any]]] = []
+    for n_agree in range(n_subs, 0, -1):
+        n_disagree = n_subs - n_agree
+        bucket = df.filter(pl.col("n_agree") == n_agree)
+        stats = slice_stats(bucket)
+        if stats["n"] == 0:
+            continue
+        rows.append((f"{n_agree}-{n_disagree}", stats))
+    rows.append(("ALL", slice_stats(df)))
+    return rows
+
+
 def by_month(df: pl.DataFrame) -> list[tuple[str, dict[str, Any]]]:
     """Group by YYYY-MM, attaching `cum_open` / `cum_close` running totals
     to each record's stats dict (in addition to the per-month stats).
