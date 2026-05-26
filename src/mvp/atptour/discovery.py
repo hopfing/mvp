@@ -32,7 +32,12 @@ class TournamentDiscovery(BaseExtractor):
     """Discover tournaments from archive pages and live scores API."""
 
     def __init__(self, data_root=None):
-        super().__init__(domain="atptour", data_root=data_root)
+        super().__init__(
+            domain="atptour",
+            data_root=data_root,
+            cloudflare_fallback=True,
+            cloudflare_browser_fetch=True,
+        )
 
     def get_archive_tournaments(
         self,

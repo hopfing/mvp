@@ -16,7 +16,12 @@ class ScheduleExtractor(BaseExtractor):
     """Fetch daily schedule HTML for an active tournament."""
 
     def __init__(self, data_root=None):
-        super().__init__(domain="atptour", data_root=data_root)
+        super().__init__(
+            domain="atptour",
+            data_root=data_root,
+            cloudflare_fallback=True,
+            cloudflare_browser_fetch=True,
+        )
 
     def _schedule_url(self, tournament: Tournament, day: int | None = None) -> str:
         prefix = tournament.scores_url_prefix
