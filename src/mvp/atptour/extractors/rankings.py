@@ -16,12 +16,7 @@ class RankingsExtractor(BaseExtractor):
     """Discover available ranking dates and fetch missing HTML pages."""
 
     def __init__(self, start_year: int = 2025, data_root=None):
-        super().__init__(
-            domain="atptour",
-            data_root=data_root,
-            cloudflare_fallback=True,
-            cloudflare_browser_fetch=True,
-        )
+        super().__init__(domain="atptour", data_root=data_root)
         self.start_year = start_year
 
     def run(self) -> int:

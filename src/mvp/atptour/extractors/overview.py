@@ -13,12 +13,7 @@ class OverviewExtractor(BaseExtractor):
     """Fetch overview JSON from ATP API, build Tournament, save raw JSON."""
 
     def __init__(self, data_root=None):
-        super().__init__(
-            domain="atptour",
-            data_root=data_root,
-            cloudflare_fallback=True,
-            cloudflare_browser_fetch=True,
-        )
+        super().__init__(domain="atptour", data_root=data_root)
 
     def run(
         self,

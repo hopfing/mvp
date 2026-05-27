@@ -7,7 +7,6 @@ from curl_cffi import requests
 
 from mvp.atptour.tournament import Tournament
 from mvp.common.base_extractor import BaseExtractor
-from mvp.common.cf_solver import CloudflareChallengeError
 
 logger = logging.getLogger(__name__)
 
@@ -18,12 +17,7 @@ class MatchStatsExtractor(BaseExtractor):
     """Fetch match stats JSON from the ATP Hawkeye API."""
 
     def __init__(self, data_root=None):
-        # Cookie tier only (no per-match browser fetch): high-volume per-match
-        # endpoint, so it rides a shared www solve if one happened and fails
-        # soft per match otherwise — never one browser navigation per match.
-        super().__init__(
-            domain="atptour", data_root=data_root, cloudflare_fallback=True
-        )
+        super().__init__(domain="atptour", data_root=data_root)
         self.session.headers.update(
             {
                 "Referer": "https://www.atptour.com/",
@@ -67,15 +61,6 @@ class MatchStatsExtractor(BaseExtractor):
 
             try:
                 data = self.fetch_json(url)
-            except CloudflareChallengeError as e:
-                logger.warning(
-                    "Cloudflare challenge unresolved for %s match %s: %s",
-                    tournament.logging_id,
-                    match_id,
-                    e,
-                )
-                failed += 1
-                continue
             except requests.RequestsError as e:
                 logger.warning(
                     "Hawkeye request failed for %s match %s: %s",

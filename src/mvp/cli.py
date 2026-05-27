@@ -2604,7 +2604,6 @@ def cmd_live(args: argparse.Namespace) -> int:
         run_player_data,
         run_rankings,
     )
-    from mvp.common.cf_solver import get_solver
     from mvp.model.predictor import ProductionPredictor
 
     current_year = datetime.now().year
@@ -2684,10 +2683,6 @@ def cmd_live(args: argparse.Namespace) -> int:
         raise RuntimeError(
             f"Pipeline cannot continue — extract/aggregate failed: {e}"
         )
-    finally:
-        # Tear down the Cloudflare solver browser (no-op if never launched).
-        # Only Stage 1 uses atptour extractors, so nothing past here needs it.
-        get_solver().close()
 
     # --- Stage 2: Winner predictions ---
     target_sections = _get_target_sections()
