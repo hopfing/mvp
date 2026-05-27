@@ -15,6 +15,13 @@ a real browser and exposes two recovery paths to `BaseExtractor`:
 Only one browser operation runs at a time (RLock), bounding Chrome memory on
 the 16GB Beelink. The driver is launched lazily on first challenge and torn
 down by the caller (`cmd_live` finally block) via `close()`.
+
+Every `uc.Chrome()` launch passes `user_multi_procs=True`: without it the
+patcher unconditionally unlinks and re-downloads the SHARED chromedriver binary
+on launch, so a concurrent `uc.Chrome()` elsewhere (the bet365 scraper runs in
+the odds pool during the same cycle) deletes the binary mid-launch and both
+crash with Errno 2. The flag routes the patcher through its internal
+multiprocessing lock and skips the unlink/redownload when already patched.
 """
 
 import logging
@@ -70,6 +77,8 @@ def _host(url: str) -> str:
 class CloudflareSolver:
     """Serialized UC-backed challenge solver with a per-host cookie store."""
 
+    _driver_timeout = 30
+
     def __init__(self) -> None:
         self._lock = threading.RLock()
         # host -> {"cookies": list[dict], "ua": str, "set_at": float}
@@ -90,9 +99,8 @@ class CloudflareSolver:
                 return cached["cookies"], cached["ua"]
 
             driver = self._ensure_driver()
-            logger.info("CF solver: clearing challenge for %s", host)
-            driver.get(f"https://{host}/")
-            time.sleep(_SOLVE_WAIT_SECONDS)
+            logger.info("CF solver: clearing challenge via %s", url)
+            self._navigate(driver, url)
             user_agent = driver.execute_script("return navigator.userAgent")
             cookies = driver.get_cookies()
             self._store[host] = {
@@ -105,25 +113,18 @@ class CloudflareSolver:
     def fetch_text(self, url: str) -> str:
         """Fetch url's body through the browser (same-origin in-page fetch).
 
-        Navigates to the target's own host first so the fetch() is same-origin
-        (no CORS) and the challenge is solved for that host. Raises
-        CloudflareChallengeError if the browser is still challenged.
+        Navigates to the full target URL (not the host root: an API gateway
+        root may redirect to another host, breaking same-origin for the fetch),
+        then issues an in-page fetch so the body is the raw response. Raises
+        CloudflareChallengeError if the browser is still challenged or the
+        navigation/fetch times out.
         """
         host = _host(url)
         with self._lock:
             driver = self._ensure_driver()
             logger.info("CF solver: browser-fetching %s", url)
-            driver.get(f"https://{host}/")
-            time.sleep(_SOLVE_WAIT_SECONDS)
-            driver.set_script_timeout(self._driver_timeout)
-            script = (
-                "const cb = arguments[arguments.length - 1];"
-                "fetch(arguments[0], {credentials: 'include'})"
-                "  .then(r => r.text())"
-                "  .then(t => cb(t))"
-                "  .catch(e => cb('__CF_ERR__' + e));"
-            )
-            text = driver.execute_async_script(script, url)
+            self._navigate(driver, url)
+            text = self._in_page_fetch(driver, url)
             if text is None or text.startswith("__CF_ERR__"):
                 raise CloudflareChallengeError(
                     f"browser fetch failed for {url}: {text}"
@@ -132,8 +133,8 @@ class CloudflareSolver:
                 raise CloudflareChallengeError(
                     f"browser still challenged for {url}"
                 )
-            # Refresh the cookie store opportunistically — the navigation above
-            # may have cleared the challenge for this host.
+            # Refresh the cookie store — the navigation may have cleared the
+            # challenge for this host.
             self._store[host] = {
                 "cookies": driver.get_cookies(),
                 "ua": driver.execute_script("return navigator.userAgent"),
@@ -160,13 +161,47 @@ class CloudflareSolver:
 
     # internal -------------------------------------------------------------
 
-    _driver_timeout = 30
-
     def _fresh_entry(self, host: str) -> dict | None:
         entry = self._store.get(host)
         if entry and (time.monotonic() - entry["set_at"]) < _COOKIE_TTL_SECONDS:
             return entry
         return None
+
+    def _navigate(self, driver, url: str) -> None:
+        """Navigate with a page-load timeout, then wait for the JS challenge.
+
+        Selenium errors (incl. page-load timeout) become CloudflareChallengeError
+        so the caller fails soft / aborts cleanly instead of leaking the raw
+        exception type while the solver holds the lock.
+        """
+        # Lazy import keeps selenium out of the import path of the many
+        # non-browser extractors (same rationale as the lazy uc import below).
+        from selenium.common.exceptions import TimeoutException, WebDriverException
+
+        try:
+            driver.set_page_load_timeout(self._driver_timeout)
+            driver.get(url)
+        except (TimeoutException, WebDriverException) as e:
+            raise CloudflareChallengeError(f"navigation failed for {url}: {e}")
+        time.sleep(_SOLVE_WAIT_SECONDS)
+
+    def _in_page_fetch(self, driver, url: str) -> str | None:
+        from selenium.common.exceptions import TimeoutException, WebDriverException
+
+        script = (
+            "const cb = arguments[arguments.length - 1];"
+            "fetch(arguments[0], {credentials: 'include'})"
+            "  .then(r => r.text())"
+            "  .then(t => cb(t))"
+            "  .catch(e => cb('__CF_ERR__' + e));"
+        )
+        try:
+            driver.set_script_timeout(self._driver_timeout)
+            return driver.execute_async_script(script, url)
+        except (TimeoutException, WebDriverException) as e:
+            raise CloudflareChallengeError(
+                f"browser fetch timed out for {url}: {e}"
+            )
 
     def _ensure_driver(self):
         if self._driver is not None:
@@ -205,7 +240,12 @@ class CloudflareSolver:
             chrome_major = None
 
         logger.info("CF solver: launching Chrome (version=%s)", chrome_major)
-        self._driver = uc.Chrome(options=options, version_main=chrome_major)
+        # user_multi_procs=True: serialize patcher access so this launch does
+        # not race the bet365 scraper's concurrent uc.Chrome() on the shared
+        # chromedriver binary.
+        self._driver = uc.Chrome(
+            options=options, version_main=chrome_major, user_multi_procs=True
+        )
         return self._driver
 
 

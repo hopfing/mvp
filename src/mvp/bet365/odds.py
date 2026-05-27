@@ -386,7 +386,12 @@ class Bet365OddsScraper(BaseJob):
                 chrome_major = int(_ver.split(".")[0])
             except Exception:
                 chrome_major = None
-            driver = uc.Chrome(options=options, version_main=chrome_major)
+            # user_multi_procs=True: serialize the uc patcher's access to the
+            # shared chromedriver binary so this launch does not race the
+            # atptour Cloudflare solver's concurrent uc.Chrome() (Errno 2).
+            driver = uc.Chrome(
+                options=options, version_main=chrome_major, user_multi_procs=True
+            )
 
             # Load SPA fully to establish session. Navigate to J10 via
             # the normal SPA route so all JS/session state initializes.
