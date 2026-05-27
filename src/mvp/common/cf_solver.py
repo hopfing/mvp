@@ -90,11 +90,8 @@ class CloudflareSolver:
                 return cached["cookies"], cached["ua"]
 
             driver = self._ensure_driver()
-            # Navigate to the actual target URL (not the host root): an API
-            # gateway root may redirect to another host, which both clears the
-            # wrong challenge and breaks same-origin for a later in-page fetch.
-            logger.info("CF solver: clearing challenge via %s", url)
-            driver.get(url)
+            logger.info("CF solver: clearing challenge for %s", host)
+            driver.get(f"https://{host}/")
             time.sleep(_SOLVE_WAIT_SECONDS)
             user_agent = driver.execute_script("return navigator.userAgent")
             cookies = driver.get_cookies()
@@ -115,10 +112,8 @@ class CloudflareSolver:
         host = _host(url)
         with self._lock:
             driver = self._ensure_driver()
-            # Navigate to the target URL first so the in-page fetch below is
-            # same-origin (host root may redirect to a different origin).
             logger.info("CF solver: browser-fetching %s", url)
-            driver.get(url)
+            driver.get(f"https://{host}/")
             time.sleep(_SOLVE_WAIT_SECONDS)
             driver.set_script_timeout(self._driver_timeout)
             script = (
