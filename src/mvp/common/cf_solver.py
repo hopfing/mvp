@@ -45,8 +45,11 @@ _CHALLENGE_MARKERS = (
 # How long harvested cookies are considered fresh before a re-solve.
 _COOKIE_TTL_SECONDS = 600
 
-# Seconds to wait after navigation for the JS challenge to auto-resolve.
-_SOLVE_WAIT_SECONDS = 12
+# Max seconds to wait for the JS challenge to auto-resolve after navigation.
+# Clear time is variable (~2s to >12s depending on how hard the IP is being
+# challenged), so we poll page_source rather than sleeping a fixed interval.
+_CHALLENGE_CLEAR_TIMEOUT = 30
+_CHALLENGE_POLL_INTERVAL = 1.0
 
 
 def body_has_challenge(body: str) -> bool:
@@ -183,7 +186,17 @@ class CloudflareSolver:
             driver.get(url)
         except (TimeoutException, WebDriverException) as e:
             raise CloudflareChallengeError(f"navigation failed for {url}: {e}")
-        time.sleep(_SOLVE_WAIT_SECONDS)
+        # Poll until the challenge clears (returns in ~2s when easy), up to the
+        # cap. If it never clears, return anyway and let the caller's body check
+        # raise CloudflareChallengeError (graceful per-tournament failure).
+        deadline = time.monotonic() + _CHALLENGE_CLEAR_TIMEOUT
+        while time.monotonic() < deadline:
+            try:
+                if not body_has_challenge(driver.page_source):
+                    return
+            except WebDriverException:
+                pass
+            time.sleep(_CHALLENGE_POLL_INTERVAL)
 
     def _in_page_fetch(self, driver, url: str) -> str | None:
         from selenium.common.exceptions import TimeoutException, WebDriverException
