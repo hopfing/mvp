@@ -13,7 +13,12 @@ class ResultsExtractor(BaseExtractor):
     """Fetch results HTML (singles + doubles) for a tournament."""
 
     def __init__(self, data_root=None):
-        super().__init__(domain="atptour", data_root=data_root)
+        super().__init__(
+            domain="atptour",
+            data_root=data_root,
+            cloudflare_fallback=True,
+            cloudflare_browser_fetch=True,
+        )
 
     def run(self, tournament: Tournament, refresh: bool = True) -> None:
         logger.info("Fetching results for %s", tournament.logging_id)
