@@ -83,6 +83,8 @@ SR_ID_MAPPING: dict[str, str] = {
     "SR:COMPETITOR:1097139": "J0EM",
     "SR:COMPETITOR:873695": "B0NO",
     "SR:COMPETITOR:628034": "K0HS",
+    "SR:COMPETITOR:240880": "H0B7",
+    "SR:COMPETITOR:95923": "PJ18",
 }
 
 # Raw match_stats files that ATP serves with the wrong stats payload. Keyed by
