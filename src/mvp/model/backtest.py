@@ -379,7 +379,10 @@ def run_backtest(
         if start is None:
             start = lead_cfg.data.date_range.end + timedelta(days=1)
         if end is None:
-            end = date.today()
+            # Default 3 days back: the most recent matches are still settling on
+            # the shared live parquet (results/stats filling in), so excluding
+            # them keeps backtests reproducible run-to-run.
+            end = date.today() - timedelta(days=3)
         if start > end:
             raise ValueError(f"Backtest start {start} after end {end}")
         logger.info("Backtest window: %s to %s", start, end)
