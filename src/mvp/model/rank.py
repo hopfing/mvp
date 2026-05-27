@@ -667,6 +667,7 @@ class LeaderCandidate:
     optimal_pct: float | None
     bt_clv_pos: float | None  # None when no fp-scoped backtest
     bt_avg_clv: float | None
+    bt_units_o: float | None  # net units at open; None when no fp-scoped backtest
 
     @property
     def label(self) -> str:
@@ -699,22 +700,31 @@ def _confidence_at(fp_dir: Path) -> dict:
     return out
 
 
-def _backtest_clv_at(fp_dir: Path) -> tuple[float | None, float | None]:
-    """Return (bt_clv_pos, bt_avg_clv) from an fp dir's backtest.csv, or (None, None)."""
+def _backtest_stats_at(
+    fp_dir: Path,
+) -> tuple[float | None, float | None, float | None]:
+    """Return (bt_clv_pos, bt_avg_clv, bt_units_o) from an fp dir's backtest.csv.
+
+    All-None when the file is missing/unreadable or no rows survive the
+    model-side + positive bet-time edge filter.
+    """
     p = fp_dir / "backtest.csv"
     if not p.exists():
-        return None, None
+        return None, None, None
     try:
         df = read_backtest_csv(p)
     except Exception:
-        return None, None
+        return None, None, None
     if "model_prob" in df.columns:
         df = df.filter(pl.col("model_prob") > 0.5)
     if "opening_edge" in df.columns:
         df = df.filter(pl.col("opening_edge") > 0)
-    if len(df) == 0 or "clv" not in df.columns:
-        return None, None
-    return (df["clv"] > 0).mean(), df["clv"].mean()
+    if len(df) == 0:
+        return None, None, None
+    clv_pos = (df["clv"] > 0).mean() if "clv" in df.columns else None
+    clv_avg = df["clv"].mean() if "clv" in df.columns else None
+    units_o = df["pnl_open"].sum() if "pnl_open" in df.columns else None
+    return clv_pos, clv_avg, units_o
 
 
 def _build_leader_candidates(summaries: list[ModelSummary]) -> list[LeaderCandidate]:
@@ -733,6 +743,7 @@ def _build_leader_candidates(summaries: list[ModelSummary]) -> list[LeaderCandid
             name=s.name, run_id=s.run_id, is_latest=True,
             signed_cal=s.signed_cal, optimal_pct=s.optimal_pct,
             bt_clv_pos=s.bt_clv_pos, bt_avg_clv=s.bt_avg_clv,
+            bt_units_o=s.bt_units_o,
         ))
         try:
             current_fp = fingerprint_for(s.config_path)
@@ -763,7 +774,7 @@ def _build_leader_candidates(summaries: list[ModelSummary]) -> list[LeaderCandid
         if fp_runs:
             best_clv = max(
                 fp_runs,
-                key=lambda x: (_backtest_clv_at(x[0]["fp_dir"])[0] or -1),
+                key=lambda x: (_backtest_stats_at(x[0]["fp_dir"])[0] or -1),
             )
             bests.append(best_clv)
         seen_ids: set[str] = set()
@@ -771,13 +782,14 @@ def _build_leader_candidates(summaries: list[ModelSummary]) -> list[LeaderCandid
             if r["run_id"] in seen_ids:
                 continue
             seen_ids.add(r["run_id"])
-            clv_pos = clv_avg = None
+            clv_pos = clv_avg = units_o = None
             if "fp_dir" in r:
-                clv_pos, clv_avg = _backtest_clv_at(r["fp_dir"])
+                clv_pos, clv_avg, units_o = _backtest_stats_at(r["fp_dir"])
             candidates.append(LeaderCandidate(
                 name=s.name, run_id=r["run_id"], is_latest=False,
                 signed_cal=ds["signed_cal"], optimal_pct=ds["optimal_pct"],
                 bt_clv_pos=clv_pos, bt_avg_clv=clv_avg,
+                bt_units_o=units_o,
             ))
     return candidates
 
@@ -858,7 +870,7 @@ def render_leader_table(summaries: list[ModelSummary]) -> str:
         "  fp-dir historical entries compete on all three axes; mlrun-only entries on C and O only.",
     ]
     header = (
-        f"  {'Model':<66} {'Axes':>5} {'SCal%':>7} {'Opt%':>6} {'CLV+%':>6} {'avgCLV':>7}"
+        f"  {'Model':<66} {'Axes':>5} {'SCal%':>7} {'Opt%':>6} {'CLV+%':>6} {'avgCLV':>7} {'Uo':>7}"
     )
     lines.append(header)
     lines.append("  " + "-" * (len(header) - 2))
@@ -868,8 +880,9 @@ def render_leader_table(summaries: list[ModelSummary]) -> str:
         opt = f"{c.optimal_pct:.1f}" if c.optimal_pct is not None else "--"
         clv_pos = f"{c.bt_clv_pos*100:.1f}" if c.bt_clv_pos is not None else "--"
         avg_clv = f"{c.bt_avg_clv*100:+.2f}" if c.bt_avg_clv is not None else "--"
+        units_o = f"{c.bt_units_o:+.1f}" if c.bt_units_o is not None else "--"
         lines.append(
-            f"  {c.label[:66]:<66} {axes_label:>5} {scal:>7} {opt:>6} {clv_pos:>6} {avg_clv:>7}"
+            f"  {c.label[:66]:<66} {axes_label:>5} {scal:>7} {opt:>6} {clv_pos:>6} {avg_clv:>7} {units_o:>7}"
         )
     return "\n".join(lines)
 
