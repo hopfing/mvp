@@ -20,6 +20,7 @@ import datetime as _dt
 import json
 import logging
 import math
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -233,6 +234,7 @@ class ModelSummary:
     bt_roi_c: float | None = None
     bt_units_o: float | None = None
     bt_units_c: float | None = None
+    bt_units_o_all: float | None = None  # consensus=1.0, no edge filter (vs bt_units_o which is edge>=0)
     bt_clv_pos: float | None = None
     bt_avg_clv: float | None = None
     bt_me_pos: float | None = None
@@ -522,6 +524,7 @@ def _extract_backtest(
         "bt_period_lo": "", "bt_period_hi": "", "bt_n": 0,
         "bt_hit": None, "bt_roi_o": None, "bt_roi_c": None,
         "bt_units_o": None, "bt_units_c": None,
+        "bt_units_o_all": None,
         "bt_clv_pos": None, "bt_avg_clv": None,
         "bt_me_pos": None, "bt_avg_me": None,
     }
@@ -551,10 +554,18 @@ def _extract_backtest(
             ).isoformat()
         df = df.filter(pl.col("effective_match_date") >= scope_start)
 
+    # Apply user's betting filters: consensus=1.0 (lead+voter agree) and model
+    # is on this side (prob > 0.5). The edge filter is applied *after* the
+    # "_all" snapshot is taken, so bt_units_o_all reflects consensus picks
+    # without the edge gate (matches user's "all" lens).
+    if "consensus" in df.columns:
+        df = df.filter(pl.col("consensus") == 1.0)
     if "model_prob" in df.columns:
         df = df.filter(pl.col("model_prob") > 0.5)
+    if "pnl_open" in df.columns:
+        out["bt_units_o_all"] = df["pnl_open"].sum()
     if "opening_edge" in df.columns:
-        df = df.filter(pl.col("opening_edge") > 0)
+        df = df.filter(pl.col("opening_edge") >= 0)
 
     n = len(df)
     if n == 0:
@@ -647,7 +658,7 @@ def _tier_symbol(cal: float | None, n: int | None) -> str:
 # Tables
 # ---------------------------------------------------------------------------
 
-LEADER_TOP_N = 25
+LEADER_TOP_PCT = 0.33  # per-axis cut = this fraction of each axis's eligible pool
 
 
 @dataclass
@@ -667,7 +678,8 @@ class LeaderCandidate:
     optimal_pct: float | None
     bt_clv_pos: float | None  # None when no fp-scoped backtest
     bt_avg_clv: float | None
-    bt_units_o: float | None  # net units at open; None when no fp-scoped backtest
+    bt_units_o: float | None  # net units at open (consensus + edge>=0); None when no fp-scoped backtest
+    bt_units_o_all: float | None  # net units at open (consensus only, no edge filter)
 
     @property
     def label(self) -> str:
@@ -702,29 +714,36 @@ def _confidence_at(fp_dir: Path) -> dict:
 
 def _backtest_stats_at(
     fp_dir: Path,
-) -> tuple[float | None, float | None, float | None]:
-    """Return (bt_clv_pos, bt_avg_clv, bt_units_o) from an fp dir's backtest.csv.
+) -> tuple[float | None, float | None, float | None, float | None]:
+    """Return (bt_clv_pos, bt_avg_clv, bt_units_o, bt_units_o_all) from an
+    fp dir's backtest.csv.
 
-    All-None when the file is missing/unreadable or no rows survive the
-    model-side + positive bet-time edge filter.
+    Filters: consensus==1.0 + model_prob>0.5 for all metrics; an additional
+    opening_edge>=0 gate for the standard set. ``bt_units_o_all`` is the
+    consensus-side units WITHOUT the edge gate (the "all" lens).
+
+    All-None when the file is missing/unreadable.
     """
     p = fp_dir / "backtest.csv"
     if not p.exists():
-        return None, None, None
+        return None, None, None, None
     try:
         df = read_backtest_csv(p)
     except Exception:
-        return None, None, None
+        return None, None, None, None
+    if "consensus" in df.columns:
+        df = df.filter(pl.col("consensus") == 1.0)
     if "model_prob" in df.columns:
         df = df.filter(pl.col("model_prob") > 0.5)
+    units_o_all = df["pnl_open"].sum() if "pnl_open" in df.columns else None
     if "opening_edge" in df.columns:
-        df = df.filter(pl.col("opening_edge") > 0)
+        df = df.filter(pl.col("opening_edge") >= 0)
     if len(df) == 0:
-        return None, None, None
+        return None, None, None, units_o_all
     clv_pos = (df["clv"] > 0).mean() if "clv" in df.columns else None
     clv_avg = df["clv"].mean() if "clv" in df.columns else None
     units_o = df["pnl_open"].sum() if "pnl_open" in df.columns else None
-    return clv_pos, clv_avg, units_o
+    return clv_pos, clv_avg, units_o, units_o_all
 
 
 def _build_leader_candidates(summaries: list[ModelSummary]) -> list[LeaderCandidate]:
@@ -744,6 +763,7 @@ def _build_leader_candidates(summaries: list[ModelSummary]) -> list[LeaderCandid
             signed_cal=s.signed_cal, optimal_pct=s.optimal_pct,
             bt_clv_pos=s.bt_clv_pos, bt_avg_clv=s.bt_avg_clv,
             bt_units_o=s.bt_units_o,
+            bt_units_o_all=s.bt_units_o_all,
         ))
         try:
             current_fp = fingerprint_for(s.config_path)
@@ -765,31 +785,44 @@ def _build_leader_candidates(summaries: list[ModelSummary]) -> list[LeaderCandid
             per_run.append((r, ds))
         if not per_run:
             continue
-        # Best historical on |signed_cal|, on Optimal%, and on bt_clv_pos (fp only)
+        # Best historical on |signed_cal|, Optimal%, CLV+%, and Uo>=0 (fp only)
         best_cal = min(per_run, key=lambda x: abs(x[1]["signed_cal"]))
         best_opt = max(per_run, key=lambda x: x[1]["optimal_pct"])
-        # CLV best is only meaningful for fp-dir entries
+        # CLV and Uo bests are only meaningful for fp-dir entries — precompute
+        # backtest stats per fp_run once so neither axis selection nor the
+        # construction step re-reads backtest.csv.
         fp_runs = [(r, ds) for r, ds in per_run if "fp_dir" in r]
+        fp_stats: dict[str, tuple] = {
+            r["run_id"]: _backtest_stats_at(r["fp_dir"]) for r, _ in fp_runs
+        }
         bests: list[tuple[dict, dict]] = [best_cal, best_opt]
         if fp_runs:
             best_clv = max(
                 fp_runs,
-                key=lambda x: (_backtest_stats_at(x[0]["fp_dir"])[0] or -1),
+                key=lambda x: (fp_stats[x[0]["run_id"]][0] or -1),
             )
             bests.append(best_clv)
+            best_units = max(
+                fp_runs,
+                key=lambda x: (
+                    fp_stats[x[0]["run_id"]][2]
+                    if fp_stats[x[0]["run_id"]][2] is not None else -1e18
+                ),
+            )
+            bests.append(best_units)
         seen_ids: set[str] = set()
         for r, ds in bests:
             if r["run_id"] in seen_ids:
                 continue
             seen_ids.add(r["run_id"])
-            clv_pos = clv_avg = units_o = None
-            if "fp_dir" in r:
-                clv_pos, clv_avg, units_o = _backtest_stats_at(r["fp_dir"])
+            clv_pos = clv_avg = units_o = units_o_all = None
+            if r["run_id"] in fp_stats:
+                clv_pos, clv_avg, units_o, units_o_all = fp_stats[r["run_id"]]
             candidates.append(LeaderCandidate(
                 name=s.name, run_id=r["run_id"], is_latest=False,
                 signed_cal=ds["signed_cal"], optimal_pct=ds["optimal_pct"],
                 bt_clv_pos=clv_pos, bt_avg_clv=clv_avg,
-                bt_units_o=units_o,
+                bt_units_o=units_o, bt_units_o_all=units_o_all,
             ))
     return candidates
 
@@ -797,14 +830,15 @@ def _build_leader_candidates(summaries: list[ModelSummary]) -> list[LeaderCandid
 def render_leader_table(summaries: list[ModelSummary]) -> str:
     """Cross-axis leader table.
 
-    Three ranking axes:
+    Four ranking axes:
       - C: abs(signed_cal) asc   (calibration magnitude)
       - O: Optimal% desc         (calibration volume)
-      - B: CLV+% desc            (market beat rate; latest runs only)
+      - B: CLV+% desc            (market beat rate; fp-scoped backtest only)
+      - U: Uo>=0 desc            (net units booked under bet rule; fp-scoped backtest only)
 
-    Latest-run candidates compete on all three axes. Historical-best
+    Latest-run candidates compete on all four axes. Historical-best
     candidates from fingerprint dirs (which carry their own
-    validation_results + backtest CSVs) compete on all three axes too.
+    validation_results + backtest CSVs) compete on all four axes too.
     Historical mlrun-only candidates compete on C and O only — they have no
     fp-scoped confidence/backtest artifacts.
 
@@ -818,21 +852,48 @@ def render_leader_table(summaries: list[ModelSummary]) -> str:
         elig = [c for c in seq if eligible_filter(c)]
         return sorted(elig, key=key)
 
-    cal_ranked = rank_asc(
+    cal_full = rank_asc(
         candidates,
         key=lambda c: abs(c.signed_cal),
         eligible_filter=lambda c: c.signed_cal is not None,
-    )[:LEADER_TOP_N]
-    opt_ranked = rank_asc(
+    )
+    opt_full = rank_asc(
         candidates,
         key=lambda c: -c.optimal_pct,
         eligible_filter=lambda c: c.optimal_pct is not None,
-    )[:LEADER_TOP_N]
-    clv_ranked = rank_asc(
+    )
+    clv_full = rank_asc(
         candidates,
         key=lambda c: -(c.bt_clv_pos or -1),
         eligible_filter=lambda c: c.bt_clv_pos is not None,
-    )[:LEADER_TOP_N]
+    )
+    units_full = rank_asc(
+        candidates,
+        # Sort by Uo>=0 desc; eligibility guard means we never hit None here.
+        key=lambda c: -c.bt_units_o,
+        eligible_filter=lambda c: c.bt_units_o is not None,
+    )
+    def _cut(n: int) -> int:
+        return max(1, round(LEADER_TOP_PCT * n))
+
+    cal_cut, opt_cut, clv_cut, units_cut = (
+        _cut(len(cal_full)), _cut(len(opt_full)),
+        _cut(len(clv_full)), _cut(len(units_full)),
+    )
+    cal_ranked = cal_full[:cal_cut]
+    opt_ranked = opt_full[:opt_cut]
+    clv_ranked = clv_full[:clv_cut]
+    units_ranked = units_full[:units_cut]
+
+    # Per-axis cut is a fraction of each axis's eligible pool (B and U are
+    # smaller: only candidates with an fp-scoped backtest carry CLV / units),
+    # so the eliteness of the cut is equal across axes even as pools differ.
+    pct_label = f"{LEADER_TOP_PCT*100:.0f}%"
+    pool_line = (
+        f"  Pool: {len(candidates)} candidates — top {pct_label} per axis "
+        f"(C: {cal_cut} of {len(cal_full)}, O: {opt_cut} of {len(opt_full)}, "
+        f"B: {clv_cut} of {len(clv_full)}, U: {units_cut} of {len(units_full)})"
+    )
 
     # Use (name, run_id) as the candidate key
     axis_ranks: dict[tuple[str, str], dict[str, int]] = {}
@@ -842,13 +903,16 @@ def render_leader_table(summaries: list[ModelSummary]) -> str:
         axis_ranks.setdefault((c.name, c.run_id), {})["O"] = i + 1
     for i, c in enumerate(clv_ranked):
         axis_ranks.setdefault((c.name, c.run_id), {})["B"] = i + 1
+    for i, c in enumerate(units_ranked):
+        axis_ranks.setdefault((c.name, c.run_id), {})["U"] = i + 1
 
     multi_axis = {key: ranks for key, ranks in axis_ranks.items() if len(ranks) >= 2}
     if not multi_axis:
         return (
             "=" * 80
-            + f"\nCross-axis leaders (top-{LEADER_TOP_N} per axis; 2+ axes shown)\n"
+            + f"\nCross-axis leaders (top {pct_label} per axis; 2+ axes shown)\n"
             + "=" * 80
+            + f"\n{pool_line}"
             + "\n  No models appear in 2+ axis top-lists."
         )
 
@@ -863,14 +927,15 @@ def render_leader_table(summaries: list[ModelSummary]) -> str:
 
     lines = [
         "=" * 80,
-        f"Cross-axis leaders (top-{LEADER_TOP_N} per axis; 2+ axes shown)",
+        f"Cross-axis leaders (top {pct_label} per axis; 2+ axes shown)",
         "=" * 80,
-        "  Axes: C=calibration (abs signed_cal asc), O=Optimal% desc, B=CLV+% desc",
+        pool_line,
+        "  Axes: C=calibration (abs signed_cal asc), O=Optimal% desc, B=CLV+% desc, U=Uo>=0 desc",
         "  Entries marked `<name> (<run_id>)` are historical bests (latest run regressed).",
-        "  fp-dir historical entries compete on all three axes; mlrun-only entries on C and O only.",
+        "  fp-dir historical entries compete on all four axes; mlrun-only entries on C and O only.",
     ]
     header = (
-        f"  {'Model':<66} {'Axes':>5} {'SCal%':>7} {'Opt%':>6} {'CLV+%':>6} {'avgCLV':>7} {'Uo':>7}"
+        f"  {'Model':<66} {'Axes':>8} {'SCal%':>7} {'Opt%':>6} {'CLV+%':>6} {'avgCLV':>7} {'Uo>=0':>7} {'Uo_all':>8}"
     )
     lines.append(header)
     lines.append("  " + "-" * (len(header) - 2))
@@ -881,8 +946,9 @@ def render_leader_table(summaries: list[ModelSummary]) -> str:
         clv_pos = f"{c.bt_clv_pos*100:.1f}" if c.bt_clv_pos is not None else "--"
         avg_clv = f"{c.bt_avg_clv*100:+.2f}" if c.bt_avg_clv is not None else "--"
         units_o = f"{c.bt_units_o:+.1f}" if c.bt_units_o is not None else "--"
+        units_o_all = f"{c.bt_units_o_all:+.1f}" if c.bt_units_o_all is not None else "--"
         lines.append(
-            f"  {c.label[:66]:<66} {axes_label:>5} {scal:>7} {opt:>6} {clv_pos:>6} {avg_clv:>7} {units_o:>7}"
+            f"  {c.label[:66]:<66} {axes_label:>8} {scal:>7} {opt:>6} {clv_pos:>6} {avg_clv:>7} {units_o:>7} {units_o_all:>8}"
         )
     return "\n".join(lines)
 
@@ -1180,25 +1246,34 @@ def orchestrate_refresh(
             logger.warning("[refresh] %s FAILED: %s", cfg.stem, e)
             return False
 
+    # Pre-pass: decide what to refresh up front so progress can show k/N.
+    todo: list[tuple[Path, str]] = []
     for cfg_path in configs:
         name = cfg_path.stem
         if force_refresh:
-            logger.info("[force-refresh] %s", name)
-            if _try_refresh(cfg_path):
-                stats.refreshed.append(name)
+            todo.append((cfg_path, "force"))
             continue
-
         fresh = check_freshness(cfg_path)
         if fresh.fresh:
             stats.skipped_fresh.append(name)
             continue
-
         if fresh.missing:
             stats.missing_artifacts.append((name, fresh.missing))
-            logger.info("[refresh] %s (missing: %s)", name, ", ".join(fresh.missing))
+            todo.append((cfg_path, f"missing: {', '.join(fresh.missing)}"))
         else:
-            logger.info("[refresh] %s (%s)", name, fresh.reason)
-        if _try_refresh(cfg_path):
+            todo.append((cfg_path, fresh.reason))
+
+    total = len(todo)
+    if total:
+        print(f"  Refreshing {total} stale model(s) (retrain + diagnostics/confidence/backtest):", flush=True)
+    for i, (cfg_path, reason) in enumerate(todo, 1):
+        name = cfg_path.stem
+        print(f"    [{i}/{total}] {name} ({reason}) ...", end="", flush=True)
+        t0 = time.perf_counter()
+        ok = _try_refresh(cfg_path)
+        dt = time.perf_counter() - t0
+        print(f" {'done' if ok else 'FAILED'} in {dt:.1f}s", flush=True)
+        if ok:
             stats.refreshed.append(name)
     return stats
 
