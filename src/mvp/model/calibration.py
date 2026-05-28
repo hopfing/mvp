@@ -121,6 +121,80 @@ class IsotonicCalibrator:
         return self._model.predict(y_prob)
 
 
+class AsymmIsotonicCalibrator:
+    """Isotonic calibration with the negative class up-weighted by `lambda_over`.
+
+    Motivation: H51 — apply asymmetric pressure as a post-hoc calibration step
+    instead of as a training-time XGB objective (the alog* family already
+    covers direct asymm training).
+
+    Mechanism: in this codebase, `_asymmetric_logloss(y, p, λ)` reduces to
+    standard log-loss with the negative class up-weighted by λ (because for
+    binary y∈{0,1} any p>0 exceeds y=0). Sklearn's IsotonicRegression with
+    sample_weight then provides a weighted-PAV fit; with the negative-class
+    weight, the fitted monotone map is pulled toward lower probability in the
+    tail. At λ=1 this is exactly IsotonicCalibrator.
+
+    NOTE: sklearn's IsotonicRegression minimizes weighted SSE, not weighted
+    log-loss. For binary outcomes the per-bin minimizer is the weighted mean
+    under both, but PAV's pool-merge decisions can differ. This is therefore
+    an APPROXIMATION to asymm-LL-optimal monotone calibration, with the right
+    direction of effect and monotonicity preserved — not a formal derivation.
+    """
+
+    def __init__(self, lambda_over: float = 1.0) -> None:
+        if lambda_over <= 0:
+            raise ValueError(f"lambda_over must be > 0 (got {lambda_over})")
+        self.lambda_over = float(lambda_over)
+        self._model: IsotonicRegression | None = None
+
+    @property
+    def is_fitted(self) -> bool:
+        return self._model is not None
+
+    @property
+    def n_thresholds(self) -> int:
+        if self._model is None:
+            raise ValueError("Calibrator not fitted")
+        return int(len(self._model.X_thresholds_))
+
+    @property
+    def y_min(self) -> float:
+        if self._model is None:
+            raise ValueError("Calibrator not fitted")
+        return float(self._model.y_thresholds_.min())
+
+    @property
+    def y_max(self) -> float:
+        if self._model is None:
+            raise ValueError("Calibrator not fitted")
+        return float(self._model.y_thresholds_.max())
+
+    def grid_sample(
+        self, grid: tuple[float, ...] = (0.1, 0.3, 0.5, 0.7, 0.9)
+    ) -> list[float]:
+        if self._model is None:
+            raise ValueError("Calibrator not fitted")
+        return [float(v) for v in self._model.predict(np.array(grid))]
+
+    def fit(
+        self, y_prob: np.ndarray, y_true: np.ndarray
+    ) -> "AsymmIsotonicCalibrator":
+        """Fit weighted isotonic; negative class gets weight lambda_over, positive class 1.0."""
+        y_true_arr = np.asarray(y_true)
+        weights = np.where(y_true_arr == 0, self.lambda_over, 1.0)
+        self._model = IsotonicRegression(
+            y_min=0.0, y_max=1.0, out_of_bounds="clip"
+        )
+        self._model.fit(y_prob, y_true_arr, sample_weight=weights)
+        return self
+
+    def transform(self, y_prob: np.ndarray) -> np.ndarray:
+        if self._model is None:
+            return y_prob
+        return self._model.predict(y_prob)
+
+
 class SegmentedPlattCalibrator:
     """Per-segment Platt scaling with a global fallback.
 
@@ -293,6 +367,17 @@ def make_calibrator(cal_cfg):
         if segments:
             return SegmentedIsotonicCalibrator(segments=segments, min_n=min_n)
         return IsotonicCalibrator()
+    if method == "asymm_isotonic":
+        if segments:
+            # Phase 2b — SegmentedAsymmIsotonicCalibrator not implemented.
+            # Raise rather than silently dropping segmentation.
+            raise ValueError(
+                "calibration.method 'asymm_isotonic' does not yet support "
+                "segments (H51 Phase 2b is not implemented). Remove 'segments' "
+                "or use 'isotonic' / 'platt' instead."
+            )
+        lam = getattr(cal_cfg, "lambda_over", 1.0)
+        return AsymmIsotonicCalibrator(lambda_over=lam)
     # default / "platt"
     if segments:
         return SegmentedPlattCalibrator(segments=segments, min_n=min_n)

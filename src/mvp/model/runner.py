@@ -15,6 +15,7 @@ import polars as pl
 run_logger = logging.getLogger(__name__)
 
 from mvp.model.calibration import (
+    AsymmIsotonicCalibrator,
     IsotonicCalibrator,
     PlattCalibrator,
     SegmentedIsotonicCalibrator,
@@ -1081,6 +1082,7 @@ class ExperimentRunner:
                 | SegmentedPlattCalibrator
                 | IsotonicCalibrator
                 | SegmentedIsotonicCalibrator
+                | AsymmIsotonicCalibrator
                 | None
             ) = None
             if self.calibrate:
@@ -1377,6 +1379,18 @@ class ExperimentRunner:
                             ),
                             "cal_mean_n_thresholds": f"{calibrator.mean_n_thresholds():.1f}",
                             "cal_max_n_thresholds": str(calibrator.max_n_thresholds()),
+                        })
+                    elif isinstance(calibrator, AsymmIsotonicCalibrator):
+                        logger.log_params({
+                            "cal_method": "asymm_isotonic",
+                            "cal_segmented": "false",
+                            "cal_lambda_over": f"{calibrator.lambda_over:.4f}",
+                            "cal_n_thresholds": str(calibrator.n_thresholds),
+                            "cal_y_min": f"{calibrator.y_min:.6f}",
+                            "cal_y_max": f"{calibrator.y_max:.6f}",
+                            "cal_grid": ",".join(
+                                f"{v:.4f}" for v in calibrator.grid_sample()
+                            ),
                         })
                     elif isinstance(calibrator, IsotonicCalibrator):
                         logger.log_params({

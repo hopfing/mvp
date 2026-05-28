@@ -238,9 +238,15 @@ class CalibrationConfig(_StrictModel):
     HP search and let `mvp model` apply it post-hoc at training time.
     """
 
-    method: Literal["platt", "isotonic"] = "platt"
+    method: Literal["platt", "isotonic", "asymm_isotonic"] = "platt"
     segments: list[str] | None = None
     min_n: int = 200
+    # Asymmetric-isotonic only: negative-class weight in the isotonic fit
+    # (lambda_over=1.0 reduces to standard isotonic). H51 Phase 2a is the
+    # non-segmented variant; segmented asymm_isotonic isn't implemented yet,
+    # so combining `method: asymm_isotonic` with `segments` raises in
+    # make_calibrator().
+    lambda_over: float = 1.0
 
 
 class ExperimentConfig(_StrictModel):
