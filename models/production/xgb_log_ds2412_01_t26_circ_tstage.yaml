@@ -1,0 +1,65 @@
+data:
+  date_range:
+    end: 2025-12-31
+    start: 2020-01-01
+  filters:
+    circuit:
+    - tour
+    - chal
+    draw_type: singles
+features:
+  include:
+  - player_glicko_mu_over_sigma
+  - opp_glicko_mu_over_sigma
+  - opp_tourn_matches_won
+  - player_tourn_matches_won
+  - player_elo_surface
+  - opp_elo_surface
+  - player_days_since_surface
+  - opp_days_since_surface
+  - player_losses_vs_surface_specialists
+  - opp_losses_vs_surface_specialists
+  - round_ordinal
+  - player_age
+  - opp_age
+  - opp_deciding_set_pct
+  - player_deciding_set_pct
+  - player_iid_hold_prob(days=15)
+  - opp_iid_hold_prob(days=15)
+  - player_glicko_rd
+  - opp_glicko_rd
+  - player_venue_win_pct
+  - opp_venue_win_pct
+  - player_opp_elo_faced_avg(days=365)
+  - opp_opp_elo_faced_avg(days=365)
+  - player_iid_hold_prob(days=180)
+  - opp_iid_hold_prob(days=180)
+  - player_surface_pts_service_won_pct(days=180)
+  - opp_surface_pts_service_won_pct(days=180)
+metrics:
+  primary: log_loss
+model:
+  params:
+    colsample_bylevel: 0.9888274166851895
+    colsample_bynode: 0.962186248897151
+    colsample_bytree: 0.9929650619615719
+    gamma: 0.2508098515241295
+    learning_rate: 0.036639214554318025
+    max_delta_step: 3
+    max_depth: 3
+    min_child_weight: 5
+    n_estimators: 850
+    reg_alpha: 0.7759257670122609
+    reg_lambda: 2.9834635206358895
+    scale_pos_weight: 0.9889736200767723
+    subsample: 0.8616288441364854
+    n_jobs: 8
+    random_state: 42
+  type: xgboost
+validation:
+  test_months: 12
+  train_months: 24
+  type: date_sliding
+calibration:
+  method: isotonic
+  segments: [circuit, tournament_stage]
