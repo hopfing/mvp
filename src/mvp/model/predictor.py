@@ -33,9 +33,15 @@ from mvp.model.config import (
 )
 from mvp.model.diagnostics import Diagnostics
 from mvp.model.engine import FeatureEngine, get_feature_columns
+from mvp.model.features._score_helpers import (
+    sets_lost as _sets_lost,
+    sets_won as _sets_won,
+    total_games_lost as _total_games_lost,
+    total_games_won as _total_games_won,
+)
 from mvp.model.features.elo import surface_elo_expr
 from mvp.model.imputation import apply_imputation, build_imputation, fit_imputation
-from mvp.model.models import EnsembleModel, get_model
+from mvp.model.models import EnsembleModel, XGBoostMTLModel, get_model
 from mvp.model.registry import get_registry
 from mvp.model.splitters import make_splitter
 from mvp.model.weighting import compute_sample_weights
@@ -130,20 +136,53 @@ class ProductionPredictor:
         """The target this predictor is configured for ('won' or 'deciding_set')."""
         return self._experiment_config.target
 
-    def _resolve_target(self, df: pl.DataFrame) -> tuple[pl.DataFrame, str]:
-        """Add the target column and filter invalid rows.
+    def _resolve_target(
+        self, df: pl.DataFrame, config: ExperimentConfig | None = None,
+    ) -> tuple[pl.DataFrame, list[str]]:
+        """Add target column(s) and filter invalid rows.
 
-        Mirrors ExperimentRunner._resolve_target().
+        Mirrors ExperimentRunner._resolve_target() including MTL parity:
+        primary target at index 0; auxiliary regression targets appended when
+        `config.mtl` is set. Backward compat: callers that only need the
+        primary use `target_cols[0]`.
+
+        Walkovers always excluded. When MTL is active, additionally exclude
+        RET/DEF/UNP and require sets_played not null because aux targets
+        require completed match scores.
+
+        Args:
+            df: input dataframe.
+            config: experiment config to read target / mtl from. Falls back to
+                `self._experiment_config` for backward compat with callers
+                that didn't pass one (e.g., production-prediction paths that
+                don't load per-entry configs).
         """
-        target = self.target
+        cfg = config if config is not None else self._experiment_config
+        target = cfg.target
+        mtl_cfg = getattr(cfg, "mtl", None)
+
+        # Primary completeness filter: walkovers always; RET/DEF/UNP when MTL.
         if "reason" in df.columns:
-            df = df.filter(pl.col("reason").fill_null("").ne("W/O"))
-        if target == "won":
-            return df, "won"
-        if target == "deciding_set":
-            target_col = "_target_deciding_set"
+            invalid_reasons = {"W/O"}
+            if mtl_cfg is not None:
+                invalid_reasons |= {"RET", "DEF", "UNP"}
+            df = df.filter(~pl.col("reason").fill_null("").is_in(invalid_reasons))
+
+        # When MTL is active, also require sets_played not null (necessary for
+        # any aux target derivation; the dropna gate below catches per-aux
+        # edge cases).
+        if mtl_cfg is not None:
             df = df.filter(pl.col("sets_played").is_not_null())
-            if "reason" in df.columns:
+
+        # Resolve primary target column
+        if target == "won":
+            primary_col = "won"
+        elif target == "deciding_set":
+            primary_col = "_target_deciding_set"
+            df = df.filter(pl.col("sets_played").is_not_null())
+            # When MTL is active, RET/DEF/UNP are already filtered above —
+            # this branch becomes a no-op then.
+            if "reason" in df.columns and mtl_cfg is None:
                 reason = pl.col("reason").fill_null("")
                 df = df.filter(
                     ~reason.is_in(["DEF", "UNP"])
@@ -155,10 +194,38 @@ class ProductionPredictor:
             df = df.with_columns(
                 (pl.col("sets_played") == pl.col("best_of"))
                 .cast(pl.Int64)
-                .alias(target_col)
+                .alias(primary_col)
             )
-            return df, target_col
-        raise ValueError(f"Unknown target: {target}")
+        else:
+            raise ValueError(f"Unknown target: {target}")
+
+        target_cols = [primary_col]
+
+        # MTL: derive auxiliary target columns + secondary completeness gate
+        if mtl_cfg is not None:
+            aux_exprs = {
+                "game_margin": (
+                    "_aux_game_margin",
+                    _total_games_won() - _total_games_lost(),
+                ),
+                "set_margin": (
+                    "_aux_set_margin",
+                    _sets_won() - _sets_lost(),
+                ),
+                "set_count": (
+                    "_aux_set_count",
+                    pl.col("sets_played").cast(pl.Int64),
+                ),
+            }
+            aux_cols: list[str] = []
+            for aux_name in mtl_cfg.auxiliary_targets:
+                col_name, expr = aux_exprs[aux_name]
+                df = df.with_columns(expr.alias(col_name))
+                aux_cols.append(col_name)
+            df = df.drop_nulls(subset=aux_cols)
+            target_cols.extend(aux_cols)
+
+        return df, target_cols
 
     def _resolve_ensemble_features(self) -> tuple[list[str], list[dict]]:
         """Resolve ensemble config to union features and base model specs."""
@@ -234,7 +301,16 @@ class ProductionPredictor:
         filter_specs = get_filter_feature_specs(entry.get("filters"))
         extra = compute_only + filter_specs
         all_specs = feature_specs + [s for s in extra if s not in feature_specs]
-        df = engine.compute(all_specs, extra_columns=_PREDICTOR_EXTRA_COLS)
+        # MTL: aux target derivation needs per-set game columns. Extend the
+        # base projection list when the entry's config has an mtl block.
+        extra_cols_eff = list(_PREDICTOR_EXTRA_COLS)
+        if config.mtl is not None:
+            for i in range(1, 6):
+                for prefix in ("player", "opp"):
+                    col = f"{prefix}_set{i}_games"
+                    if col not in extra_cols_eff:
+                        extra_cols_eff.append(col)
+        df = engine.compute(all_specs, extra_columns=extra_cols_eff)
 
         # Apply training filters
         train_range = entry["train_date_range"]
@@ -248,8 +324,12 @@ class ProductionPredictor:
         if entry.get("filters"):
             df = apply_filters(df, entry["filters"])
 
-        # Resolve target column and filter invalid rows
-        df, target_col = self._resolve_target(df)
+        # Resolve target column(s). Primary at index 0; aux targets appended
+        # when config.mtl is set. Single-task path: target_cols has length 1
+        # and target_col aliases it (unchanged behavior).
+        df, target_cols = self._resolve_target(df, config=config)
+        target_col = target_cols[0]
+        is_mtl = config.mtl is not None
 
         # Drop rows without outcomes
         df = df.filter(pl.col(target_col).is_not_null())
@@ -297,6 +377,12 @@ class ProductionPredictor:
 
         X = df_deploy.select(pl.col(c).cast(pl.Float64) for c in augmented_cols).to_numpy()
         y = df_deploy[target_col].to_numpy().astype(int)
+        # MTL: 2D y for the multi-target fit (primary + aux columns). Single-
+        # task path: y_for_fit aliases y (1D). The 1D `y` stays the canonical
+        # primary label for calibrator fits and OOF buffers downstream.
+        y_for_fit = (
+            df_deploy.select(target_cols).to_numpy() if is_mtl else y
+        )
 
         logger.info("Training on %d rows with %d features", len(y), len(feature_cols))
 
@@ -345,16 +431,28 @@ class ProductionPredictor:
                 train_dates, config.sample_weight
             )
 
-        # Train
-        model = get_model(
-            config.model.type,
-            config.model.params or {},
-            feature_names=feature_cols,
-        )
+        # Train. MTL: dispatch to XGBoostMTLModel directly (model.type stays
+        # "xgboost" in config; routing is a training-path decision). Aligns
+        # with ExperimentRunner's MTL branch — same model class, same 2D y,
+        # same weight_{target_name} extraction.
+        if is_mtl:
+            assert config.mtl is not None
+            target_names_mtl = [config.target, *config.mtl.auxiliary_targets]
+            model = XGBoostMTLModel(
+                config.model.params or {},
+                target_names=target_names_mtl,
+                feature_names=feature_cols,
+            )
+        else:
+            model = get_model(
+                config.model.type,
+                config.model.params or {},
+                feature_names=feature_cols,
+            )
         if is_ensemble and base_model_specs is not None:
             assert isinstance(model, EnsembleModel)
             model.configure(base_model_specs)
-        model.fit(X, y, sample_weight=sample_weights)
+        model.fit(X, y_for_fit, sample_weight=sample_weights)
 
         # Fit Platt calibrator on OOF predictions. Prefer the same temporal CV
         # that `mvp model` uses (per the validation block in the model YAML)
@@ -406,6 +504,13 @@ class ProductionPredictor:
                     pl.col(c).cast(pl.Float64) for c in augmented_cols
                 ).to_numpy()
                 y_train_fold = train_df[target_col].to_numpy().astype(int)
+                # MTL: 2D y for the fold model fit. Single-task: alias to the
+                # 1D primary. y_test_fold and y_train_fold (1D) remain the
+                # canonical labels for calibrator fitting and metrics.
+                y_train_fold_for_fit = (
+                    train_df.select(target_cols).to_numpy()
+                    if is_mtl else y_train_fold
+                )
                 X_test_raw = test_df.select(
                     pl.col(c).cast(pl.Float64) for c in augmented_cols
                 ).to_numpy()
@@ -443,16 +548,24 @@ class ProductionPredictor:
                         train_dates_fold, config.sample_weight
                     )
 
-                fold_model = get_model(
-                    config.model.type,
-                    config.model.params or {},
-                    feature_names=feature_cols,
-                )
+                if is_mtl:
+                    assert config.mtl is not None
+                    fold_model = XGBoostMTLModel(
+                        config.model.params or {},
+                        target_names=[config.target, *config.mtl.auxiliary_targets],
+                        feature_names=feature_cols,
+                    )
+                else:
+                    fold_model = get_model(
+                        config.model.type,
+                        config.model.params or {},
+                        feature_names=feature_cols,
+                    )
                 if is_ensemble and base_model_specs is not None:
                     assert isinstance(fold_model, EnsembleModel)
                     fold_model.configure(base_model_specs)
                 fold_model.fit(
-                    X_train_fold, y_train_fold, sample_weight=fold_weights
+                    X_train_fold, y_train_fold_for_fit, sample_weight=fold_weights
                 )
                 if is_ensemble:
                     assert isinstance(fold_model, EnsembleModel)
@@ -584,16 +697,28 @@ class ProductionPredictor:
             )
             skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
             for train_idx, val_idx in skf.split(X, y):
-                fold_model = get_model(
-                    config.model.type,
-                    config.model.params or {},
-                    feature_names=feature_cols,
-                )
+                if is_mtl:
+                    assert config.mtl is not None
+                    fold_model = XGBoostMTLModel(
+                        config.model.params or {},
+                        target_names=[config.target, *config.mtl.auxiliary_targets],
+                        feature_names=feature_cols,
+                    )
+                else:
+                    fold_model = get_model(
+                        config.model.type,
+                        config.model.params or {},
+                        feature_names=feature_cols,
+                    )
                 if is_ensemble and base_model_specs is not None:
                     assert isinstance(fold_model, EnsembleModel)
                     fold_model.configure(base_model_specs)
                 fold_weights = sample_weights[train_idx] if sample_weights is not None else None
-                fold_model.fit(X[train_idx], y[train_idx], sample_weight=fold_weights)
+                # MTL: y_for_fit is 2D; slicing by train_idx preserves shape.
+                # Single-task: y_for_fit is 1D primary (aliased to y).
+                fold_model.fit(
+                    X[train_idx], y_for_fit[train_idx], sample_weight=fold_weights,
+                )
                 if is_ensemble and n_subs > 0:
                     assert isinstance(fold_model, EnsembleModel)
                     sub_preds = fold_model.predict_proba_per_model(X[val_idx])
