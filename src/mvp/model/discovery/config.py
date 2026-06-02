@@ -8,7 +8,7 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, field_validator, model_validator
 
-from mvp.model.config import SampleWeightConfig
+from mvp.model.config import MTLConfig, SampleWeightConfig
 
 
 class DateRange(BaseModel):
@@ -141,6 +141,16 @@ class DiscoveryConfig(BaseModel):
     model: ModelConfig = ModelConfig()
     validation: ValidationConfig = ValidationConfig()
     sample_weight: SampleWeightConfig | None = None
+    mtl: MTLConfig | None = None
+
+    @model_validator(mode="after")
+    def validate_mtl_compatibility(self) -> "DiscoveryConfig":
+        """Mirror the ExperimentConfig validator — MTL only with xgboost."""
+        if self.mtl is not None and self.model.type != "xgboost":
+            raise ValueError(
+                f"MTL requires model.type='xgboost'; got {self.model.type!r}"
+            )
+        return self
 
     @classmethod
     def from_yaml(cls, yaml_str: str) -> "DiscoveryConfig":
@@ -187,4 +197,6 @@ class DiscoveryConfig(BaseModel):
             result["target"] = self.target
         if self.sample_weight is not None:
             result["sample_weight"] = self.sample_weight.model_dump()
+        if self.mtl is not None:
+            result["mtl"] = self.mtl.model_dump()
         return result

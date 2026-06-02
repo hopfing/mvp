@@ -14,9 +14,15 @@ from sklearn.linear_model import LogisticRegression
 from mvp.model.config import apply_filters
 from mvp.model.discovery.config import DiscoveryConfig
 from mvp.model.engine import check_memory, get_feature_columns, make_fs_engine
+from mvp.model.features._score_helpers import (
+    sets_lost as _sets_lost,
+    sets_won as _sets_won,
+    total_games_lost as _total_games_lost,
+    total_games_won as _total_games_won,
+)
 from mvp.model.imputation import build_imputation
 from mvp.model.metrics import compute_metrics
-from mvp.model.models import get_model
+from mvp.model.models import XGBoostMTLModel, _sigmoid, get_model
 from mvp.model.registry import FeatureRegistry, get_registry
 from mvp.model.splitters import make_splitter
 
@@ -69,6 +75,52 @@ def _resolve_column_impute(
     if impute == "median":
         return ("median", 0.0)
     return ("constant", float(impute))
+
+
+def _compute_mtl_loss(
+    model: XGBoostMTLModel,
+    X_test: np.ndarray,
+    y_test_primary: np.ndarray,
+    y_aux_test: np.ndarray,
+) -> float:
+    """Multi-task FS scoring loss: ``log_loss(primary) + sum_i w_i * MSE(aux_i)``.
+
+    Aux MSE computed on the **standardized scale** (mle review 2026-06-01):
+    raw booster output is already on the standardized scale the model trained
+    against — we do NOT call `predict_aux()` because that inverse-transforms
+    back to original scale; we read the booster output directly. `y_aux_test`
+    is re-standardized using the model's training-fold `_aux_mean` /
+    `_aux_std` so both sides of the MSE are on the same scale. Result: per-
+    target MSE is O(1) (unit-variance), matching what the loss weights were
+    tuned against. Without standardization, large-range aux (game_margin
+    variance ~50) would dominate small-range aux (set_count variance ~0.25).
+    """
+    import xgboost as xgb
+
+    raw = model._booster.predict(xgb.DMatrix(X_test))  # [n, num_target] standardized
+    # Primary head: sigmoid → log_loss
+    p_primary = _sigmoid(raw[:, 0])
+    eps = 1e-15
+    p_clip = np.clip(p_primary, eps, 1.0 - eps)
+    primary_ll = -float(
+        np.mean(
+            y_test_primary * np.log(p_clip)
+            + (1.0 - y_test_primary) * np.log(1.0 - p_clip)
+        )
+    )
+
+    # Aux heads: standardize y_aux using training-fold params, weighted MSE
+    # against raw booster aux output (also standardized).
+    p_aux_std = raw[:, 1:]
+    y_aux_std = (y_aux_test - model._aux_mean) / model._aux_std
+    aux_loss = 0.0
+    # model.loss_weights[0] is the primary weight (training-only); aux
+    # weights at indices 1..N apply to the scoring term per target.
+    for i in range(p_aux_std.shape[1]):
+        mse_i = float(np.mean((p_aux_std[:, i] - y_aux_std[:, i]) ** 2))
+        aux_loss += float(model.loss_weights[i + 1]) * mse_i
+
+    return primary_ll + aux_loss
 
 
 def _make_metric_fn(
@@ -146,6 +198,12 @@ class FastForwardSelector:
 
         self.X_wide: np.ndarray | None = None
         self.y: np.ndarray | None = None
+        # Aux target values for MTL feature selection. None under single-task
+        # configs. Shape `[n_rows, num_aux]` when MTL is active. Column order
+        # mirrors `self.aux_target_names` (friendly names like "game_margin"),
+        # not the internal `_aux_*` derived-column names.
+        self.y_aux: np.ndarray | None = None
+        self.aux_target_names: list[str] | None = None
         self.sample_weights: np.ndarray | None = None
         self.col_to_idx: dict[str, int] = {}
         self.folds: list[tuple[np.ndarray, np.ndarray]] = []
@@ -187,11 +245,29 @@ class FastForwardSelector:
             s for s in compute_only if s not in self.all_feature_specs
         ]
 
+        # MTL detection: same flag the runner uses. Drives the completeness
+        # gate (RET/DEF/UNP exclusion), aux target derivation, and the
+        # per-set game columns that the score helpers need.
+        is_mtl = getattr(self.config, "mtl", None) is not None
+        mtl_aux_targets = (
+            list(self.config.mtl.auxiliary_targets) if is_mtl else []
+        )
+
         # Extra columns needed for filtering, target resolution, etc.
         extra_columns = [
             "won", "reason", "sets_played", "best_of",
             "circuit", "surface", "round",
         ]
+        # MTL aux derivation reads per-set game counts via score helpers
+        # (game_margin = sum player_set{i}_games − sum opp_set{i}_games,
+        # set_margin via sets_won/sets_lost). Without these in the projection
+        # list, the with_columns call would fail with ColumnNotFoundError.
+        if is_mtl:
+            for i in range(1, 6):
+                for prefix in ("player", "opp"):
+                    col = f"{prefix}_set{i}_games"
+                    if col not in extra_columns:
+                        extra_columns.append(col)
         if self.config.data.filters:
             for col in self.config.data.filters:
                 if col not in extra_columns:
@@ -218,9 +294,20 @@ class FastForwardSelector:
             & (pl.col("effective_match_date") <= dr.end)
         )
 
-        # Walkovers are voided bets — never valid training data for any target
+        # Walkovers are voided bets — never valid training data for any target.
+        # When MTL is active, additionally exclude RET / DEF / UNP because aux
+        # targets require completed match scores. Same gate as the runner uses.
         if "reason" in df.columns:
-            df = df.filter(pl.col("reason").fill_null("").ne("W/O"))
+            invalid_reasons = {"W/O"}
+            if is_mtl:
+                invalid_reasons |= {"RET", "DEF", "UNP"}
+            df = df.filter(
+                ~pl.col("reason").fill_null("").is_in(invalid_reasons)
+            )
+        # When MTL is active, also require sets_played not null. Necessary
+        # for any aux target derivation.
+        if is_mtl:
+            df = df.filter(pl.col("sets_played").is_not_null())
         # Resolve target column
         target = getattr(self.config, "target", "won")
         if target == "deciding_set":
@@ -243,6 +330,34 @@ class FastForwardSelector:
         else:
             target_col = "won"
         df = df.filter(pl.col(target_col).is_not_null())
+
+        # MTL: derive auxiliary regression target columns and apply secondary
+        # completeness gate. Same expressions the runner's _resolve_target
+        # uses, so FS sees the same aux values that the training path does.
+        aux_col_names: list[str] = []
+        if is_mtl and mtl_aux_targets:
+            aux_exprs = {
+                "game_margin": (
+                    "_aux_game_margin",
+                    _total_games_won() - _total_games_lost(),
+                ),
+                "set_margin": (
+                    "_aux_set_margin",
+                    _sets_won() - _sets_lost(),
+                ),
+                "set_count": (
+                    "_aux_set_count",
+                    pl.col("sets_played").cast(pl.Int64),
+                ),
+            }
+            for aux_name in mtl_aux_targets:
+                col_name, expr = aux_exprs[aux_name]
+                df = df.with_columns(expr.alias(col_name))
+                aux_col_names.append(col_name)
+            # Drop rows where any aux value is null (catches edge cases where
+            # per-set games are partially missing despite sets_played being set).
+            df = df.drop_nulls(subset=aux_col_names)
+            self.aux_target_names = list(mtl_aux_targets)
 
         if row_keys is not None:
             keyed = row_keys.with_row_index("_order")
@@ -314,6 +429,12 @@ class FastForwardSelector:
         )
         self.y = df[target_col].to_numpy().astype(int)
         self.circuit = df["circuit"].to_numpy()
+        # MTL: extract aux y as a 2D `[n_rows, num_aux]` float array. Column
+        # order mirrors `mtl_aux_targets` (and therefore `self.aux_target_names`).
+        if is_mtl and aux_col_names:
+            self.y_aux = (
+                df.select(aux_col_names).to_numpy().astype(np.float64)
+            )
         logger.info("Numpy extraction complete in %.1fs", time.perf_counter() - t0)
 
         if override_y is not None:
@@ -322,6 +443,8 @@ class FastForwardSelector:
             self.X_wide = self.X_wide[row_mask]
             self.y = self.y[row_mask]
             self.circuit = self.circuit[row_mask]
+            if self.y_aux is not None:
+                self.y_aux = self.y_aux[row_mask]
             if sample_weights is not None:
                 sample_weights = sample_weights[row_mask]
             df = df.filter(pl.Series(row_mask))
@@ -381,6 +504,19 @@ class FastForwardSelector:
         model_params = self.config.model.params or {}
         scale = model_type in ("logistic", "neural_net")
         nan_tolerant = model_type in NAN_TOLERANT_MODEL_TYPES
+
+        # MTL state captured for the scorer closure. When MTL is active, the
+        # scorer instantiates XGBoostMTLModel (vector-leaf + custom objective)
+        # instead of routing through get_model. `target_names_mtl` is the
+        # full target list in column order (primary + aux), passed to the
+        # model so its weight_{target_name} extraction lines up with the
+        # config's `model.params.weight_*` keys.
+        is_mtl = self.config.mtl is not None
+        y_aux = self.y_aux if is_mtl else None
+        target_names_mtl = (
+            [self.config.target, *self.config.mtl.auxiliary_targets]
+            if is_mtl else None
+        )
         # For non-NaN-tolerant models, impute=None features must be filled
         # before the model sees them. Production training for these models
         # applies a median imputer at the wrapper level (models._apply_median_imputer),
@@ -481,6 +617,28 @@ class FastForwardSelector:
                     sw = sample_weights[train_idx] if sample_weights is not None else None
                     model.fit(X_train, y_train, sample_weight=sw)
                     y_prob = model.predict_proba(X_test)[:, 1]
+                elif is_mtl:
+                    # MTL: vector-leaf XGBoostMTLModel trained on 2D y
+                    # [primary, *aux]. y_aux is already in friendly column
+                    # order matching `target_names_mtl[1:]`. Per-target loss
+                    # weights come from `model_params` via the model's
+                    # weight_{target_name} extraction. predict_proba returns
+                    # primary head only (BaseModel contract preserved).
+                    assert y_aux is not None and target_names_mtl is not None
+                    y_train_2d = np.column_stack([
+                        y_train.astype(np.float64),
+                        y_aux[train_idx],
+                    ])
+                    model = XGBoostMTLModel(
+                        model_params,
+                        target_names=target_names_mtl,
+                        feature_names=col_names,
+                    )
+                    fit_kwargs = {}
+                    if sample_weights is not None:
+                        fit_kwargs["sample_weight"] = sample_weights[train_idx]
+                    model.fit(X_train, y_train_2d, **fit_kwargs)
+                    y_prob = model.predict_proba(X_test)
                 else:
                     model = get_model(model_type, model_params, feature_names=col_names)
                     fit_kwargs: dict = {}
@@ -489,7 +647,16 @@ class FastForwardSelector:
                     model.fit(X_train, y_train, **fit_kwargs)
                     y_prob = model.predict_proba(X_test)
 
-                fold_metrics.append(metric_fn(y_test, y_prob))
+                # MTL: score on the full multi-task loss per design (primary
+                # log_loss + weighted standardized aux MSE). Single-task uses
+                # the existing single-target metric_fn against y_prob.
+                if is_mtl:
+                    assert y_aux is not None
+                    fold_metrics.append(
+                        _compute_mtl_loss(model, X_test, y_test, y_aux[test_idx])
+                    )
+                else:
+                    fold_metrics.append(metric_fn(y_test, y_prob))
 
             return float(np.mean(fold_metrics))
 
