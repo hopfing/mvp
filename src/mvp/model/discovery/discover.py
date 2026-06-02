@@ -424,6 +424,19 @@ class FeatureDiscovery:
             "roc_auc": 0.50,
         }
         round1_baseline = no_skill_baselines.get(self.config.discovery.metric)
+        # When MTL is active, the scorer returns multi-task loss (primary
+        # log_loss + sum_i weight_i * MSE_std(aux_i)) — different scale than
+        # raw primary log_loss. Bump the baseline by the aux contribution:
+        # standardized targets have unit variance, so the no-model MSE per
+        # aux is ~1.0; multiplied by per-target weights and summed. Without
+        # this, all candidates would report as "below baseline" because the
+        # 0.693 primary baseline is well under the multi-task loss values.
+        if round1_baseline is not None and self.config.mtl is not None:
+            aux_weights_sum = sum(
+                float((self.config.model.params or {}).get(f"weight_{name}", 0.1))
+                for name in self.config.mtl.auxiliary_targets
+            )
+            round1_baseline = round1_baseline + aux_weights_sum
 
         selector = FeatureSelector(
             scorer=scorer,
