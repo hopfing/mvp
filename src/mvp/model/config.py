@@ -100,6 +100,14 @@ class DataConfig(_StrictModel):
     filters: dict[str, Any] | None = None  # Applied pre-split to the whole dataset
     train_filters: dict[str, Any] | None = None  # Applied post-split to train fold only
     eval_filters: dict[str, Any] | None = None  # Applied post-split to test fold only
+    # Exclude all incomplete-match reasons (W/O, RET, DEF, UNP) instead of
+    # only W/O. Default behavior keeps RET/DEF/UNP rows because `won` is
+    # well-defined for retirements. Set true to match the MTL completeness
+    # gate when comparing an MTL run against a single-task baseline — without
+    # this, the baseline trains/evaluates on a different (slightly larger)
+    # row set than the MTL path, confounding the comparison. Implicitly true
+    # whenever `mtl:` is set on the experiment config.
+    exclude_incomplete: bool = False
 
 
 class FeaturesConfig(_StrictModel):
@@ -249,6 +257,31 @@ class CalibrationConfig(_StrictModel):
     lambda_over: float = 1.0
 
 
+class MTLConfig(_StrictModel):
+    """Multi-task learning configuration.
+
+    When set on `ExperimentConfig.mtl`, the runner derives auxiliary regression
+    targets from match outcome data and applies a stricter completeness filter
+    (all incomplete-match reasons excluded, not just walkovers). The model
+    wrapper handles training with the multi-task objective; this config block
+    only controls which auxiliary targets are materialized.
+
+    Per-target loss weights are NOT specified here — they are HP-search
+    dimensions tuned by Optuna during the HP sweep.
+    """
+
+    auxiliary_targets: list[Literal["game_margin", "set_margin", "set_count"]]
+
+    @field_validator("auxiliary_targets")
+    @classmethod
+    def at_least_one_aux(cls, v: list[str]) -> list[str]:
+        if not v:
+            raise ValueError("mtl.auxiliary_targets must list at least one target")
+        if len(set(v)) != len(v):
+            raise ValueError("mtl.auxiliary_targets must not contain duplicates")
+        return v
+
+
 class ExperimentConfig(_StrictModel):
     """Complete experiment configuration."""
 
@@ -261,11 +294,26 @@ class ExperimentConfig(_StrictModel):
     metrics: MetricsConfig = MetricsConfig()
     sample_weight: SampleWeightConfig | None = None
     calibration: CalibrationConfig | None = None
+    mtl: MTLConfig | None = None
 
     @model_validator(mode="after")
     def validate_features_required(self) -> "ExperimentConfig":
         if self.model.type != "ensemble" and self.features is None:
             raise ValueError("features is required for non-ensemble models")
+        return self
+
+    @model_validator(mode="after")
+    def validate_mtl_compatibility(self) -> "ExperimentConfig":
+        """MTL is implemented for XGBoost vector-leaf only.
+
+        Reject combinations the runner can't dispatch (ensemble, sequence,
+        non-XGB) at config load time so the user gets a clear error before
+        any compute.
+        """
+        if self.mtl is not None and self.model.type != "xgboost":
+            raise ValueError(
+                f"MTL requires model.type='xgboost'; got {self.model.type!r}"
+            )
         return self
 
     @classmethod

@@ -388,6 +388,23 @@ def print_run_summary(results: dict[str, Any], name: str | None = None) -> None:
     else:
         print(f"\nTest: {test_acc:.1%} acc | {test_auc:.3f} AUC | {test_ll:.4f} LL | {test_brier:.4f} Brier")
 
+    # MTL: per-aux-head R² on the test fold (fold-mean). H38 sanity-check:
+    # values near zero signal the aux heads did not learn the targets, in
+    # which case MTL effectively collapsed to single-task and the run isn't
+    # testing real MTL. game_margin R² is the gated check (floor 0.10).
+    aux_r2 = results.get("aux_r2_test")
+    if aux_r2:
+        print("\nMTL aux head R² (test fold mean, original scale):")
+        for name in aux_r2:
+            r2 = aux_r2[name]
+            gate = ""
+            if name == "game_margin":
+                if r2 >= 0.10:
+                    gate = "  ✓ above 0.10 floor"
+                else:
+                    gate = "  ✗ BELOW 0.10 floor — aux head not contributing"
+            print(f"  {name:<14} R² = {r2:>7.4f}{gate}")
+
     _print_per_fold_section(fold_metrics, fold_meta)
 
     if not diagnostics:

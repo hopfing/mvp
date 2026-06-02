@@ -11,6 +11,7 @@ from typing import Any
 
 import numpy as np
 import polars as pl
+from sklearn.metrics import r2_score
 
 run_logger = logging.getLogger(__name__)
 
@@ -33,10 +34,16 @@ from mvp.model.config import (
 from mvp.model.diagnostics import Diagnostics, EnsembleDiagnostics
 from mvp.model.discovery.importance import gain_importance
 from mvp.model.engine import check_memory, get_feature_columns, make_fs_engine
+from mvp.model.features._score_helpers import (
+    sets_lost as _sets_lost,
+    sets_won as _sets_won,
+    total_games_lost as _total_games_lost,
+    total_games_won as _total_games_won,
+)
 from mvp.model.imputation import apply_imputation, build_imputation, fit_imputation
 from mvp.model.metrics import compute_metrics
 from mvp.model.mlflow_logger import ExperimentLogger
-from mvp.model.models import EnsembleModel, get_model
+from mvp.model.models import EnsembleModel, XGBoostMTLModel, get_model
 from mvp.model.registry import get_registry
 from mvp.model.splitters import BaseSplitter, make_splitter
 from mvp.model.weighting import compute_sample_weights
@@ -121,29 +128,62 @@ class ExperimentRunner:
             cache_dir=self.cache_dir,
         )
 
-    def _resolve_target(self, df: pl.DataFrame) -> tuple[pl.DataFrame, str]:
-        """Add the target column to df and return (df, target_col_name).
+    def _resolve_target(self, df: pl.DataFrame) -> tuple[pl.DataFrame, list[str]]:
+        """Add the target column(s) to df and return (df, target_cols).
 
-        Walkovers are always excluded — they're voided bets with no on-court signal.
+        Primary target is always at index 0 (today: `won` or `deciding_set`).
+        When `config.mtl` is set, auxiliary regression targets are derived and
+        appended. Backward compat: callers that only need the primary target
+        use `target_cols[0]`.
 
-        For 'won': uses existing column as-is, excludes walkovers.
+        Walkovers are always excluded — they're voided bets with no on-court
+        signal. When MTL is active, additionally excludes RET / DEF / UNP
+        because aux targets are undefined for incomplete matches.
+
+        For 'won': uses existing column as-is.
         For 'deciding_set': derives target from sets_played == best_of,
             excludes incomplete matches where outcome is uncertain.
+        For MTL: derives game_margin / set_margin / set_count auxiliaries
+            (per `config.mtl.auxiliary_targets`) and applies a secondary
+            `drop_nulls` gate to catch edge cases where `reason` is null or
+            unrecognized but set/game columns are still partially missing.
         """
         target = self.config.target
-        # Walkovers are voided bets — never valid training data for any target
+        mtl_cfg = self.config.mtl
+        # The completeness gate is active when MTL is on OR when the user
+        # opts in via data.exclude_incomplete. MTL needs it because aux
+        # targets are undefined for partial scores; non-MTL configs use the
+        # flag to match the MTL path's row set so MTL-vs-baseline comparisons
+        # are apples-to-apples.
+        exclude_incomplete = mtl_cfg is not None or self.config.data.exclude_incomplete
+
+        # Primary completeness filter:
+        #  - Walkovers always excluded (today's behavior).
+        #  - When `exclude_incomplete` is true, also exclude RET / DEF / UNP.
         if "reason" in df.columns:
-            df = df.filter(pl.col("reason").fill_null("").ne("W/O"))
-        if target == "won":
-            return df, "won"
-        if target == "deciding_set":
-            target_col = "_target_deciding_set"
+            invalid_reasons = {"W/O"}
+            if exclude_incomplete:
+                invalid_reasons |= {"RET", "DEF", "UNP"}
+            df = df.filter(~pl.col("reason").fill_null("").is_in(invalid_reasons))
+
+        # When the completeness gate is active, additionally require sets_played
+        # not null. For MTL, this is necessary for any aux target derivation;
+        # the dropna gate below catches remaining edge cases per-aux-column.
+        if exclude_incomplete:
             df = df.filter(pl.col("sets_played").is_not_null())
-            # Retirements where sets_played == best_of are settled:
-            # the deciding set started, so over is graded a winner.
-            # Retirements before that point are voided — outcome uncertain.
-            # DEF/UNP are always excluded (no meaningful play).
-            if "reason" in df.columns:
+
+        # Resolve primary target column
+        if target == "won":
+            primary_col = "won"
+        elif target == "deciding_set":
+            primary_col = "_target_deciding_set"
+            df = df.filter(pl.col("sets_played").is_not_null())
+            # Retirements where sets_played == best_of are settled (deciding set
+            # started, over graded a winner). Retirements before that point are
+            # voided — outcome uncertain. DEF/UNP always excluded.
+            # When the completeness gate already removed RET/DEF/UNP above,
+            # this branch is a no-op.
+            if "reason" in df.columns and not exclude_incomplete:
                 reason = pl.col("reason").fill_null("")
                 df = df.filter(
                     ~reason.is_in(["DEF", "UNP"])
@@ -155,10 +195,42 @@ class ExperimentRunner:
             df = df.with_columns(
                 (pl.col("sets_played") == pl.col("best_of"))
                 .cast(pl.Int64)
-                .alias(target_col)
+                .alias(primary_col)
             )
-            return df, target_col
-        raise ValueError(f"Unknown target: {target}")
+        else:
+            raise ValueError(f"Unknown target: {target}")
+
+        target_cols = [primary_col]
+
+        # MTL: derive auxiliary target columns + secondary completeness gate
+        if mtl_cfg is not None:
+            aux_exprs = {
+                "game_margin": (
+                    "_aux_game_margin",
+                    _total_games_won() - _total_games_lost(),
+                ),
+                "set_margin": (
+                    "_aux_set_margin",
+                    _sets_won() - _sets_lost(),
+                ),
+                "set_count": (
+                    "_aux_set_count",
+                    pl.col("sets_played").cast(pl.Int64),
+                ),
+            }
+            aux_cols: list[str] = []
+            for aux_name in mtl_cfg.auxiliary_targets:
+                col_name, expr = aux_exprs[aux_name]
+                df = df.with_columns(expr.alias(col_name))
+                aux_cols.append(col_name)
+            # Secondary completeness gate: catch any null aux values from
+            # edge cases (e.g., reason null/unrecognized but set columns
+            # still partially missing). Strict: drop the row if any aux
+            # target is null.
+            df = df.drop_nulls(subset=aux_cols)
+            target_cols.extend(aux_cols)
+
+        return df, target_cols
 
     def _get_splitter(self) -> BaseSplitter:
         """Get the appropriate splitter for validation strategy."""
@@ -273,6 +345,7 @@ class ExperimentRunner:
 
         # Resolve ensemble or standard features
         is_ensemble = self.config.model.type == "ensemble"
+        is_mtl = self.config.mtl is not None
 
         # When the model is trained with asymmetric_logloss, mirror its
         # lambda_over into compute_metrics so the tune metric evaluates the
@@ -329,6 +402,16 @@ class ExperimentRunner:
             for col in HISTORY_RAW_COLUMNS:
                 if col not in runner_columns:
                     runner_columns.append(col)
+        # MTL aux target derivation reads per-set game counts via the score
+        # helpers (game_margin = sum player_set{i}_games − sum opp_set{i}_games,
+        # set_margin via sets_won/sets_lost). Without these columns in the
+        # runner projection, _resolve_target raises ColumnNotFoundError.
+        if is_mtl:
+            for i in range(1, 6):
+                for prefix in ("player", "opp"):
+                    col = f"{prefix}_set{i}_games"
+                    if col not in runner_columns:
+                        runner_columns.append(col)
         for _scope_filt in (
             self.config.data.filters,
             self.config.data.train_filters,
@@ -365,8 +448,13 @@ class ExperimentRunner:
             if any(sw is not None for sw in model_sample_weights):
                 needs_per_model = True
 
-        # Resolve target column (adds derived column if needed, filters incomplete matches)
-        df, target_col = self._resolve_target(df)
+        # Resolve target column(s). Primary is always at index 0. When
+        # config.mtl is set, aux targets are appended to target_cols and the
+        # aux columns are materialized on df. Step A leaves downstream y
+        # construction on the primary target only (target_col); Step C will
+        # wire the multi-target y path for the MTL model.
+        df, target_cols = self._resolve_target(df)
+        target_col = target_cols[0]
 
         # Build wide date range df for per-model training (ensemble only)
         df_wide = None
@@ -443,6 +531,9 @@ class ExperimentRunner:
         all_train_metrics: list[dict[str, float]] = []
         all_predictions: list[dict[str, Any]] = []
         all_fold_meta: list[dict[str, Any]] = []
+        # Per-fold aux head R² captured only when MTL is active. Empty list
+        # under non-MTL configs. Friendly aux names (without "_aux_" prefix).
+        all_aux_r2: list[dict[str, float]] = []
         all_fold_importances: list[dict[str, float]] | None = (
             None if is_ensemble else []
         )
@@ -596,6 +687,16 @@ class ExperimentRunner:
                     pl.col(c).cast(pl.Float64) for c in augmented_cols
                 ).to_numpy()
                 y_train = train_df[target_col].to_numpy().astype(int)
+                # MTL path: assemble 2D y for the multi-target fit. Primary
+                # column (target_cols[0]) is the same as 1D y_train; aux
+                # columns are appended in the order target_cols specifies. The
+                # XGBoostMTLModel handles aux standardization internally.
+                # Non-MTL path: y_train_for_fit aliases y_train (1D).
+                y_train_for_fit = (
+                    train_df.select(target_cols).to_numpy()
+                    if is_mtl
+                    else y_train
+                )
                 X_test = test_df.select(
                     pl.col(c).cast(pl.Float64) for c in augmented_cols
                 ).to_numpy()
@@ -741,12 +842,32 @@ class ExperimentRunner:
                         else:
                             per_model_data.append(None)
 
-                # Train model
-                model = get_model(
-                    self.config.model.type,
-                    self.config.model.params or {},
-                    feature_names=feature_cols,
-                )
+                # Train model. MTL dispatches to XGBoostMTLModel directly:
+                # model.type stays "xgboost" in config, but the runner routes
+                # to the multi-task wrapper because MTL is a runner-level
+                # decision (vector-leaf + custom heterogeneous objective).
+                # target_names uses the user-friendly aux names from the MTL
+                # config (e.g. "game_margin"), not the derived column names
+                # (e.g. "_aux_game_margin"), so per-target loss-weight params
+                # (weight_game_margin, ...) match up with the model's
+                # extraction logic.
+                if is_mtl:
+                    assert self.config.mtl is not None
+                    target_names_mtl = (
+                        [self.config.target]
+                        + list(self.config.mtl.auxiliary_targets)
+                    )
+                    model = XGBoostMTLModel(
+                        params=self.config.model.params or {},
+                        target_names=target_names_mtl,
+                        feature_names=feature_cols,
+                    )
+                else:
+                    model = get_model(
+                        self.config.model.type,
+                        self.config.model.params or {},
+                        feature_names=feature_cols,
+                    )
                 if self.config.model.type == "sequence":
                     # Build per-fold history DataFrame: pre-start seed (anti-cold-start)
                     # plus this fold's training rows. Encode player_id with the same
@@ -788,7 +909,7 @@ class ExperimentRunner:
                         per_model_data=per_model_data,
                     )
                 else:
-                    model.fit(X_train, y_train, sample_weight=train_weights)
+                    model.fit(X_train, y_train_for_fit, sample_weight=train_weights)
 
                 # Predict and evaluate on test
                 is_stacking = (
@@ -810,6 +931,26 @@ class ExperimentRunner:
                 # Predict and evaluate on train (for overfitting detection)
                 train_metrics = compute_metrics(y_train, y_prob_train, lambda_over=lambda_over_eval)
                 all_train_metrics.append(train_metrics)
+
+                # MTL: per-fold aux head R² on the test fold. H38 design uses
+                # aux R² as the sanity-check gate — if the aux heads collapsed
+                # to no signal, MTL was effectively single-task. R² computed on
+                # ORIGINAL (un-standardized) scale because predict_aux returns
+                # inverse-transformed predictions.
+                if is_mtl and hasattr(model, "predict_aux"):
+                    aux_pred_test = model.predict_aux(X_test)
+                    aux_col_names = target_cols[1:]  # exclude primary
+                    y_test_aux = test_df.select(aux_col_names).to_numpy()
+                    fold_aux_r2: dict[str, float] = {}
+                    for i, aux_col in enumerate(aux_col_names):
+                        friendly = aux_col.removeprefix("_aux_")
+                        try:
+                            fold_aux_r2[friendly] = float(
+                                r2_score(y_test_aux[:, i], aux_pred_test[:, i])
+                            )
+                        except (ValueError, RuntimeWarning):
+                            fold_aux_r2[friendly] = float("nan")
+                    all_aux_r2.append(fold_aux_r2)
 
                 # Capture per-fold gain importance (tree, non-ensemble only)
                 if all_fold_importances is not None:
@@ -1448,6 +1589,15 @@ class ExperimentRunner:
 
         run_logger.info("Run complete in %.1fs", time.perf_counter() - t_run)
 
+        # MTL: aggregate per-fold aux head R² to fold-mean (only when MTL was
+        # active). Empty dict if no aux R² captured.
+        aux_r2_summary: dict[str, float] = {}
+        if all_aux_r2:
+            aux_names = list(all_aux_r2[0].keys())
+            for name in aux_names:
+                vals = [f.get(name, float("nan")) for f in all_aux_r2]
+                aux_r2_summary[name] = float(np.nanmean(vals))
+
         return {
             "metrics": avg_metrics,
             "train_metrics": avg_train_metrics,
@@ -1473,4 +1623,6 @@ class ExperimentRunner:
             "inner_fold_count_per_outer": (
                 inner_fold_count_per_outer if self.inner_cv_folds > 0 else None
             ),
+            "aux_r2_test": aux_r2_summary or None,
+            "aux_r2_per_fold": all_aux_r2 or None,
         }

@@ -125,6 +125,81 @@ def _asymmetric_logloss_factory(lambda_over: float):
     return functools.partial(_asymmetric_logloss, lambda_over=lambda_over)
 
 
+def _mtl_heterogeneous_objective(
+    predt: np.ndarray,
+    dtrain: Any,  # xgb.DMatrix
+    weights: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """XGB custom objective: heterogeneous multi-task loss.
+
+    Column 0 of `predt` is the primary binary-classification head: standard
+    logistic gradient/Hessian on raw margin.
+    Columns 1+ are regression heads on STANDARDIZED auxiliary targets
+    (standardization is applied by the model wrapper before DMatrix
+    construction): standard squared-error gradient/Hessian.
+
+    Per-target gradient and Hessian are scaled by `weights[i]`. The per-row
+    Hessian is diagonal across targets (each (row, target) entry depends only
+    on that target's prediction) — required by XGBoost's multi-output
+    custom-objective contract.
+
+    `dtrain.get_label()` returns the label buffer as 1D; reshape to predt's
+    shape `[n_rows, num_target]` (row-major matches XGBoost's internal layout).
+
+    Module-level so functools.partial wraps it picklably for `xgb.train(obj=)`.
+    """
+    y = dtrain.get_label().reshape(predt.shape)
+
+    grad = np.empty_like(predt)
+    hess = np.empty_like(predt)
+
+    # Primary (col 0): logistic on raw margin.
+    p = _sigmoid(predt[:, 0])
+    grad[:, 0] = (p - y[:, 0]) * weights[0]
+    hess[:, 0] = p * (1.0 - p) * weights[0]
+
+    # Aux (cols 1+): squared error on standardized targets. Constant Hessian.
+    for i in range(1, predt.shape[1]):
+        grad[:, i] = (predt[:, i] - y[:, i]) * weights[i]
+        hess[:, i] = weights[i]
+
+    return grad, hess
+
+
+def _mtl_heterogeneous_objective_factory(weights: np.ndarray):
+    """Return a picklable callable bound to per-target loss weights."""
+    import functools
+    return functools.partial(_mtl_heterogeneous_objective, weights=weights)
+
+
+def _mtl_primary_logloss_eval(
+    predt: np.ndarray,
+    dtrain: Any,  # xgb.DMatrix
+) -> tuple[str, float]:
+    """XGB custom eval metric: log-loss on the primary head only.
+
+    `predt` shape is `[n_rows, num_target]`; extract column 0 (primary raw
+    margin), sigmoid-transform, compute binary log-loss against the primary
+    label column. This is the multi-output analog of XGBoost's built-in
+    `binary:logistic` eval metric — same numerical signal, just operating on
+    a 2D prediction matrix.
+
+    Used by the MTL training path so early stopping is symmetric with the
+    single-task baseline's `binary:logistic` eval metric.
+
+    Module-level for picklability (factories not required since this takes no
+    bound parameters).
+    """
+    y = dtrain.get_label().reshape(predt.shape)
+    p = _sigmoid(predt[:, 0])
+    eps = 1e-15
+    p_clip = np.clip(p, eps, 1.0 - eps)
+    ll = -float(np.mean(
+        y[:, 0] * np.log(p_clip) + (1.0 - y[:, 0]) * np.log(1.0 - p_clip)
+    ))
+    return ("primary_logloss", ll)
+
+
 class XGBoostModel(BaseModel):
     """XGBoost classifier wrapper."""
 
@@ -192,6 +267,196 @@ class XGBoostModel(BaseModel):
             raw = self._model.predict(X, output_margin=True)
             return _sigmoid(raw)
         return self._model.predict_proba(X)[:, 1]
+
+
+class XGBoostMTLModel(BaseModel):
+    """XGBoost multi-task model: vector-leaf trees + custom heterogeneous objective.
+
+    Trains a single booster that produces predictions for all targets jointly.
+    Column 0 of the output is the primary binary classification head (raw
+    margin / logit, sigmoid-transformed in `predict_proba`). Columns 1+ are
+    regression heads for auxiliary targets — internally trained against
+    STANDARDIZED labels so the per-target loss weights express importance
+    rather than scale.
+
+    `predict_proba(X)` returns the primary head as a 1D probability array,
+    matching `BaseModel`'s contract — downstream code that called single-task
+    `predict_proba` works without change. `predict_aux(X)` returns aux head
+    predictions on the ORIGINAL (un-standardized) scale, for R² reporting and
+    aux-head sanity checks.
+
+    Per-target loss weights are read from `params` under keys
+    `weight_{target_name}` (e.g. `weight_won`, `weight_game_margin`). When a
+    weight key is absent, defaults are 1.0 for the primary (target_names[0])
+    and 0.1 for aux targets. The Optuna HP sweep populates these keys when
+    tuning loss weights as additional HP dimensions.
+
+    Standardization parameters (per-aux mean and std) are computed on the
+    training fold only and cached on the model; they're serialized with the
+    pickled artifact so reload + inverse transform later use the original
+    training-fold parameters rather than recomputing on new data.
+    """
+
+    def __init__(
+        self,
+        params: dict[str, Any],
+        target_names: list[str],
+        feature_names: list[str] | None = None,
+    ) -> None:
+        if not target_names:
+            raise ValueError("target_names must include at least the primary target")
+        self.target_names = list(target_names)
+        self.num_target = len(target_names)
+
+        resolved = _resolve_monotone_constraints(params, feature_names)
+        resolved = dict(resolved)  # don't mutate caller
+
+        # Extract per-target loss weights. Pop them out of `resolved` so they
+        # don't leak through to XGBoost as unknown parameters.
+        weights = []
+        for i, name in enumerate(self.target_names):
+            key = f"weight_{name}"
+            default = 1.0 if i == 0 else 0.1
+            weights.append(float(resolved.pop(key, default)))
+        self.loss_weights = np.asarray(weights, dtype=np.float64)
+
+        # Defensive: drop any remaining weight_* keys (MTL-specific config for
+        # targets not present in target_names — e.g., stale config from a
+        # previous MTLConfig.auxiliary_targets value). XGBoost would otherwise
+        # emit a "parameters not used" warning for each.
+        for stale_key in [k for k in resolved if k.startswith("weight_")]:
+            resolved.pop(stale_key)
+
+        # n_estimators is consumed by xgb.train as num_boost_round, not a
+        # `params` entry. Pop it out the same way XGBoostModel does.
+        self._n_estimators = int(resolved.pop("n_estimators", 100))
+
+        self.params = {
+            "tree_method": "hist",
+            "multi_strategy": "multi_output_tree",
+            "num_target": self.num_target,
+            "n_jobs": _default_n_jobs(),
+            "random_state": 42,
+            "disable_default_eval_metric": 1,
+            **resolved,
+        }
+
+        # Standardization parameters (filled at fit time).
+        self._aux_mean: np.ndarray | None = None  # shape [num_aux]
+        self._aux_std: np.ndarray | None = None
+        self._booster = None
+
+    def _standardize_aux(self, y: np.ndarray) -> np.ndarray:
+        """Standardize the aux columns of y; primary column kept as-is.
+
+        Requires `self._aux_mean` and `self._aux_std` to be set (i.e., fit()
+        has been called or this is being applied to eval data after fit).
+        Returns a copy; does not mutate the input.
+        """
+        out = y.astype(np.float64).copy()
+        if self.num_target > 1:
+            assert self._aux_mean is not None and self._aux_std is not None
+            out[:, 1:] = (out[:, 1:] - self._aux_mean) / self._aux_std
+        return out
+
+    def fit(
+        self,
+        X: np.ndarray,
+        y: np.ndarray,
+        sample_weight: np.ndarray | None = None,
+        eval_set: list[tuple[np.ndarray, np.ndarray]] | None = None,
+        early_stopping_rounds: int | None = 10,
+    ) -> None:
+        import xgboost as xgb
+
+        if y.ndim != 2:
+            raise ValueError(
+                f"XGBoostMTLModel.fit expects 2D y of shape [n_rows, num_target]; "
+                f"got shape {y.shape}"
+            )
+        if y.shape[1] != self.num_target:
+            raise ValueError(
+                f"y has {y.shape[1]} target columns; "
+                f"target_names has {self.num_target}"
+            )
+
+        # Fit standardization on the training fold's aux columns. Primary
+        # stays as 0/1; only aux gets standardized.
+        if self.num_target > 1:
+            aux = y[:, 1:].astype(np.float64)
+            self._aux_mean = aux.mean(axis=0)
+            std = aux.std(axis=0)
+            # Guard against zero std (degenerate aux column — e.g., all same
+            # value). Substitute 1.0 so the standardization is a no-op for that
+            # column, which is the right behavior: nothing to learn from a
+            # constant.
+            self._aux_std = np.where(std == 0.0, 1.0, std)
+        else:
+            self._aux_mean = np.zeros(0, dtype=np.float64)
+            self._aux_std = np.ones(0, dtype=np.float64)
+
+        y_train = self._standardize_aux(y)
+        dtrain = xgb.DMatrix(X, label=y_train)
+        # Explicit set_weight: silent failure mode if omitted under multi-output.
+        if sample_weight is not None:
+            dtrain.set_weight(np.asarray(sample_weight, dtype=np.float64))
+
+        evals: list[tuple[Any, str]] = []
+        if eval_set is not None:
+            for X_eval, y_eval in eval_set:
+                if y_eval.ndim != 2 or y_eval.shape[1] != self.num_target:
+                    raise ValueError(
+                        "eval_set y must be 2D with num_target columns"
+                    )
+                d_eval = xgb.DMatrix(X_eval, label=self._standardize_aux(y_eval))
+                evals.append((d_eval, "validation"))
+
+        train_kwargs: dict[str, Any] = {
+            "params": self.params,
+            "dtrain": dtrain,
+            "num_boost_round": self._n_estimators,
+            "obj": _mtl_heterogeneous_objective_factory(self.loss_weights),
+            "custom_metric": _mtl_primary_logloss_eval,
+        }
+        if evals:
+            train_kwargs["evals"] = evals
+            train_kwargs["verbose_eval"] = False
+            if early_stopping_rounds is not None:
+                train_kwargs["early_stopping_rounds"] = early_stopping_rounds
+
+        self._booster = xgb.train(**train_kwargs)
+
+    def predict_proba(self, X: np.ndarray) -> np.ndarray:
+        """Return primary head P(win) as a 1D array (BaseModel contract)."""
+        if self._booster is None:
+            raise RuntimeError("Model not fitted")
+        import xgboost as xgb
+        raw = self._booster.predict(xgb.DMatrix(X))
+        # Vector-leaf output is [n_rows, num_target]; degenerate to 1D if
+        # num_target == 1 (treated defensively; the MTL path shouldn't be
+        # constructed with num_target == 1).
+        if raw.ndim == 1:
+            return _sigmoid(raw)
+        return _sigmoid(raw[:, 0])
+
+    def predict_aux(self, X: np.ndarray) -> np.ndarray:
+        """Return aux head predictions on the ORIGINAL (un-standardized) scale.
+
+        Shape: `[n_rows, num_aux]` where `num_aux = num_target - 1`. Empty
+        array when there are no aux targets.
+
+        For R² reporting on auxiliary heads (sanity-check that aux heads
+        actually learned something) and any diagnostic use of aux predictions.
+        Not used at deployment.
+        """
+        if self._booster is None:
+            raise RuntimeError("Model not fitted")
+        if self.num_target == 1:
+            return np.empty((X.shape[0], 0))
+        import xgboost as xgb
+        raw = self._booster.predict(xgb.DMatrix(X))
+        assert self._aux_mean is not None and self._aux_std is not None
+        return raw[:, 1:] * self._aux_std + self._aux_mean
 
 
 class LogisticModel(BaseModel):
