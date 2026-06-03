@@ -83,11 +83,10 @@ DEFAULT_SEARCH_SPACES: dict[str, dict[str, dict[str, Any]]] = {
         "batch_size": {"type": "categorical", "choices": [256, 512, 1024, 2048]},
         "epochs": {"type": "int", "low": 15, "high": 50},
         "patience": {"type": "int", "low": 3, "high": 10},
-        "batch_norm": {"type": "categorical", "choices": [True, False]},
+        "normalization": {"type": "categorical", "choices": ["none", "batch", "layer"]},
         "label_smoothing": {"type": "float", "low": 0.0, "high": 0.1},
         "weight_decay": {"type": "float", "low": 0.0, "high": 0.01},
         "grad_clip_norm": {"type": "categorical", "choices": [None, 1.0, 5.0]},
-        "layer_norm": {"type": "categorical", "choices": [True, False]},
         "lr_scheduler": {"type": "categorical", "choices": [None, "plateau"]},
     },
 }
@@ -135,6 +134,12 @@ def _decode_params(params: dict[str, Any]) -> dict[str, Any]:
     decoded = dict(params)
     if "hidden_layers" in decoded and isinstance(decoded["hidden_layers"], str):
         decoded["hidden_layers"] = HIDDEN_LAYERS_MAP[decoded["hidden_layers"]]
+    # Expand the mutually-exclusive normalization choice into the two booleans
+    # the model expects (batch_norm and layer_norm cannot both be True).
+    if "normalization" in decoded:
+        norm = decoded.pop("normalization")
+        decoded["batch_norm"] = norm == "batch"
+        decoded["layer_norm"] = norm == "layer"
     return decoded
 
 
@@ -245,7 +250,16 @@ class HyperparamTuner:
         base_params = self._get_base_params()
         baseline = {}
         for k in self.search_space:
-            if k in base_params:
+            if k == "normalization":
+                # Encode the config's two booleans into the single search-space
+                # choice (inverse of the decode in _decode_params).
+                if base_params.get("batch_norm"):
+                    baseline[k] = "batch"
+                elif base_params.get("layer_norm"):
+                    baseline[k] = "layer"
+                else:
+                    baseline[k] = "none"
+            elif k in base_params:
                 baseline[k] = base_params[k]
         # Only enqueue if we have values for all search space params
         if len(baseline) == len(self.search_space):

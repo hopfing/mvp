@@ -117,6 +117,23 @@ class TestDecodeParams:
         for choice in nn_choices:
             assert choice in HIDDEN_LAYERS_MAP, f"Missing map entry for '{choice}'"
 
+    @pytest.mark.parametrize(
+        "norm,batch,layer",
+        [("none", False, False), ("batch", True, False), ("layer", False, True)],
+    )
+    def test_normalization_expands_to_booleans(self, norm, batch, layer):
+        """normalization choice expands to the two mutually-exclusive booleans."""
+        result = _decode_params({"normalization": norm})
+        assert result["batch_norm"] is batch
+        assert result["layer_norm"] is layer
+        assert "normalization" not in result
+
+    def test_normalization_choices_never_enable_both(self):
+        """No normalization choice can produce batch_norm and layer_norm both True."""
+        for choice in DEFAULT_SEARCH_SPACES["neural_net"]["normalization"]["choices"]:
+            result = _decode_params({"normalization": choice})
+            assert not (result["batch_norm"] and result["layer_norm"])
+
 
 class TestDefaultSearchSpaces:
     """Tests for DEFAULT_SEARCH_SPACES structure."""
