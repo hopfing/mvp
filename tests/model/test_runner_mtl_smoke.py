@@ -261,12 +261,13 @@ mtl:
         assert "weight_set_margin" in tuner.search_space
         assert "weight_set_count" in tuner.search_space
 
-        # Configured as loguniform 0.01-1.0
+        # Configured as loguniform 0.01-5.0 (widened post-H38 when set_margin
+        # tuned to 0.96 at the prior 1.0 ceiling)
         for aux in ("game_margin", "set_margin", "set_count"):
             spec = tuner.search_space[f"weight_{aux}"]
             assert spec["type"] == "float"
             assert spec["low"] == 0.01
-            assert spec["high"] == 1.0
+            assert spec["high"] == 5.0
             assert spec.get("log") is True
 
         # Primary weight is NOT in the search space — relative weights only
@@ -317,11 +318,11 @@ mtl:
         # At least one model was instantiated (per fold of the trial).
         assert len(recorded_weights) >= 1
         # Each instantiation had loss_weights with 4 entries (primary + 3 aux),
-        # primary fixed at 1.0, aux values within the search range 0.01-1.0.
+        # primary fixed at 1.0, aux values within the search range 0.01-5.0.
         for w in recorded_weights:
             assert w.shape == (4,)
             assert w[0] == 1.0, "primary weight should default to 1.0"
             for aux_w in w[1:]:
-                assert 0.01 <= aux_w <= 1.0, (
-                    f"aux weight {aux_w} outside search range [0.01, 1.0]"
+                assert 0.01 <= aux_w <= 5.0, (
+                    f"aux weight {aux_w} outside search range [0.01, 5.0]"
                 )
