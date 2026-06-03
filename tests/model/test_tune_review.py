@@ -3,7 +3,11 @@
 import optuna
 import pytest
 
-from mvp.model.tune_review import format_leaderboard, format_param_importance
+from mvp.model.tune_review import (
+    format_best_trial,
+    format_leaderboard,
+    format_param_importance,
+)
 
 
 @pytest.fixture
@@ -184,3 +188,72 @@ class TestFormatParamImportance:
         study = optuna.create_study(study_name="empty", storage=storage, direction="minimize")
         lines = format_param_importance(study)
         assert len(lines) > 0
+
+
+@pytest.fixture
+def nn_study(tmp_path):
+    """Study with a single NN trial carrying encoded search-space params."""
+    storage = f"sqlite:///{tmp_path / 'nn.db'}"
+    study = optuna.create_study(
+        study_name="nn_review", storage=storage, direction="minimize"
+    )
+    trial = optuna.trial.create_trial(
+        params={
+            "hidden_layers": "256-128",
+            "normalization": "layer",
+            "grad_clip_norm": None,
+            "lr_scheduler": None,
+            "dropout": 0.19,
+        },
+        distributions={
+            "hidden_layers": optuna.distributions.CategoricalDistribution(
+                ["256-128", "64-32"]
+            ),
+            "normalization": optuna.distributions.CategoricalDistribution(
+                ["none", "batch", "layer"]
+            ),
+            "grad_clip_norm": optuna.distributions.CategoricalDistribution(
+                [None, 1.0, 5.0]
+            ),
+            "lr_scheduler": optuna.distributions.CategoricalDistribution(
+                [None, "plateau"]
+            ),
+            "dropout": optuna.distributions.FloatDistribution(0.1, 0.5),
+        },
+        values=[0.62],
+        user_attrs={
+            "_tuning_mode": "raw",
+            "log_loss": 0.62,
+            "holdout_log_loss": 0.62,
+            "duration_s": 5.0,
+        },
+    )
+    study.add_trial(trial)
+    return study
+
+
+class TestFormatBestTrial:
+    """Best-trial output must be decoded and YAML-paste-safe."""
+
+    def test_decodes_and_renders_yaml_safe_params(self, nn_study):
+        lines = format_best_trial(nn_study)
+        text = "\n".join(lines)
+        # hidden_layers as a list, not the "256-128" string
+        assert "hidden_layers: [256, 128]" in text
+        # normalization expanded to the two booleans the model reads
+        assert "batch_norm: false" in text
+        assert "layer_norm: true" in text
+        assert "normalization:" not in text
+        # None rendered as YAML null, not the string "None"
+        assert "grad_clip_norm: null" in text
+        assert "lr_scheduler: null" in text
+
+    def test_leaderboard_params_are_decoded(self, nn_study):
+        """The per-trial param block in the leaderboard is paste-safe too."""
+        text = "\n".join(format_leaderboard(nn_study))
+        assert "hidden_layers: [256, 128]" in text
+        assert "batch_norm: false" in text
+        assert "layer_norm: true" in text
+        assert "normalization:" not in text
+        assert "grad_clip_norm: null" in text
+        assert "lr_scheduler: null" in text

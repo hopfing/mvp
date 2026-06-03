@@ -4,9 +4,23 @@ import logging
 
 import optuna
 
-from mvp.model.tuning import _MAXIMIZE_METRICS
+from mvp.model.tuning import _MAXIMIZE_METRICS, _decode_params
 
 logger = logging.getLogger(__name__)
+
+
+def _yaml_value(v: object) -> str:
+    """Render a param value as a YAML-safe scalar for copy-paste into a config.
+
+    None -> null, bools -> lowercase, lists -> flow sequence; everything else
+    via str(). Avoids the bare ``None`` (parsed as the string "None") and
+    string-encoded ``hidden_layers`` that otherwise reach the model untouched.
+    """
+    if v is None:
+        return "null"
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    return str(v)
 
 
 def _is_raw_mode_study(trials: list[optuna.trial.FrozenTrial]) -> bool:
@@ -192,10 +206,10 @@ def format_leaderboard(
             )
             lines.append(f"      sort: {extra_str}")
 
-        merged = {**trial.params, **pinned}
+        merged = _decode_params({**trial.params, **pinned})
         for k, v in sorted(merged.items()):
             suffix = "  # pinned" if k in pinned else ""
-            lines.append(f"      {k}: {v}{suffix}")
+            lines.append(f"      {k}: {_yaml_value(v)}{suffix}")
 
     return lines
 
@@ -259,9 +273,9 @@ def format_best_trial(study: optuna.Study) -> list[str]:
                 if k != "duration_s"
             )
             lines.append(f"  {i + 1}. {metrics_str}")
-            merged = {**trial.params, **pinned}
+            merged = _decode_params({**trial.params, **pinned})
             params_str = ", ".join(
-                f"{k}={v}{'(pinned)' if k in pinned else ''}"
+                f"{k}={_yaml_value(v)}{'(pinned)' if k in pinned else ''}"
                 for k, v in sorted(merged.items())
             )
             lines.append(f"     {params_str}")
@@ -278,10 +292,10 @@ def format_best_trial(study: optuna.Study) -> list[str]:
             lines.append(f"    {k}: {v:.4f}")
 
     lines.append("  Params:")
-    merged = {**best.params, **pinned}
+    merged = _decode_params({**best.params, **pinned})
     for k, v in sorted(merged.items()):
         suffix = "  # pinned" if k in pinned else ""
-        lines.append(f"    {k}: {v}{suffix}")
+        lines.append(f"    {k}: {_yaml_value(v)}{suffix}")
 
     return lines
 
