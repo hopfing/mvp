@@ -472,10 +472,12 @@ class ExperimentRunner:
         # - target resolution: won, reason, sets_played, best_of
         # - date filtering: effective_match_date (already structural)
         # - diagnostics: circuit, surface, round
+        # - per-fold prediction persistence: match_uid, player_id, opp_id
         # - raw filter columns (draw_type, etc.) that aren't computed features
         runner_columns = [
             "won", "reason", "sets_played", "best_of",
             "circuit", "surface", "round",
+            "match_uid", "player_id", "opp_id",
         ]
         # Sequence model needs raw history columns from matches.parquet
         # so they're available for the per-player history dict.
@@ -1178,6 +1180,31 @@ class ExperimentRunner:
                 if regrouped_importances is not None:
                     all_fold_importances = regrouped_importances
 
+            # Build per-fold predictions parquet content. Used by the
+            # feature-error analysis pipeline (mvp-docs/experiments/
+            # 2026-06-03-feature-error-analysis-plan.md) to join predictions
+            # back to features. Captured here after any inner-CV regrouping so
+            # fold_idx corresponds to outer folds the user sees.
+            _fold_pred_cols = [
+                "match_uid", "player_id", "opp_id",
+                "effective_match_date", "circuit", "surface", "round",
+            ]
+            fold_pred_frames: list[pl.DataFrame] = []
+            for fold_idx, pred in enumerate(all_predictions):
+                fold_df = pred["df"]
+                available = [c for c in _fold_pred_cols if c in fold_df.columns]
+                fold_pred_frames.append(
+                    fold_df.select(available).with_columns(
+                        pl.lit(fold_idx + 1).cast(pl.Int32).alias("fold_idx"),
+                        pl.Series("y_test", pred["y_true"]).cast(pl.Int64),
+                        pl.Series("y_prob", pred["y_prob"]).cast(pl.Float64),
+                    )
+                )
+            fold_predictions_df = (
+                pl.concat(fold_pred_frames, how="diagonal_relaxed")
+                if fold_pred_frames else None
+            )
+
             # Per-sub OOF transpose. Reshape all_per_model_predictions
             # (list[fold][sub] → ndarray) into per_sub_predictions
             # (list[sub][fold] → dict shaped for fit_calibrator_with_nested_cv).
@@ -1684,6 +1711,10 @@ class ExperimentRunner:
                         self.config, fp, config_path=self.config_path
                     )
                     append_source(fp, self.config_path.stem, run_id)
+                    if fold_predictions_df is not None:
+                        fold_predictions_df.write_parquet(
+                            fp_dir / "fold_predictions.parquet"
+                        )
                 except Exception:
                     run_logger.exception(
                         "Failed to write fingerprint artifacts; mlflow "

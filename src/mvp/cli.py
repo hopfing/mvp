@@ -1032,6 +1032,34 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         help="Override memory limit %% (0 to disable, default 75)",
     )
 
+    # model-errors subcommand — feature-error analysis on a model evaluation dir
+    me_parser = subparsers.add_parser(
+        "model-errors",
+        help="Run feature-error analysis (calibration, SHAP-on-errors, etc.) "
+             "on a model_evaluations/<fingerprint>/ dir",
+    )
+    me_parser.add_argument(
+        "model", type=str,
+        help="Model name (e.g. 'xgb_log_05_a105'), 12-char fingerprint, "
+             "YAML config path, or full path to a model_evaluations/<fp>/ dir",
+    )
+    me_parser.add_argument(
+        "--skip-shap", action="store_true",
+        help="Skip SHAP-on-errors meta-model (faster for first runs)",
+    )
+    me_parser.add_argument(
+        "--matches-path", type=str, default=None,
+        help="Override matches.parquet path",
+    )
+    me_parser.add_argument(
+        "--cache-dir", type=str, default=None,
+        help="FeatureEngine cache dir override",
+    )
+    me_parser.add_argument(
+        "--memory-limit", type=int, default=None,
+        help="Override memory limit %% (0 to disable, default 75)",
+    )
+
     # analysis subcommand
     analysis_parser = subparsers.add_parser(
         "analysis", help="Build analysis dataset with odds, CLV, and simulations"
@@ -2575,6 +2603,127 @@ def cmd_model_rank(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_model_errors(args: argparse.Namespace) -> int:
+    """Run feature-error analysis on a model evaluation (by name or fingerprint)."""
+    from mvp.model.error_analysis.runner import run_error_analysis
+
+    resolved = _resolve_model_evaluation_target(args.model)
+    if resolved is None:
+        return 1
+    fp_dir, source_yaml = resolved
+
+    out_dir = run_error_analysis(
+        fingerprint_dir=fp_dir,
+        config_path=source_yaml,
+        matches_path=args.matches_path,
+        skip_shap=args.skip_shap,
+        cache_dir=args.cache_dir,
+    )
+    print(f"\nOutputs written to: {out_dir}")
+    return 0
+
+
+def _resolve_model_evaluation_target(name_or_fp: str) -> "tuple[Path, Path | None] | None":
+    """Return (fingerprint_dir, source_yaml_path or None).
+
+    source_yaml_path is the YAML config the analysis can re-train from when
+    inputs are missing. Only populated when the input is a YAML path.
+    """
+    fp_dir = _resolve_model_evaluation_dir(name_or_fp)
+    if fp_dir is None:
+        return None
+    source_yaml: Path | None = None
+    if name_or_fp.endswith(".yaml") or name_or_fp.endswith(".yml"):
+        source_yaml = Path(name_or_fp)
+    return fp_dir, source_yaml
+
+
+def _resolve_model_evaluation_dir(name_or_fp: str) -> "Path | None":
+    """Resolve to a model_evaluations/<fp>/ directory from one of:
+      - YAML config path (computes fingerprint from content, looks up dir)
+      - Direct path to a model_evaluations/<fp>/ dir
+      - 12-char fingerprint hex
+      - Model name (scans source.txt across all fingerprint dirs)
+    """
+    from mvp.common.base_job import get_data_root
+    from mvp.common.config_hash import compute_fingerprint, fingerprint_dir
+    from mvp.model.config import ExperimentConfig
+
+    fp_root = get_data_root() / "model_evaluations"
+
+    # 1. YAML config path → compute fingerprint, look up (or return expected
+    # path even if dir doesn't exist yet — auto-generation will create it)
+    if name_or_fp.endswith(".yaml") or name_or_fp.endswith(".yml"):
+        config_path = Path(name_or_fp)
+        if not config_path.exists():
+            print(f"Config file not found: {config_path}")
+            return None
+        try:
+            config = ExperimentConfig.from_file(str(config_path))
+            fp = compute_fingerprint(config, config_path=config_path)
+        except Exception as e:
+            print(f"Failed to compute fingerprint from config: {e}")
+            return None
+        fp_dir = fingerprint_dir(fp)
+        if fp_dir.exists():
+            print(f"Resolved {config_path.name} -> fingerprint {fp}")
+        else:
+            print(
+                f"Resolved {config_path.name} -> fingerprint {fp} (dir doesn't "
+                f"exist yet; will be created by training)"
+            )
+            fp_dir.mkdir(parents=True, exist_ok=True)
+        return fp_dir
+
+    # 2. Path-shaped input (slash) — direct path to fp dir
+    if "/" in name_or_fp or "\\" in name_or_fp:
+        fp_dir = Path(name_or_fp)
+        if not fp_dir.exists() or not fp_dir.is_dir():
+            print(f"Path not a directory: {fp_dir}")
+            return None
+        return fp_dir
+
+    # 3. Direct fingerprint hash match
+    direct = fp_root / name_or_fp
+    if direct.exists() and direct.is_dir():
+        return direct
+
+    # 4. Model name — scan source.txt files
+    matches: list[tuple[float, Path, set[str]]] = []
+    for fp_dir_p in fp_root.iterdir() if fp_root.exists() else []:
+        if not fp_dir_p.is_dir():
+            continue
+        source_path = fp_dir_p / "source.txt"
+        if not source_path.exists():
+            continue
+        names: set[str] = set()
+        try:
+            for line in source_path.read_text(encoding="utf-8").splitlines():
+                parts = line.split("\t")
+                if parts and parts[0]:
+                    names.add(parts[0])
+        except OSError:
+            continue
+        if name_or_fp in names:
+            matches.append((source_path.stat().st_mtime, fp_dir_p, names))
+
+    if not matches:
+        print(
+            f"No model_evaluations dir matches '{name_or_fp}'. "
+            f"Pass a YAML config path, model name, 12-char fingerprint, "
+            f"or full path to a model_evaluations/<fp>/ dir."
+        )
+        return None
+
+    matches.sort(key=lambda x: x[0], reverse=True)
+    if len(matches) > 1:
+        print(f"Multiple fingerprint dirs match '{name_or_fp}' ({len(matches)} total). "
+              f"Using most recent: {matches[0][1].name}")
+        for ts, fp_dir_p, _ in matches[:5]:
+            print(f"  - {fp_dir_p.name} (mtime {ts:.0f})")
+    return matches[0][1]
+
+
 def cmd_backtest(args: argparse.Namespace) -> int:
     """Backtest a lead model: simulate predictions + bets on a window with odds data."""
     from datetime import date as _date
@@ -3060,6 +3209,8 @@ def main(args: list[str] | None = None) -> int:
         return cmd_iid_backtest(parsed)
     elif parsed.command == "backtest":
         return cmd_backtest(parsed)
+    elif parsed.command == "model-errors":
+        return cmd_model_errors(parsed)
     elif parsed.command == "analysis":
         return cmd_analysis(parsed)
     elif parsed.command == "model-report":
