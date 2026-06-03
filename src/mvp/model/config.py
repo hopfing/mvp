@@ -270,7 +270,24 @@ class MTLConfig(_StrictModel):
     dimensions tuned by Optuna during the HP sweep.
     """
 
-    auxiliary_targets: list[Literal["game_margin", "set_margin", "set_count"]]
+    auxiliary_targets: list[
+        Literal[
+            "game_margin",
+            "set_margin",
+            "set_count",
+            "total_pts_won_diff",
+            "service_pts_won_pct_diff",
+            "return_pts_won_pct_diff",
+            "first_serve_won_pct_diff",
+            "bp_save_pct_diff",
+            "svc_serve_rating_diff",
+            "ret_return_rating_diff",
+            "set1_games_diff",
+            "set2_games_diff",
+            "duration_seconds",
+            "wl_continuous_proxy",
+        ]
+    ]
 
     @field_validator("auxiliary_targets")
     @classmethod

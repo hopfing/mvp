@@ -216,6 +216,88 @@ class ProductionPredictor:
                     "_aux_set_count",
                     pl.col("sets_played").cast(pl.Int64),
                 ),
+                "total_pts_won_diff": (
+                    "_aux_total_pts_won_diff",
+                    (pl.col("pts_total_pts_won") - pl.col("opp_pts_total_pts_won")).cast(pl.Float64),
+                ),
+                "service_pts_won_pct_diff": (
+                    "_aux_service_pts_won_pct_diff",
+                    (
+                        pl.when(pl.col("pts_service_pts_played") > 0)
+                        .then(pl.col("pts_service_pts_won") / pl.col("pts_service_pts_played"))
+                        .otherwise(None)
+                        - pl.when(pl.col("opp_pts_service_pts_played") > 0)
+                        .then(pl.col("opp_pts_service_pts_won") / pl.col("opp_pts_service_pts_played"))
+                        .otherwise(None)
+                    ).cast(pl.Float64),
+                ),
+                "return_pts_won_pct_diff": (
+                    "_aux_return_pts_won_pct_diff",
+                    (
+                        pl.when(pl.col("pts_return_pts_played") > 0)
+                        .then(pl.col("pts_return_pts_won") / pl.col("pts_return_pts_played"))
+                        .otherwise(None)
+                        - pl.when(pl.col("opp_pts_return_pts_played") > 0)
+                        .then(pl.col("opp_pts_return_pts_won") / pl.col("opp_pts_return_pts_played"))
+                        .otherwise(None)
+                    ).cast(pl.Float64),
+                ),
+                "first_serve_won_pct_diff": (
+                    "_aux_first_serve_won_pct_diff",
+                    (
+                        pl.when(pl.col("svc_first_serve_pts_played") > 0)
+                        .then(pl.col("svc_first_serve_pts_won") / pl.col("svc_first_serve_pts_played"))
+                        .otherwise(None)
+                        - pl.when(pl.col("opp_svc_first_serve_pts_played") > 0)
+                        .then(pl.col("opp_svc_first_serve_pts_won") / pl.col("opp_svc_first_serve_pts_played"))
+                        .otherwise(None)
+                    ).cast(pl.Float64),
+                ),
+                "bp_save_pct_diff": (
+                    "_aux_bp_save_pct_diff",
+                    (
+                        pl.when(pl.col("svc_bp_faced") > 0)
+                        .then(pl.col("svc_bp_saved") / pl.col("svc_bp_faced"))
+                        .otherwise(None)
+                        - pl.when(pl.col("opp_svc_bp_faced") > 0)
+                        .then(pl.col("opp_svc_bp_saved") / pl.col("opp_svc_bp_faced"))
+                        .otherwise(None)
+                    ).cast(pl.Float64),
+                ),
+                "svc_serve_rating_diff": (
+                    "_aux_svc_serve_rating_diff",
+                    (pl.col("svc_serve_rating") - pl.col("opp_svc_serve_rating")).cast(pl.Float64),
+                ),
+                "ret_return_rating_diff": (
+                    "_aux_ret_return_rating_diff",
+                    (pl.col("ret_return_rating") - pl.col("opp_ret_return_rating")).cast(pl.Float64),
+                ),
+                "set1_games_diff": (
+                    "_aux_set1_games_diff",
+                    pl.when(
+                        pl.col("player_set1_games").is_not_null()
+                        & pl.col("opp_set1_games").is_not_null()
+                    )
+                    .then((pl.col("player_set1_games") - pl.col("opp_set1_games")).cast(pl.Float64))
+                    .otherwise(None),
+                ),
+                "set2_games_diff": (
+                    "_aux_set2_games_diff",
+                    pl.when(
+                        pl.col("player_set2_games").is_not_null()
+                        & pl.col("opp_set2_games").is_not_null()
+                    )
+                    .then((pl.col("player_set2_games") - pl.col("opp_set2_games")).cast(pl.Float64))
+                    .otherwise(None),
+                ),
+                "duration_seconds": (
+                    "_aux_duration_seconds",
+                    pl.col("duration_seconds").cast(pl.Float64),
+                ),
+                "wl_continuous_proxy": (
+                    "_aux_wl_continuous_proxy",
+                    (pl.col(primary_col).cast(pl.Float64) * 2.0 - 1.0),
+                ),
             }
             aux_cols: list[str] = []
             for aux_name in mtl_cfg.auxiliary_targets:
@@ -301,13 +383,39 @@ class ProductionPredictor:
         filter_specs = get_filter_feature_specs(entry.get("filters"))
         extra = compute_only + filter_specs
         all_specs = feature_specs + [s for s in extra if s not in feature_specs]
-        # MTL: aux target derivation needs per-set game columns. Extend the
-        # base projection list when the entry's config has an mtl block.
+        # MTL: aux target derivation reads raw matches.parquet columns directly.
+        # Extend the base projection list when the entry's config has an mtl block.
         extra_cols_eff = list(_PREDICTOR_EXTRA_COLS)
         if config.mtl is not None:
             for i in range(1, 6):
                 for prefix in ("player", "opp"):
                     col = f"{prefix}_set{i}_games"
+                    if col not in extra_cols_eff:
+                        extra_cols_eff.append(col)
+            aux_required: dict[str, list[str]] = {
+                "total_pts_won_diff": ["pts_total_pts_won", "opp_pts_total_pts_won"],
+                "service_pts_won_pct_diff": [
+                    "pts_service_pts_won", "opp_pts_service_pts_won",
+                    "pts_service_pts_played", "opp_pts_service_pts_played",
+                ],
+                "return_pts_won_pct_diff": [
+                    "pts_return_pts_won", "opp_pts_return_pts_won",
+                    "pts_return_pts_played", "opp_pts_return_pts_played",
+                ],
+                "first_serve_won_pct_diff": [
+                    "svc_first_serve_pts_won", "opp_svc_first_serve_pts_won",
+                    "svc_first_serve_pts_played", "opp_svc_first_serve_pts_played",
+                ],
+                "bp_save_pct_diff": [
+                    "svc_bp_saved", "opp_svc_bp_saved",
+                    "svc_bp_faced", "opp_svc_bp_faced",
+                ],
+                "svc_serve_rating_diff": ["svc_serve_rating", "opp_svc_serve_rating"],
+                "ret_return_rating_diff": ["ret_return_rating", "opp_ret_return_rating"],
+                "duration_seconds": ["duration_seconds"],
+            }
+            for aux_name in config.mtl.auxiliary_targets:
+                for col in aux_required.get(aux_name, []):
                     if col not in extra_cols_eff:
                         extra_cols_eff.append(col)
         df = engine.compute(all_specs, extra_columns=extra_cols_eff)

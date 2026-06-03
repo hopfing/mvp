@@ -192,15 +192,13 @@ class HyperparamTuner:
             )
 
         # MTL: extend the search space with per-target loss-weight dimensions
-        # (one per configured aux target). Log-uniform 0.01-1.0 covers three
-        # decades. Primary weight is fixed at 1.0 — only relative weights
-        # matter, so tuning the primary alongside aux would just be a global
-        # scale knob with no effect on the optimum.
+        # (one per configured aux target). Range widened to 0.01-5.0 after H38
+        # set_margin tuned to 0.96 (right at the prior 1.0 ceiling).
         mtl_block = self.base_config.get("mtl")
         if mtl_block:
             for aux in mtl_block.get("auxiliary_targets", []) or []:
                 self.search_space[f"weight_{aux}"] = {
-                    "type": "float", "low": 0.01, "high": 1.0, "log": True,
+                    "type": "float", "low": 0.01, "high": 5.0, "log": True,
                 }
 
         # Pin specific params, removing them from the search space
