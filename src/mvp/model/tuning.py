@@ -64,6 +64,12 @@ DEFAULT_SEARCH_SPACES: dict[str, dict[str, dict[str, Any]]] = {
     },
     "logistic": {
         "C": {"type": "float", "low": 0.0001, "high": 10.0, "log": True},
+        # Penalty type — L1 does feature selection, L2 shrinks, elasticnet
+        # mixes both. LogisticModel auto-sets solver="saga" when penalty is
+        # l1/elasticnet (lbfgs default doesn't support those).
+        "penalty": {"type": "categorical", "choices": ["l1", "l2", "elasticnet"]},
+        # l1_ratio only has effect when penalty="elasticnet" (0=pure L2, 1=pure L1)
+        "l1_ratio": {"type": "float", "low": 0.0, "high": 1.0},
     },
     "random_forest": {
         "n_estimators": {"type": "int", "low": 100, "high": 500, "step": 50},
@@ -75,6 +81,9 @@ DEFAULT_SEARCH_SPACES: dict[str, dict[str, dict[str, Any]]] = {
         "min_impurity_decrease": {"type": "float", "low": 0.0, "high": 0.01},
         "bootstrap": {"type": "categorical", "choices": [True, False]},
         "criterion": {"type": "categorical", "choices": ["gini", "log_loss"]},
+        # max_samples controls per-tree sample fraction when bootstrap=True;
+        # sklearn ignores when bootstrap=False. Meaningful bias/variance lever.
+        "max_samples": {"type": "categorical", "choices": [None, 0.5, 0.7, 0.85, 1.0]},
     },
     "neural_net": {
         "hidden_layers": {"type": "categorical", "choices": ["32", "64", "32-16", "64-32", "128-64", "256-128", "64-32-16", "128-64-32"]},
@@ -203,6 +212,20 @@ class HyperparamTuner:
                 f"No default search space for model type '{self.model_type}'"
                 " — pass search_space explicitly"
             )
+
+        # DART: rate_drop / skip_drop are only meaningful when booster="dart",
+        # and DART trials are O(n_estimators²) which can hang at the default
+        # n_estimators ceiling. So instead of putting them in the default
+        # xgboost search space (which would force every routine XGB tune to
+        # sample dart), they're conditionally added only when the user has
+        # pinned `booster: dart` in the config — making DART an explicit
+        # per-config opt-in. See models/prod_log_dart.yaml for the pattern.
+        if (
+            self.model_type == "xgboost"
+            and (self.base_config.get("model") or {}).get("params", {}).get("booster") == "dart"
+        ):
+            self.search_space["rate_drop"] = {"type": "float", "low": 0.05, "high": 0.25}
+            self.search_space["skip_drop"] = {"type": "float", "low": 0.0, "high": 0.5}
 
         # MTL: extend the search space with per-target loss-weight dimensions
         # (one per configured aux target). Range widened to 0.01-5.0 after H38

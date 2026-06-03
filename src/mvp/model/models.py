@@ -218,6 +218,11 @@ class XGBoostModel(BaseModel):
             # dict(resolved) so we don't mutate the caller's params
             resolved = dict(resolved)
             self._lambda_over = float(resolved.pop("lambda_over", 2.0))
+        # DART-only params have no effect under gbtree and XGBoost warns about
+        # them every fit. The tuner samples them unconditionally per trial, so
+        # drop them here when the chosen booster isn't dart.
+        if resolved.get("booster", "gbtree") != "dart":
+            resolved = {k: v for k, v in resolved.items() if k not in ("rate_drop", "skip_drop")}
         self.params = {
             "objective": "binary:logistic",
             "eval_metric": "logloss",
@@ -326,6 +331,11 @@ class XGBoostMTLModel(BaseModel):
         # emit a "parameters not used" warning for each.
         for stale_key in [k for k in resolved if k.startswith("weight_")]:
             resolved.pop(stale_key)
+
+        # DART-only params have no effect under gbtree and XGBoost warns about
+        # them every fit. The tuner samples them unconditionally per trial.
+        if resolved.get("booster", "gbtree") != "dart":
+            resolved = {k: v for k, v in resolved.items() if k not in ("rate_drop", "skip_drop")}
 
         # n_estimators is consumed by xgb.train as num_boost_round, not a
         # `params` entry. Pop it out the same way XGBoostModel does.
@@ -470,6 +480,21 @@ class LogisticModel(BaseModel):
 
     def __init__(self, params: dict[str, Any]) -> None:
         self.params = {"random_state": 42, "max_iter": 1000, **params}
+        # Auto-pick solver compatible with penalty when not explicitly set.
+        # sklearn default is lbfgs which only supports l2; saga supports
+        # l1/l2/elasticnet. Letting the tuner explore penalty types means
+        # solver has to follow along.
+        penalty = self.params.get("penalty", "l2")
+        if "solver" not in self.params:
+            if penalty in ("l1", "elasticnet"):
+                self.params["solver"] = "saga"
+            else:
+                self.params["solver"] = "lbfgs"
+        # l1_ratio is only meaningful for elasticnet; drop it otherwise to
+        # avoid sklearn's "l1_ratio is only used when penalty=elasticnet"
+        # warning.
+        if penalty != "elasticnet" and "l1_ratio" in self.params:
+            del self.params["l1_ratio"]
         self._model = None
         self._impute_medians: np.ndarray | None = None
 
@@ -502,7 +527,13 @@ class RandomForestModel(BaseModel):
     """
 
     def __init__(self, params: dict[str, Any]) -> None:
-        self.params = {"random_state": 42, "n_jobs": _default_n_jobs(), **params}
+        merged = {"random_state": 42, "n_jobs": _default_n_jobs(), **params}
+        # sklearn rejects max_samples when bootstrap=False. The tuner samples
+        # both dims unconditionally per trial, so strip max_samples when
+        # bootstrap is off rather than failing the trial.
+        if not merged.get("bootstrap", True) and "max_samples" in merged:
+            del merged["max_samples"]
+        self.params = merged
         self._model = None
         self._impute_medians: np.ndarray | None = None
 
