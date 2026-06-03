@@ -88,6 +88,14 @@ DEFAULT_SEARCH_SPACES: dict[str, dict[str, dict[str, Any]]] = {
         "weight_decay": {"type": "float", "low": 0.0, "high": 0.01},
         "grad_clip_norm": {"type": "categorical", "choices": [None, 1.0, 5.0]},
         "lr_scheduler": {"type": "categorical", "choices": [None, "plateau"]},
+        # Fine-tune phase (applied after main training, on the most-recent
+        # finetune_frac slice of training data with finetune_lr). finetune_frac=0
+        # disables fine-tuning entirely — lets the tuner discover whether
+        # fine-tuning helps or hurts on this config.
+        "finetune_frac": {"type": "float", "low": 0.0, "high": 0.3},
+        "finetune_lr": {"type": "float", "low": 0.00001, "high": 0.001, "log": True},
+        "finetune_epochs": {"type": "int", "low": 10, "high": 50},
+        "finetune_patience": {"type": "int", "low": 5, "high": 15},
     },
 }
 
