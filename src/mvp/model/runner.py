@@ -409,8 +409,16 @@ class ExperimentRunner:
 
         return all_feature_specs, base_model_specs, model_date_ranges, meta_feature_indices, model_filters, model_sample_weights
 
-    def run(self) -> dict[str, Any]:
+    def run(self, trial: Any = None) -> dict[str, Any]:
         """Execute the experiment.
+
+        Args:
+            trial: Optional Optuna Trial. When provided, the runner reports
+                each tuning outer-fold's log_loss to the trial via
+                trial.report(step=outer_idx) and consults trial.should_prune()
+                at each outer-fold boundary. If pruning fires, raises
+                optuna.TrialPruned. Only the tuning folds (0..n_tuning-1)
+                are reported — the holdout fold(s) never feed the pruner.
 
         Returns:
             Dictionary with metrics and metadata.
@@ -1106,6 +1114,44 @@ class ExperimentRunner:
                     logger.log_metrics(
                         {f"fold_{fold_idx}_{k}": v for k, v in metrics.items()}
                     )
+
+                # Pruning check at outer-fold boundaries only. Aggregate the
+                # current outer fold's per-iteration predictions (only one
+                # entry when inner_cv_folds=0; up to inner_cv_folds entries
+                # otherwise), compute the outer-fold log_loss, report to
+                # the trial, and consult the pruner. Holdout folds are
+                # excluded (only the tuning folds 0..n_tuning-1 are reported).
+                if trial is not None:
+                    current_outer = iteration_to_outer[fold_idx]
+                    next_outer = (
+                        iteration_to_outer[fold_idx + 1]
+                        if fold_idx + 1 < len(iteration_to_outer)
+                        else -1
+                    )
+                    is_last_iter_of_outer = next_outer != current_outer
+                    is_tuning_outer = current_outer < n_tuning
+                    if is_last_iter_of_outer and is_tuning_outer:
+                        outer_iter_idxs = [
+                            i for i, o in enumerate(iteration_to_outer)
+                            if o == current_outer and i <= fold_idx
+                        ]
+                        outer_y_true = np.concatenate(
+                            [all_predictions[i]["y_true"] for i in outer_iter_idxs]
+                        )
+                        outer_y_prob = np.concatenate(
+                            [all_predictions[i]["y_prob"] for i in outer_iter_idxs]
+                        )
+                        outer_ll = float(compute_metrics(
+                            outer_y_true, outer_y_prob, lambda_over=lambda_over_eval,
+                        ).get("log_loss", float("nan")))
+                        if not np.isnan(outer_ll):
+                            trial.report(outer_ll, step=current_outer)
+                            if trial.should_prune():
+                                # Inline import: runner is also called from
+                                # `mvp model` (no optuna dep). Importing at the
+                                # top would force optuna onto every code path.
+                                import optuna
+                                raise optuna.TrialPruned()
 
             # If inner CV was active, the per-iteration lists above hold one
             # entry per inner split. Regroup them by outer fold so downstream

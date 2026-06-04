@@ -899,17 +899,20 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
     tune_parser.add_argument(
         "--cap", type=int, default=None,
         help=(
-            "Stop when the study reaches N total completed runs "
-            "(auto-computes remainder; mutually exclusive with --limit)"
+            "Stop when the study reaches N consumed budget slots "
+            "(COMPLETE + PRUNED; mutually exclusive with --limit). "
+            "Pruned trials count toward the cap because they consumed a "
+            "trial slot — use --limit if you want N starts regardless of state."
         ),
     )
     tune_parser.add_argument(
         "--n-startup-trials", type=int, default=None,
         help=(
-            "TPE startup trials (pure-random sampling before Bayesian "
-            "modeling kicks in). Optuna default is 10; bump for wider "
-            "early exploration on large search spaces. Applies only to "
-            "fresh studies — ignored when resuming an existing study."
+            "Startup trials for both TPE sampler and MedianPruner — "
+            "trials 0..N-1 are pure-random and never pruned. Default 25. "
+            "Sampler value applies only to fresh studies; pruner value "
+            "applies on every invocation (pass the same value on resume "
+            "to keep pruning behavior consistent)."
         ),
     )
 
@@ -1151,6 +1154,27 @@ def cmd_train(args: argparse.Namespace) -> int:
     return 0
 
 
+def _state_counts(study: Any) -> dict[str, int]:
+    """Count trials by state. Used by tune CLI logging and tune-review header
+    so pruned/zombie/failed trials are visible as separate buckets instead
+    of being lumped into a generic 'incomplete' count."""
+    import optuna as _optuna
+
+    counts = {"complete": 0, "pruned": 0, "running": 0, "failed": 0, "waiting": 0}
+    for t in study.trials:
+        if t.state == _optuna.trial.TrialState.COMPLETE:
+            counts["complete"] += 1
+        elif t.state == _optuna.trial.TrialState.PRUNED:
+            counts["pruned"] += 1
+        elif t.state == _optuna.trial.TrialState.RUNNING:
+            counts["running"] += 1
+        elif t.state == _optuna.trial.TrialState.FAIL:
+            counts["failed"] += 1
+        elif t.state == _optuna.trial.TrialState.WAITING:
+            counts["waiting"] += 1
+    return counts
+
+
 def _parse_param_overrides(raw_params: list[str] | None) -> dict[str, Any]:
     """Parse --param KEY=VALUE arguments into a dict."""
     import json as _json
@@ -1256,36 +1280,39 @@ def cmd_tune(args: argparse.Namespace) -> int:
         )
 
         if args.cap is not None:
-            completed = sum(
-                1 for t in tuner.study.trials
-                if t.state == optuna.trial.TrialState.COMPLETE
-            )
+            # --cap counts COMPLETE + PRUNED toward the budget: each pruned
+            # trial consumed a trial slot (even if it didn't run to
+            # completion), so we don't auto-schedule a replacement.
+            state_counts = _state_counts(tuner.study)
+            budget_consumed = state_counts["complete"] + state_counts["pruned"]
             total = len(tuner.study.trials)
-            zombie = total - completed
-            if completed >= args.cap:
+            if budget_consumed >= args.cap:
                 logger.info(
-                    "%s at or above cap (%d completed, cap=%d); nothing to do",
-                    config_path.stem, completed, args.cap,
+                    "%s at or above cap "
+                    "(budget=%d [complete=%d, pruned=%d], cap=%d); nothing to do",
+                    config_path.stem, budget_consumed,
+                    state_counts["complete"], state_counts["pruned"], args.cap,
                 )
                 return 0
-            n_trials = args.cap - completed
+            n_trials = args.cap - budget_consumed
             logger.info(
-                "Tuning %s (cap=%d, completed=%d, total=%d, zombie=%d) "
-                "-> running %d more",
-                config_path.stem, args.cap, completed, total, zombie, n_trials,
+                "Tuning %s (cap=%d, complete=%d, pruned=%d, "
+                "running/zombie=%d, failed=%d, total=%d) -> running %d more",
+                config_path.stem, args.cap,
+                state_counts["complete"], state_counts["pruned"],
+                state_counts["running"], state_counts["failed"], total, n_trials,
             )
         else:
             n_trials = args.limit
 
         study = tuner.run(n_trials=n_trials)
         logger.info("Results saved to %s", tuner.db_path)
-        completed_after = sum(
-            1 for t in study.trials
-            if t.state == optuna.trial.TrialState.COMPLETE
-        )
+        end_counts = _state_counts(study)
         logger.info(
-            "Total trials: %d (%d completed)",
-            len(study.trials), completed_after,
+            "Total trials: %d (complete=%d, pruned=%d, running/zombie=%d, failed=%d)",
+            len(study.trials),
+            end_counts["complete"], end_counts["pruned"],
+            end_counts["running"], end_counts["failed"],
         )
 
     return 0
@@ -1327,9 +1354,23 @@ def cmd_tune_review(args: argparse.Namespace) -> int:
         storage=storage,
     )
 
-    completed = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
+    state_counts = _state_counts(study)
     print(f"Study: {study.study_name}")
-    print(f"Total trials: {len(completed)}")
+    # Total counts COMPLETE + PRUNED only (the "budget consumed" view).
+    # Failed / running shown separately if present so they're not invisible.
+    total = state_counts["complete"] + state_counts["pruned"]
+    bucket_parts = [f"complete={state_counts['complete']}"]
+    if state_counts["pruned"]:
+        bucket_parts.append(f"pruned={state_counts['pruned']}")
+    extras = []
+    if state_counts["running"]:
+        extras.append(f"running/zombie={state_counts['running']}")
+    if state_counts["failed"]:
+        extras.append(f"failed={state_counts['failed']}")
+    header = f"Total trials: {total} ({', '.join(bucket_parts)})"
+    if extras:
+        header += f"  [also: {', '.join(extras)}]"
+    print(header)
     print()
 
     for line in format_leaderboard(study, sort_by=args.sort, top_n=args.top):

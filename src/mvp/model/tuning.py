@@ -293,13 +293,34 @@ class HyperparamTuner:
             for m in self.metrics
         ]
 
-        # Custom TPESampler when n_startup_trials is set (Optuna's default is
-        # 10 pure-random trials before TPE kicks in). Higher values force
-        # broader early exploration — useful on wide search spaces where
-        # TPE risks underexploring categorical params it commits to early.
-        sampler = None
-        if self.n_startup_trials is not None:
-            sampler = optuna.samplers.TPESampler(n_startup_trials=self.n_startup_trials)
+        # Sampler and pruner share the same startup-trial threshold so the
+        # pure-random exploration phase is fully protected from both TPE
+        # modeling and pruning decisions. Default is 25 — wider than
+        # Optuna's TPESampler default of 10 — to give TPE a broader
+        # foundation before it commits to a region and to keep early
+        # noisy-fold metrics from feeding pruning decisions.
+        # CAVEAT: the pruner config is not persisted in the SQLite study.
+        # Resuming a study constructs a fresh pruner — if the original run
+        # used a non-default --n-startup-trials, the resume invocation MUST
+        # pass the same value or the new pruner will fire earlier than
+        # intended for trials added in that resume session.
+        startup_trials = (
+            self.n_startup_trials if self.n_startup_trials is not None else 25
+        )
+        sampler = optuna.samplers.TPESampler(n_startup_trials=startup_trials)
+
+        # MedianPruner kills trials whose fold-k log_loss is worse than the
+        # median of completed trials at the same fold step. warmup=2 means
+        # pruning can only fire from fold 2 onward; fold 0 and fold 1
+        # metrics are too noisy on tabular CV to drive kills. See
+        # scripts/analyze_fold_predictiveness.py for the empirical
+        # validation (zero top-K trials killed at warmup=2 across 50 trials).
+        pruner = optuna.pruners.MedianPruner(
+            n_startup_trials=startup_trials,
+            n_warmup_steps=2,
+            n_min_trials=10,
+            interval_steps=1,
+        )
 
         self.study = optuna.create_study(
             study_name=self.config_path.stem,
@@ -307,6 +328,7 @@ class HyperparamTuner:
             directions=directions,
             load_if_exists=True,
             sampler=sampler,
+            pruner=pruner,
         )
 
         if self.pinned_params:
@@ -343,12 +365,18 @@ class HyperparamTuner:
             self.study.enqueue_trial(baseline)
 
     def _objective(self, trial: optuna.Trial) -> float | tuple[float, ...]:
-        """Optuna objective: suggest params, run experiment, return metric(s)."""
+        """Optuna objective: suggest params, run experiment, return metric(s).
+
+        Raises optuna.TrialPruned if the runner's per-fold pruning check
+        fires mid-trial. That exception propagates up to Optuna's optimize
+        loop, which records the trial in PRUNED state."""
         params = suggest_params(trial, self.search_space)
         params.update(self.pinned_params)
         params = _decode_params(params)
 
-        result = self._run_one(params)
+        # Pass `trial` so the runner can report per-fold log_loss and
+        # consult the pruner at each tuning-fold boundary.
+        result = self._run_one(params, trial=trial)
 
         # Mark trials as raw-mode so `tune-review` can distinguish post-refactor
         # studies (raw discrimination) from legacy studies (Platt-calibrated).
@@ -376,14 +404,28 @@ class HyperparamTuner:
                 result["inner_fold_count_per_outer"],
             )
 
+        # Per-fold metrics — needed for retrospective analyses (e.g., is
+        # fold-1 log_loss predictive of the mean across folds, which informs
+        # whether per-fold pruning would be safe to enable).
+        if result.get("fold_metrics"):
+            trial.set_user_attr("fold_metrics", result["fold_metrics"])
+        if result.get("holdout_fold_metrics"):
+            trial.set_user_attr("holdout_fold_metrics", result["holdout_fold_metrics"])
+
         trial.set_user_attr("duration_s", result["duration_s"])
 
         if len(self.metrics) == 1:
             return result["metrics"][self.metrics[0]]
         return tuple(result["metrics"][m] for m in self.metrics)
 
-    def _run_one(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Run a single param combination through the appropriate runner."""
+    def _run_one(
+        self, params: dict[str, Any], trial: optuna.Trial | None = None,
+    ) -> dict[str, Any]:
+        """Run a single param combination through the appropriate runner.
+
+        When `trial` is provided, the underlying runner reports per-fold
+        log_loss and may raise optuna.TrialPruned mid-run.
+        """
         config = dict(self.base_config)
         if self.is_iid:
             config["serve_model"] = dict(config["serve_model"])
@@ -456,7 +498,13 @@ class HyperparamTuner:
                         inner_cv_folds=4,
                         calibrate=False,
                     )
-                result = runner.run()
+                # IID / projection runners don't currently support pruning;
+                # only ExperimentRunner threads `trial` through. Pass it where
+                # accepted, ignore where not.
+                if self.is_iid or self.model_type in _PROJECTION_MODEL_TYPES:
+                    result = runner.run()
+                else:
+                    result = runner.run(trial=trial)
                 metrics = dict(result["metrics"])
                 holdout_metrics = (
                     dict(result["holdout_metrics"])
@@ -467,6 +515,16 @@ class HyperparamTuner:
                 inner_fold_count_per_outer = (
                     list(result["inner_fold_count_per_outer"])
                     if result.get("inner_fold_count_per_outer") is not None
+                    else None
+                )
+                fold_metrics = (
+                    [dict(f) for f in result["fold_metrics"]]
+                    if result.get("fold_metrics") is not None
+                    else None
+                )
+                holdout_fold_metrics = (
+                    [dict(f) for f in result["holdout_fold_metrics"]]
+                    if result.get("holdout_fold_metrics") is not None
                     else None
                 )
             finally:
@@ -489,6 +547,8 @@ class HyperparamTuner:
                 "holdout_metrics": holdout_metrics,
                 "inner_cv_folds": inner_cv_folds_used,
                 "inner_fold_count_per_outer": inner_fold_count_per_outer,
+                "fold_metrics": fold_metrics,
+                "holdout_fold_metrics": holdout_fold_metrics,
                 "duration_s": round(duration, 1),
             }
         finally:
@@ -531,7 +591,19 @@ class HyperparamTuner:
     def _log_trial_callback(
         self, study: optuna.Study, trial: optuna.trial.FrozenTrial
     ) -> None:
-        """Log each completed trial."""
+        """Log each trial. Pruned trials get a one-line summary since their
+        user_attrs (which `_objective` sets after `_run_one` returns) are
+        empty — the prune raised before that code ran."""
+        if trial.state == optuna.trial.TrialState.PRUNED:
+            # Pruned trials carry no user_attrs; report which fold step
+            # killed them (intermediate_values is set by Optuna from the
+            # runner's trial.report() calls before the prune).
+            last_step = max(trial.intermediate_values) if trial.intermediate_values else "?"
+            logger.info(
+                "Trial %d: PRUNED at step %s | %s",
+                trial.number, last_step, _param_combo_str(trial.params),
+            )
+            return
         metrics_str = ", ".join(
             f"{m}={trial.user_attrs.get(m, 'N/A'):.4f}"
             if isinstance(trial.user_attrs.get(m), float) else f"{m}=N/A"
