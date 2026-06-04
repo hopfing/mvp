@@ -1014,7 +1014,14 @@ class NeuralNetModel(BaseModel):
         if w_t is not None:
             tensors.append(w_t)
         dataset = TensorDataset(*tensors)
-        loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=self.shuffle)
+        # drop_last when batch_norm is on: BatchNorm needs batch size > 1 to
+        # compute variance, and a final batch of size 1 (when n_train % bs == 1)
+        # crashes. LayerNorm and no-norm handle batch size 1 fine, so they
+        # keep all data.
+        loader = DataLoader(
+            dataset, batch_size=self.batch_size, shuffle=self.shuffle,
+            drop_last=self.batch_norm,
+        )
 
         best_val_loss = float("inf")
         best_state = None
@@ -1095,7 +1102,10 @@ class NeuralNetModel(BaseModel):
             if ft_w is not None:
                 ft_tensors.append(ft_w)
             ft_dataset = TensorDataset(*ft_tensors)
-            ft_loader = DataLoader(ft_dataset, batch_size=self.batch_size, shuffle=True)
+            ft_loader = DataLoader(
+                ft_dataset, batch_size=self.batch_size, shuffle=True,
+                drop_last=self.batch_norm,
+            )
 
             ft_optimizer = self._make_optimizer(self._module.parameters(), self.finetune_lr)
             ft_scheduler = None
