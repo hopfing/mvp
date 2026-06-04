@@ -211,11 +211,13 @@ class HyperparamTuner:
         matches_path: Path | str | None = None,
         cache_dir: Path | str | None = None,
         state_dir: Path | str | None = None,
+        n_startup_trials: int | None = None,
     ) -> None:
         self.config_path = Path(config_path)
         self.metrics = metrics or ["log_loss"]
         self.matches_path = matches_path
         self.cache_dir = cache_dir
+        self.n_startup_trials = n_startup_trials
 
         with open(self.config_path) as f:
             self.base_config = yaml.safe_load(f)
@@ -291,11 +293,20 @@ class HyperparamTuner:
             for m in self.metrics
         ]
 
+        # Custom TPESampler when n_startup_trials is set (Optuna's default is
+        # 10 pure-random trials before TPE kicks in). Higher values force
+        # broader early exploration — useful on wide search spaces where
+        # TPE risks underexploring categorical params it commits to early.
+        sampler = None
+        if self.n_startup_trials is not None:
+            sampler = optuna.samplers.TPESampler(n_startup_trials=self.n_startup_trials)
+
         self.study = optuna.create_study(
             study_name=self.config_path.stem,
             storage=storage,
             directions=directions,
             load_if_exists=True,
+            sampler=sampler,
         )
 
         if self.pinned_params:

@@ -903,6 +903,15 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
             "(auto-computes remainder; mutually exclusive with --limit)"
         ),
     )
+    tune_parser.add_argument(
+        "--n-startup-trials", type=int, default=None,
+        help=(
+            "TPE startup trials (pure-random sampling before Bayesian "
+            "modeling kicks in). Optuna default is 10; bump for wider "
+            "early exploration on large search spaces. Applies only to "
+            "fresh studies — ignored when resuming an existing study."
+        ),
+    )
 
     # tune-review subcommand
     tune_review_parser = subparsers.add_parser(
@@ -1243,6 +1252,7 @@ def cmd_tune(args: argparse.Namespace) -> int:
             config_path=config_path,
             param_overrides=param_overrides or None,
             metrics=args.metric,
+            n_startup_trials=args.n_startup_trials,
         )
 
         if args.cap is not None:
