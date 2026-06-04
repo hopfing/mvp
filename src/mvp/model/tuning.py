@@ -120,6 +120,18 @@ DEFAULT_SEARCH_SPACES: dict[str, dict[str, dict[str, Any]]] = {
         "weight_decay": {"type": "float", "low": 0.0, "high": 0.01},
         "grad_clip_norm": {"type": "categorical", "choices": [None, 1.0, 5.0]},
         "lr_scheduler": {"type": "categorical", "choices": [None, "plateau"]},
+        # lr_scheduler_factor / lr_scheduler_patience only have effect when
+        # lr_scheduler="plateau" is sampled. factor = LR multiplier on plateau;
+        # patience = epochs of no improvement before reducing.
+        "lr_scheduler_factor": {"type": "float", "low": 0.1, "high": 0.7},
+        "lr_scheduler_patience": {"type": "int", "low": 2, "high": 10},
+        # optimizer: "auto" preserves the original behavior (Adam if
+        # weight_decay==0 else AdamW). The other choices override it.
+        "optimizer": {"type": "categorical", "choices": ["auto", "adam", "adamw", "sgd_momentum", "radam", "nadam"]},
+        # activation: hidden-layer activation function. ReLU is the historical
+        # default; GELU is the modern default in transformers; SiLU (Swish)
+        # shows up in vision/regression; LeakyReLU avoids dying-neuron issues.
+        "activation": {"type": "categorical", "choices": ["relu", "gelu", "silu", "leaky_relu"]},
         # Fine-tune phase (applied after main training, on the most-recent
         # finetune_frac slice of training data with finetune_lr). finetune_frac=0
         # disables fine-tuning entirely — lets the tuner discover whether

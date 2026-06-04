@@ -777,6 +777,21 @@ class EnsembleModel(BaseModel):
         return _SklearnWrapper(self)
 
 
+def _make_activation(name: str):
+    """Resolve activation name to a fresh torch.nn module instance."""
+    import torch.nn as nn
+
+    mapping = {
+        "relu": nn.ReLU,
+        "gelu": nn.GELU,
+        "silu": nn.SiLU,
+        "leaky_relu": nn.LeakyReLU,
+    }
+    if name not in mapping:
+        raise ValueError(f"Unknown activation: {name}")
+    return mapping[name]()
+
+
 def _make_embedding_mlp():
     """Lazy factory to avoid top-level torch import."""
     import torch
@@ -793,6 +808,7 @@ def _make_embedding_mlp():
             batch_norm: bool,
             layer_norm: bool = False,
             dual_embedding: bool = False,
+            activation: str = "relu",
         ):
             super().__init__()
             self.embedding = nn.Embedding(n_players + 1, embedding_dim, padding_idx=0)
@@ -807,7 +823,7 @@ def _make_embedding_mlp():
                     layers.append(nn.LayerNorm(hidden_dim))
                 elif batch_norm:
                     layers.append(nn.BatchNorm1d(hidden_dim))
-                layers.append(nn.ReLU())
+                layers.append(_make_activation(activation))
                 if dropout > 0:
                     layers.append(nn.Dropout(dropout))
                 in_dim = hidden_dim
@@ -859,6 +875,12 @@ class NeuralNetModel(BaseModel):
         self.lr_scheduler: str | None = params.get("lr_scheduler", None)
         self.lr_scheduler_factor: float = params.get("lr_scheduler_factor", 0.5)
         self.lr_scheduler_patience: int = params.get("lr_scheduler_patience", 5)
+        # "auto" = original Adam/AdamW heuristic from weight_decay; any other
+        # value overrides explicitly (adam, adamw, sgd_momentum, radam, nadam).
+        self.optimizer_type: str = params.get("optimizer", "auto")
+        # Hidden-layer activation. "relu" preserves the original behavior;
+        # gelu/silu/leaky_relu are alternatives the tuner can explore.
+        self.activation: str = params.get("activation", "relu")
         self.layer_norm: bool = params.get("layer_norm", False)
         if self.batch_norm and self.layer_norm:
             raise ValueError(
@@ -898,6 +920,7 @@ class NeuralNetModel(BaseModel):
                 batch_norm=self.batch_norm,
                 layer_norm=self.layer_norm,
                 dual_embedding=self._has_opp_embeddings,
+                activation=self.activation,
             )
 
         layers: list[nn.Module] = []
@@ -908,7 +931,7 @@ class NeuralNetModel(BaseModel):
                 layers.append(nn.LayerNorm(hidden_dim))
             elif self.batch_norm:
                 layers.append(nn.BatchNorm1d(hidden_dim))
-            layers.append(nn.ReLU())
+            layers.append(_make_activation(self.activation))
             if self.dropout > 0:
                 layers.append(nn.Dropout(self.dropout))
             in_dim = hidden_dim
@@ -942,12 +965,32 @@ class NeuralNetModel(BaseModel):
         return X_features, emb_ids, opp_ids
 
     def _make_optimizer(self, params, lr: float):
-        """Create optimizer — AdamW when weight_decay > 0, else Adam."""
+        """Create optimizer based on self.optimizer_type.
+
+        "auto" preserves the original behavior: AdamW when weight_decay > 0,
+        else Adam. Other choices override that selection. SGD-momentum uses
+        a fixed momentum=0.9 (the textbook value); the tuner explores SGD
+        vs adaptive optimizers, not the SGD momentum coefficient itself.
+        """
         import torch
 
-        if self.weight_decay > 0:
-            return torch.optim.AdamW(params, lr=lr, weight_decay=self.weight_decay)
-        return torch.optim.Adam(params, lr=lr)
+        wd = self.weight_decay
+        opt = self.optimizer_type
+        if opt == "auto":
+            if wd > 0:
+                return torch.optim.AdamW(params, lr=lr, weight_decay=wd)
+            return torch.optim.Adam(params, lr=lr)
+        if opt == "adam":
+            return torch.optim.Adam(params, lr=lr, weight_decay=wd)
+        if opt == "adamw":
+            return torch.optim.AdamW(params, lr=lr, weight_decay=wd)
+        if opt == "sgd_momentum":
+            return torch.optim.SGD(params, lr=lr, momentum=0.9, weight_decay=wd)
+        if opt == "radam":
+            return torch.optim.RAdam(params, lr=lr, weight_decay=wd)
+        if opt == "nadam":
+            return torch.optim.NAdam(params, lr=lr, weight_decay=wd)
+        raise ValueError(f"Unknown optimizer: {opt}")
 
     def _forward(self, X_t, emb_t=None, opp_emb_t=None):
         """Forward pass handling plain MLP, single embedding, and dual embedding."""
