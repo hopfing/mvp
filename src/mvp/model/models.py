@@ -480,21 +480,18 @@ class LogisticModel(BaseModel):
 
     def __init__(self, params: dict[str, Any]) -> None:
         self.params = {"random_state": 42, "max_iter": 1000, **params}
-        # Auto-pick solver compatible with penalty when not explicitly set.
-        # sklearn default is lbfgs which only supports l2; saga supports
-        # l1/l2/elasticnet. Letting the tuner explore penalty types means
-        # solver has to follow along.
-        penalty = self.params.get("penalty", "l2")
+        # sklearn 1.8+ deprecates the `penalty` keyword and infers penalty
+        # type from l1_ratio (0=pure L2, 1=pure L1, intermediate=elasticnet).
+        # Strip `penalty` if present (legacy configs / stale tune DBs) so we
+        # don't trigger the FutureWarning and the inconsistency UserWarning
+        # when penalty disagrees with l1_ratio.
+        self.params.pop("penalty", None)
+        # Derive solver from l1_ratio when not explicitly set: lbfgs is fast
+        # but only handles pure L2 (l1_ratio == 0); saga handles the full
+        # L1 / L2 / elasticnet spectrum.
         if "solver" not in self.params:
-            if penalty in ("l1", "elasticnet"):
-                self.params["solver"] = "saga"
-            else:
-                self.params["solver"] = "lbfgs"
-        # l1_ratio is only meaningful for elasticnet; drop it otherwise to
-        # avoid sklearn's "l1_ratio is only used when penalty=elasticnet"
-        # warning.
-        if penalty != "elasticnet" and "l1_ratio" in self.params:
-            del self.params["l1_ratio"]
+            l1_ratio = self.params.get("l1_ratio") or 0.0
+            self.params["solver"] = "lbfgs" if l1_ratio == 0.0 else "saga"
         self._model = None
         self._impute_medians: np.ndarray | None = None
 

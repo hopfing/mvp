@@ -64,11 +64,10 @@ DEFAULT_SEARCH_SPACES: dict[str, dict[str, dict[str, Any]]] = {
     },
     "logistic": {
         "C": {"type": "float", "low": 0.0001, "high": 10.0, "log": True},
-        # Penalty type — L1 does feature selection, L2 shrinks, elasticnet
-        # mixes both. LogisticModel auto-sets solver="saga" when penalty is
-        # l1/elasticnet (lbfgs default doesn't support those).
-        "penalty": {"type": "categorical", "choices": ["l1", "l2", "elasticnet"]},
-        # l1_ratio only has effect when penalty="elasticnet" (0=pure L2, 1=pure L1)
+        # l1_ratio spans the full L2 → elasticnet → L1 spectrum: 0.0=pure L2,
+        # 1.0=pure L1, intermediate=elasticnet mix. Replaces sklearn's deprecated
+        # `penalty=` keyword (removed in sklearn 1.10). LogisticModel derives
+        # solver from l1_ratio (lbfgs for 0, saga otherwise).
         "l1_ratio": {"type": "float", "low": 0.0, "high": 1.0},
     },
     "random_forest": {
