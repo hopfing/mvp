@@ -61,6 +61,22 @@ DEFAULT_SEARCH_SPACES: dict[str, dict[str, dict[str, Any]]] = {
         "reg_lambda": {"type": "float", "low": 0.1, "high": 10.0, "log": True},
         "max_delta_step": {"type": "int", "low": 0, "high": 5},
         "scale_pos_weight": {"type": "float", "low": 0.9, "high": 1.1},
+        # grow_policy: depthwise = balanced trees (max_depth is the binding
+        # control); lossguide = split the leaf with highest loss reduction
+        # next regardless of depth (max_leaves becomes binding). lossguide
+        # is what LightGBM does by default.
+        "grow_policy": {"type": "categorical", "choices": ["depthwise", "lossguide"]},
+        # max_leaves: cap on total leaves per tree. 0=no limit (fine for
+        # depthwise, where max_depth caps the tree shape). Constraining
+        # makes lossguide grow narrower trees focused on high-loss regions.
+        "max_leaves": {"type": "int", "low": 0, "high": 256, "step": 16},
+        # tree_method: how splits are searched. hist (default) uses binned
+        # histograms; approx uses quantile sketches; exact evaluates every
+        # value (most precise, much slower).
+        "tree_method": {"type": "categorical", "choices": ["hist", "approx", "exact"]},
+        # max_bin: histogram bins for tree_method=hist (and approx). More
+        # bins = finer split candidates but slower and more memory.
+        "max_bin": {"type": "categorical", "choices": [128, 256, 512]},
     },
     "logistic": {
         "C": {"type": "float", "low": 0.0001, "high": 10.0, "log": True},

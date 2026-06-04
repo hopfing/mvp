@@ -223,6 +223,14 @@ class XGBoostModel(BaseModel):
         # drop them here when the chosen booster isn't dart.
         if resolved.get("booster", "gbtree") != "dart":
             resolved = {k: v for k, v in resolved.items() if k not in ("rate_drop", "skip_drop")}
+        # tree_method="exact" doesn't support: colsample_bynode (hard error),
+        # grow_policy=lossguide (lossguide requires histogram-based splits),
+        # or max_bin (histogram-only). Force compatible values rather than
+        # failing the trial.
+        if resolved.get("tree_method") == "exact":
+            resolved = {k: v for k, v in resolved.items() if k not in ("colsample_bynode", "max_bin")}
+            if resolved.get("grow_policy") == "lossguide":
+                resolved["grow_policy"] = "depthwise"
         self.params = {
             "objective": "binary:logistic",
             "eval_metric": "logloss",
@@ -336,6 +344,12 @@ class XGBoostMTLModel(BaseModel):
         # them every fit. The tuner samples them unconditionally per trial.
         if resolved.get("booster", "gbtree") != "dart":
             resolved = {k: v for k, v in resolved.items() if k not in ("rate_drop", "skip_drop")}
+        # tree_method="exact" doesn't support colsample_bynode, lossguide, or
+        # max_bin. Force compatible values rather than failing the trial.
+        if resolved.get("tree_method") == "exact":
+            resolved = {k: v for k, v in resolved.items() if k not in ("colsample_bynode", "max_bin")}
+            if resolved.get("grow_policy") == "lossguide":
+                resolved["grow_policy"] = "depthwise"
 
         # n_estimators is consumed by xgb.train as num_boost_round, not a
         # `params` entry. Pop it out the same way XGBoostModel does.
