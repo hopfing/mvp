@@ -99,6 +99,14 @@ DEFAULT_SEARCH_SPACES: dict[str, dict[str, dict[str, Any]]] = {
         # max_samples controls per-tree sample fraction when bootstrap=True;
         # sklearn ignores when bootstrap=False. Meaningful bias/variance lever.
         "max_samples": {"type": "categorical", "choices": [None, 0.5, 0.7, 0.85, 1.0]},
+        # ccp_alpha: cost-complexity pruning. Prunes subtrees whose contribution
+        # to loss reduction doesn't justify their complexity. Different
+        # regularization mechanism than min_samples_*/max_depth.
+        "ccp_alpha": {"type": "float", "low": 0.0, "high": 0.05},
+        # min_weight_fraction_leaf: leaf must have at least this fraction of
+        # total sample weight. Different from min_samples_leaf when
+        # sample_weight is non-uniform (runner passes time-decay weights).
+        "min_weight_fraction_leaf": {"type": "float", "low": 0.0, "high": 0.05},
     },
     "neural_net": {
         "hidden_layers": {"type": "categorical", "choices": ["32", "64", "32-16", "64-32", "128-64", "256-128", "64-32-16", "128-64-32"]},
