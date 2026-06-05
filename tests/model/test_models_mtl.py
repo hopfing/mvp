@@ -308,6 +308,34 @@ class TestXGBoostMTLModel:
         assert "weight_won" not in model.params
         assert "weight_game_margin" not in model.params
 
+    def test_tree_method_forced_to_hist(self, model_params):
+        """multi_output_tree (vector leaf) only builds under tree_method=hist;
+        exact/approx hard-error in xgb.train. The tuner samples tree_method
+        unconditionally, so the wrapper must drop a non-hist value rather than
+        let it override the hist default and fail the trial."""
+        for bad in ("exact", "approx"):
+            params = dict(model_params)
+            params["tree_method"] = bad
+            model = XGBoostMTLModel(
+                params=params,
+                target_names=["won", "game_margin", "set_margin", "set_count"],
+            )
+            assert model.params["tree_method"] == "hist"
+
+    def test_tree_method_forced_to_hist_smoke(self, synthetic, model_params):
+        """End-to-end: a config that pins tree_method=exact must still fit
+        (previously raised XGBoostError at gbtree.cc:205)."""
+        X, y = synthetic
+        params = dict(model_params)
+        params["tree_method"] = "exact"
+        model = XGBoostMTLModel(
+            params=params,
+            target_names=["won", "game_margin", "set_margin", "set_count"],
+        )
+        model.fit(X[:300], y[:300])
+        proba = model.predict_proba(X[300:])
+        assert proba.shape == (100,)
+
     def test_stale_weight_keys_dropped_defensively(self):
         """weight_* keys for targets NOT in target_names get silently dropped
         so they don't leak to XGBoost as unknown parameters (which would

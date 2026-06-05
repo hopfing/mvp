@@ -344,12 +344,13 @@ class XGBoostMTLModel(BaseModel):
         # them every fit. The tuner samples them unconditionally per trial.
         if resolved.get("booster", "gbtree") != "dart":
             resolved = {k: v for k, v in resolved.items() if k not in ("rate_drop", "skip_drop")}
-        # tree_method="exact" doesn't support colsample_bynode, lossguide, or
-        # max_bin. Force compatible values rather than failing the trial.
-        if resolved.get("tree_method") == "exact":
-            resolved = {k: v for k, v in resolved.items() if k not in ("colsample_bynode", "max_bin")}
-            if resolved.get("grow_policy") == "lossguide":
-                resolved["grow_policy"] = "depthwise"
+        # multi_strategy=multi_output_tree (vector leaf) is only supported under
+        # tree_method=hist (gbtree.cc:205); exact/approx hard-error. The tuner
+        # samples tree_method unconditionally, so drop it here and let the hist
+        # default below stand rather than failing the trial. Under hist the
+        # exact-only incompatibilities (colsample_bynode, max_bin, lossguide)
+        # don't apply, so nothing else needs coercing.
+        resolved.pop("tree_method", None)
 
         # n_estimators is consumed by xgb.train as num_boost_round, not a
         # `params` entry. Pop it out the same way XGBoostModel does.

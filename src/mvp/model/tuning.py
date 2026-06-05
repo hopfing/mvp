@@ -269,6 +269,12 @@ class HyperparamTuner:
         # set_margin tuned to 0.96 (right at the prior 1.0 ceiling).
         mtl_block = self.base_config.get("mtl")
         if mtl_block:
+            # MTL trains vector-leaf multi-output trees, which XGBoost only
+            # supports under tree_method=hist (gbtree.cc:205). Drop tree_method
+            # from the search space so trials don't log an exact/approx value
+            # that the model wrapper silently overrides to hist, and so the
+            # TPE dimension isn't wasted on an ignored param.
+            self.search_space.pop("tree_method", None)
             for aux in mtl_block.get("auxiliary_targets", []) or []:
                 self.search_space[f"weight_{aux}"] = {
                     "type": "float", "low": 0.01, "high": 5.0, "log": True,
