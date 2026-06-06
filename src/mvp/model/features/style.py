@@ -572,6 +572,7 @@ for _m in _STYLE_MATCHUP_PAIRS:
 @feature(
     name="is_power_server",
     params=[],
+    impute=None,
     description="Top-tertile rolling 1st-serve speed (power serve type)",
     depends_on=["style_avg_1st_serve_speed"],
     mirror=True,
@@ -584,6 +585,7 @@ def is_power_server() -> pl.Expr:
 @feature(
     name="is_placement_server",
     params=[],
+    impute=None,
     description="Bottom-tertile rolling 1st-serve speed (placement serve type)",
     depends_on=["style_avg_1st_serve_speed"],
     mirror=True,
@@ -596,6 +598,7 @@ def is_placement_server() -> pl.Expr:
 @feature(
     name="is_counterpuncher",
     params=[],
+    impute=None,
     description="Bottom-tertile rolling winner rate (defensive rally type)",
     depends_on=["style_winner_rate"],
     mirror=True,
@@ -608,6 +611,7 @@ def is_counterpuncher() -> pl.Expr:
 @feature(
     name="is_aggressive_baseliner",
     params=[],
+    impute=None,
     description="Top-tertile rolling winner rate (aggressive rally type)",
     depends_on=["style_winner_rate"],
     mirror=True,
@@ -620,6 +624,7 @@ def is_aggressive_baseliner() -> pl.Expr:
 @feature(
     name="is_net_rusher",
     params=[],
+    impute=None,
     description="Comes forward frequently (above 75th percentile)",
     depends_on=["style_net_approach_frequency"],
     mirror=True,
@@ -632,6 +637,7 @@ def is_net_rusher() -> pl.Expr:
 @feature(
     name="is_clay_specialist",
     params=[],
+    impute=None,
     description="Strong clay Elo adjustment (existing elo_clay_specialist > threshold)",
     depends_on=["elo_clay_specialist"],
     mirror=True,
@@ -644,6 +650,7 @@ def is_clay_specialist() -> pl.Expr:
 @feature(
     name="is_hard_specialist",
     params=[],
+    impute=None,
     description="Strong hard Elo adjustment (existing elo_hard_specialist > threshold)",
     depends_on=["elo_hard_specialist"],
     mirror=True,
@@ -656,6 +663,7 @@ def is_hard_specialist() -> pl.Expr:
 @feature(
     name="is_clutch_player",
     params=[],
+    impute=None,
     description="High BP save and BP convert rates (above median both)",
     depends_on=["svc_bp_save_pct", "ret_bp_convert_pct"],
     mirror=True,
@@ -677,6 +685,7 @@ def is_clutch_player() -> pl.Expr:
 @feature(
     name="matchup_power_serve_vs_strong_return",
     params=[],
+    impute=None,
     description="Player is power server AND opponent has strong return",
     depends_on=["is_power_server", "ret_first_serve_win_pct"],
     mirror=True,
@@ -692,6 +701,7 @@ def matchup_power_serve_vs_strong_return() -> pl.Expr:
 @feature(
     name="matchup_placement_serve_vs_strong_return",
     params=[],
+    impute=None,
     description="Player is placement server AND opponent has strong return",
     depends_on=["is_placement_server", "ret_first_serve_win_pct"],
     mirror=True,
@@ -707,6 +717,7 @@ def matchup_placement_serve_vs_strong_return() -> pl.Expr:
 @feature(
     name="matchup_aggressor_vs_counterpuncher",
     params=[],
+    impute=None,
     description="Player is aggressive baseliner AND opponent is counterpuncher",
     depends_on=["is_aggressive_baseliner", "is_counterpuncher"],
     mirror=True,
@@ -721,6 +732,7 @@ def matchup_aggressor_vs_counterpuncher() -> pl.Expr:
 @feature(
     name="matchup_counterpuncher_vs_aggressor",
     params=[],
+    impute=None,
     description="Player is counterpuncher AND opponent is aggressive baseliner",
     depends_on=["is_counterpuncher", "is_aggressive_baseliner"],
     mirror=True,
@@ -735,6 +747,7 @@ def matchup_counterpuncher_vs_aggressor() -> pl.Expr:
 @feature(
     name="matchup_both_power_servers",
     params=[],
+    impute=None,
     description="Both players are power servers",
     depends_on=["is_power_server"],
     mirror=False,
@@ -750,6 +763,7 @@ def matchup_both_power_servers() -> pl.Expr:
 @feature(
     name="matchup_both_counterpunchers",
     params=[],
+    impute=None,
     description="Both players are counterpunchers",
     depends_on=["is_counterpuncher"],
     mirror=False,
@@ -765,6 +779,7 @@ def matchup_both_counterpunchers() -> pl.Expr:
 @feature(
     name="matchup_net_rusher_vs_passer",
     params=[],
+    impute=None,
     description="Player is net rusher AND opponent has high passing frequency",
     depends_on=["is_net_rusher", "style_passing_frequency"],
     mirror=True,

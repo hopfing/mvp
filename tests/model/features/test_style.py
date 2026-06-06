@@ -591,3 +591,29 @@ class TestStyleFeatureCount:
             if self._is_style_feature(n)
         ]
         assert len(style_names) == len(set(style_names))
+
+
+class TestBinaryIndicatorImpute:
+    """Nullable binary indicators must stay null (impute=None), not median-filled.
+
+    Median of a ~33%-fire binary is 0, so median-imputation would merge "unknown"
+    (no style data) into "not-this-type". These must preserve null.
+    """
+
+    _INDICATORS = [
+        "is_power_server", "is_placement_server", "is_aggressive_baseliner",
+        "is_counterpuncher", "is_net_rusher", "is_clutch_player",
+        "is_clay_specialist", "is_hard_specialist",
+        "matchup_power_serve_vs_strong_return",
+        "matchup_placement_serve_vs_strong_return",
+        "matchup_aggressor_vs_counterpuncher",
+        "matchup_counterpuncher_vs_aggressor",
+        "matchup_both_power_servers",
+        "matchup_both_counterpunchers",
+        "matchup_net_rusher_vs_passer",
+    ]
+
+    def test_impute_none(self):
+        reg = get_registry()
+        for name in self._INDICATORS:
+            assert reg.get(name).impute is None, f"{name} should have impute=None"
