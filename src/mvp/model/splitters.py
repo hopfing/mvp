@@ -212,27 +212,61 @@ class DateSlidingWindowSplitter(BaseSplitter):
         self.test_months = test_months
         self.date_col = date_col
 
-    def split(self, df: pl.DataFrame) -> Iterator[tuple[list[int], list[int]]]:
-        sorted_df = df.with_row_index("_idx").sort(self.date_col)
-        dates = sorted_df[self.date_col].cast(pl.Date)
-        idx = sorted_df["_idx"]
+    def _bounds(
+        self, min_date: date, max_date: date
+    ) -> list[tuple[date, date, date, date]]:
+        """Generate (train_start, train_end, test_start, test_end) windows.
 
-        min_date = dates.min()
-        max_date = dates.max()
+        Single source of truth for fold geometry, shared by ``split`` and
+        ``date_windows`` so the two can never drift.
+        """
         anchor = date(min_date.year, min_date.month, 1)
         upper = _add_months(date(max_date.year, max_date.month, 1), 1)
         first_test_start = _add_months(anchor, self.train_months)
 
+        windows: list[tuple[date, date, date, date]] = []
         i = 0
         while True:
             test_start = _add_months(first_test_start, i * self.test_months)
             test_end = _add_months(test_start, self.test_months)
             if test_end > upper:
                 break
-
             train_start = _add_months(test_start, -self.train_months)
             train_end = test_start
+            windows.append((train_start, train_end, test_start, test_end))
+            i += 1
+        return windows
 
+    def date_windows(
+        self, df: pl.DataFrame
+    ) -> list[tuple[date, date, date, date]]:
+        """Return fold date windows that hold data on *df*.
+
+        Used to freeze fold geometry from a reference (full, unmasked) frame so
+        resampled subsets can be assigned to identical folds. Only windows with
+        both train and test rows present in *df* are returned, matching the
+        folds ``split`` would yield on the same frame.
+        """
+        dates = df[self.date_col].cast(pl.Date)
+        min_date, max_date = dates.min(), dates.max()
+        out: list[tuple[date, date, date, date]] = []
+        for train_start, train_end, test_start, test_end in self._bounds(
+            min_date, max_date
+        ):
+            has_train = ((dates >= train_start) & (dates < train_end)).any()
+            has_test = ((dates >= test_start) & (dates < test_end)).any()
+            if has_train and has_test:
+                out.append((train_start, train_end, test_start, test_end))
+        return out
+
+    def split(self, df: pl.DataFrame) -> Iterator[tuple[list[int], list[int]]]:
+        sorted_df = df.with_row_index("_idx").sort(self.date_col)
+        dates = sorted_df[self.date_col].cast(pl.Date)
+        idx = sorted_df["_idx"]
+
+        for train_start, train_end, test_start, test_end in self._bounds(
+            dates.min(), dates.max()
+        ):
             train_mask = (dates >= train_start) & (dates < train_end)
             test_mask = (dates >= test_start) & (dates < test_end)
 
@@ -241,8 +275,6 @@ class DateSlidingWindowSplitter(BaseSplitter):
 
             if train_idx and test_idx:
                 yield train_idx, test_idx
-
-            i += 1
 
 
 class DateExpandingWindowSplitter(BaseSplitter):
@@ -272,25 +304,55 @@ class DateExpandingWindowSplitter(BaseSplitter):
         self.test_months = test_months
         self.date_col = date_col
 
-    def split(self, df: pl.DataFrame) -> Iterator[tuple[list[int], list[int]]]:
-        sorted_df = df.with_row_index("_idx").sort(self.date_col)
-        dates = sorted_df[self.date_col].cast(pl.Date)
-        idx = sorted_df["_idx"]
+    def _bounds(
+        self, min_date: date, max_date: date
+    ) -> list[tuple[date, date, date, date]]:
+        """Generate (train_start, train_end, test_start, test_end) windows.
 
-        min_date = dates.min()
-        max_date = dates.max()
+        Expanding: ``train_start`` is the fixed anchor for every fold; the train
+        window grows as ``test_start`` advances. Single source of truth shared by
+        ``split`` and ``date_windows``.
+        """
         anchor = date(min_date.year, min_date.month, 1)
         upper = _add_months(date(max_date.year, max_date.month, 1), 1)
         first_test_start = _add_months(anchor, self.initial_train_months)
 
+        windows: list[tuple[date, date, date, date]] = []
         i = 0
         while True:
             test_start = _add_months(first_test_start, i * self.test_months)
             test_end = _add_months(test_start, self.test_months)
             if test_end > upper:
                 break
+            windows.append((anchor, test_start, test_start, test_end))
+            i += 1
+        return windows
 
-            train_mask = (dates >= anchor) & (dates < test_start)
+    def date_windows(
+        self, df: pl.DataFrame
+    ) -> list[tuple[date, date, date, date]]:
+        """Return fold date windows that hold data on *df* (see sliding variant)."""
+        dates = df[self.date_col].cast(pl.Date)
+        min_date, max_date = dates.min(), dates.max()
+        out: list[tuple[date, date, date, date]] = []
+        for train_start, train_end, test_start, test_end in self._bounds(
+            min_date, max_date
+        ):
+            has_train = ((dates >= train_start) & (dates < train_end)).any()
+            has_test = ((dates >= test_start) & (dates < test_end)).any()
+            if has_train and has_test:
+                out.append((train_start, train_end, test_start, test_end))
+        return out
+
+    def split(self, df: pl.DataFrame) -> Iterator[tuple[list[int], list[int]]]:
+        sorted_df = df.with_row_index("_idx").sort(self.date_col)
+        dates = sorted_df[self.date_col].cast(pl.Date)
+        idx = sorted_df["_idx"]
+
+        for train_start, train_end, test_start, test_end in self._bounds(
+            dates.min(), dates.max()
+        ):
+            train_mask = (dates >= train_start) & (dates < train_end)
             test_mask = (dates >= test_start) & (dates < test_end)
 
             train_idx = idx.filter(train_mask).to_list()
@@ -298,8 +360,6 @@ class DateExpandingWindowSplitter(BaseSplitter):
 
             if train_idx and test_idx:
                 yield train_idx, test_idx
-
-            i += 1
 
 
 class DateWindowSplitter(BaseSplitter):

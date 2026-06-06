@@ -11,13 +11,19 @@ import numpy as np
 import polars as pl
 import yaml
 
+from mvp.common.base_job import get_local_data_root
 from mvp.model.discovery.config import DiscoveryConfig
 from mvp.model.discovery.fast_selection import FastForwardSelector
 from mvp.model.discovery.importance import compute_importance
 from mvp.model.discovery.segments import (
     SegmentImportanceResult,
 )
+from mvp.model.discovery.null_importance import (
+    NullImportanceResult,
+    run_null_importance,
+)
 from mvp.model.discovery.selection import FeatureSelector, SelectionResult
+from mvp.model.discovery.stability import StabilityResult, run_stability_selection
 from mvp.model.discovery.sweeps import (
     ParameterSweep,
     SweepResult,
@@ -38,6 +44,8 @@ class DiscoveryResult:
     segment_importance: dict[str, SegmentImportanceResult] = field(
         default_factory=dict
     )
+    stability_result: StabilityResult | None = None
+    null_importance_result: NullImportanceResult | None = None
     final_metric: float = 0.0
     n_experiments: int = 0
     recommended_config_path: Path | None = None
@@ -352,6 +360,168 @@ class FeatureDiscovery:
 
         return importance_fn
 
+    def _build_candidate_pool(
+        self, all_features: list[str] | None = None
+    ) -> list[str]:
+        """Build the candidate feature pool from registry + config filters.
+
+        Applies window_sizes, paramed_only, include, compute_only, and exclude.
+        Shared by forward selection and stability selection so both search the
+        same pool.
+        """
+        feat_cfg = self.config.discovery.features
+
+        if all_features is None:
+            all_features = get_all_feature_specs(window_sizes=feat_cfg.window_sizes)
+
+        if feat_cfg.paramed_only:
+            n_before = len(all_features)
+            all_features = [f for f in all_features if "(days=" in f]
+            self._log(
+                f"paramed_only=True: filtered {n_before} → {len(all_features)} "
+                "features (kept only specs with days param)"
+            )
+
+        if feat_cfg.include:
+            included = set(feat_cfg.include)
+            all_features = [f for f in all_features if f in included]
+            self._log(f"Restricted to {len(all_features)} features via include")
+
+        if feat_cfg.compute_only:
+            compute_only = set(feat_cfg.compute_only)
+            all_features = [f for f in all_features if f not in compute_only]
+
+        if feat_cfg.exclude:
+            excluded = set(feat_cfg.exclude)
+            all_features = [f for f in all_features if f not in excluded]
+            self._log(f"Excluding {len(excluded)} features: {list(excluded)}")
+
+        return all_features
+
+    def run_stability(self) -> StabilityResult:
+        """Run stability selection over the candidate pool.
+
+        Precomputes the feature matrix once on the full (unmasked) frame, freezing
+        fold geometry and per-fold medians, then runs forward selection over
+        ``n_resamples`` tournament-level subsamples and aggregates per-spec
+        selection frequency.
+        """
+        stab_cfg = self.config.discovery.stability_selection
+        assert stab_cfg is not None
+        feat_cfg = self.config.discovery.features
+        ni_cfg = self.config.discovery.null_importance
+
+        all_features = self._build_candidate_pool()
+
+        # Precompute once on the full frame — reused by both the null-importance
+        # screen and stability selection.
+        fast = FastForwardSelector(
+            config=self.config,
+            all_feature_specs=all_features,
+            matches_path=self.matches_path,
+            cache_dir=self.cache_dir,
+        )
+        fast.precompute()
+
+        # PHASE 0: Null-importance pre-filter (optional) — shrink the pool that
+        # stability selection then searches.
+        self._null_importance_result = None
+        if ni_cfg is not None:
+            self._log("PHASE 0: Null-importance pre-filter")
+            ni_cache_dir = (
+                get_local_data_root() / "discovery" / "null_importance_cache"
+            )
+            ni_result = run_null_importance(
+                fast,
+                all_features=all_features,
+                config=ni_cfg,
+                cache_dir=ni_cache_dir,
+            )
+            self._log_null_importance_report(ni_result)
+            self._null_importance_result = ni_result
+            all_features = ni_result.kept_features
+            if not all_features:
+                raise RuntimeError(
+                    "Null-importance dropped every feature — loosen alpha or "
+                    "check the candidate pool."
+                )
+
+        self._log("PHASE 1: Stability Selection")
+        self._log(
+            f"  {len(all_features)} candidate features, "
+            f"{stab_cfg.n_resamples} resamples at {stab_cfg.resample_unit} level "
+            f"(fraction={stab_cfg.subsample_fraction})"
+        )
+
+        stab_checkpoint = Path(
+            f"discovery_stability_checkpoint_{self.config_path.stem}.json"
+        )
+        result = run_stability_selection(
+            fast,
+            stab_cfg,
+            metric=self.config.discovery.metric,
+            direction=self.config.discovery.direction,
+            all_features=all_features,
+            min_features=feat_cfg.min,
+            max_features=feat_cfg.max,
+            min_delta=self.config.discovery.min_delta,
+            base_features=feat_cfg.base or None,
+            checkpoint_path=stab_checkpoint,
+        )
+
+        self._log_stability_report(result)
+        return result
+
+    def _log_null_importance_report(self, result: NullImportanceResult) -> None:
+        """Log the null-importance screen: how many kept, and what was dropped."""
+        self._log(
+            f"  kept {len(result.kept_features)} / "
+            f"{len(result.kept_features) + len(result.dropped_features)} features "
+            f"(alpha={result.alpha}, {result.n_runs} runs)"
+        )
+        ranked_keep = sorted(
+            result.kept_features,
+            key=lambda f: result.real_importance[f],
+            reverse=True,
+        )
+        for feat in ranked_keep:
+            self._log(
+                f"    keep  p={result.p_value[feat]:.3f}  "
+                f"imp={result.real_importance[feat]:.4f}  {feat}"
+            )
+        self._log(f"  dropped {len(result.dropped_features)} features below alpha")
+
+    def _log_stability_report(self, result: StabilityResult) -> None:
+        """Log the stability-selection profile and diagnostics."""
+        self._log("")
+        self._log(
+            f"STABILITY PROFILE ({result.n_resamples_effective}/"
+            f"{result.n_resamples_requested} resamples effective)"
+        )
+        self._log("-" * 50)
+        ranked = sorted(
+            result.selection_frequency.items(), key=lambda kv: kv[1], reverse=True
+        )
+        for feat, freq in ranked:
+            mark = "*" if freq >= result.threshold else " "
+            self._log(f"  {mark} {freq:5.2f}  {feat}")
+        self._log(
+            f"  (threshold π={result.threshold}; {len(result.selected_features)} "
+            "features selected)"
+        )
+        if result.stopping_rounds:
+            sr = np.array(result.stopping_rounds)
+            self._log(
+                f"  stopping round: min={sr.min()} median={int(np.median(sr))} "
+                f"max={sr.max()}"
+            )
+        if result.resample_match_counts:
+            mc = np.array(result.resample_match_counts)
+            self._log(
+                f"  resample rows: min={mc.min()} median={int(np.median(mc))} "
+                f"max={mc.max()}"
+            )
+
     def run_selection(
         self,
         all_features: list[str] | None = None,
@@ -371,32 +541,7 @@ class FeatureDiscovery:
             SelectionResult with selected features.
         """
         feat_cfg = self.config.discovery.features
-
-        if all_features is None:
-            all_features = get_all_feature_specs(
-                window_sizes=feat_cfg.window_sizes
-            )
-
-        if feat_cfg.paramed_only:
-            n_before = len(all_features)
-            all_features = [f for f in all_features if "(days=" in f]
-            self._log(
-                f"paramed_only=True: filtered {n_before} → {len(all_features)} features (kept only specs with days param)"
-            )
-
-        if feat_cfg.include:
-            included = set(feat_cfg.include)
-            all_features = [f for f in all_features if f in included]
-            self._log(f"Restricted to {len(all_features)} features via include")
-
-        if feat_cfg.compute_only:
-            compute_only = set(feat_cfg.compute_only)
-            all_features = [f for f in all_features if f not in compute_only]
-
-        if feat_cfg.exclude:
-            excluded = set(feat_cfg.exclude)
-            all_features = [f for f in all_features if f not in excluded]
-            self._log(f"Excluding {len(excluded)} features: {list(excluded)}")
+        all_features = self._build_candidate_pool(all_features)
 
         self._log("PHASE 1: Feature Selection")
 
@@ -565,6 +710,47 @@ class FeatureDiscovery:
         finally:
             temp_path.unlink(missing_ok=True)
 
+    def _run_stability_workflow(self) -> DiscoveryResult:
+        """Run the stability-selection workflow and assemble a DiscoveryResult."""
+        stability_result = self.run_stability()
+        ni_result = getattr(self, "_null_importance_result", None)
+        selected = stability_result.selected_features
+
+        if not selected:
+            self._log(
+                "No features cleared the stability threshold "
+                f"(π={stability_result.threshold}). Inspect the profile above and "
+                "lower selection_threshold if appropriate."
+            )
+            self._last_result = DiscoveryResult(
+                selected_features=[],
+                stability_result=stability_result,
+                null_importance_result=ni_result,
+                n_experiments=self._experiment_count,
+            )
+            return self._last_result
+
+        # Score the selected set once for reporting (logs to MLflow).
+        final_result = self._run_experiment(selected, log_to_mlflow=True)
+        final_metric = final_result["metrics"].get(self.config.discovery.metric, 0.0)
+
+        self._log("")
+        self._log("RESULTS")
+        self._log("-" * 30)
+        self._log(f"Stability-selected feature set ({len(selected)} features):")
+        for f in selected:
+            self._log(f"  - {f}  ({stability_result.selection_frequency[f]:.2f})")
+        self._log(f"Final {self.config.discovery.metric}: {final_metric:.4f}")
+
+        self._last_result = DiscoveryResult(
+            selected_features=selected,
+            stability_result=stability_result,
+            null_importance_result=ni_result,
+            final_metric=final_metric,
+            n_experiments=self._experiment_count,
+        )
+        return self._last_result
+
     def run(
         self,
         checkpoint_path: Path | None = None,
@@ -581,6 +767,11 @@ class FeatureDiscovery:
         """
         self._log(f"Discovery: {self.config_path.stem}")
         self._log("=" * 60)
+
+        # Stability selection is a distinct Phase 1 that supersedes the single
+        # forward-selection pass; it returns its own feature set and profile.
+        if self.config.discovery.stability_selection is not None:
+            return self._run_stability_workflow()
 
         # Phase 1: Selection
         selection_result = self.run_selection(

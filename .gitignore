@@ -16,3 +16,6 @@ projections/
 # Environment
 .env
 /scripts/
+
+# Discovery runtime artifacts (resume checkpoints)
+discovery_stability_checkpoint_*.json

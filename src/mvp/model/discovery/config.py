@@ -41,6 +41,50 @@ class MetaDiscoveryConfig(BaseModel):
     weighting: Literal["binary", "magnitude"] = "magnitude"
 
 
+class NullImportanceConfig(BaseModel):
+    """Configuration for the null-importance (target-permutation) pre-filter.
+
+    Trains the model on the real target vs ``n_runs`` shuffled-target copies and
+    drops any feature whose real gain importance does not significantly exceed its
+    own shuffled-target null distribution. Used to shrink the candidate pool
+    before stability selection so the B-resample loop isn't spent rediscovering
+    that pure-noise features are noise. Gain-based, so it requires a tree model
+    (xgboost / random_forest).
+    """
+
+    n_runs: int = 20  # number of shuffled-target fits forming the null
+    # Per-feature permutation-test significance: keep a feature when the fraction
+    # of null runs whose importance >= the real importance is <= alpha.
+    alpha: float = 0.05
+    random_seed: int = 42
+
+
+class StabilitySelectionConfig(BaseModel):
+    """Configuration for stability selection.
+
+    Wraps the base selector (forward selection) and runs it over ``n_resamples``
+    subsamples of the data, keeping features (or feature clusters) selected in at
+    least ``selection_threshold`` of the runs. Fold geometry and per-fold medians
+    are frozen from the full unmasked frame; each resample only thins rows within
+    those fixed folds, so selection frequency reflects feature reproducibility,
+    not shifts in the evaluation period.
+    """
+
+    n_resamples: int = 50
+    resample_unit: Literal["tournament", "match"] = "tournament"
+    subsample_fraction: float = 0.5
+    selection_threshold: float = 0.6  # pi: keep features selected in >= this fraction
+    # Minimum train AND test rows a fold must retain in a resample to be scored.
+    # Folds below this are skipped for that resample (logged) rather than
+    # propagating a degenerate metric into the selection-frequency count.
+    min_fold_rows: int = 100
+    # Secondary-view only: when set, report a family/correlation-cluster
+    # aggregate of selection probability alongside the primary per-spec view.
+    # None disables the clustered view (per-spec frequencies are always primary).
+    cluster_corr_threshold: float | None = None
+    random_seed: int = 42
+
+
 class DiscoveryFeaturesConfig(BaseModel):
     """Feature configuration for discovery."""
 
@@ -66,6 +110,8 @@ class DiscoveryOptions(BaseModel):
     importance_threshold: float = 0.05
     min_delta: float = 0.0  # forward selection: minimum absolute improvement to accept a candidate
     meta_discovery: MetaDiscoveryConfig | None = None
+    stability_selection: StabilitySelectionConfig | None = None
+    null_importance: NullImportanceConfig | None = None
     features: DiscoveryFeaturesConfig = DiscoveryFeaturesConfig()
 
 

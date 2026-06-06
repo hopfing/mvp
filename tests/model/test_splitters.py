@@ -332,3 +332,58 @@ class TestDateSplitterDatetimeColumn:
         splits = list(splitter.split(df))
         # Anchor 2022-01, first test 2024-01. Folds: 2024, 2025 → 2 folds
         assert len(splits) == 2
+
+
+class TestDateWindowsFrozenGeometry:
+    """Tests for date_windows() — frozen fold geometry for stability selection."""
+
+    def _df(self, start: date, n_months: int) -> pl.DataFrame:
+        """One row on the 1st of each of n_months consecutive months."""
+        dates = [_add_months(date(start.year, start.month, 1), i) for i in range(n_months)]
+        return pl.DataFrame(
+            {
+                "effective_match_date": dates,
+                "won": [i % 2 == 0 for i in range(n_months)],
+            }
+        )
+
+    def test_sliding_windows_match_split_folds(self):
+        """date_windows yields exactly the folds split() produces, in order."""
+        df = self._df(date(2020, 1, 1), 60)  # 2020-01 .. 2024-12
+        sp = DateSlidingWindowSplitter(train_months=24, test_months=12)
+        windows = sp.date_windows(df)
+        splits = list(sp.split(df))
+        assert len(windows) == len(splits)
+        # Each split's train/test rows must fall inside the matching window bounds.
+        dates = df["effective_match_date"].cast(pl.Date).to_list()
+        for (tr_s, tr_e, te_s, te_e), (train_idx, test_idx) in zip(windows, splits):
+            assert all(tr_s <= dates[i] < tr_e for i in train_idx)
+            assert all(te_s <= dates[i] < te_e for i in test_idx)
+
+    def test_expanding_windows_match_split_folds(self):
+        df = self._df(date(2020, 1, 1), 60)
+        sp = DateExpandingWindowSplitter(initial_train_months=24, test_months=12)
+        windows = sp.date_windows(df)
+        splits = list(sp.split(df))
+        assert len(windows) == len(splits)
+        # Expanding: train_start is the fixed anchor for every fold.
+        assert len({w[0] for w in windows}) == 1
+
+    def test_windows_frozen_under_subset(self):
+        """Dropping early rows must NOT shift the windows derived from the full frame.
+
+        This is the core invariant: geometry is frozen from the full frame, so a
+        resample's rows are assigned to identical folds.
+        """
+        full = self._df(date(2020, 1, 1), 60)
+        sp = DateSlidingWindowSplitter(train_months=24, test_months=12)
+        full_windows = sp.date_windows(full)
+        # A resample that drops 2020 entirely: split() on it would re-anchor and
+        # shift folds, but the frozen windows are computed from `full`, so the
+        # subset's rows just map into a subset of the same windows.
+        subset = full.filter(pl.col("effective_match_date") >= date(2021, 1, 1))
+        # Re-deriving from the subset re-anchors (demonstrates the drift we avoid).
+        subset_windows = sp.date_windows(subset)
+        assert subset_windows[0][2] != full_windows[0][2]  # test_start shifted
+        # But the full-frame windows are the geometry stability selection uses.
+        assert full_windows[0][2] == date(2022, 1, 1)

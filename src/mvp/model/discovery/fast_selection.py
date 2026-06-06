@@ -209,6 +209,15 @@ class FastForwardSelector:
         self.folds: list[tuple[np.ndarray, np.ndarray]] = []
         self.circuit: np.ndarray | None = None
         self.fold_medians: list[np.ndarray] = []
+        # Frozen geometry for stability selection. row_dates is the per-row
+        # effective_match_date (aligned to X_wide); tournament_key is the
+        # per-row resample unit (tournament_id + year). fold_windows holds the
+        # date-window tuples derived once from the full unmasked frame so that
+        # resampled subsets are assigned to identical folds. All populated in
+        # precompute(); empty/None under non-date splitters.
+        self.row_dates: np.ndarray | None = None
+        self.tournament_key: np.ndarray | None = None
+        self.fold_windows: list[tuple] = []
         # Per-column FS-time fill strategy and constant value, indexed parallel
         # to col_to_idx. Built in precompute() from the registry, consumed by
         # the scorer to honor each feature's declared impute contract instead
@@ -254,9 +263,13 @@ class FastForwardSelector:
         )
 
         # Extra columns needed for filtering, target resolution, etc.
+        # tournament_id / year are the resample unit for stability selection;
+        # loaded when available (availability-filtered below) and otherwise
+        # silently absent — stability's tournament-level resampling guards on
+        # their presence.
         extra_columns = [
             "won", "reason", "sets_played", "best_of",
-            "circuit", "surface", "round",
+            "circuit", "surface", "round", "tournament_id", "year",
         ]
         # MTL aux derivation reads raw matches.parquet columns directly.
         # Without these in the projection list, the with_columns call would
@@ -536,6 +549,21 @@ class FastForwardSelector:
         )
         self.y = df[target_col].to_numpy().astype(int)
         self.circuit = df["circuit"].to_numpy()
+        # Frozen-geometry inputs for stability selection. Dates drive fold
+        # assignment of resampled rows; tournament_key is the resample unit.
+        self.row_dates = df["effective_match_date"].cast(pl.Date).to_numpy()
+        if "tournament_id" in df.columns and "year" in df.columns:
+            self.tournament_key = (
+                df.select(
+                    pl.concat_str(
+                        [pl.col("tournament_id").cast(pl.Utf8),
+                         pl.col("year").cast(pl.Utf8)],
+                        separator="_",
+                    )
+                ).to_series().to_numpy()
+            )
+        else:
+            self.tournament_key = None
         # MTL: extract aux y as a 2D `[n_rows, num_aux]` float array. Column
         # order mirrors `mtl_aux_targets` (and therefore `self.aux_target_names`).
         if is_mtl and aux_col_names:
@@ -550,6 +578,9 @@ class FastForwardSelector:
             self.X_wide = self.X_wide[row_mask]
             self.y = self.y[row_mask]
             self.circuit = self.circuit[row_mask]
+            self.row_dates = self.row_dates[row_mask]
+            if self.tournament_key is not None:
+                self.tournament_key = self.tournament_key[row_mask]
             if self.y_aux is not None:
                 self.y_aux = self.y_aux[row_mask]
             if sample_weights is not None:
@@ -580,6 +611,12 @@ class FastForwardSelector:
             (np.array(train_idx), np.array(test_idx))
             for train_idx, test_idx in splitter.split(df)
         ]
+        # Freeze fold date-windows from this (full, unmasked) frame so stability
+        # selection can assign resampled subsets to identical folds. Only date
+        # splitters expose date_windows(); other splitters leave this empty and
+        # stability selection is unavailable (guarded at the orchestration layer).
+        if hasattr(splitter, "date_windows"):
+            self.fold_windows = splitter.date_windows(df)
 
         logger.info("Precomputing per-fold medians for %d folds", len(self.folds))
         t0 = time.perf_counter()
@@ -590,11 +627,23 @@ class FastForwardSelector:
             self.fold_medians.append(medians)
         logger.info("Per-fold medians computed in %.1fs", time.perf_counter() - t0)
 
-    def create_scorer(self, metric: str) -> Callable[[list[str]], float]:
+    def create_scorer(
+        self,
+        metric: str,
+        folds: list[tuple[np.ndarray, np.ndarray]] | None = None,
+        fold_medians: list[np.ndarray] | None = None,
+    ) -> Callable[[list[str]], float]:
         """Return a fast scorer function that evaluates feature subsets.
 
         Args:
             metric: Metric name to extract from compute_metrics (e.g. "log_loss").
+            folds: Optional per-resample folds (global row-index pairs into
+                X_wide). Defaults to the full-frame folds. Stability selection
+                passes a thinned set here; medians stay frozen via fold_medians.
+            fold_medians: Optional per-fold medians aligned to *folds*. Defaults
+                to the full-frame frozen medians. When passing resampled folds
+                that skip some windows, pass the matching median subset so
+                fold_idx alignment holds.
 
         Returns:
             Callable that takes a list of feature specs and returns the metric value.
@@ -603,8 +652,8 @@ class FastForwardSelector:
         y = self.y
         sample_weights = self.sample_weights
         col_to_idx = self.col_to_idx
-        folds = self.folds
-        fold_medians = self.fold_medians
+        folds = self.folds if folds is None else folds
+        fold_medians = self.fold_medians if fold_medians is None else fold_medians
         fill_strategies = self.fill_strategies
         fill_constants = self.fill_constants
         model_type = self.config.model.type
@@ -768,3 +817,57 @@ class FastForwardSelector:
             return float(np.mean(fold_metrics))
 
         return scorer
+
+    def resample_folds(
+        self, row_mask: np.ndarray, min_fold_rows: int,
+    ) -> tuple[list[tuple[np.ndarray, np.ndarray]], list[np.ndarray], int]:
+        """Assign a resample's rows to the frozen fold windows.
+
+        For each frozen fold window, selects the masked rows whose date falls in
+        the window's train / test range. Fold geometry and medians come from the
+        full unmasked frame, so the only thing that varies across resamples is
+        which rows populate each fixed fold — selection frequency therefore
+        reflects feature reproducibility, not a shifting evaluation period.
+
+        Folds where either side falls below ``min_fold_rows`` are skipped (a
+        degenerate fold would inject noise into the selection-frequency count).
+
+        Args:
+            row_mask: Boolean mask over X_wide rows (the resample subset).
+            min_fold_rows: Minimum train AND test rows for a fold to be kept.
+
+        Returns:
+            (folds, fold_medians, n_skipped) where folds/fold_medians are aligned
+            and restricted to surviving windows, ready to pass to create_scorer.
+        """
+        if not self.fold_windows:
+            raise ValueError(
+                "Frozen fold windows unavailable — stability selection requires "
+                "a date splitter (date_sliding / date_expanding)."
+            )
+        if len(self.fold_windows) != len(self.fold_medians):
+            raise RuntimeError(
+                "fold_windows / fold_medians length mismatch "
+                f"({len(self.fold_windows)} vs {len(self.fold_medians)}); "
+                "frozen geometry is inconsistent."
+            )
+
+        dates = self.row_dates
+        folds: list[tuple[np.ndarray, np.ndarray]] = []
+        medians: list[np.ndarray] = []
+        skipped = 0
+        for fold_idx, (tr_s, tr_e, te_s, te_e) in enumerate(self.fold_windows):
+            tr_s64, tr_e64 = np.datetime64(tr_s), np.datetime64(tr_e)
+            te_s64, te_e64 = np.datetime64(te_s), np.datetime64(te_e)
+            train_idx = np.nonzero(
+                row_mask & (dates >= tr_s64) & (dates < tr_e64)
+            )[0]
+            test_idx = np.nonzero(
+                row_mask & (dates >= te_s64) & (dates < te_e64)
+            )[0]
+            if len(train_idx) < min_fold_rows or len(test_idx) < min_fold_rows:
+                skipped += 1
+                continue
+            folds.append((train_idx, test_idx))
+            medians.append(self.fold_medians[fold_idx])
+        return folds, medians, skipped
