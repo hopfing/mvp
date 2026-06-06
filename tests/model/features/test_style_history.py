@@ -70,12 +70,13 @@ class TestStyleHistoryRegistration:
         registry = get_registry()
         # 6 universal × 4 metrics = 24
         # 1 surface-aligned composite × 4 metrics = 4
-        # = 28 base + 28 diffs = 56 total
+        # 3 vs-opp-type axes × 4 metrics = 12
+        # = 40 base + 40 diffs = 80 total
         count = sum(
             1 for n in registry.list_features()
             if (n.startswith(("matches_vs_", "wins_vs_", "losses_vs_", "winpct_vs_")))
         )
-        assert count == 56, f"Expected 56 style_history features, got {count}"
+        assert count == 80, f"Expected 80 style_history features, got {count}"
 
 
 class TestUniversalLabelComputation:
@@ -226,3 +227,43 @@ class TestTemporalSafety:
         assert df.with_columns(
             registry.get("winpct_vs_power_server").func().alias("v")
         )["v"][0] == pytest.approx(0.5)
+
+
+class TestVsOppType:
+    """vs-current-opponent's-type composites (serve / rally / net axes)."""
+
+    def _df(self) -> "pl.DataFrame":
+        # Player A history; serve-type axis via opp_is_power_server / opp_is_placement_server.
+        #   m1 power  (won)   m2 placement (lost)  m3 power (lost)
+        #   m4 neutral (won)  m5 power (won)       m6 opp type unknown (null)
+        return pl.DataFrame({
+            "player_id": ["A"] * 6,
+            "effective_match_date": [date(2024, 1, i) for i in range(1, 7)],
+            "won": [1, 0, 0, 1, 1, 1],
+            "opp_is_power_server": pl.Series([1, 0, 1, 0, 1, None], dtype=pl.Int8),
+            "opp_is_placement_server": pl.Series([0, 1, 0, 0, 0, None], dtype=pl.Int8),
+        }).sort("effective_match_date")
+
+    def test_registration(self):
+        reg = get_registry()
+        for axis in ("serve_type", "rally_type", "net_type"):
+            for stat in ("matches", "wins", "losses", "winpct"):
+                feat = reg.get(f"{stat}_vs_opp_{axis}")
+                assert feat.mirror is True
+                assert feat.params == ["days"]
+                assert feat.impute is None  # unknown stays null, not imputed
+
+    def test_matches_selects_current_opp_bucket(self):
+        fn = get_registry().get("matches_vs_opp_serve_type").func
+        result = self._df().with_columns(fn().alias("v"))
+        # prior matches sharing the current opp's serve bucket:
+        # m1 power:0  m2 placement:0  m3 power:{m1}=1  m4 neutral:0  m5 power:{m1,m3}=2  m6 unknown:null
+        assert result["v"].to_list() == [0, 0, 1, 0, 2, None]
+
+    def test_winpct_and_unknown_null(self):
+        fn = get_registry().get("winpct_vs_opp_serve_type").func
+        result = self._df().with_columns(fn().alias("v"))
+        assert result["v"][0] is None          # m1: no prior power → null (not 0.5)
+        assert result["v"][2] == pytest.approx(1.0)   # m3: power priors {m1 won} → 1/1
+        assert result["v"][4] == pytest.approx(0.5)   # m5: power priors {m1 won, m3 lost} → 1/2
+        assert result["v"][5] is None          # m6: opp type unknown → null

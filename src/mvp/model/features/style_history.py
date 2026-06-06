@@ -240,3 +240,141 @@ feature(
 
 for _stat in ("matches", "wins", "losses", "winpct"):
     register_diff(f"{_stat}_vs_surface_specialists")
+
+
+# =============================================================================
+# Vs-current-opponent's-type composites (serve / rally / net axes)
+# =============================================================================
+# Collapse the per-label universal composites into ONE always-relevant column per
+# axis. For each row, accumulate the player's record against opponents that fell in
+# the CURRENT opponent's bucket on that axis, then select that bucket. Buckets are
+# mutually exclusive (tertile/binary labels), so exactly one branch fires; the value
+# is null when the current opponent's type is unknown (label absent). No impute —
+# unknown stays null rather than being merged into a fabricated neutral/0.5.
+
+
+def _opp(label: str) -> pl.Expr:
+    return pl.col(f"opp_is_{label}")
+
+
+# (axis_name, [(bucket_name, current-opp condition), ...], depends_on labels)
+_OPP_TYPE_AXES = [
+    (
+        "serve_type",
+        [
+            ("power", _opp("power_server") == 1),
+            ("placement", _opp("placement_server") == 1),
+            ("neutral", (_opp("power_server") == 0) & (_opp("placement_server") == 0)),
+        ],
+        ["is_power_server", "is_placement_server"],
+    ),
+    (
+        "rally_type",
+        [
+            ("aggressive", _opp("aggressive_baseliner") == 1),
+            ("counterpuncher", _opp("counterpuncher") == 1),
+            ("neutral", (_opp("aggressive_baseliner") == 0) & (_opp("counterpuncher") == 0)),
+        ],
+        ["is_aggressive_baseliner", "is_counterpuncher"],
+    ),
+    (
+        "net_type",
+        [
+            ("rusher", _opp("net_rusher") == 1),
+            ("non_rusher", _opp("net_rusher") == 0),
+        ],
+        ["is_net_rusher"],
+    ),
+]
+
+
+def _build_vs_opp_type(buckets):
+    """Build matches/wins/losses/winpct features gated to the current opp's bucket.
+
+    For each bucket, accumulate the per-stat value over prior matches whose opp fell
+    in that bucket, then select the accumulator for the bucket the CURRENT opp falls
+    in. Null when the current opp's bucket is undefined (its type label is absent).
+    """
+
+    def _accum(expr: pl.Expr, days: int | None) -> pl.Expr:
+        if days is None:
+            return cumulative_sum(expr, group_by="player_id")
+        return rolling_sum(expr, days=days, group_by="player_id")
+
+    def _mask(cond: pl.Expr) -> pl.Expr:
+        # Nullable labels: an unknown-style prior opp counts as 0 toward every bucket
+        # (we only accumulate matches whose opp bucket is known).
+        return cond.cast(pl.Int64).fill_null(0)
+
+    def _select(branches: list[tuple[pl.Expr, pl.Expr]]) -> pl.Expr:
+        acc = pl.when(branches[0][0]).then(branches[0][1])
+        for cond, val in branches[1:]:
+            acc = acc.when(cond).then(val)
+        return acc.otherwise(None)
+
+    def matches_vs(days: int | None = None) -> pl.Expr:
+        return _select([(c, _accum(_mask(c), days)) for _, c in buckets])
+
+    def wins_vs(days: int | None = None) -> pl.Expr:
+        won = pl.col("won").cast(pl.Int64)
+        return _select([(c, _accum(won * _mask(c), days)) for _, c in buckets])
+
+    def losses_vs(days: int | None = None) -> pl.Expr:
+        lost = 1 - pl.col("won").cast(pl.Int64)
+        return _select([(c, _accum(lost * _mask(c), days)) for _, c in buckets])
+
+    def winpct_vs(days: int | None = None) -> pl.Expr:
+        won = pl.col("won").cast(pl.Int64)
+        branches = []
+        for _, c in buckets:
+            m = _mask(c)
+            cum_w = _accum(won * m, days)
+            cum_n = _accum(m, days)
+            branches.append((c, pl.when(cum_n > 0).then(cum_w / cum_n).otherwise(None)))
+        return _select(branches)
+
+    return matches_vs, wins_vs, losses_vs, winpct_vs
+
+
+for _axis, _buckets, _deps in _OPP_TYPE_AXES:
+    _m_ot, _w_ot, _l_ot, _wp_ot = _build_vs_opp_type(_buckets)
+
+    feature(
+        name=f"matches_vs_opp_{_axis}",
+        params=["days"], mirror=True, impute=None, depends_on=_deps,
+        description=(
+            f"Prior matches vs opponents sharing the current opponent's {_axis} "
+            "bucket; null when the current opp's type is unknown. `days` = rolling "
+            "window, omit for career-cumulative."
+        ),
+    )(_m_ot)
+
+    feature(
+        name=f"wins_vs_opp_{_axis}",
+        params=["days"], mirror=True, impute=None, depends_on=_deps,
+        description=(
+            f"Prior wins vs opponents sharing the current opponent's {_axis} bucket; "
+            "null when type unknown. `days` = rolling window, omit for career."
+        ),
+    )(_w_ot)
+
+    feature(
+        name=f"losses_vs_opp_{_axis}",
+        params=["days"], mirror=True, impute=None, depends_on=_deps,
+        description=(
+            f"Prior losses vs opponents sharing the current opponent's {_axis} bucket; "
+            "null when type unknown. `days` = rolling window, omit for career."
+        ),
+    )(_l_ot)
+
+    feature(
+        name=f"winpct_vs_opp_{_axis}",
+        params=["days"], mirror=True, impute=None, depends_on=_deps,
+        description=(
+            f"Win pct vs opponents sharing the current opponent's {_axis} bucket; "
+            "null when no prior or type unknown. `days` = rolling window, omit for career."
+        ),
+    )(_wp_ot)
+
+    for _stat in ("matches", "wins", "losses", "winpct"):
+        register_diff(f"{_stat}_vs_opp_{_axis}")
