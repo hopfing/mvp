@@ -14,7 +14,7 @@ DATE_COL = "effective_match_date"
     params=[],
     description="Days since player last played on current surface",
     mirror=True,
-    impute="median",
+    impute=None,
 )
 def days_since_surface() -> pl.Expr:
     """Days since this player last played on the current surface."""

@@ -23,6 +23,7 @@ def height_diff() -> pl.Expr:
     params=[],
     description="Player age in years at match date",
     mirror=True,
+    impute=None,
 )
 def age() -> pl.Expr:
     """Player age in years (clipped to 14-55 range, null if outside)."""

@@ -22,6 +22,7 @@ def glicko_mu() -> pl.Expr:
     name="glicko_rd",
     description="Glicko-2 rating deviation (uncertainty)",
     mirror=True,
+    impute=None,
 )
 def glicko_rd() -> pl.Expr:
     return pl.col("player_glicko_rd")

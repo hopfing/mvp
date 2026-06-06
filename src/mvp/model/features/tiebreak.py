@@ -68,6 +68,7 @@ def tiebreaks_played_feat(days: int | None = None) -> pl.Expr:
     params=["days"],
     description="How often matches go to deciding set (windowed or all-time)",
     mirror=True,
+    impute=None,
 )
 def deciding_set_pct(days: int | None = None) -> pl.Expr:
     """Percentage of matches going to deciding set."""

@@ -17,6 +17,7 @@ from mvp.model.registry import feature, register_diff
     params=["days"],
     description="Win percentage on current venue type (indoor/outdoor)",
     mirror=True,
+    impute=None,
 )
 def venue_win_pct(days: int | None = None) -> pl.Expr:
     """Win percentage on current venue type (indoor/outdoor)."""
@@ -288,6 +289,7 @@ def is_indoor() -> pl.Expr:
     params=[],
     description="Round as ordinal from round_order column (Q1=1 through F=12)",
     match_level=True,
+    impute=None,
 )
 def round_ordinal() -> pl.Expr:
     """Round encoded as ordinal progression. Uses existing round_order column."""

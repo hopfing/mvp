@@ -136,6 +136,7 @@ def _lookup_from_table(table: np.ndarray, s: pl.Series) -> pl.Series:
     description="Theoretical P(hold serve) from iid model (non-linear transform of service point win rate)",
     depends_on=["pts_service_won_pct"],
     mirror=True,
+    impute=None,
 )
 def iid_hold_prob(days: int | None = None) -> pl.Expr:
     if days is None:

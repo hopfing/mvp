@@ -43,7 +43,7 @@ def opp_elo_beaten_avg(days: int | None = None) -> pl.Expr:
     params=["days"],
     description="Avg Elo of all opponents faced (strength of schedule)",
     mirror=True,
-    impute="median",
+    impute=None,
 )
 def opp_elo_faced_avg(days: int | None = None) -> pl.Expr:
     """Average Elo of all opponents faced."""

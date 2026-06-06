@@ -212,6 +212,7 @@ def surface_ret_bp_convert_pct(days: int | None = None) -> pl.Expr:
     params=["days"],
     description="Service points won % on current surface",
     mirror=True,
+    impute=None,
 )
 def surface_pts_service_won_pct(days: int | None = None) -> pl.Expr:
     return ratio_feature(
@@ -225,6 +226,7 @@ def surface_pts_service_won_pct(days: int | None = None) -> pl.Expr:
     params=["days"],
     description="Return points won % on current surface",
     mirror=True,
+    impute=None,
 )
 def surface_pts_return_won_pct(days: int | None = None) -> pl.Expr:
     return ratio_feature(
