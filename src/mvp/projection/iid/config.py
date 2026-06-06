@@ -26,6 +26,9 @@ class ServeModelConfig(BaseModel):
     window: int | None = 90
     clip_min: float = 0.30
     clip_max: float = 0.90
+    # Compress the favorite-underdog serve gap toward the pair mean (1.0 = off).
+    # Preserves serve levels; only narrows the between-player differential.
+    gap_shrink: float = 1.0
     # Used only when type == "matchup"
     feature_columns: list[str] = []
     match_level_columns: list[str] = []

@@ -147,6 +147,7 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
         engine: Any = None,
         clip_min: float = SERVE_PROB_MIN,
         clip_max: float = SERVE_PROB_MAX,
+        gap_shrink: float = 1.0,
     ) -> None:
         if not match_level_features and not point_level_features:
             raise ValueError(
@@ -159,6 +160,7 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
         self.params = dict(params or {})
         self.clip_min = clip_min
         self.clip_max = clip_max
+        self.gap_shrink = gap_shrink
         # Paths default to the standard data locations; tests can override.
         self._points_path = Path(points_path) if points_path is not None else None
         self._matches_path = Path(matches_path) if matches_path is not None else None
@@ -696,6 +698,33 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
                 return np.hstack([X_match, X_point])
             return X_match
 
+        # Gap-shrink: compress the favorite-underdog serve gap toward the pair
+        # mean by `gap_shrink` (1.0 = no-op), via a per-player constant offset
+        # derived at the neutral opening state. Preserves each player's
+        # state-dependent modulation; only narrows the between-player level gap.
+        if self.gap_shrink != 1.0:
+            from mvp.projection.iid.score_state import ScoreState  # local import
+            _neutral = ScoreState(
+                serve_num=1, game_score_server="0", game_score_returner="0",
+                is_tiebreak=False, set_score_server_games=0,
+                set_score_returner_games=0, sets_won_server=0,
+                sets_won_returner=0, best_of=3,
+            )
+            p_a0 = np.clip(
+                self._model.predict_proba(_X_for(self._X_match_A, _neutral)),
+                self.clip_min, self.clip_max,
+            )
+            p_b0 = np.clip(
+                self._model.predict_proba(_X_for(self._X_match_B, _neutral)),
+                self.clip_min, self.clip_max,
+            )
+            m0 = 0.5 * (p_a0 + p_b0)
+            shift_a = (self.gap_shrink - 1.0) * (p_a0 - m0)
+            shift_b = (self.gap_shrink - 1.0) * (p_b0 - m0)
+        else:
+            shift_a = 0.0
+            shift_b = 0.0
+
         cache_a: dict[tuple, np.ndarray] = {}
         cache_b: dict[tuple, np.ndarray] = {}
 
@@ -705,7 +734,7 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
             if cached is not None:
                 return cached
             X = _X_for(self._X_match_A, state)  # type: ignore[arg-type]
-            p = self._model.predict_proba(X)  # type: ignore[union-attr]
+            p = self._model.predict_proba(X) + shift_a  # type: ignore[union-attr]
             p = np.clip(p, self.clip_min, self.clip_max)
             cache_a[key] = p
             return p
@@ -716,7 +745,7 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
             if cached is not None:
                 return cached
             X = _X_for(self._X_match_B, state)  # type: ignore[arg-type]
-            p = self._model.predict_proba(X)  # type: ignore[union-attr]
+            p = self._model.predict_proba(X) + shift_b  # type: ignore[union-attr]
             p = np.clip(p, self.clip_min, self.clip_max)
             cache_b[key] = p
             return p

@@ -87,6 +87,7 @@ def _build_serve_model(
             engine=engine,
             clip_min=cfg.clip_min,
             clip_max=cfg.clip_max,
+            gap_shrink=cfg.gap_shrink,
         )
     raise ValueError(f"Unknown serve model type: {cfg.type}")
 
@@ -415,10 +416,12 @@ def _settle_totals(preds: pl.DataFrame, totals: pl.DataFrame, dist) -> pl.DataFr
         return pl.DataFrame()
 
     pmf = dist.total_games_pmf
+    total_support = np.arange(pmf.shape[1], dtype=np.float64)
     rows = []
     for r in joined.iter_rows(named=True):
         line = float(r["points"])
         idx = int(r["_row_idx"])
+        e_total = float((total_support * pmf[idx]).sum())  # chain's expected total
         p_over_model = float(_p_over_at(pmf[idx:idx+1], line)[0])
         p_under_model = 1.0 - p_over_model
 
@@ -460,6 +463,9 @@ def _settle_totals(preds: pl.DataFrame, totals: pl.DataFrame, dist) -> pl.DataFr
                 "model_p": model_p,
                 "edge": edge,
                 "edge_novig": model_p - p_novig,
+                # Mean gate: does the chain's expected total land on the bet side?
+                "mean_covers": int(e_total > line) if side == "over"
+                else int(e_total < line),
                 "actual": actual,
                 "won": won,
                 "profit": profit,
@@ -478,10 +484,14 @@ def _settle_spreads(preds: pl.DataFrame, spreads: pl.DataFrame, dist) -> pl.Data
 
     pmf = dist.spread_pmf
     offset = dist.spread_offset
+    margin_support = np.arange(pmf.shape[1], dtype=np.float64) - offset
     rows = []
     for r in joined.iter_rows(named=True):
         idx = int(r["_row_idx"])
         a_id = r["a_player_id"]
+        e_a_margin = float((margin_support * pmf[idx]).sum())  # chain's expected (a-b) margin
+        e_p1_margin = e_a_margin if r["p1_id"] == a_id else -e_a_margin
+        e_p2_margin = -e_p1_margin
         # p1's points (book row) — the spread on p1's side.
         p1_points = float(r["p1_points"])
         p2_points = float(r["p2_points"])
@@ -512,9 +522,9 @@ def _settle_spreads(preds: pl.DataFrame, spreads: pl.DataFrame, dist) -> pl.Data
         p1_p_novig = p1_implied / overround
         p2_p_novig = p2_implied / overround
 
-        for side, model_p, odds, won, points, p_novig in [
-            ("p1", p_p1_model, r["p1_odds"], p1_won, p1_points, p1_p_novig),
-            ("p2", p_p2_model, r["p2_odds"], p2_won, p2_points, p2_p_novig),
+        for side, model_p, odds, won, points, p_novig, e_side_margin in [
+            ("p1", p_p1_model, r["p1_odds"], p1_won, p1_points, p1_p_novig, e_p1_margin),
+            ("p2", p_p2_model, r["p2_odds"], p2_won, p2_points, p2_p_novig, e_p2_margin),
         ]:
             book_p = 1.0 / odds
             edge = model_p - book_p
@@ -542,6 +552,8 @@ def _settle_spreads(preds: pl.DataFrame, spreads: pl.DataFrame, dist) -> pl.Data
                 "model_p": model_p,
                 "edge": edge,
                 "edge_novig": model_p - p_novig,
+                # Mean gate: does the chain's expected margin cover this line?
+                "mean_covers": int(e_side_margin > -points),
                 "actual": a_margin if r["p1_id"] == a_id else -a_margin,
                 "won": won,
                 "profit": profit,
@@ -757,3 +769,13 @@ def print_backtest_summary(csv_path: Path) -> None:
         _print_view(f"{tag} — MAIN LINE — RAW", sub_main, "edge")
         _print_view(f"{tag} — ALL LINES — NO-VIG", sub_all, "edge_novig")
         _print_view(f"{tag} — ALL LINES — RAW", sub_all, "edge")
+
+        # Mean-gated: only bets whose expected total/margin lands on the bet side
+        # (the chain's point estimate agrees with the side, not just a pmf tail).
+        if "mean_covers" in sub_raw.columns:
+            mean_raw = sub_raw.filter(pl.col("mean_covers") == 1)
+            if len(mean_raw):
+                mean_all = _dedupe_best_price(mean_raw)
+                mean_main = _dedupe_best_price(_select_main_line(mean_raw))
+                _print_view(f"{tag} — MEAN-GATED MAIN LINE — NO-VIG", mean_main, "edge_novig")
+                _print_view(f"{tag} — MEAN-GATED ALL LINES — NO-VIG", mean_all, "edge_novig")
