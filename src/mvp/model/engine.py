@@ -379,6 +379,8 @@ class FeatureEngine:
         self._registry = get_registry()
         self._manifest_path = self.cache_dir / "manifest.json"
         self._manifest: dict[str, Any] = self._load_manifest()
+        # Per-feature compute timings (phase, spec, seconds); reset per ensure_cached.
+        self._feature_timings: list[tuple[str, str, float]] = []
 
     def _load_manifest(self) -> dict[str, Any]:
         """Load the cache manifest from disk.
@@ -537,16 +539,37 @@ class FeatureEngine:
         col_name: str,
         params: dict[str, Any],
         cache_key: str,
+        phase: str = "",
     ) -> pl.DataFrame:
-        """Compute a feature's expression, add to df, cache it, log timing."""
+        """Compute a feature's expression, add to df, cache it, record timing."""
         feature_def = self._registry.get(base_name)
         t0 = time.perf_counter()
         expr = feature_def.func(**params)
         df = df.with_columns(expr.alias(col_name))
         elapsed = time.perf_counter() - t0
-        logger.info("Computed %s in %.2fs", cache_spec, elapsed)
+        # Record timing for the end-of-run summary instead of one INFO line each.
+        self._feature_timings.append((phase, cache_spec, elapsed))
+        logger.debug("Computed %s in %.2fs", cache_spec, elapsed)
         self._cache_feature(cache_spec, df, [col_name], cache_key)
         return df
+
+    def _log_timing_summary(self) -> None:
+        """Log per-phase feature counts/time and the slowest features."""
+        timings = getattr(self, "_feature_timings", [])
+        if not timings:
+            return
+        from collections import defaultdict
+        by_phase: dict[str, list] = defaultdict(lambda: [0, 0.0])
+        for phase, _spec, elapsed in timings:
+            by_phase[phase][0] += 1
+            by_phase[phase][1] += elapsed
+        logger.info("Feature computation timing by phase:")
+        for phase, (n, tot) in by_phase.items():
+            logger.info("  %-14s %5d computed  %8.1fs", phase or "?", n, tot)
+        slowest = sorted(timings, key=lambda x: x[2], reverse=True)[:15]
+        logger.info("Slowest %d features:", len(slowest))
+        for _phase, spec, elapsed in slowest:
+            logger.info("  %7.2fs  %s", elapsed, spec)
 
     def _batch_join_cached(
         self, df: pl.DataFrame, cache_specs: list[str]
@@ -729,6 +752,8 @@ class FeatureEngine:
             The cache_key (callers need it to load from cache).
         """
         t0 = time.perf_counter()
+        self._feature_timings: list[tuple[str, str, float]] = []
+        from tqdm import tqdm
 
         # Resolve dependencies
         feature_specs = self._resolve_dependencies(feature_specs)
@@ -776,7 +801,10 @@ class FeatureEngine:
             self._invalidate_cache()
 
         # Phase 0: match-level features (small, do all at once)
-        for spec in match_level_specs:
+        for spec in tqdm(
+            match_level_specs, desc="Phase 0: match-level",
+            leave=False, ncols=120, disable=not match_level_specs,
+        ):
             _prefix, base_name, full_name, params = parse_feature_spec(spec)
             col_name = build_column_name(full_name, params)
             cache_spec = base_name
@@ -786,6 +814,7 @@ class FeatureEngine:
             if not self._is_cached(cache_spec, cache_key):
                 df = self._compute_and_cache_feature(
                     df, base_name, cache_spec, col_name, params, cache_key,
+                    phase="match-level",
                 )
 
         if match_level_specs:
@@ -814,12 +843,18 @@ class FeatureEngine:
         # Track raw parquet columns so we never drop them — other features
         # (e.g. elo_diff) may reference them via pl.col("player_elo").
         parquet_cols = set(df.columns)
+        base_pbar = tqdm(
+            total=len(uncached_base), desc="Phase 1: base",
+            leave=False, ncols=120, disable=not uncached_base,
+        )
         for i in range(0, len(uncached_base), batch_size):
             batch = uncached_base[i : i + batch_size]
             for base_name, cache_spec, player_col, params in batch:
                 df = self._compute_and_cache_feature(
                     df, base_name, cache_spec, player_col, params, cache_key,
+                    phase="base",
                 )
+                base_pbar.update(1)
             # Drop computed columns before next batch, but preserve raw
             # parquet columns that other features may reference directly
             cols_to_drop = [
@@ -829,6 +864,7 @@ class FeatureEngine:
             if cols_to_drop:
                 df = df.drop(cols_to_drop)
             check_memory(f"ensure_cached: after base batch {i // batch_size + 1}")
+        base_pbar.close()
 
         logger.info(
             "Phase 1: %d base features (%d computed, %d already cached)",
@@ -840,7 +876,10 @@ class FeatureEngine:
         # First, handle opp mirroring: for opp derived features with mirror=True,
         # we need the player_ version computed and mirrored. For ensure_cached we
         # just need to compute the player_ version (mirroring happens at load time).
-        for spec in derived_specs:
+        for spec in tqdm(
+            derived_specs, desc="Phase 3: derived",
+            leave=False, ncols=120, disable=not derived_specs,
+        ):
             prefix, base_name, full_name, params = parse_feature_spec(spec)
             feature_def = self._registry.get(base_name)
             col_name = build_column_name(full_name, params)
@@ -893,6 +932,7 @@ class FeatureEngine:
 
             df = self._compute_and_cache_feature(
                 df, base_name, cache_spec, col_name, params, cache_key,
+                phase="derived",
             )
 
             # Drop everything we added
@@ -905,7 +945,10 @@ class FeatureEngine:
             check_memory("ensure_cached: after derived")
 
         # Phase 6: match-level derived features
-        for spec in match_level_derived_specs:
+        for spec in tqdm(
+            match_level_derived_specs, desc="Phase 6: match-derived",
+            leave=False, ncols=120, disable=not match_level_derived_specs,
+        ):
             _prefix, base_name, full_name, params = parse_feature_spec(spec)
             col_name = build_column_name(full_name, params)
             cache_spec = base_name
@@ -945,11 +988,13 @@ class FeatureEngine:
 
             df = self._compute_and_cache_feature(
                 df, base_name, cache_spec, col_name, params, cache_key,
+                phase="match-derived",
             )
             added_cols = [c for c in df.columns if c not in dep_cols_before]
             if added_cols:
                 df = df.drop(added_cols)
 
+        self._log_timing_summary()
         elapsed = time.perf_counter() - t0
         logger.info("ensure_cached complete in %.1fs", elapsed)
         return cache_key
