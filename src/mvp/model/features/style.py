@@ -30,6 +30,13 @@ def _rolling(expr: pl.Expr, days: int | None = None) -> pl.Expr:
 
 _THRESHOLD_WINDOW_DAYS = 730
 
+# Type-axis tertile cut points. Each style axis is a single TYPE dimension split
+# in thirds: top tertile = one archetype, bottom = the other, middle = neutral
+# (no label fires). Mutually exclusive by construction. Labels stay null when the
+# underlying rolling style metric is absent (no impute) so "unknown" != "neutral".
+_LO_TERTILE = 1 / 3
+_HI_TERTILE = 2 / 3
+
 
 def _rolling_threshold(col: str, q: float) -> pl.Expr:
     """Time-aware threshold: rolling quantile of `col` over past 730d, excluding current row.
@@ -565,69 +572,49 @@ for _m in _STYLE_MATCHUP_PAIRS:
 @feature(
     name="is_power_server",
     params=[],
-    description="High serve speed AND high ace rate (top quartile both)",
-    depends_on=["style_avg_1st_serve_speed", "svc_ace_pct"],
+    description="Top-tertile rolling 1st-serve speed (power serve type)",
+    depends_on=["style_avg_1st_serve_speed"],
     mirror=True,
 )
 def is_power_server() -> pl.Expr:
-    speed_p50 = _rolling_threshold("player_style_avg_1st_serve_speed", 0.50)
-    ace_p50 = _rolling_threshold("player_svc_ace_pct", 0.50)
-    return (
-        (pl.col("player_style_avg_1st_serve_speed") > speed_p50)
-        & (pl.col("player_svc_ace_pct") > ace_p50)
-    ).cast(pl.Int8)
+    hi = _rolling_threshold("player_style_avg_1st_serve_speed", _HI_TERTILE)
+    return (pl.col("player_style_avg_1st_serve_speed") >= hi).cast(pl.Int8)
 
 
 @feature(
     name="is_placement_server",
     params=[],
-    description="High ace rate but below-average speed (winning with angles, not power)",
-    depends_on=["style_avg_1st_serve_speed", "svc_ace_pct"],
+    description="Bottom-tertile rolling 1st-serve speed (placement serve type)",
+    depends_on=["style_avg_1st_serve_speed"],
     mirror=True,
 )
 def is_placement_server() -> pl.Expr:
-    speed_p50 = _rolling_threshold("player_style_avg_1st_serve_speed", 0.50)
-    ace_p50 = _rolling_threshold("player_svc_ace_pct", 0.50)
-    return (
-        (pl.col("player_svc_ace_pct") > ace_p50)
-        & (pl.col("player_style_avg_1st_serve_speed") <= speed_p50)
-    ).cast(pl.Int8)
+    lo = _rolling_threshold("player_style_avg_1st_serve_speed", _LO_TERTILE)
+    return (pl.col("player_style_avg_1st_serve_speed") <= lo).cast(pl.Int8)
 
 
 @feature(
     name="is_counterpuncher",
     params=[],
-    description="Wins long rallies, few UEs, strong return (all above median)",
-    depends_on=["style_long_rally_win_pct", "style_ue_rate", "ret_first_serve_win_pct"],
+    description="Bottom-tertile rolling winner rate (defensive rally type)",
+    depends_on=["style_winner_rate"],
     mirror=True,
 )
 def is_counterpuncher() -> pl.Expr:
-    rally_p50 = _rolling_threshold("player_style_long_rally_win_pct", 0.50)
-    ue_p50 = _rolling_threshold("player_style_ue_rate", 0.50)
-    ret_p50 = _rolling_threshold("player_ret_first_serve_win_pct", 0.50)
-    return (
-        (pl.col("player_style_long_rally_win_pct") > rally_p50)
-        & (pl.col("player_style_ue_rate") < ue_p50)
-        & (pl.col("player_ret_first_serve_win_pct") > ret_p50)
-    ).cast(pl.Int8)
+    lo = _rolling_threshold("player_style_winner_rate", _LO_TERTILE)
+    return (pl.col("player_style_winner_rate") <= lo).cast(pl.Int8)
 
 
 @feature(
     name="is_aggressive_baseliner",
     params=[],
-    description="High winner rate, efficient, strong ground strokes (all above median)",
-    depends_on=["style_winner_rate", "style_winner_ue_ratio", "style_ground_stroke_winner_rate"],
+    description="Top-tertile rolling winner rate (aggressive rally type)",
+    depends_on=["style_winner_rate"],
     mirror=True,
 )
 def is_aggressive_baseliner() -> pl.Expr:
-    wr_p50 = _rolling_threshold("player_style_winner_rate", 0.50)
-    wur_p50 = _rolling_threshold("player_style_winner_ue_ratio", 0.50)
-    gswr_p50 = _rolling_threshold("player_style_ground_stroke_winner_rate", 0.50)
-    return (
-        (pl.col("player_style_winner_rate") > wr_p50)
-        & (pl.col("player_style_winner_ue_ratio") > wur_p50)
-        & (pl.col("player_style_ground_stroke_winner_rate") > gswr_p50)
-    ).cast(pl.Int8)
+    hi = _rolling_threshold("player_style_winner_rate", _HI_TERTILE)
+    return (pl.col("player_style_winner_rate") >= hi).cast(pl.Int8)
 
 
 @feature(

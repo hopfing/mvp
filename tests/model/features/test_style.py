@@ -487,41 +487,53 @@ class TestStyleBoolLabels:
         registry = get_registry()
         feat = registry.get("is_power_server")
         assert feat.mirror is True
-        assert "style_avg_1st_serve_speed" in feat.depends_on
-        assert "svc_ace_pct" in feat.depends_on
+        assert feat.depends_on == ["style_avg_1st_serve_speed"]
 
     def test_is_power_server_computes(self):
-        """Threshold is a rolling-730d median; need enough prior rows for stable test."""
+        """Top-tertile rolling-730d 1st-serve speed (population threshold, closed-left)."""
         from datetime import date as _date
-
-        from mvp.model.features.style import is_power_server
-        # 20 rows spread over a year, with speed and ace decreasing.
-        # After the rolling window is populated, the last row should be below median
-        # on both axes (label = 0) and the first row above median (but row 0 has no
-        # prior data, so its threshold is null → undefined). We test row 19 (low) and
-        # an early-but-not-first row (row 2) where the threshold is established.
         from datetime import timedelta as _td
 
-        speeds = [225.0 - 2.5 * i for i in range(20)]   # 225 → 177.5
-        aces = [0.30 - 0.012 * i for i in range(20)]    # 0.30 → 0.072
-        dates = [_date(2024, 1, 1) + _td(days=15 * i) for i in range(20)]
+        from mvp.model.features.style import is_power_server
+        # 30 history rows spanning a stable speed distribution (~180..240), then two
+        # test rows: a clearly-fast one (>= 2/3 quantile -> power) and a clearly-slow
+        # one (<= 2/3 quantile -> not power). Threshold uses prior 730d only.
+        speeds = [180.0, 195.0, 210.0, 225.0, 240.0] * 6
+        dates = [_date(2023, 1, 1) + _td(days=20 * i) for i in range(30)]
+        speeds += [245.0, 175.0]
+        dates += [_date(2024, 8, 1), _date(2024, 8, 21)]
 
         df = pl.DataFrame({
             "effective_match_date": dates,
             "player_style_avg_1st_serve_speed": speeds,
-            "player_svc_ace_pct": aces,
         }).lazy()
         result = df.with_columns(
             is_power_server().alias("is_power_server")
         ).collect()
-        # Last row: very low speed/ace relative to rolling 730d population → not a power server
-        assert result["is_power_server"][19] == 0
-        # Mid-late high row: row 5 has speed > rolling median (which is median of rows 0-4) AND ace > rolling median
-        # rolling median of speeds[0..4] = speeds[2] = 220 (since [225,222.5,220,217.5,215])
-        # row 5 speed = 212.5 < 220 → not power server in this monotone setup
-        # The monotone decline means no row beyond row 0 is above its rolling median on speed.
-        # So we mostly just verify low rows are NOT labeled power server.
-        assert result["is_power_server"][15] == 0
+        # 2/3 quantile of the history (~225); 245 is above -> power, 175 below -> not.
+        assert result["is_power_server"][30] == 1
+        assert result["is_power_server"][31] == 0
+
+    def test_is_placement_server_computes(self):
+        """Bottom-tertile rolling-730d 1st-serve speed."""
+        from datetime import date as _date
+        from datetime import timedelta as _td
+
+        from mvp.model.features.style import is_placement_server
+        speeds = [180.0, 195.0, 210.0, 225.0, 240.0] * 6
+        dates = [_date(2023, 1, 1) + _td(days=20 * i) for i in range(30)]
+        speeds += [175.0, 245.0]   # slow -> placement, fast -> not
+        dates += [_date(2024, 8, 1), _date(2024, 8, 21)]
+
+        df = pl.DataFrame({
+            "effective_match_date": dates,
+            "player_style_avg_1st_serve_speed": speeds,
+        }).lazy()
+        result = df.with_columns(
+            is_placement_server().alias("is_placement_server")
+        ).collect()
+        assert result["is_placement_server"][30] == 1
+        assert result["is_placement_server"][31] == 0
 
     def test_all_8_labels_registered(self):
         registry = get_registry()
