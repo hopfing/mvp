@@ -288,18 +288,21 @@ _OPP_TYPE_AXES = [
 ]
 
 
-def _build_vs_opp_type(buckets):
+def _build_vs_opp_type(buckets, group="player_id"):
     """Build matches/wins/losses/winpct features gated to the current opp's bucket.
 
     For each bucket, accumulate the per-stat value over prior matches whose opp fell
     in that bucket, then select the accumulator for the bucket the CURRENT opp falls
     in. Null when the current opp's bucket is undefined (its type label is absent).
+
+    `group` controls the accumulation scope: "player_id" = cross-surface career;
+    ["player_id", "surface"] = restricted to prior matches on the current surface.
     """
 
     def _accum(expr: pl.Expr, days: int | None) -> pl.Expr:
         if days is None:
-            return cumulative_sum(expr, group_by="player_id")
-        return rolling_sum(expr, days=days, group_by="player_id")
+            return cumulative_sum(expr, group_by=group)
+        return rolling_sum(expr, days=days, group_by=group)
 
     def _mask(cond: pl.Expr) -> pl.Expr:
         # Nullable labels: an unknown-style prior opp counts as 0 toward every bucket
@@ -378,3 +381,143 @@ for _axis, _buckets, _deps in _OPP_TYPE_AXES:
 
     for _stat in ("matches", "wins", "losses", "winpct"):
         register_diff(f"{_stat}_vs_opp_{_axis}")
+
+
+# Surface-conditioned variants: same as above but accumulation restricted to prior
+# matches on the CURRENT surface (group by player + surface). Works on all surfaces
+# (style types, unlike specialist labels, exist on every surface).
+for _axis, _buckets, _deps in _OPP_TYPE_AXES:
+    _m_os, _w_os, _l_os, _wp_os = _build_vs_opp_type(_buckets, group=["player_id", "surface"])
+
+    feature(
+        name=f"surface_matches_vs_opp_{_axis}",
+        params=["days"], mirror=True, impute=None, depends_on=_deps,
+        description=(
+            f"Prior same-surface matches vs opponents sharing the current opp's "
+            f"{_axis} bucket; null when type unknown. `days` = rolling, omit for career."
+        ),
+    )(_m_os)
+
+    feature(
+        name=f"surface_wins_vs_opp_{_axis}",
+        params=["days"], mirror=True, impute=None, depends_on=_deps,
+        description=(
+            f"Prior same-surface wins vs opponents sharing the current opp's {_axis} "
+            "bucket; null when type unknown. `days` = rolling, omit for career."
+        ),
+    )(_w_os)
+
+    feature(
+        name=f"surface_losses_vs_opp_{_axis}",
+        params=["days"], mirror=True, impute=None, depends_on=_deps,
+        description=(
+            f"Prior same-surface losses vs opponents sharing the current opp's {_axis} "
+            "bucket; null when type unknown. `days` = rolling, omit for career."
+        ),
+    )(_l_os)
+
+    feature(
+        name=f"surface_winpct_vs_opp_{_axis}",
+        params=["days"], mirror=True, impute=None, depends_on=_deps,
+        description=(
+            f"Same-surface win pct vs opponents sharing the current opp's {_axis} "
+            "bucket; null when no prior or type unknown. `days` = rolling, omit for career."
+        ),
+    )(_wp_os)
+
+    for _stat in ("matches", "wins", "losses", "winpct"):
+        register_diff(f"surface_{_stat}_vs_opp_{_axis}")
+
+
+# =============================================================================
+# Surface rate stats vs surface specialists (+ elo-weighted quality vs spec)
+# =============================================================================
+# A per-surface rate accumulated only over prior same-surface matches vs specialists
+# of that surface (same gating as the surface_specialists count composite). Fires
+# only on hard/clay (no specialist label elsewhere); null on other surfaces, when
+# no prior, or when the denominator is empty. No impute.
+
+
+def _surf_spec_ratio(num: pl.Expr, den: pl.Expr, days: int | None = None) -> pl.Expr:
+    hard = (
+        pl.col("opp_is_hard_specialist").cast(pl.Int64).fill_null(0)
+        * (pl.col("surface") == "Hard").cast(pl.Int64)
+    )
+    clay = (
+        pl.col("opp_is_clay_specialist").cast(pl.Int64).fill_null(0)
+        * (pl.col("surface") == "Clay").cast(pl.Int64)
+    )
+
+    def acc(e: pl.Expr) -> pl.Expr:
+        if days is None:
+            return cumulative_sum(e, group_by="player_id")
+        return rolling_sum(e, days=days, group_by="player_id")
+
+    nh, dh = acc(num * hard), acc(den * hard)
+    nc, dc = acc(num * clay), acc(den * clay)
+    return (
+        pl.when((pl.col("surface") == "Hard") & (dh > 0)).then(nh / dh)
+        .when((pl.col("surface") == "Clay") & (dc > 0)).then(nc / dc)
+        .otherwise(None)
+    )
+
+
+def _make_surf_spec_fn(num: pl.Expr, den: pl.Expr):
+    def fn(days: int | None = None) -> pl.Expr:
+        return _surf_spec_ratio(num, den, days)
+    return fn
+
+
+_holds = pl.col("svc_games_played") - (pl.col("svc_bp_faced") - pl.col("svc_bp_saved"))
+
+# (feature_name, numerator, denominator) — mirrors the 12 surface_* micro-stats
+_SURF_SPEC_RATIOS = [
+    ("surface_first_serve_win_pct_vs_surf_spec",
+     pl.col("svc_first_serve_pts_won"), pl.col("svc_first_serve_pts_played")),
+    ("surface_second_serve_win_pct_vs_surf_spec",
+     pl.col("svc_second_serve_pts_won"), pl.col("svc_second_serve_pts_played")),
+    ("surface_ace_pct_vs_surf_spec",
+     pl.col("svc_aces"), pl.col("svc_first_serve_att")),
+    ("surface_df_pct_vs_surf_spec",
+     pl.col("svc_double_faults"), pl.col("svc_first_serve_att")),
+    ("surface_first_serve_in_pct_vs_surf_spec",
+     pl.col("svc_first_serve_in"), pl.col("svc_first_serve_att")),
+    ("surface_bp_save_pct_vs_surf_spec",
+     pl.col("svc_bp_saved"), pl.col("svc_bp_faced")),
+    ("surface_hold_pct_vs_surf_spec",
+     _holds, pl.col("svc_games_played")),
+    ("surface_ret_first_serve_win_pct_vs_surf_spec",
+     pl.col("ret_first_serve_pts_won"), pl.col("ret_first_serve_pts_played")),
+    ("surface_ret_second_serve_win_pct_vs_surf_spec",
+     pl.col("ret_second_serve_pts_won"), pl.col("ret_second_serve_pts_played")),
+    ("surface_ret_bp_convert_pct_vs_surf_spec",
+     pl.col("ret_bp_converted"), pl.col("ret_bp_opportunities")),
+    ("surface_pts_service_won_pct_vs_surf_spec",
+     pl.col("pts_service_pts_won"), pl.col("pts_service_pts_played")),
+    ("surface_pts_return_won_pct_vs_surf_spec",
+     pl.col("pts_return_pts_won"), pl.col("pts_return_pts_played")),
+]
+
+for _nm, _num, _den in _SURF_SPEC_RATIOS:
+    feature(
+        name=_nm, params=["days"], mirror=True, impute=None,
+        depends_on=["is_hard_specialist", "is_clay_specialist"],
+        description=(
+            "Surface rate accumulated over prior same-surface matches vs specialists "
+            "of that surface (hard/clay only; null otherwise / no prior). `days` = "
+            "rolling window, omit for career."
+        ),
+    )(_make_surf_spec_fn(_num, _den))
+    register_diff(_nm)
+
+# Elo-weighted win rate vs surface specialists (quality x surf-spec).
+feature(
+    name="quality_win_rate_vs_surf_spec", params=["days"], mirror=True, impute=None,
+    depends_on=["is_hard_specialist", "is_clay_specialist"],
+    description=(
+        "Elo-weighted win rate vs specialists of the current surface, over prior "
+        "same-surface matches (hard/clay only; null otherwise / no prior). `days` = "
+        "rolling window, omit for career."
+    ),
+)(_make_surf_spec_fn(pl.col("won").cast(pl.Float64) * pl.col("opp_elo"), pl.col("opp_elo")))
+register_diff("quality_win_rate_vs_surf_spec")

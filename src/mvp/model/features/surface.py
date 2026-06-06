@@ -49,6 +49,21 @@ def surface_matches(days: int | None = None) -> pl.Expr:
 register_diff("surface_win_pct")
 
 
+@feature(
+    name="surface_quality_win_rate",
+    params=["days"],
+    description="Elo-weighted win rate on current surface (quality_win_rate by surface)",
+    mirror=True,
+    impute=None,
+)
+def surface_quality_win_rate(days: int | None = None) -> pl.Expr:
+    won_weighted = pl.col("won").cast(pl.Float64) * pl.col("opp_elo")
+    return ratio_feature(won_weighted, pl.col("opp_elo"), days, group_by=_SURFACE_GROUP)
+
+
+register_diff("surface_quality_win_rate")
+
+
 # =============================================================================
 # Surface-stratified serve stats
 # =============================================================================

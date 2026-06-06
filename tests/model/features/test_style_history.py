@@ -71,12 +71,17 @@ class TestStyleHistoryRegistration:
         # 6 universal × 4 metrics = 24
         # 1 surface-aligned composite × 4 metrics = 4
         # 3 vs-opp-type axes × 4 metrics = 12
-        # = 40 base + 40 diffs = 80 total
+        # 3 surface-gated vs-opp-type axes × 4 metrics = 12
+        # = 52 base + 52 diffs = 104 total
         count = sum(
             1 for n in registry.list_features()
-            if (n.startswith(("matches_vs_", "wins_vs_", "losses_vs_", "winpct_vs_")))
+            if (n.startswith((
+                "matches_vs_", "wins_vs_", "losses_vs_", "winpct_vs_",
+                "surface_matches_vs_", "surface_wins_vs_",
+                "surface_losses_vs_", "surface_winpct_vs_",
+            )))
         )
-        assert count == 80, f"Expected 80 style_history features, got {count}"
+        assert count == 104, f"Expected 104 style_history features, got {count}"
 
 
 class TestUniversalLabelComputation:
@@ -267,3 +272,74 @@ class TestVsOppType:
         assert result["v"][2] == pytest.approx(1.0)   # m3: power priors {m1 won} → 1/1
         assert result["v"][4] == pytest.approx(0.5)   # m5: power priors {m1 won, m3 lost} → 1/2
         assert result["v"][5] is None          # m6: opp type unknown → null
+
+    def test_surface_gating(self):
+        # surface-gated variant counts only prior SAME-surface matches in the bucket
+        df = pl.DataFrame({
+            "player_id": ["A"] * 4,
+            "effective_match_date": [date(2024, 1, i) for i in range(1, 5)],
+            "won": [1, 1, 0, 1],
+            "surface": ["Hard", "Clay", "Hard", "Hard"],
+            "opp_is_power_server": pl.Series([1, 1, 1, 1], dtype=pl.Int8),
+            "opp_is_placement_server": pl.Series([0, 0, 0, 0], dtype=pl.Int8),
+        }).sort("effective_match_date")
+        xsurf = get_registry().get("matches_vs_opp_serve_type").func
+        surf = get_registry().get("surface_matches_vs_opp_serve_type").func
+        rx = df.with_columns(xsurf().alias("v"))["v"].to_list()
+        rs = df.with_columns(surf().alias("v"))["v"].to_list()
+        # all opps power. m4 (Hard): cross-surface prior = {m1,m2,m3}=3; same-surface Hard = {m1,m3}=2
+        assert rx == [0, 1, 2, 3]
+        assert rs == [0, 0, 1, 2]
+
+
+class TestSurfSpecRatios:
+    """Surface rate stats / quality, gated to prior same-surface vs-specialist matches."""
+
+    _NAMES = [
+        "surface_first_serve_win_pct_vs_surf_spec",
+        "surface_second_serve_win_pct_vs_surf_spec",
+        "surface_ace_pct_vs_surf_spec",
+        "surface_df_pct_vs_surf_spec",
+        "surface_first_serve_in_pct_vs_surf_spec",
+        "surface_bp_save_pct_vs_surf_spec",
+        "surface_hold_pct_vs_surf_spec",
+        "surface_ret_first_serve_win_pct_vs_surf_spec",
+        "surface_ret_second_serve_win_pct_vs_surf_spec",
+        "surface_ret_bp_convert_pct_vs_surf_spec",
+        "surface_pts_service_won_pct_vs_surf_spec",
+        "surface_pts_return_won_pct_vs_surf_spec",
+        "quality_win_rate_vs_surf_spec",
+    ]
+
+    def test_registration(self):
+        reg = get_registry()
+        for name in self._NAMES:
+            feat = reg.get(name)
+            assert feat.mirror is True
+            assert feat.params == ["days"]
+            assert feat.impute is None
+            assert feat.depends_on == ["is_hard_specialist", "is_clay_specialist"]
+
+    def test_first_serve_win_pct_gating(self):
+        fn = get_registry().get("surface_first_serve_win_pct_vs_surf_spec").func
+        df = pl.DataFrame({
+            "player_id": ["A"] * 5,
+            "effective_match_date": [date(2024, 1, i) for i in range(1, 6)],
+            "won": [1, 1, 0, 1, 1],
+            "surface": ["Hard", "Hard", "Clay", "Hard", "Grass"],
+            "opp_is_hard_specialist": pl.Series([1, 0, 0, 1, 0], dtype=pl.Int8),
+            "opp_is_clay_specialist": pl.Series([0, 0, 1, 0, 0], dtype=pl.Int8),
+            "svc_first_serve_pts_won": [30, 40, 20, 10, 25],
+            "svc_first_serve_pts_played": [50, 50, 50, 50, 50],
+        }).sort("effective_match_date")
+        v = df.with_columns(fn().alias("v"))["v"].to_list()
+        # m1 Hard: no prior Hard-vs-hardspec -> null
+        # m2 Hard: prior = {m1} -> 30/50 = 0.6
+        # m3 Clay: no prior Clay-vs-clayspec -> null
+        # m4 Hard: prior Hard-vs-hardspec = {m1} (m2 not spec) -> 30/50 = 0.6
+        # m5 Grass: no specialist label for grass -> null
+        assert v[0] is None
+        assert v[1] == pytest.approx(0.6)
+        assert v[2] is None
+        assert v[3] == pytest.approx(0.6)
+        assert v[4] is None
