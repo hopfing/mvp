@@ -29,6 +29,14 @@ ROUND_ORDER: dict[str, int] = {
     "F": 12,
 }
 
+# Main-draw rounds in elimination order, mapped to depth from a 128 draw.
+# round_order has a gap at 11 (playoff rounds) so depth != round_order; this
+# map is what makes the tournament round ordinal evenly spaced.
+_MAIN_DRAW_DEPTH: dict[int, int] = {5: 0, 6: 1, 7: 2, 8: 3, 9: 4, 10: 5, 12: 6}
+# Singles draw size -> opening round_order, for standard brackets. 96 and any
+# non-standard size are omitted and fall through to the rounds-derived opener.
+_DRAW_SIZE_OPENER: dict[int, int] = {28: 7, 32: 7, 48: 6, 56: 6, 64: 6, 128: 5}
+
 
 def filter_dc_tournaments(df: pl.DataFrame) -> pl.DataFrame:
     """Exclude Davis Cup and team events from tournament matches."""
@@ -303,6 +311,59 @@ def add_round_order(df: pl.DataFrame) -> pl.DataFrame:
         .cast(pl.Int64)
         .alias("round_order")
     )
+
+
+def add_draw_round_ordinal(df: pl.DataFrame) -> pl.DataFrame:
+    """Add `tournament_round_ordinal`: the round's signed position within its draw.
+
+    Main-draw rounds count up from the opener (opener = +1, next = +2, ... final);
+    qualifying rounds count down toward the main draw (last qualifier = -1, ...).
+    So R32 is +1 in a 32-draw (it IS the opener) but +2 in a 64-draw (round 2) —
+    a distinction the global `round_order` cannot express.
+
+    The opener is resolved from `singles_draw_size` where available (robust to the
+    occasional mislabeled round), falling back to the earliest main-draw round
+    observed in the (tournament_id, year, draw_type) edition otherwise (ITF, 96-
+    draws, missing draw size). The draw is published weeks before play, so this
+    value is known well pre-match. Non-standard rounds (RR, playoff) get null.
+
+    Depends on `round_order` — call after `add_round_order`.
+    """
+    grp = ["tournament_id", "year", "draw_type"]
+    ro = pl.col("round_order")
+    is_main = ro.is_in(list(_MAIN_DRAW_DEPTH.keys()))
+    is_qual = ro.is_in([1, 2, 3])
+
+    # Opener round_order: draw-size lookup (singles) first, else earliest observed
+    # main-draw round in the edition.
+    lookup = (
+        pl.when(pl.col("draw_type") == "singles")
+        .then(
+            pl.col("singles_draw_size")
+            .cast(pl.Int64, strict=False)
+            .replace_strict(_DRAW_SIZE_OPENER, default=None, return_dtype=pl.Int64)
+        )
+        .otherwise(None)
+    )
+    derived = pl.when(is_main).then(ro).otherwise(None).min().over(grp)
+    opener_ro = pl.coalesce([lookup, derived])
+
+    depth = ro.replace_strict(_MAIN_DRAW_DEPTH, default=None, return_dtype=pl.Int64)
+    opener_depth = opener_ro.replace_strict(
+        _MAIN_DRAW_DEPTH, default=None, return_dtype=pl.Int64
+    )
+    max_qual = pl.when(is_qual).then(ro).otherwise(None).max().over(grp)
+
+    ordinal = (
+        pl.when(is_main)
+        .then(depth - opener_depth + 1)
+        .when(is_qual)
+        .then(ro - max_qual - 1)
+        .otherwise(None)
+        .cast(pl.Int64)
+        .alias("tournament_round_ordinal")
+    )
+    return df.with_columns(ordinal)
 
 
 def add_effective_match_date(df: pl.DataFrame) -> pl.DataFrame:
@@ -747,6 +808,7 @@ class MatchesAggregator(BaseJob):
         combined = fill_tournament_fields(combined)
         combined = disambiguate_tournament_names(combined)
         combined = add_round_order(combined)
+        combined = add_draw_round_ordinal(combined)
         combined = add_effective_match_date(combined)
         combined = add_tournament_level(combined)
         combined = add_best_of(combined)

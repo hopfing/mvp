@@ -295,6 +295,29 @@ def round_ordinal() -> pl.Expr:
 
 
 @feature(
+    name="tournament_round_ordinal",
+    params=[],
+    description="Signed round position within the draw: opener=+1 upward, "
+    "qualifying negative toward the main draw (R32 is +1 in a 32-draw, +2 in a 64-draw)",
+    match_level=True,
+)
+def tournament_round_ordinal() -> pl.Expr:
+    """Round position relative to the draw opener (precomputed in matches.parquet)."""
+    return pl.col("tournament_round_ordinal").cast(pl.Float64)
+
+
+@feature(
+    name="is_draw_opener",
+    params=[],
+    description="1 if the match is the first main-draw round of its tournament",
+    match_level=True,
+)
+def is_draw_opener() -> pl.Expr:
+    """Whether this round is the draw opener (tournament_round_ordinal == 1)."""
+    return (pl.col("tournament_round_ordinal") == 1).cast(pl.Float64)
+
+
+@feature(
     name="is_qualifying",
     params=[],
     description="1 if qualifying round (Q1/Q2/Q3), 0 otherwise",

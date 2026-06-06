@@ -40,6 +40,39 @@ class TestRoundOrder:
             ROUND_ORDER["THIRDPLACE"],
         ]
 
+    def test_draw_round_ordinal(self):
+        """Signed ordinal: opener=+1 up the main draw, qualifying negative; the
+        same global round (R32) gets different ordinals by draw size."""
+        from mvp.atptour.aggregators.matches import (
+            add_round_order,
+            add_draw_round_ordinal,
+        )
+
+        rows = []
+        # 32-draw (singles): full qualifying + main draw
+        for rnd in ["Q1", "Q2", "Q3", "R32", "R16", "QF", "SF", "F"]:
+            rows.append({"tournament_id": "A", "year": 2024,
+                         "draw_type": "singles", "singles_draw_size": 32, "round": rnd})
+        # 64-draw (singles): R32 is now round 2, not the opener
+        for rnd in ["R64", "R32", "R16", "QF", "SF", "F"]:
+            rows.append({"tournament_id": "B", "year": 2024,
+                         "draw_type": "singles", "singles_draw_size": 64, "round": rnd})
+        # null draw size: opener derived from earliest observed main-draw round
+        for rnd in ["R32", "R16", "QF"]:
+            rows.append({"tournament_id": "C", "year": 2024,
+                         "draw_type": "singles", "singles_draw_size": None, "round": rnd})
+        out = add_draw_round_ordinal(add_round_order(pl.DataFrame(rows)))
+        g = {(r["tournament_id"], r["round"]): r["tournament_round_ordinal"]
+             for r in out.iter_rows(named=True)}
+
+        # 32-draw: R32 is the opener (+1); qualifying counts back; F is +5
+        assert g[("A", "Q1")] == -3 and g[("A", "Q3")] == -1
+        assert g[("A", "R32")] == 1 and g[("A", "R16")] == 2 and g[("A", "F")] == 5
+        # 64-draw: same R32 label is now +2 (round 2); F is +6
+        assert g[("B", "R64")] == 1 and g[("B", "R32")] == 2 and g[("B", "F")] == 6
+        # null draw size falls back to earliest observed round (R32 -> opener)
+        assert g[("C", "R32")] == 1 and g[("C", "QF")] == 3
+
 
 class TestDCFilter:
     def test_filter_dc_from_tournament_matches(self):
