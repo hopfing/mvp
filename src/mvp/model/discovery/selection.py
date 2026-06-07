@@ -1,6 +1,7 @@
 """Feature selection algorithms."""
 
 
+import json
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -17,6 +18,37 @@ from mvp.model.discovery.checkpoint import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _fs_history_path(checkpoint_path: Path | None) -> Path | None:
+    """Durable per-round score log derived from the checkpoint path.
+
+    A sibling of the resume checkpoint (``fs_history_<stem>.jsonl``), but —
+    unlike the checkpoint — it is append-only and is kept after the run
+    completes, so the full per-round candidate scores remain queryable.
+    """
+    if checkpoint_path is None:
+        return None
+    name = checkpoint_path.name
+    prefix = "discovery_checkpoint_"
+    stem = name[len(prefix):] if name.startswith(prefix) else name
+    stem = stem.rsplit(".", 1)[0]
+    return checkpoint_path.with_name(f"fs_history_{stem}.jsonl")
+
+
+def _append_fs_history(path: Path | None, entry: dict[str, Any]) -> None:
+    """Append one round's record as a JSON line. Best-effort: never fatal.
+
+    ``default=float`` coerces stray numpy scalars (e.g. np.float32 metrics),
+    which json cannot serialize natively.
+    """
+    if path is None:
+        return
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, default=float) + "\n")
+    except OSError as e:
+        logger.warning("Failed to append FS history to %s: %s", path, e)
 
 
 @dataclass
@@ -161,6 +193,12 @@ class FeatureSelector:
             else:
                 best_metric = self._worst_value()
 
+        # Durable per-round score log (append-only, kept after completion).
+        # Fresh start wipes any stale log; resume appends to the existing one.
+        history_path = _fs_history_path(checkpoint_path)
+        if cp is None and history_path is not None and history_path.exists():
+            history_path.unlink()
+
         while remaining and len(selected) < self.max_features:
             round_num = len(selected) + 1
             best_feature = None
@@ -264,6 +302,20 @@ class FeatureSelector:
                         best_feature_metric if best_feature is not None else None
                     ),
                 })
+                _append_fs_history(history_path, {
+                    "round": round_num,
+                    "action": "stop",
+                    "reason": reason,
+                    "metric": best_metric,
+                    "best_candidate": best_feature,
+                    "best_candidate_metric": (
+                        best_feature_metric if best_feature is not None else None
+                    ),
+                    "ranking": sorted(
+                        round_results, key=lambda x: x[1],
+                        reverse=self.direction == "maximize",
+                    ),
+                })
                 break
 
             # Add best feature
@@ -286,6 +338,13 @@ class FeatureSelector:
                 "feature": best_feature,
                 "metric": best_metric,
                 "round_ranking": sorted_results,
+            })
+            _append_fs_history(history_path, {
+                "round": round_num,
+                "action": "add",
+                "feature": best_feature,
+                "metric": best_metric,
+                "ranking": sorted_results,
             })
 
             # Checkpoint at round boundary (current round advances, scores reset)

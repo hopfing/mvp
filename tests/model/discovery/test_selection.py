@@ -1,5 +1,6 @@
 """Tests for feature selection algorithms."""
 
+import json
 from datetime import datetime, timezone
 
 import pytest
@@ -60,6 +61,47 @@ class TestForwardSelection:
 
         # Should have stopped before adding noise
         assert "noise" in result.excluded_features
+
+    def test_writes_fs_history_jsonl(self, mock_scorer, tmp_path):
+        """Per-round candidate scores persist to a durable JSONL log."""
+        selector = FeatureSelector(
+            scorer=mock_scorer,
+            all_features=["a", "b", "c", "noise"],
+            method="forward",
+            direction="minimize",
+        )
+        cp = tmp_path / "discovery_checkpoint_unit.json"
+        selector.forward_selection(checkpoint_path=cp)
+
+        hist = tmp_path / "fs_history_unit.jsonl"
+        assert hist.exists()
+        lines = [json.loads(ln) for ln in hist.read_text().splitlines() if ln.strip()]
+        assert lines
+        first = lines[0]
+        assert first["round"] == 1
+        assert first["action"] == "add"
+        assert first["feature"] == "a"
+        # full round ranking retained — every candidate, not just the winner
+        assert {r[0] for r in first["ranking"]} == {"a", "b", "c", "noise"}
+        # checkpoint is cleaned up on completion; history is kept
+        assert not cp.exists()
+        assert lines[-1]["action"] == "stop"
+
+    def test_fresh_run_resets_history(self, mock_scorer, tmp_path):
+        """A fresh run (no checkpoint) wipes a stale history log."""
+        hist = tmp_path / "fs_history_unit.jsonl"
+        hist.write_text('{"round": 99, "action": "stale"}\n')
+        selector = FeatureSelector(
+            scorer=mock_scorer,
+            all_features=["a", "b", "c", "noise"],
+            method="forward",
+            direction="minimize",
+        )
+        selector.forward_selection(
+            checkpoint_path=tmp_path / "discovery_checkpoint_unit.json",
+        )
+        lines = [json.loads(ln) for ln in hist.read_text().splitlines() if ln.strip()]
+        assert all(ln.get("round") != 99 for ln in lines)
 
     def test_respects_max_features(self, mock_scorer):
         """Should stop at max_features."""
