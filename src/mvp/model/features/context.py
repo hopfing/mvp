@@ -39,6 +39,7 @@ register_diff("venue_win_pct")
     params=["days"],
     description="Win percentage on current circuit (tour vs challenger)",
     mirror=True,
+    impute=None,
 )
 def circuit_win_pct(days: int | None = None) -> pl.Expr:
     """Win percentage on the current circuit."""
@@ -60,6 +61,7 @@ register_diff("circuit_win_pct")
     params=["days"],
     description="Fraction of recent matches played on ATP Tour circuit",
     mirror=True,
+    impute=None,
 )
 def tour_match_pct(days: int | None = None) -> pl.Expr:
     """Fraction of a player's matches on the Tour circuit in a rolling window."""
@@ -89,6 +91,7 @@ register_diff("tour_match_pct")
     params=["days"],
     description="Fraction of recent matches played on Challenger circuit",
     mirror=True,
+    impute=None,
 )
 def chal_match_pct(days: int | None = None) -> pl.Expr:
     """Fraction of a player's matches on the Challenger circuit in a rolling window."""
@@ -118,6 +121,7 @@ register_diff("chal_match_pct")
     params=["days"],
     description="Fraction of recent matches played on ITF circuit",
     mirror=True,
+    impute=None,
 )
 def itf_match_pct(days: int | None = None) -> pl.Expr:
     """Fraction of a player's matches on the ITF circuit in a rolling window."""

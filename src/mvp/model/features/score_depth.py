@@ -56,7 +56,7 @@ def _games_per_set() -> pl.Expr:
     params=["days"],
     description="Avg sets played per match in window",
     mirror=True,
-    impute="median",
+    impute=None,
 )
 def sets_per_match(days: int | None = None) -> pl.Expr:
     expr = pl.col("sets_played").cast(pl.Float64)
@@ -70,7 +70,7 @@ def sets_per_match(days: int | None = None) -> pl.Expr:
     params=["days"],
     description="Fraction of wins in straight sets",
     mirror=True,
-    impute=0.5,
+    impute=None,
 )
 def straight_sets_win_pct(days: int | None = None) -> pl.Expr:
     wins = pl.col("won").cast(pl.Int64)
@@ -83,7 +83,7 @@ def straight_sets_win_pct(days: int | None = None) -> pl.Expr:
     params=["days"],
     description="Avg games won per set in window",
     mirror=True,
-    impute="median",
+    impute=None,
 )
 def games_won_per_set(days: int | None = None) -> pl.Expr:
     if days is None:
@@ -96,7 +96,7 @@ def games_won_per_set(days: int | None = None) -> pl.Expr:
     params=["days"],
     description="Avg games lost per set in window",
     mirror=True,
-    impute="median",
+    impute=None,
 )
 def games_lost_per_set(days: int | None = None) -> pl.Expr:
     if days is None:
@@ -109,7 +109,7 @@ def games_lost_per_set(days: int | None = None) -> pl.Expr:
     params=["days"],
     description="Avg (games won - lost) per set in window",
     mirror=True,
-    impute="median",
+    impute=None,
 )
 def games_margin_per_set(days: int | None = None) -> pl.Expr:
     if days is None:
@@ -122,7 +122,7 @@ def games_margin_per_set(days: int | None = None) -> pl.Expr:
     params=["days"],
     description="Avg total games per set in window (tightness)",
     mirror=True,
-    impute="median",
+    impute=None,
 )
 def games_per_set(days: int | None = None) -> pl.Expr:
     if days is None:
@@ -135,7 +135,7 @@ def games_per_set(days: int | None = None) -> pl.Expr:
     params=["days"],
     description="Avg total games won per match in window",
     mirror=True,
-    impute="median",
+    impute=None,
 )
 def total_games_won(days: int | None = None) -> pl.Expr:
     expr = _total_games_won().cast(pl.Float64)
@@ -149,7 +149,7 @@ def total_games_won(days: int | None = None) -> pl.Expr:
     params=["days"],
     description="Avg total games conceded per match in window",
     mirror=True,
-    impute="median",
+    impute=None,
 )
 def total_games_lost(days: int | None = None) -> pl.Expr:
     expr = _total_games_lost().cast(pl.Float64)
@@ -163,7 +163,7 @@ def total_games_lost(days: int | None = None) -> pl.Expr:
     params=["days"],
     description="Avg total games per match in window (match length tendency)",
     mirror=True,
-    impute="median",
+    impute=None,
 )
 def total_games(days: int | None = None) -> pl.Expr:
     expr = (_total_games_won() + _total_games_lost()).cast(pl.Float64)
@@ -196,6 +196,7 @@ def recent_games_load(days: int | None = None) -> pl.Expr:
     params=["days"],
     description="Fraction of sets at 7-5 or 7-6 (tight set tendency)",
     mirror=True,
+    impute=None,
 )
 def tight_set_pct(days: int | None = None) -> pl.Expr:
     return ratio_feature(_tight_sets(), pl.col("sets_played").cast(pl.Int64), days)
@@ -206,6 +207,7 @@ def tight_set_pct(days: int | None = None) -> pl.Expr:
     params=["days"],
     description="Fraction of sets at 6-0 or 6-1 (blowout tendency)",
     mirror=True,
+    impute=None,
 )
 def blowout_set_pct(days: int | None = None) -> pl.Expr:
     return ratio_feature(_blowout_sets(), pl.col("sets_played").cast(pl.Int64), days)

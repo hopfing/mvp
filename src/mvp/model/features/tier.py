@@ -240,6 +240,7 @@ def prize_money_log() -> pl.Expr:
         "high-tier events (GS / 1000 / 500). Null when no priors in window."
     ),
     mirror=True,
+    impute=None,
 )
 def high_tier_match_pct(days: int | None = None) -> pl.Expr:
     """Fraction of recent matches at GS/1000/500."""
@@ -281,6 +282,7 @@ register_diff("high_tier_match_pct")
         "Captures the level of competition recently played."
     ),
     mirror=True,
+    impute=None,
 )
 def tier_ordinal_avg(days: int | None = None) -> pl.Expr:
     """Avg tier ordinal across recent matches."""
@@ -319,6 +321,7 @@ register_diff("tier_ordinal_avg")
         "Continuous variant of recent tier exposure."
     ),
     mirror=True,
+    impute=None,
 )
 def prize_money_log_avg(days: int | None = None) -> pl.Expr:
     """Avg log prize money across recent matches."""

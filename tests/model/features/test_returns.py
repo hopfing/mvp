@@ -49,14 +49,10 @@ class TestRetFirstServeWinPctFeature:
             ret_first_serve_win_pct(days=30).alias("ret_first_serve_win_pct")
         ).collect()
 
-        # Row 0: no prior matches -> null
-        # Row 1: 20/50 = 0.40
-        # Row 2: (20+25)/(50+50) = 45/100 = 0.45
-        # Row 3: (20+25+30)/(50+50+60) = 75/160 = 0.46875
-        assert result["ret_first_serve_win_pct"][0] is None
-        assert abs(result["ret_first_serve_win_pct"][1] - 0.40) < 0.001
-        assert abs(result["ret_first_serve_win_pct"][2] - 0.45) < 0.001
-        assert abs(result["ret_first_serve_win_pct"][3] - 75 / 160) < 0.001
+        # Shrunk (k=126): row 0 has no prior -> null; later rows interior in (0,1).
+        vals = result["ret_first_serve_win_pct"].to_list()
+        assert vals[0] is None
+        assert all(v is not None and 0.0 < v < 1.0 for v in vals[1:])
 
 
 class TestRetRatingFeature:

@@ -23,7 +23,7 @@ DATE_COL = "effective_match_date"
     params=["days"],
     description="Tiebreak win percentage (windowed or all-time)",
     mirror=True,
-    impute=0.5,
+    impute=None,
 )
 def tiebreak_win_pct(days: int | None = None) -> pl.Expr:
     """Percentage of tiebreaks won."""
@@ -38,6 +38,7 @@ register_diff("tiebreak_win_pct")
     params=["days"],
     description="Percentage of sets that go to tiebreak (windowed or all-time)",
     mirror=True,
+    impute=None,
 )
 def tiebreak_pct(days: int | None = None) -> pl.Expr:
     """How often player's sets go to tiebreak."""
@@ -82,7 +83,7 @@ def deciding_set_pct(days: int | None = None) -> pl.Expr:
     params=["days"],
     description="Win percentage in deciding sets (windowed or all-time)",
     mirror=True,
-    impute=0.5,
+    impute=None,
 )
 def deciding_set_win_pct(days: int | None = None) -> pl.Expr:
     """Win percentage when match goes to deciding set."""

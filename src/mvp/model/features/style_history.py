@@ -73,7 +73,7 @@ def _build_universal(label: str):
         matches_expr = pl.col(opp_label_col).cast(pl.Int64)
         cum_w = _accum(wins_expr, days)
         cum_n = _accum(matches_expr, days)
-        return pl.when(cum_n > 0).then(cum_w / cum_n).otherwise(0.5)
+        return pl.when(cum_n > 0).then(cum_w / cum_n).otherwise(None)
 
     return matches_vs, wins_vs, losses_vs, winpct_vs
 
@@ -136,7 +136,7 @@ def _build_surface_specialist_composite():
     def winpct_vs(days: int | None = None) -> pl.Expr:
         cum_w = _surface_aligned_cum(pl.col("won").cast(pl.Int64), days=days)
         cum_n = _surface_aligned_cum(pl.lit(1, dtype=pl.Int64), days=days)
-        return pl.when(cum_n > 0).then(cum_w / cum_n).otherwise(0.5)
+        return pl.when(cum_n > 0).then(cum_w / cum_n).otherwise(None)
 
     return matches_vs, wins_vs, losses_vs, winpct_vs
 
@@ -177,7 +177,7 @@ for _label in UNIVERSAL_LABELS:
 
     feature(
         name=f"winpct_vs_{_label}",
-        params=["days"], mirror=True, impute=0.5,
+        params=["days"], mirror=True, impute=None,
         depends_on=[f"is_{_label}"],
         description=(
             f"Win pct vs opponents flagged is_{_label} (impute 0.5 when no prior); "

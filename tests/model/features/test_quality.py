@@ -133,7 +133,8 @@ class TestQualityDiffFeatures:
         for name in diff_names:
             feat = registry.get(name)
             assert feat.mirror is False
-            assert feat.impute == 0
+            # diff inherits the base feature's impute (no-fabricate bases are None)
+            assert feat.impute == registry.get(feat.depends_on[0]).impute
             assert len(feat.depends_on) == 1
 
     def test_quality_win_rate_diff_computation(self):

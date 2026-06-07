@@ -82,6 +82,7 @@ def ranking_ratio_capped(cap: float = 3.0) -> pl.Expr:
     params=["days"],
     description="Average ranking of opponents faced (strength of schedule)",
     mirror=True,
+    impute=None,
 )
 def avg_opp_ranking(days: int | None = None) -> pl.Expr:
     """Average ranking of opponents faced recently.

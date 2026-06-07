@@ -142,6 +142,7 @@ def first_serve_power() -> pl.Expr:
     name="second_serve_reliability",
     description="Second serve reliability rating",
     mirror=True,
+    impute=None,
 )
 def second_serve_reliability() -> pl.Expr:
     return pl.col("player_second_serve_reliability")
@@ -160,6 +161,7 @@ def ace_resistance() -> pl.Expr:
     name="serve_clutch",
     description="Serve clutch (BP save) rating",
     mirror=True,
+    impute=None,
 )
 def serve_clutch() -> pl.Expr:
     return pl.col("player_serve_clutch")
@@ -169,6 +171,7 @@ def serve_clutch() -> pl.Expr:
     name="return_clutch",
     description="Return clutch (BP conversion) rating",
     mirror=True,
+    impute=None,
 )
 def return_clutch() -> pl.Expr:
     return pl.col("player_return_clutch")
@@ -178,6 +181,7 @@ def return_clutch() -> pl.Expr:
     name="tb_clutch",
     description="Tiebreak clutch rating",
     mirror=True,
+    impute=None,
 )
 def tb_clutch() -> pl.Expr:
     return pl.col("player_tb_clutch")
@@ -187,6 +191,7 @@ def tb_clutch() -> pl.Expr:
     name="overall_clutch",
     description="Overall clutch rating",
     mirror=True,
+    impute=None,
 )
 def overall_clutch() -> pl.Expr:
     return pl.col("player_overall_clutch")

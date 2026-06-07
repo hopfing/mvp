@@ -88,6 +88,7 @@ def svc_first_serve_in_pct(days: int | None = None) -> pl.Expr:
     params=["days"],
     description="ATP serve rating average (windowed or all-time)",
     mirror=True,
+    impute=None,
 )
 def svc_rating(days: int | None = None) -> pl.Expr:
     """ATP composite serve rating (average over time)."""

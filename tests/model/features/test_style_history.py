@@ -36,7 +36,7 @@ class TestStyleHistoryRegistration:
                 assert feat.params == ["days"]
                 assert f"is_{label}" in feat.depends_on
                 if stat == "winpct":
-                    assert feat.impute == 0.5
+                    assert feat.impute is None  # no-fabricate: null when no prior
                 else:
                     assert feat.impute == 0
 
@@ -124,7 +124,7 @@ class TestUniversalLabelComputation:
         winpct_fn = get_registry().get("winpct_vs_power_server").func
         df = self._df()
         result = df.with_columns(winpct_fn().alias("val"))
-        assert result["val"][0] == pytest.approx(0.5)
+        assert result["val"][0] is None  # no prior vs this type -> null (no-fabricate)
         assert result["val"][1] == pytest.approx(1.0)
         assert result["val"][2] == pytest.approx(1.0)
         assert result["val"][3] == pytest.approx(0.5)
@@ -194,10 +194,10 @@ class TestSurfaceSpecialistComposite:
         result = df.with_columns(winpct_fn().alias("val"))
         # m6 (Clay): 1 win / 2 matches = 0.5
         # m7 (Hard): 1 win / 2 matches = 0.5
-        # m8 (Grass): cum_n = 0 → impute 0.5
+        # m8 (Grass): cum_n = 0 → null (no-fabricate)
         assert result["val"][5] == pytest.approx(0.5)
         assert result["val"][6] == pytest.approx(0.5)
-        assert result["val"][7] == pytest.approx(0.5)
+        assert result["val"][7] is None
 
     def test_grass_match_returns_zero_count(self):
         """On a grass match, the count features must be 0 (no specialist label for grass)."""
@@ -231,7 +231,7 @@ class TestTemporalSafety:
         )["v"][0] == 0
         assert df.with_columns(
             registry.get("winpct_vs_power_server").func().alias("v")
-        )["v"][0] == pytest.approx(0.5)
+        )["v"][0] is None  # no prior -> null (no-fabricate)
 
 
 class TestVsOppType:

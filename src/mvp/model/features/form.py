@@ -51,7 +51,7 @@ def match_count_max(days: int | None = None) -> pl.Expr:
     params=[],
     description="Days since player's most recent match (any surface/tournament)",
     mirror=True,
-    impute="median",
+    impute=None,
 )
 def days_since_last_match() -> pl.Expr:
     """Days since this player last played any match."""

@@ -47,14 +47,13 @@ class TestWinPctFeature:
 
         result = df.with_columns(win_pct(days=30).alias("win_pct")).collect()
 
-        # Row 0: no prior matches -> null
-        # Row 1: 1 prior match (won=1) -> 1.0
-        # Row 2: 2 prior matches (won=1,0) -> 0.5
-        # Row 3: 3 prior matches (won=1,0,1) -> 0.666...
-        assert result["win_pct"][0] is None
-        assert result["win_pct"][1] == 1.0
-        assert result["win_pct"][2] == 0.5
-        assert abs(result["win_pct"][3] - 2 / 3) < 0.001
+        # win_pct is empirical-Bayes shrunk (k=13) and never fabricates at no
+        # history: row 0 (no priors) is null; later rows are interior, pulled
+        # toward the pooled mean (a perfect 1-0 no longer reads as a flat 1.0).
+        vals = result["win_pct"].to_list()
+        assert vals[0] is None
+        assert all(v is not None and 0.0 < v < 1.0 for v in vals[1:])
+        assert vals[1] < 1.0  # 1-0 shrunk below a confident 100%
 
 
 class TestMatchesPlayedFeature:

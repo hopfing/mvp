@@ -331,8 +331,9 @@ def tourn_history_games_margin_sum() -> pl.Expr:
 
 @feature(
     name="tourn_history_win_pct",
-    params=[], mirror=True, impute=0.5,
+    params=[], mirror=True,
     description="Career win pct at this tournament (matches_won / matches_played)",
+    impute=None,
 )
 def tourn_history_win_pct() -> pl.Expr:
     return cumulative_mean(pl.col("won").cast(pl.Int64), group_by=TOURN_HISTORY_GROUP)

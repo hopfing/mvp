@@ -241,7 +241,8 @@ class TestFormDiffFeatures:
         for name in ["days_since_last_match_diff", "prev_tourn_round_reached_diff"]:
             feat = registry.get(name)
             assert feat.mirror is False
-            assert feat.impute == 0
+            # diff inherits the base's impute (no-fabricate bases are None)
+            assert feat.impute == registry.get(feat.depends_on[0]).impute
             assert len(feat.depends_on) == 1
 
     def test_days_since_last_match_diff(self):

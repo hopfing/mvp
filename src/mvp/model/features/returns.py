@@ -52,6 +52,7 @@ def ret_bp_convert_pct(days: int | None = None) -> pl.Expr:
     params=["days"],
     description="ATP return rating average (windowed or all-time)",
     mirror=True,
+    impute=None,
 )
 def ret_rating(days: int | None = None) -> pl.Expr:
     """ATP composite return rating (average over time)."""

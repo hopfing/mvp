@@ -41,7 +41,7 @@ def surface_switch() -> pl.Expr:
     params=["days"],
     description="Fraction of recent matches played on current surface",
     mirror=True,
-    impute="median",
+    impute=None,
 )
 def pct_matches_on_surface(days: int | None = None) -> pl.Expr:
     """Fraction of a player's matches on the current surface in a rolling window."""

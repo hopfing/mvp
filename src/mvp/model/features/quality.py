@@ -14,7 +14,7 @@ from mvp.model.registry import feature, register_diff
     params=["days"],
     description="Win rate weighted by opponent Elo",
     mirror=True,
-    impute="median",
+    impute=None,
 )
 def quality_win_rate(days: int | None = None) -> pl.Expr:
     """sum(won * opp_elo) / sum(opp_elo)."""
@@ -28,7 +28,7 @@ def quality_win_rate(days: int | None = None) -> pl.Expr:
     params=["days"],
     description="Avg Elo of opponents beaten in window",
     mirror=True,
-    impute="median",
+    impute=None,
 )
 def opp_elo_beaten_avg(days: int | None = None) -> pl.Expr:
     """Average Elo of opponents beaten."""
