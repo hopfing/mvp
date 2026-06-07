@@ -16,10 +16,11 @@ from mvp.model.registry import feature, register_diff, register_matchup, registe
     params=["days"],
     description="First serve points won percentage (windowed or all-time)",
     mirror=True,
+    impute=None,
 )
 def svc_first_serve_win_pct(days: int | None = None) -> pl.Expr:
     """First serve points won percentage."""
-    return ratio_feature("svc_first_serve_pts_won", "svc_first_serve_pts_played", days)
+    return ratio_feature("svc_first_serve_pts_won", "svc_first_serve_pts_played", days, k=56.0)
 
 
 @feature(
@@ -27,10 +28,11 @@ def svc_first_serve_win_pct(days: int | None = None) -> pl.Expr:
     params=["days"],
     description="Second serve points won percentage (windowed or all-time)",
     mirror=True,
+    impute=None,
 )
 def svc_second_serve_win_pct(days: int | None = None) -> pl.Expr:
     """Second serve points won percentage."""
-    return ratio_feature("svc_second_serve_pts_won", "svc_second_serve_pts_played", days)
+    return ratio_feature("svc_second_serve_pts_won", "svc_second_serve_pts_played", days, k=114.0)
 
 
 @feature(
@@ -38,10 +40,11 @@ def svc_second_serve_win_pct(days: int | None = None) -> pl.Expr:
     params=["days"],
     description="Ace percentage (aces / first serve attempts)",
     mirror=True,
+    impute=None,
 )
 def svc_ace_pct(days: int | None = None) -> pl.Expr:
     """Ace percentage - aces per first serve attempt."""
-    return ratio_feature("svc_aces", "svc_first_serve_att", days)
+    return ratio_feature("svc_aces", "svc_first_serve_att", days, k=77.0)
 
 
 @feature(
@@ -49,10 +52,11 @@ def svc_ace_pct(days: int | None = None) -> pl.Expr:
     params=["days"],
     description="Double fault percentage (double faults / first serve attempts)",
     mirror=True,
+    impute=None,
 )
 def svc_df_pct(days: int | None = None) -> pl.Expr:
     """Double fault percentage - double faults per first serve attempt."""
-    return ratio_feature("svc_double_faults", "svc_first_serve_att", days)
+    return ratio_feature("svc_double_faults", "svc_first_serve_att", days, k=80.0)
 
 
 @feature(
@@ -60,10 +64,11 @@ def svc_df_pct(days: int | None = None) -> pl.Expr:
     params=["days"],
     description="Break points saved percentage (windowed or all-time)",
     mirror=True,
+    impute=None,
 )
 def svc_bp_save_pct(days: int | None = None) -> pl.Expr:
     """Break points saved percentage."""
-    return ratio_feature("svc_bp_saved", "svc_bp_faced", days)
+    return ratio_feature("svc_bp_saved", "svc_bp_faced", days, k=64.0)
 
 
 @feature(
@@ -71,10 +76,11 @@ def svc_bp_save_pct(days: int | None = None) -> pl.Expr:
     params=["days"],
     description="First serve in percentage (first serves in / attempts)",
     mirror=True,
+    impute=None,
 )
 def svc_first_serve_in_pct(days: int | None = None) -> pl.Expr:
     """First serve in percentage."""
-    return ratio_feature("svc_first_serve_in", "svc_first_serve_att", days)
+    return ratio_feature("svc_first_serve_in", "svc_first_serve_att", days, k=95.0)
 
 
 @feature(
@@ -95,6 +101,7 @@ def svc_rating(days: int | None = None) -> pl.Expr:
     params=["days"],
     description="Service games held percentage (windowed or all-time)",
     mirror=True,
+    impute=None,
 )
 def hold_pct(days: int | None = None) -> pl.Expr:
     """Percentage of service games held.
@@ -102,7 +109,7 @@ def hold_pct(days: int | None = None) -> pl.Expr:
     Holds = service games played minus games broken (bp_faced - bp_saved).
     """
     holds = pl.col("svc_games_played") - (pl.col("svc_bp_faced") - pl.col("svc_bp_saved"))
-    return ratio_feature(holds, "svc_games_played", days)
+    return ratio_feature(holds, "svc_games_played", days, k=12.0)
 
 
 # =============================================================================

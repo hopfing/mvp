@@ -168,6 +168,7 @@ def style_forced_error_rate(days: int | None = None) -> pl.Expr:
     params=["days"],
     description="Rolling easy holds / service games (serve dominance)",
     mirror=True,
+    impute=None,
 )
 def style_easy_hold_pct(days: int | None = None) -> pl.Expr:
     return ratio_feature(

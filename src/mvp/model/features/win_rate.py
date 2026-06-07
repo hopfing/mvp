@@ -5,9 +5,8 @@ import polars as pl
 
 from mvp.model.primitives import (
     cumulative_count,
-    cumulative_mean,
+    ratio_feature,
     rolling_count,
-    rolling_mean,
 )
 from mvp.model.registry import feature, register_diff
 
@@ -17,6 +16,7 @@ from mvp.model.registry import feature, register_diff
     params=["days"],
     description="Win percentage (windowed or all-time)",
     mirror=True,
+    impute=None,
 )
 def win_pct(days: int | None = None) -> pl.Expr:
     """Win percentage over past N days, or all-time if days is None.
@@ -25,11 +25,14 @@ def win_pct(days: int | None = None) -> pl.Expr:
         days: Window size in days. If None, uses all-time cumulative.
 
     Returns:
-        Polars expression computing the win percentage.
+        Polars expression computing the (shrunk) win percentage.
     """
-    if days is None:
-        return cumulative_mean("won", group_by="player_id")
-    return rolling_mean("won", days=days, group_by="player_id")
+    # Shrink toward the pooled win rate (k=13 matches, EB). den is a per-valid-row
+    # 1 that cumulative-sums to the match count; the is_not_null guard excludes any
+    # null-won row from both numerator and denominator.
+    won = pl.col("won").cast(pl.Int64)
+    valid = pl.col("won").is_not_null().cast(pl.Int64)
+    return ratio_feature(won, valid, days, k=13.0)
 
 
 @feature(

@@ -16,10 +16,11 @@ from mvp.model.registry import feature, register_diff, register_matchup, registe
     params=["days"],
     description="First serve return points won percentage (windowed or all-time)",
     mirror=True,
+    impute=None,
 )
 def ret_first_serve_win_pct(days: int | None = None) -> pl.Expr:
     """First serve return points won percentage."""
-    return ratio_feature("ret_first_serve_pts_won", "ret_first_serve_pts_played", days)
+    return ratio_feature("ret_first_serve_pts_won", "ret_first_serve_pts_played", days, k=126.0)
 
 
 @feature(
@@ -27,10 +28,11 @@ def ret_first_serve_win_pct(days: int | None = None) -> pl.Expr:
     params=["days"],
     description="Second serve return points won percentage (windowed or all-time)",
     mirror=True,
+    impute=None,
 )
 def ret_second_serve_win_pct(days: int | None = None) -> pl.Expr:
     """Second serve return points won percentage."""
-    return ratio_feature("ret_second_serve_pts_won", "ret_second_serve_pts_played", days)
+    return ratio_feature("ret_second_serve_pts_won", "ret_second_serve_pts_played", days, k=137.0)
 
 
 @feature(
@@ -38,10 +40,11 @@ def ret_second_serve_win_pct(days: int | None = None) -> pl.Expr:
     params=["days"],
     description="Break points converted percentage (windowed or all-time)",
     mirror=True,
+    impute=None,
 )
 def ret_bp_convert_pct(days: int | None = None) -> pl.Expr:
     """Break points converted percentage."""
-    return ratio_feature("ret_bp_converted", "ret_bp_opportunities", days)
+    return ratio_feature("ret_bp_converted", "ret_bp_opportunities", days, k=180.0)
 
 
 @feature(

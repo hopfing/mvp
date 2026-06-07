@@ -235,26 +235,88 @@ def ratio_feature(
     denominator_col: str | pl.Expr,
     days: int | None = None,
     group_by: str | list[str] = "player_id",
+    k: float | None = None,
+    prior: float | pl.Expr | None = None,
 ) -> pl.Expr:
     """Ratio of two columns or expressions (windowed or all-time).
 
-    Computes sum(numerator) / sum(denominator) with null when denominator is 0.
+    With ``k=None`` (default): raw sum(numerator)/sum(denominator), null when the
+    denominator is 0 — the original behavior.
+
+    With ``k`` set: empirical-Bayes shrinkage toward the population mean,
+    ``(sum(num) + k*m) / (sum(den) + k)``. This dampens low-sample rates (a 1-0
+    record no longer reads as a confident 100%) and converges to the raw ratio
+    as the denominator grows. ``m`` defaults to the global pooled mean
+    sum(num)/sum(den) over the whole frame (a population-level constant; pass
+    ``prior`` to supply a train-fold value instead). Shrinkage only regularizes
+    rows that have at least one observation: at zero history (denominator 0) the
+    row is **null**, never the prior — so shrinkage never fabricates a value for
+    debut / new-surface / thin-window rows, and composes with ``impute=None``.
+
+    See ``EB_SHRINK_K`` for the per-family k values and the script that derived
+    them.
 
     Args:
         numerator_col: Column name or expression for the numerator.
         denominator_col: Column name or expression for the denominator.
         days: Window size in days. If None, uses all-time cumulative.
         group_by: Column(s) to group by.
+        k: Shrinkage pseudo-count in the denominator's native units. None = raw.
+        prior: Override for the shrinkage target mean m (default: global pooled).
 
     Returns:
-        Polars expression computing the ratio.
+        Polars expression computing the (optionally shrunk) ratio.
     """
+    num_src, den_src = numerator_col, denominator_col
+    if k is not None:
+        # Null-safe: fill source nulls BEFORE the windowed sum so a missing-stat
+        # match contributes (0, 0) and never leaves a null position that shift(1)
+        # would carry into the next row's ratio. (Raw path keeps null semantics.)
+        num_src = _to_expr(numerator_col).fill_null(0)
+        den_src = _to_expr(denominator_col).fill_null(0)
     if days is None:
-        num = cumulative_sum(numerator_col, group_by=group_by)
-        denom = cumulative_sum(denominator_col, group_by=group_by)
+        num = cumulative_sum(num_src, group_by=group_by)
+        denom = cumulative_sum(den_src, group_by=group_by)
     else:
-        num = rolling_sum(numerator_col, days=days, group_by=group_by)
-        denom = rolling_sum(denominator_col, days=days, group_by=group_by)
-    return pl.when(denom > 0).then(num / denom).otherwise(None)
+        num = rolling_sum(num_src, days=days, group_by=group_by)
+        denom = rolling_sum(den_src, days=days, group_by=group_by)
+    if k is None:
+        return pl.when(denom > 0).then(num / denom).otherwise(None)
+    # m (pooled prior) uses the original columns; .sum() skips nulls already.
+    m = prior if prior is not None else (
+        _to_expr(numerator_col).sum() / _to_expr(denominator_col).sum()
+    )
+    # No fabrication at zero history: shrink only rows with >=1 observation;
+    # debut / no-data rows stay null (XGBoost missing-direction split).
+    denom_filled = denom.fill_null(0)
+    shrunk = (num.fill_null(0) + k * m) / (denom_filled + k)
+    return pl.when(denom_filled > 0).then(shrunk).otherwise(None)
+
+
+# ---------------------------------------------------------------------------
+# Empirical-Bayes shrinkage strengths (k = alpha+beta, Beta-Binomial MoM).
+#
+# DOCUMENTATION ONLY. The per-family k is passed as a literal at each
+# ratio_feature CALL SITE (colocated with the feature, so an edit is captured by
+# the feature-source cache hash and correctly invalidates). Source of truth for
+# the numbers: scripts/_eb_shrinkage_k.py (singles, walkovers excluded, players
+# with >=20 matches, ~5,700). k is in each ratio's native denominator units;
+# estimation biases are conservative (toward under-shrinkage).
+#
+#   win_pct                   13   (matches)        ret_first_serve_win_pct  126 (points)
+#   hold_pct                  12   (games)          ret_second_serve_win_pct 137 (points)
+#   first_serve_win_pct       56   (points)         pts_return_won_pct       144 (points)
+#   bp_save_pct               64   (break points)   ret_bp_convert_pct       180 (break points)
+#   ace_pct                   77   (serves)
+#   df_pct                    80   (serves)
+#   pts_service_won_pct       82   (points)
+#   first_serve_in_pct        95   (serves)
+#   second_serve_win_pct     114   (points)
+#   pts_total_won_pct        194   (points)
+#
+# Narrow win-rate subsets (vs surface specialists, vs opp-type) inherit win_pct
+# k (~13) as a placeholder, floor 5, until subset-specific EB k is estimated.
+# Sustainable regeneration tooling + train-fold m persistence: see issue #94.
+# ---------------------------------------------------------------------------
 
 

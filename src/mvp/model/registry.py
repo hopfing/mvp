@@ -212,7 +212,9 @@ def register_sum(base_name: str, description: str = "") -> None:
         depends_on=[base_name],
         mirror=False,
         match_level=True,
-        impute="median",
+        # Inherit the base's impute (mirrors register_diff) so a no-fabricate
+        # base (impute=None) doesn't get a median-fabricated sum.
+        impute=base.impute,
     )
     def _sum(days: int | None = None, _bn: str = base_name) -> pl.Expr:
         if days is None:
