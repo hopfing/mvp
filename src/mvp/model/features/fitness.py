@@ -10,9 +10,14 @@ DATE_COL = "effective_match_date"
 
 
 def _player_retired() -> pl.Expr:
-    """1 if the player themselves retired/walked over (lost + RET or W/O)."""
+    """1 if the player themselves retired mid-match (lost via RET).
+
+    Retirement-only: walkovers (W/O) are a noisier durability signal (they
+    happen for scheduling/illness/visa, not just injury) and are filtered out
+    of the feature stream upstream anyway.
+    """
     return (
-        pl.col("reason").fill_null("").is_in(["RET", "W/O"])
+        (pl.col("reason").fill_null("") == "RET")
         & ~pl.col("won").cast(pl.Boolean)
     ).cast(pl.Int64)
 

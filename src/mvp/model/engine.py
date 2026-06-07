@@ -17,6 +17,7 @@ from typing import Any
 import polars as pl
 
 import mvp.model.features  # noqa: F401 - triggers feature registration
+from mvp.model.completeness import is_incomplete_match
 from mvp.model.registry import get_registry
 
 logger = logging.getLogger(__name__)
@@ -467,6 +468,22 @@ class FeatureEngine:
         )
         return df
 
+    def _apply_completeness_filter(self, df: pl.DataFrame) -> pl.DataFrame:
+        """Drop walkover rows so they never enter feature aggregation.
+
+        Walkovers are non-matches (no play), so counting them in rolling
+        win/quality rates inflates a player's history with phantom wins. Uses
+        the shared completeness predicate (reason == "W/O" OR result_type ==
+        "walkover"); retirements are real matches and are kept. Always-on
+        (unlike the cutoff filter) so the prediction path is covered too.
+        """
+        before = df.height
+        df = df.filter(~is_incomplete_match(df.columns, exclude_incomplete=False))
+        dropped = before - df.height
+        if dropped:
+            logger.info("Dropped %d walkover rows from feature stream", dropped)
+        return df
+
     def _compute_registry_hash(self) -> str:
         """Compute a hash of all feature function source code.
 
@@ -684,6 +701,8 @@ class FeatureEngine:
         # Structural columns the engine always needs
         needed: set[str] = {
             "match_uid", "player_id", "opp_id", "effective_match_date",
+            # always loaded so the walkover completeness filter can apply
+            "reason", "result_type",
         }
 
         if extra_columns:
@@ -792,6 +811,7 @@ class FeatureEngine:
             df = pl.read_parquet(self.matches_path)
         logger.info("Loaded matches: %d rows x %d columns", df.height, df.width)
         df = self._apply_cutoff_filter(df)
+        df = self._apply_completeness_filter(df)
         check_memory("ensure_cached: after parquet load")
 
         # Cache validity
@@ -1169,6 +1189,7 @@ class FeatureEngine:
             df = pl.read_parquet(self.matches_path)
             logger.info("Loaded matches: %d rows x %d columns", df.height, df.width)
         df = self._apply_cutoff_filter(df)
+        df = self._apply_completeness_filter(df)
         check_memory("after parquet load")
 
         # Check cache validity — wipe everything if data or code changed

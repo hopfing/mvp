@@ -20,7 +20,7 @@ def _make_fitness_df() -> pl.DataFrame:
     Match 1: won normally
     Match 2: lost via retirement (player retired)
     Match 3: won normally
-    Match 4: lost via walkover (player walked over)
+    Match 4: lost via walkover (player walked over) — excluded, RET-only
     Match 5: won normally
     """
     return pl.DataFrame({
@@ -60,18 +60,18 @@ class TestFitnessBaseFeatures:
         assert result["val"][2] == pytest.approx(0.5)
         # Row 3: prior=[m1 ok, m2 RET, m3 ok] -> 1/3
         assert result["val"][3] == pytest.approx(1 / 3, abs=0.01)
-        # Row 4: prior=[m1 ok, m2 RET, m3 ok, m4 W/O] -> 2/4 = 0.5
-        assert result["val"][4] == pytest.approx(0.5)
+        # Row 4: prior=[m1 ok, m2 RET, m3 ok, m4 W/O] -> W/O excluded -> 1/4 = 0.25
+        assert result["val"][4] == pytest.approx(0.25)
 
     def test_retirement_rate_rolling(self):
         from mvp.model.features.fitness import retirement_rate
 
         df = _make_fitness_df()
         result = df.with_columns(retirement_rate(days=365).alias("val"))
-        # Same as alltime for this data (all within 365d)
+        # Same as alltime for this data (all within 365d); W/O excluded -> 1/4
         assert result["val"][0] is None
         assert result["val"][1] == pytest.approx(0.0)
-        assert result["val"][4] == pytest.approx(0.5)
+        assert result["val"][4] == pytest.approx(0.25)
 
     def test_retirement_rate_ignores_opponent_retirement(self):
         """Opponent retiring (player won, reason=RET) should NOT count."""
@@ -125,8 +125,8 @@ class TestFitnessBaseFeatures:
         assert result["val"][2] == pytest.approx(1.0)
         # Row 3: prev=m3 (won, no reason) -> 0
         assert result["val"][3] == pytest.approx(0.0)
-        # Row 4: prev=m4 (lost, W/O) -> 1
-        assert result["val"][4] == pytest.approx(1.0)
+        # Row 4: prev=m4 (lost, W/O) -> W/O excluded -> 0
+        assert result["val"][4] == pytest.approx(0.0)
 
 
 class TestFitnessMultiPlayer:
@@ -163,7 +163,7 @@ class TestFitnessDiffFeatures:
         for name in ["retirement_rate_diff", "last_match_retirement_diff"]:
             feat = registry.get(name)
             assert feat.mirror is False
-            assert feat.impute == 0
+            assert feat.impute is None  # diffs inherit base impute; retirement_rate is None
             assert len(feat.depends_on) == 1
 
     def test_retirement_rate_diff_computation(self):
