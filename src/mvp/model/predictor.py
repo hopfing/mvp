@@ -23,6 +23,7 @@ from mvp.model.calibration import (
     fit_calibrator_with_nested_cv,
     make_calibrator,
 )
+from mvp.model.completeness import is_incomplete_match
 from mvp.model.confidence.dimensions import MODIFIERS
 from mvp.model.config import (
     CalibrationConfig,
@@ -55,7 +56,7 @@ PRODUCTION_CONFIG_PATH = Path("production.yaml")
 
 # Columns the predictor needs beyond what features reference
 _PREDICTOR_EXTRA_COLS = [
-    "won", "reason", "sets_played", "best_of",
+    "won", "reason", "result_type", "sets_played", "best_of",
     "circuit", "surface", "round", "draw_type",
     "tournament_id", "tournament_name",
     "player_first_name", "player_last_name",
@@ -162,11 +163,7 @@ class ProductionPredictor:
         mtl_cfg = getattr(cfg, "mtl", None)
 
         # Primary completeness filter: walkovers always; RET/DEF/UNP when MTL.
-        if "reason" in df.columns:
-            invalid_reasons = {"W/O"}
-            if mtl_cfg is not None:
-                invalid_reasons |= {"RET", "DEF", "UNP"}
-            df = df.filter(~pl.col("reason").fill_null("").is_in(invalid_reasons))
+        df = df.filter(~is_incomplete_match(df.columns, mtl_cfg is not None))
 
         # When MTL is active, also require sets_played not null (necessary for
         # any aux target derivation; the dropna gate below catches per-aux

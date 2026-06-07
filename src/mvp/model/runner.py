@@ -15,6 +15,7 @@ from sklearn.metrics import r2_score
 
 run_logger = logging.getLogger(__name__)
 
+from mvp.model.completeness import is_incomplete_match
 from mvp.model.calibration import (
     AsymmIsotonicCalibrator,
     IsotonicCalibrator,
@@ -160,11 +161,7 @@ class ExperimentRunner:
         # Primary completeness filter:
         #  - Walkovers always excluded (today's behavior).
         #  - When `exclude_incomplete` is true, also exclude RET / DEF / UNP.
-        if "reason" in df.columns:
-            invalid_reasons = {"W/O"}
-            if exclude_incomplete:
-                invalid_reasons |= {"RET", "DEF", "UNP"}
-            df = df.filter(~pl.col("reason").fill_null("").is_in(invalid_reasons))
+        df = df.filter(~is_incomplete_match(df.columns, exclude_incomplete))
 
         # When the completeness gate is active, additionally require sets_played
         # not null. For MTL, this is necessary for any aux target derivation;
@@ -298,6 +295,18 @@ class ExperimentRunner:
                 "wl_continuous_proxy": (
                     "_aux_wl_continuous_proxy",
                     (pl.col(primary_col).cast(pl.Float64) * 2.0 - 1.0),
+                ),
+                # Placebo controls (see MTLConfig.auxiliary_targets). Seeded for
+                # reproducibility. placebo_gaussian is pure N(0,1) noise; the
+                # shuffled variant keeps set_margin's marginal but destroys its
+                # per-match link to the outcome via a seeded column shuffle.
+                "placebo_gaussian": (
+                    "_aux_placebo_gaussian",
+                    pl.Series(np.random.default_rng(42).standard_normal(df.height)),
+                ),
+                "placebo_shuffled_set_margin": (
+                    "_aux_placebo_shuffled_set_margin",
+                    (_sets_won() - _sets_lost()).shuffle(seed=42),
                 ),
             }
             aux_cols: list[str] = []
@@ -483,7 +492,7 @@ class ExperimentRunner:
         # - per-fold prediction persistence: match_uid, player_id, opp_id
         # - raw filter columns (draw_type, etc.) that aren't computed features
         runner_columns = [
-            "won", "reason", "sets_played", "best_of",
+            "won", "reason", "result_type", "sets_played", "best_of",
             "circuit", "surface", "round",
             "match_uid", "player_id", "opp_id",
         ]

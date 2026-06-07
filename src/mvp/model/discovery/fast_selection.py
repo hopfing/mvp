@@ -13,6 +13,7 @@ from sklearn.linear_model import LogisticRegression
 
 from mvp.model.config import apply_filters
 from mvp.model.discovery.config import DiscoveryConfig
+from mvp.model.completeness import is_incomplete_match
 from mvp.model.engine import check_memory, get_feature_columns, make_fs_engine
 from mvp.model.features._score_helpers import (
     sets_lost as _sets_lost,
@@ -268,7 +269,7 @@ class FastForwardSelector:
         # silently absent — stability's tournament-level resampling guards on
         # their presence.
         extra_columns = [
-            "won", "reason", "sets_played", "best_of",
+            "won", "reason", "result_type", "sets_played", "best_of",
             "circuit", "surface", "round", "tournament_id", "year",
         ]
         # MTL aux derivation reads raw matches.parquet columns directly.
@@ -335,13 +336,7 @@ class FastForwardSelector:
         # Walkovers are voided bets — never valid training data for any target.
         # When MTL is active, additionally exclude RET / DEF / UNP because aux
         # targets require completed match scores. Same gate as the runner uses.
-        if "reason" in df.columns:
-            invalid_reasons = {"W/O"}
-            if is_mtl:
-                invalid_reasons |= {"RET", "DEF", "UNP"}
-            df = df.filter(
-                ~pl.col("reason").fill_null("").is_in(invalid_reasons)
-            )
+        df = df.filter(~is_incomplete_match(df.columns, is_mtl))
         # When MTL is active, also require sets_played not null. Necessary
         # for any aux target derivation.
         if is_mtl:
