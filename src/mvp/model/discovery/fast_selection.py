@@ -543,8 +543,12 @@ class FastForwardSelector:
             len(all_col_names), len(self._build_result.aux_base_col_names), len(df),
         )
         t0 = time.perf_counter()
+        # float32 (not float64): XGBoost's DMatrix is float32 internally, so it
+        # already downcasts — the model sees identical values, and the feature
+        # matrix halves in RAM. NaN (null) is preserved, so passthrough impute
+        # still works. Median/scaling differ only at ~1e-7, below any split.
         self.X_wide = (
-            df.select(pl.col(c).cast(pl.Float64) for c in augmented_col_names)
+            df.select(pl.col(c).cast(pl.Float32) for c in augmented_col_names)
             .to_numpy()
         )
         self.y = df[target_col].to_numpy().astype(int)
