@@ -83,6 +83,15 @@ class StabilitySelectionConfig(BaseModel):
     # None disables the clustered view (per-spec frequencies are always primary).
     cluster_corr_threshold: float | None = None
     random_seed: int = 42
+    # Resample-level parallelism. Resamples are independent (seeded by index,
+    # aggregated in index order), so a thread pool changes throughput, never the
+    # selected set. None = auto: floor(cpu / per-fit n_jobs) when n_jobs is
+    # explicitly capped (config model.params n_jobs or the --n-jobs override),
+    # else 1 — an uncapped fit uses ~all cores, so concurrent fits would
+    # oversubscribe. 1 forces the sequential path. Results-invariant, so it is
+    # deliberately excluded from the checkpoint fingerprint (changing it does not
+    # invalidate completed resamples).
+    max_workers: int | None = None
 
 
 class DiscoveryFeaturesConfig(BaseModel):

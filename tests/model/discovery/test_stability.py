@@ -6,6 +6,7 @@ running real model fits.
 """
 
 import json
+import threading
 from datetime import date
 
 import numpy as np
@@ -46,17 +47,27 @@ def _fast() -> FastForwardSelector:
 
 
 class _ScriptedSelector:
-    """Stub FeatureSelector that returns a scripted selection per call."""
+    """Stub FeatureSelector that returns a scripted selection per call.
+
+    The call counter is lock-guarded so the stub stays correct under the
+    threaded resample path (each scripted entry is consumed exactly once).
+    """
 
     scripted: list[list[str]] = []
     calls = 0
+    _lock = threading.Lock()
 
     def __init__(self, **kwargs):
         pass
 
     def run(self, verbose=False):
-        sel = _ScriptedSelector.scripted[_ScriptedSelector.calls]
-        _ScriptedSelector.calls += 1
+        with _ScriptedSelector._lock:
+            sel = _ScriptedSelector.scripted[_ScriptedSelector.calls]
+            _ScriptedSelector.calls += 1
+        # A scripted "RAISE" entry injects a per-resample failure, so tests can
+        # exercise the parallel tear-down / salvage path.
+        if sel == "RAISE":
+            raise RuntimeError("injected resample failure")
         return SelectionResult(
             selected_features=sel, excluded_features=[], history=[], final_metric=0.0
         )
@@ -222,6 +233,78 @@ def test_checkpoint_fingerprint_mismatch_starts_fresh(patched, tmp_path):
     # Stale fingerprint ignored -> both resamples run fresh, "x" never appears.
     assert _ScriptedSelector.calls == 2
     assert "x" not in res.selection_frequency
+
+
+def test_parallel_path_aggregates_and_checkpoints(patched, tmp_path):
+    """max_workers>1 runs resamples on a thread pool and must produce the same
+    frequency aggregation as the sequential path, then clean up the checkpoint.
+
+    Aggregation counts each feature across the resample multiset, so a scrambled
+    completion order yields identical frequencies (the script below has no
+    frequency ties, so the thresholded set is order-independent too).
+    """
+    script = [["a", "b"], ["a", "c"], ["a"], ["b", "c"], ["a"], ["a", "b"]]
+    cp = tmp_path / "stab_cp.json"
+    _ScriptedSelector.scripted = list(script)
+    config = StabilitySelectionConfig(
+        n_resamples=len(script), subsample_fraction=1.0, min_fold_rows=1,
+        selection_threshold=0.6, max_workers=4,
+    )
+    res = stab.run_stability_selection(
+        _fast(), config, metric="log_loss", direction="minimize",
+        all_features=["a", "b", "c"], min_features=1, max_features=3,
+        checkpoint_path=cp,
+    )
+    # Each resample ran exactly once across the pool.
+    assert _ScriptedSelector.calls == len(script)
+    assert res.n_resamples_effective == len(script)
+    assert res.selection_frequency["a"] == pytest.approx(5 / 6)
+    assert res.selection_frequency["b"] == pytest.approx(3 / 6)
+    assert res.selection_frequency["c"] == pytest.approx(2 / 6)
+    assert res.selected_features == ["a"]
+    # Checkpoint removed on full completion (no resume left dangling).
+    assert not cp.exists()
+
+
+def test_parallel_failure_preserves_progress_and_resumes(patched, tmp_path):
+    """A resample raising mid-batch aborts the run (fail-fast) but must NOT lose
+    the work that finished: completed resamples stay checkpointed, and a re-run
+    resumes, re-running only what didn't finish.
+    """
+    cp = tmp_path / "stab_cp.json"
+    # One resample's forward selection raises; the rest succeed. Which index
+    # draws "RAISE" depends on completion order, so assertions stay invariant
+    # to scheduling.
+    _ScriptedSelector.scripted = [["a"], ["a"], "RAISE", ["a"], ["a", "b"], ["a"]]
+    config = StabilitySelectionConfig(
+        n_resamples=6, subsample_fraction=1.0, min_fold_rows=1,
+        selection_threshold=0.6, max_workers=3,
+    )
+
+    def _call():
+        return stab.run_stability_selection(
+            _fast(), config, metric="log_loss", direction="minimize",
+            all_features=["a", "b", "c"], min_features=1, max_features=3,
+            checkpoint_path=cp,
+        )
+
+    with pytest.raises(RuntimeError, match="injected resample failure"):
+        _call()
+
+    # Failure leaves the checkpoint on disk (not deleted) holding the salvaged,
+    # successfully-completed resamples — never the one that raised.
+    assert cp.exists()
+    completed = {r["index"] for r in json.loads(cp.read_text())["completed"]}
+    assert 1 <= len(completed) <= 5
+
+    # Resume: the previously-failed index now succeeds; only unfinished resamples
+    # re-run, and the run completes and cleans up its checkpoint.
+    _ScriptedSelector.calls = 0
+    _ScriptedSelector.scripted = [["a"]] * 6
+    res = _call()
+    assert res.n_resamples_effective == 6
+    assert _ScriptedSelector.calls < 6  # resumed work was skipped
+    assert not cp.exists()
 
 
 def test_run_branches_into_stability_workflow(tmp_path, monkeypatch):

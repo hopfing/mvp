@@ -14,18 +14,25 @@ tournament-clustered resamples. The threshold is an empirical knob — inspect t
 selection-frequency profile and place it where reproducible and noise features
 separate.
 
-NOTE: resamples run sequentially. They are independent and could be parallelised
-across cores; that is a deliberate follow-up optimisation, not part of this first
-implementation. The intended way to keep the sequential cost tractable is to run
-stability on a pool already reduced by the null-importance pre-filter.
+NOTE: resamples are independent and run concurrently across a thread pool (see
+``max_workers`` on StabilitySelectionConfig). The XGBoost fits release the GIL,
+so threads parallelise the real work while sharing the single precomputed
+feature matrix — no per-worker copies. Parallelism is results-invariant: each
+resample is seeded by its index and the selections are aggregated in index
+order, so completion order cannot change the outcome, and ``max_workers=1``
+restores the exact sequential path. Cost still scales with ``n_resamples``;
+the null-importance pre-filter remains the lever for keeping the searched pool
+small.
 """
 
 import hashlib
 import json
 import logging
 import os
+import threading
 import time
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -34,6 +41,7 @@ import numpy as np
 from mvp.model.discovery.config import DiscoveryConfig, StabilitySelectionConfig
 from mvp.model.discovery.fast_selection import FastForwardSelector
 from mvp.model.discovery.selection import FeatureSelector
+from mvp.model.models import get_n_jobs_override
 
 logger = logging.getLogger(__name__)
 
@@ -53,9 +61,10 @@ def _resample_fingerprint(
     """Content hash of everything that determines each resample's selected set.
 
     EXCLUDES ``n_resamples`` (the loop is extendable — more resamples reuse the
-    completed ones) and ``selection_threshold`` (applied post-hoc at aggregation,
-    so re-thresholding reuses the checkpoint). A mismatch invalidates the
-    checkpoint and the run starts fresh.
+    completed ones), ``selection_threshold`` (applied post-hoc at aggregation,
+    so re-thresholding reuses the checkpoint), and ``max_workers`` (parallelism
+    is results-invariant — resamples are index-seeded and aggregated in index
+    order). A mismatch invalidates the checkpoint and the run starts fresh.
     """
     payload = {
         "pool": sorted(all_features),
@@ -231,28 +240,45 @@ def run_stability_selection(
                 len(results_by_index), config.n_resamples,
             )
 
+    pending = [b for b in range(config.n_resamples) if b not in results_by_index]
+
+    # Resample-level parallelism. Resamples are independent (each seeded by its
+    # index, aggregated below in index order), so a thread pool changes only
+    # throughput, never the selected set. The heavy per-resample work is XGBoost
+    # fits, which release the GIL, so threads — not processes — give real
+    # parallelism while still sharing the single precomputed X_wide (no
+    # per-worker matrix copies). create_scorer / resample_folds only read frozen
+    # state, and the scorer copies each fold's slice before imputing, so X_wide
+    # is never mutated across threads.
+    # Resolve the per-fit thread cap the way the model layer does: config
+    # model.params n_jobs, else the --n-jobs override. When neither is set the
+    # fit falls back to ~all cores (cpu-2), so concurrent fits would
+    # oversubscribe — stay sequential there and let an explicit n_jobs cap free
+    # cores for resample-level parallelism.
+    params_n_jobs = (fast.config.model.params or {}).get("n_jobs")
+    explicit_n_jobs = int(params_n_jobs) if params_n_jobs else get_n_jobs_override()
+    cpu_count = os.cpu_count() or 4
+    if config.max_workers is not None:
+        workers = max(1, config.max_workers)
+    elif explicit_n_jobs:
+        workers = max(1, cpu_count // max(1, explicit_n_jobs))
+    else:
+        workers = 1
+    workers = min(workers, len(pending)) if pending else 1
+
     loop_t0 = time.perf_counter()
-    newly_done = 0
+    done_this_run = 0
 
-    for b in range(config.n_resamples):
-        if b in results_by_index:
-            continue  # already completed on a previous run
-
-        # Per-resample seeding: resample b is reproducible regardless of where a
-        # resumed run picks up.
+    def _run_one(b: int) -> dict:
+        """Compute one resample's record. Pure with respect to shared state —
+        reads only frozen geometry and copies each fold slice, so it is safe to
+        run on a worker thread. Per-resample seeding makes it reproducible
+        regardless of completion order."""
         rng = np.random.default_rng(config.random_seed + b)
         mask = _resample_mask(rng, fast, config)
         folds, medians, skipped = fast.resample_folds(mask, config.min_fold_rows)
         if not folds:
-            logger.warning(
-                "Resample %d/%d: every fold degenerate (< %d rows); skipping.",
-                b + 1, config.n_resamples, config.min_fold_rows,
-            )
-            results_by_index[b] = {"index": b, "degenerate": True}
-            if checkpoint_path is not None:
-                _save_resample_checkpoint(checkpoint_path, fingerprint, results_by_index)
-            continue
-
+            return {"index": b, "degenerate": True}
         scorer = fast.create_scorer(metric, folds=folds, fold_medians=medians)
         selector = FeatureSelector(
             scorer=scorer,
@@ -265,31 +291,82 @@ def run_stability_selection(
             min_delta=min_delta,
         )
         result = selector.run(verbose=False)
-        selected = result.selected_features
-
-        results_by_index[b] = {
+        return {
             "index": b,
-            "selected": selected,
+            "selected": result.selected_features,
             "match_count": int(mask.sum()),
             "fold_skips": skipped,
         }
-        newly_done += 1
+
+    def _finalize(record: dict) -> None:
+        """Record a completed resample, checkpoint, and log progress. In the
+        threaded path the caller holds the lock: the dict mutation, checkpoint
+        write, and counter bump must be atomic together."""
+        nonlocal done_this_run
+        b = record["index"]
+        results_by_index[b] = record
         if checkpoint_path is not None:
             _save_resample_checkpoint(checkpoint_path, fingerprint, results_by_index)
-
-        # ETA is averaged over resamples completed THIS run (not resumed ones),
-        # and is rougher than the null-importance ETA: each resample's forward
-        # selection runs to a different stopping depth over a different subsample
-        # size, so per-resample cost varies — treat early estimates as approximate.
+        if record.get("degenerate"):
+            logger.warning(
+                "Resample %d/%d: every fold degenerate (< %d rows); skipping.",
+                b + 1, config.n_resamples, config.min_fold_rows,
+            )
+            return
+        # ETA is wall-clock over non-degenerate resamples completed THIS run
+        # (resumed ones excluded). Under parallelism each completion stands in
+        # for `workers` overlapping resamples, and per-resample cost already
+        # varies with stopping depth and subsample size — treat it as approximate.
+        done_this_run += 1
         elapsed = time.perf_counter() - loop_t0
-        avg = elapsed / newly_done
-        eta_min = avg * (config.n_resamples - (b + 1)) / 60.0
+        avg = elapsed / done_this_run
+        eta_min = avg * (len(pending) - done_this_run) / 60.0
         logger.info(
-            "Resample %d/%d: %d features, %d rows, %d folds skipped "
-            "(avg %.0fs/resample, ETA ~%.1f min)",
-            b + 1, config.n_resamples, len(selected), int(mask.sum()), skipped,
-            avg, eta_min,
+            "Resample %d/%d done: %d features, %d rows, %d folds skipped "
+            "(avg %.0fs/resample wall, ETA ~%.1f min)",
+            b + 1, config.n_resamples, len(record["selected"]),
+            record["match_count"], record["fold_skips"], avg, eta_min,
         )
+
+    if workers == 1:
+        for b in pending:
+            _finalize(_run_one(b))
+    elif pending:
+        logger.info(
+            "Stability: %d resamples across %d worker threads (n_jobs=%s per fit).",
+            len(pending), workers, explicit_n_jobs if explicit_n_jobs else "default",
+        )
+        lock = threading.Lock()
+        executor = ThreadPoolExecutor(max_workers=workers)
+        futures = [executor.submit(_run_one, b) for b in pending]
+        try:
+            for fut in as_completed(futures):
+                record = fut.result()
+                with lock:
+                    _finalize(record)
+        finally:
+            # Tear-down doubles as crash recovery. cancel_futures drops resamples
+            # that never started (so a doomed batch doesn't burn the rest of the
+            # pool), and wait=True joins the in-flight threads. We then checkpoint
+            # every resample that DID finish — including any that completed after
+            # the failing one and so never reached _finalize in the loop above.
+            # On a clean run this is a no-op (all already recorded); on a failure
+            # or Ctrl-C it means resuming re-runs only what didn't finish. Threads
+            # are joined here, so no lock is needed.
+            executor.shutdown(wait=True, cancel_futures=True)
+            salvaged = 0
+            for fut in futures:
+                if fut.cancelled() or fut.exception() is not None:
+                    continue
+                record = fut.result()
+                if record["index"] not in results_by_index:
+                    _finalize(record)
+                    salvaged += 1
+            if salvaged:
+                logger.info(
+                    "Stability: salvaged %d completed resample(s) to the "
+                    "checkpoint before aborting.", salvaged,
+                )
 
     # Aggregate over effective (non-degenerate) resamples, in index order.
     effective_records = [

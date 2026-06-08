@@ -16,6 +16,11 @@ def set_n_jobs_override(n: int | None) -> None:
     _n_jobs_override = n
 
 
+def get_n_jobs_override() -> int | None:
+    """Return the global n_jobs override, or None if unset (CLI --n-jobs)."""
+    return _n_jobs_override
+
+
 def _default_n_jobs() -> int:
     """Return n_jobs: global override if set, else cpu_count - 2."""
     if _n_jobs_override is not None:
