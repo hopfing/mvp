@@ -16,10 +16,35 @@ Currently deployed on: Beelink (Linux, user `happybees`).
 - `config/notify.env.example` — template for the two Discord webhooks. The
   real file lives at `~/.config/mvp/notify.env`, has mode 0600, and is **not**
   in version control.
-- `crontab` — the three cron entries (15-min run, daily log cleanup, hourly
-  heartbeat).
+- `crontab` — the cron entries: two 15-min jobs (`mvp-live` — ATP fetch +
+  predict + publish, run off-VPN via `mullvad-exclude`; and `mvp-books` — odds
+  scraping, run on the VPN), plus daily log cleanup and the hourly heartbeat.
 - `install.sh` — validates `notify.env` and replaces the user crontab with
   this repo's `crontab`. Idempotent.
+
+## Egress split (books vs ATP)
+
+The pipeline runs as **two** 15-min cron jobs with opposite egress needs:
+
+- `mvp-live` (off-VPN, via `mullvad-exclude`) — ATP data fetch + predictions +
+  Sheets sync. The Infosys match-centre endpoint 403s the Mullvad exit IP, so
+  this must run on the bare ISP IP; atptour.com still clears Cloudflare via the
+  browser solver on that IP.
+- `mvp-books` (on the VPN) — sportsbook odds scraping, which must stay on the
+  VPN (book anti-bot / account constraints).
+
+Linux split tunnelling (Mullvad `mullvad-exclude`) is whole-process, so the two
+cannot share a process. They hand off through the staged odds parquet on the
+local filesystem: the books job touches a completion sentinel
+(`pipeline/.books_done`) when done, and the main job waits (bounded, ~120s) for
+a fresh sentinel before mapping/matching odds, flagging the run `books_stale`
+if it times out. The ATP fetch normally outlasts the books job, so the wait is
+usually a near-no-op.
+
+Only `mvp-live` marks the heartbeat (`.last-success`); `mvp-books` runs with
+`--no-heartbeat`, so a books outage can't keep the heartbeat fresh and mask a
+main-job hard crash. A books outage surfaces via its own `mvp-books` Discord
+alert (plus a sustained-0-entry alert after several consecutive empty runs).
 
 ## Where alerts come from
 
@@ -27,7 +52,8 @@ Two paths:
 
 1. **Python (`src/mvp/notify.py`).** The pipeline itself posts:
    - `post_predictions` — when a sheets sync produces N>0 new bets.
-   - `post_failure` — when any caught exception ends `mvp live` non-zero.
+   - `post_failure` — when a caught exception ends the main (`mvp-live`) or
+     books (`mvp-books`) job non-zero, each on its own labelled alert.
    These fire in real-time and use proper JSON encoding (no shell escaping
    pitfalls). Best-effort: a webhook outage never fails the pipeline.
 

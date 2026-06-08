@@ -1,6 +1,12 @@
 # MVP live pipeline crontab — managed by ops/live/install.sh
 # Edit in the repo, not via `crontab -e`. Re-run install.sh to apply.
 
-*/15 * * * * ~/projects/mvp/ops/live/bin/run-job.sh --name mvp-live --dir ~/projects/mvp -- poetry run python -m mvp live
+# ATP fetch + predict + publish — runs OFF the VPN (mullvad-exclude) so the
+# Infosys match-centre endpoint isn't 403'd by the VPN exit IP; atptour.com
+# still clears Cloudflare via the browser solver on the bare IP.
+*/15 * * * * ~/projects/mvp/ops/live/bin/run-job.sh --name mvp-live --dir ~/projects/mvp -- mullvad-exclude poetry run python -m mvp live
+# Book odds scraping — runs ON the VPN (no mullvad-exclude); --no-heartbeat so
+# a books outage doesn't mask a main-job crash from check-heartbeat.sh.
+*/15 * * * * ~/projects/mvp/ops/live/bin/run-job.sh --name mvp-books --no-heartbeat --dir ~/projects/mvp -- poetry run python -m mvp books
 0 3 * * * find ~/logs -name "*.log" -mtime +30 -delete
 10 * * * * ~/projects/mvp/ops/live/bin/check-heartbeat.sh

@@ -16,10 +16,12 @@ export PATH="$HOME/.local/bin:$HOME/bin:$PATH"
 
 NAME=""
 DIR=""
+HEARTBEAT=1
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --name) NAME="$2"; shift 2 ;;
         --dir)  DIR="$2";  shift 2 ;;
+        --no-heartbeat) HEARTBEAT=0; shift ;;
         --)     shift; break ;;
         *)      break ;;
     esac
@@ -43,7 +45,11 @@ echo "=== $(date '+%Y-%m-%d %H:%M:%S') ===" >> "$LOG_FILE"
 EXIT_CODE=0
 "$@" >> "$LOG_FILE" 2>&1 || EXIT_CODE=$?
 
-if [[ $EXIT_CODE -eq 0 ]]; then
+# Only the main pipeline job marks the heartbeat. The books job runs with
+# --no-heartbeat so a books outage doesn't keep .last-success fresh (which
+# would mask a main-job hard crash from check-heartbeat.sh); the books job
+# has its own mvp-books failure alert instead.
+if [[ $EXIT_CODE -eq 0 && $HEARTBEAT -eq 1 ]]; then
     touch "$HOME/logs/.last-success"
 fi
 
