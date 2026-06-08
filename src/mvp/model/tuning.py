@@ -4,11 +4,13 @@ import gc
 import logging
 import tempfile
 import time
+import warnings
 from pathlib import Path
 from typing import Any
 
 import optuna
 import yaml
+from optuna.exceptions import ExperimentalWarning
 
 from mvp.common.base_job import get_data_root
 from mvp.projection.iid.metric_registry import METRICS as _IID_METRICS
@@ -69,14 +71,23 @@ DEFAULT_SEARCH_SPACES: dict[str, dict[str, dict[str, Any]]] = {
         # max_leaves: cap on total leaves per tree. 0=no limit (fine for
         # depthwise, where max_depth caps the tree shape). Constraining
         # makes lossguide grow narrower trees focused on high-loss regions.
-        "max_leaves": {"type": "int", "low": 0, "high": 256, "step": 16},
+        # Conditional: only the binding control under lossguide, so don't spend
+        # a TPE dimension on it when grow_policy=depthwise.
+        "max_leaves": {
+            "type": "int", "low": 0, "high": 256, "step": 16,
+            "condition": {"param": "grow_policy", "in": ["lossguide"]},
+        },
         # tree_method: how splits are searched. hist (default) uses binned
         # histograms; approx uses quantile sketches; exact evaluates every
         # value (most precise, much slower).
         "tree_method": {"type": "categorical", "choices": ["hist", "approx", "exact"]},
         # max_bin: histogram bins for tree_method=hist (and approx). More
         # bins = finer split candidates but slower and more memory.
-        "max_bin": {"type": "categorical", "choices": [128, 256, 512]},
+        # Conditional: tree_method=exact doesn't bin, so max_bin is inert there.
+        "max_bin": {
+            "type": "categorical", "choices": [128, 256, 512],
+            "condition": {"param": "tree_method", "in": ["hist", "approx"]},
+        },
     },
     "logistic": {
         "C": {"type": "float", "low": 0.0001, "high": 10.0, "log": True},
@@ -122,9 +133,16 @@ DEFAULT_SEARCH_SPACES: dict[str, dict[str, dict[str, Any]]] = {
         "lr_scheduler": {"type": "categorical", "choices": [None, "plateau"]},
         # lr_scheduler_factor / lr_scheduler_patience only have effect when
         # lr_scheduler="plateau" is sampled. factor = LR multiplier on plateau;
-        # patience = epochs of no improvement before reducing.
-        "lr_scheduler_factor": {"type": "float", "low": 0.1, "high": 0.7},
-        "lr_scheduler_patience": {"type": "int", "low": 2, "high": 10},
+        # patience = epochs of no improvement before reducing. Conditional so
+        # they aren't sampled (wasted) when lr_scheduler=None.
+        "lr_scheduler_factor": {
+            "type": "float", "low": 0.1, "high": 0.7,
+            "condition": {"param": "lr_scheduler", "in": ["plateau"]},
+        },
+        "lr_scheduler_patience": {
+            "type": "int", "low": 2, "high": 10,
+            "condition": {"param": "lr_scheduler", "in": ["plateau"]},
+        },
         # optimizer: "auto" preserves the original behavior (Adam if
         # weight_decay==0 else AdamW). The other choices override it.
         "optimizer": {"type": "categorical", "choices": ["auto", "adam", "adamw", "sgd_momentum", "radam", "nadam"]},
@@ -145,11 +163,28 @@ DEFAULT_SEARCH_SPACES: dict[str, dict[str, dict[str, Any]]] = {
 
 
 def suggest_params(
-    trial: optuna.Trial, search_space: dict[str, dict[str, Any]]
+    trial: optuna.Trial,
+    search_space: dict[str, dict[str, Any]],
+    fixed: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Use an Optuna trial to suggest values for all params in the search space."""
+    """Use an Optuna trial to suggest values for the params in the search space.
+
+    A spec may carry a ``"condition"`` of the form
+    ``{"param": <controller>, "in": [<values>]}``; that param is suggested only
+    when the controller's value — taken from an already-suggested param, or from
+    a pinned value in *fixed* — is in the allowed set. This keeps inert
+    dimensions (e.g. ``max_bin`` under ``tree_method=exact``) from consuming TPE
+    budget. Controllers must precede their dependents in the dict; a test guards
+    that ordering.
+    """
+    fixed = fixed or {}
     params: dict[str, Any] = {}
     for name, spec in search_space.items():
+        cond = spec.get("condition")
+        if cond is not None:
+            ctrl_val = params.get(cond["param"], fixed.get(cond["param"]))
+            if ctrl_val not in cond["in"]:
+                continue
         ptype = spec["type"]
         if ptype == "int":
             kwargs = {}
@@ -313,7 +348,19 @@ class HyperparamTuner:
         startup_trials = (
             self.n_startup_trials if self.n_startup_trials is not None else 25
         )
-        sampler = optuna.samplers.TPESampler(n_startup_trials=startup_trials)
+        # multivariate=True models HP interactions (tree HPs are correlated, so
+        # the univariate default leaves signal on the table); group=True lets the
+        # multivariate TPE handle the conditional search space — trials with
+        # different active params — via Gibbs sampling. Both are flagged
+        # experimental in optuna 4.8 but stable in practice; the warning fires
+        # once at construction, so suppress it there to keep tune logs clean.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", ExperimentalWarning)
+            sampler = optuna.samplers.TPESampler(
+                n_startup_trials=startup_trials,
+                multivariate=True,
+                group=True,
+            )
 
         # MedianPruner kills trials whose fold-k log_loss is worse than the
         # median of completed trials at the same fold step. warmup=2 means
@@ -376,7 +423,7 @@ class HyperparamTuner:
         Raises optuna.TrialPruned if the runner's per-fold pruning check
         fires mid-trial. That exception propagates up to Optuna's optimize
         loop, which records the trial in PRUNED state."""
-        params = suggest_params(trial, self.search_space)
+        params = suggest_params(trial, self.search_space, fixed=self.pinned_params)
         params.update(self.pinned_params)
         params = _decode_params(params)
 

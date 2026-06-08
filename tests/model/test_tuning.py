@@ -94,6 +94,70 @@ class TestSuggestParams:
         with pytest.raises(ValueError, match="Unknown param type"):
             suggest_params(trial, space)
 
+    def _conditional_space(self):
+        return {
+            "tree_method": {
+                "type": "categorical", "choices": ["hist", "approx", "exact"],
+            },
+            "max_bin": {
+                "type": "categorical", "choices": [128, 256, 512],
+                "condition": {"param": "tree_method", "in": ["hist", "approx"]},
+            },
+        }
+
+    def test_condition_skips_dependent_when_controller_excludes(self):
+        """A conditional param is not suggested when its controller excludes it."""
+        trial = MagicMock()
+        trial.suggest_categorical.return_value = "exact"
+
+        result = suggest_params(trial, self._conditional_space())
+
+        assert result == {"tree_method": "exact"}  # max_bin skipped
+        trial.suggest_categorical.assert_called_once_with(
+            "tree_method", ["hist", "approx", "exact"]
+        )
+
+    def test_condition_includes_dependent_when_controller_matches(self):
+        """A conditional param IS suggested when its controller matches."""
+        trial = MagicMock()
+        trial.suggest_categorical.return_value = "hist"
+
+        result = suggest_params(trial, self._conditional_space())
+
+        assert "max_bin" in result
+        assert trial.suggest_categorical.call_count == 2
+
+    def test_condition_reads_controller_from_fixed(self):
+        """A pinned controller (not in the space) still gates the dependent."""
+        trial = MagicMock()
+        trial.suggest_categorical.return_value = 256
+        space = {"max_bin": self._conditional_space()["max_bin"]}
+
+        # Pinned tree_method=hist -> max_bin suggested.
+        result = suggest_params(trial, space, fixed={"tree_method": "hist"})
+        assert "max_bin" in result
+
+        # Pinned tree_method=exact -> max_bin skipped.
+        result2 = suggest_params(MagicMock(), space, fixed={"tree_method": "exact"})
+        assert result2 == {}
+
+    def test_default_space_conditions_reference_earlier_controllers(self):
+        """Every condition points at a known param that precedes the dependent."""
+        for model_type, space in DEFAULT_SEARCH_SPACES.items():
+            names = list(space.keys())
+            for idx, (name, spec) in enumerate(space.items()):
+                cond = spec.get("condition")
+                if cond is None:
+                    continue
+                ctrl = cond["param"]
+                assert "in" in cond, f"{model_type}.{name} condition missing 'in'"
+                assert ctrl in names, (
+                    f"{model_type}.{name} condition references unknown '{ctrl}'"
+                )
+                assert names.index(ctrl) < idx, (
+                    f"{model_type}.{name} controller '{ctrl}' must precede it"
+                )
+
 
 class TestDecodeParams:
     """Tests for _decode_params helper."""
