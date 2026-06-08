@@ -286,6 +286,12 @@ class MTLConfig(_StrictModel):
             "set2_games_diff",
             "duration_seconds",
             "wl_continuous_proxy",
+            # Placebo controls: carry no per-match signal. Used to separate
+            # target-specific value from generic MTL regularization — if a
+            # placebo head improves primary LL like a real aux target does,
+            # the gain is regularization, not the target's information.
+            "placebo_gaussian",
+            "placebo_shuffled_set_margin",
         ]
     ]
 

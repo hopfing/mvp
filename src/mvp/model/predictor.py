@@ -295,6 +295,18 @@ class ProductionPredictor:
                     "_aux_wl_continuous_proxy",
                     (pl.col(primary_col).cast(pl.Float64) * 2.0 - 1.0),
                 ),
+                # Placebo controls (see MTLConfig.auxiliary_targets). Seeded for
+                # reproducibility. placebo_gaussian is pure N(0,1) noise; the
+                # shuffled variant keeps set_margin's marginal but destroys its
+                # per-match link to the outcome via a seeded column shuffle.
+                "placebo_gaussian": (
+                    "_aux_placebo_gaussian",
+                    pl.Series(np.random.default_rng(42).standard_normal(df.height)),
+                ),
+                "placebo_shuffled_set_margin": (
+                    "_aux_placebo_shuffled_set_margin",
+                    (_sets_won() - _sets_lost()).shuffle(seed=42),
+                ),
             }
             aux_cols: list[str] = []
             for aux_name in mtl_cfg.auxiliary_targets:
