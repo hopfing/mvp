@@ -8,6 +8,7 @@ from mvp.atptour.mappings import (
     SR_ID_MAPPING,
     create_match_uid,
     is_placeholder_id,
+    is_unknown_round,
     map_player_id,
     normalize_flag_url,
     normalize_round,
@@ -73,6 +74,16 @@ class TestNormalizeRound:
     def test_unmapped_raises_valueerror(self):
         with pytest.raises(ValueError, match="Unmapped round name"):
             normalize_round("Unknown Round")
+
+    def test_is_unknown_round_true_for_sentinel(self):
+        # ATP's explicit no-round sentinel — skipped at the transformer level.
+        assert is_unknown_round("Unknown Round") is True
+        assert is_unknown_round("  Unknown Round  ") is True
+
+    def test_is_unknown_round_false_for_real_rounds(self):
+        assert is_unknown_round("Quarterfinals") is False
+        assert is_unknown_round("1st Round Qualifying") is False
+        assert is_unknown_round("") is False
 
     def test_empty_string_raises_valueerror(self):
         with pytest.raises(ValueError, match="Unmapped round name"):

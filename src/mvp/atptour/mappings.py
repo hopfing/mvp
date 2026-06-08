@@ -61,6 +61,21 @@ def normalize_round(raw: str) -> Round:
     return result
 
 
+UNKNOWN_ROUND_SENTINEL = "Unknown Round"
+
+
+def is_unknown_round(raw: str) -> bool:
+    """True if ATP emitted its explicit no-round sentinel for a match.
+
+    ATP occasionally labels a match's round 'Unknown Round' in the results
+    data (observed on tournament 9005, 2026) — it has no real bracket
+    position. Such matches are skipped during results staging rather than
+    fabricating a round; any OTHER unmapped round name still fail-hards via
+    normalize_round (ADR-002).
+    """
+    return _DAY_SUFFIX_RE.sub("", raw.strip()) == UNKNOWN_ROUND_SENTINEL
+
+
 # Mapping Sportradar player IDs to ATP IDs, partial mapping based on observed data.
 SR_ID_MAPPING: dict[str, str] = {
     "SR:COMPETITOR:972327": "J0DZ",

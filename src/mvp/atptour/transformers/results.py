@@ -7,6 +7,7 @@ from pathlib import Path
 import polars as pl
 
 from mvp.atptour.mappings import (
+    is_unknown_round,
     map_player_id,
     parse_duration,
     parse_seed_entry,
@@ -103,6 +104,17 @@ class ResultsTransformer(BaseJob):
         records = []
 
         for match in raw_matches:
+            # ATP sometimes emits 'Unknown Round' in the results data — the
+            # match has no real bracket position, so skip it rather than
+            # fabricate a round. Any OTHER unmapped round name still fail-hards
+            # in ResultRecord (normalize_round / ADR-002).
+            if is_unknown_round(match["round_text"]):
+                logger.warning(
+                    "Skipping match with ATP 'Unknown Round' in %s (match_id=%s)",
+                    self.tournament.logging_id,
+                    match.get("match_id", "?"),
+                )
+                continue
             record = self._build_record(
                 match, draw_type, is_doubles, source_file, parsed_at
             )
