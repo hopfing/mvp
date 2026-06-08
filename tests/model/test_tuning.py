@@ -288,6 +288,9 @@ model:
   type: logistic
   params:
     C: 1.0
+    # Full logistic search space (C + l1_ratio) so the baseline is complete and
+    # is enqueued as trial 0. A partial config intentionally skips the baseline.
+    l1_ratio: 0.0
 validation:
   type: walk_forward
   n_splits: 2
