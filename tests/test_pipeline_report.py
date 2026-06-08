@@ -11,6 +11,26 @@ def test_new_report_has_timestamp():
     assert report.data["timestamp"] is not None
 
 
+def test_new_report_has_tick_id_and_job():
+    report = PipelineReport()
+    assert report.data["job"] == "main"
+    assert report.data["tick_id"] is not None
+    assert PipelineReport(job="books").data["job"] == "books"
+
+
+def test_tick_id_floors_to_15min():
+    from datetime import datetime
+
+    from mvp.pipeline_report import _tick_id
+
+    # Both jobs in one cron tick floor to the same id regardless of seconds.
+    assert _tick_id(datetime(2026, 6, 8, 7, 15, 0)) == "2026-06-08T07:15:00"
+    assert _tick_id(datetime(2026, 6, 8, 7, 17, 42)) == "2026-06-08T07:15:00"
+    assert _tick_id(datetime(2026, 6, 8, 7, 29, 59)) == "2026-06-08T07:15:00"
+    assert _tick_id(datetime(2026, 6, 8, 7, 30, 0)) == "2026-06-08T07:30:00"
+    assert _tick_id(datetime(2026, 6, 8, 7, 2, 0)) == "2026-06-08T07:00:00"
+
+
 def test_record_tournaments():
     report = PipelineReport()
     report.record_tournaments(processed=8, failed=[("houston", 2026, "timeout")])
