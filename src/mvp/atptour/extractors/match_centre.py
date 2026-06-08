@@ -123,6 +123,7 @@ class MatchCentreExtractor(BaseExtractor):
         )
 
         stats = {dt: {"saved": 0, "skipped": 0, "failed": 0} for dt in self.data_types}
+        status_failures = 0
 
         for match_id in sorted(all_to_fetch):
             mid = match_id.upper()
@@ -132,9 +133,11 @@ class MatchCentreExtractor(BaseExtractor):
                 tournament.year, tournament.tournament_id, mid
             )
             if status is None:
-                for dt in self.data_types:
-                    if mid in to_fetch_by_type[dt]:
-                        stats[dt]["skipped"] += 1
+                # A failed status call is an error (egress/WAF block, upstream
+                # outage, decrypt failure) — NOT a benign "data not available"
+                # skip. Track it separately so a total block can't masquerade as
+                # a quiet skipped count.
+                status_failures += 1
                 continue
 
             match_center = status.get("matchCenter", {})
@@ -184,12 +187,27 @@ class MatchCentreExtractor(BaseExtractor):
                 self.save_json(data, target)
                 stats[dt]["saved"] += 1
 
-        # Log results
+        # Log results. Elevate to WARNING when anything actually failed (status
+        # call or data fetch) so an egress/WAF block or upstream outage surfaces
+        # — WARNING records survive the pipeline's WARNING-only worker-log replay
+        # instead of being swallowed as INFO.
         total_saved = 0
+        total_failed = sum(stats[dt]["failed"] for dt in self.data_types)
+        level = logging.WARNING if (status_failures or total_failed) else logging.INFO
+        if status_failures:
+            logger.log(
+                level,
+                "%s: match-centre status fetch FAILED for %d/%d match(es) "
+                "— possible egress/WAF block or upstream outage",
+                tournament.logging_id,
+                status_failures,
+                len(all_to_fetch),
+            )
         for dt in self.data_types:
             s = stats[dt]
             total_saved += s["saved"]
-            logger.info(
+            logger.log(
+                level,
                 "%s: %s - saved %d, skipped %d, failed %d",
                 tournament.logging_id,
                 dt.value,
@@ -232,7 +250,8 @@ class MatchCentreExtractor(BaseExtractor):
                 return None
 
             return decrypt_response(encrypted, last_modified)
-        except (requests.RequestsError, ValueError, KeyError):
+        except (requests.RequestsError, ValueError, KeyError) as e:
+            logger.debug("Status fetch failed for match %s: %s", match_id, e)
             return None
 
     def _fetch_data(
