@@ -251,9 +251,18 @@ class FastForwardSelector:
             cache_dir=self.cache_dir,
         )
         compute_only = self.config.discovery.features.compute_only
-        all_specs = self.all_feature_specs + [
-            s for s in compute_only if s not in self.all_feature_specs
+        # Recomputable diffs (e.g. a screened `include` that kept a diff but
+        # dropped its player/opp parts) need those base columns present for
+        # imputation. build_imputation derives exactly which base specs are
+        # required; fold them into the load so the augmented-matrix select
+        # below can't reference a column the loader was never asked to fetch.
+        self._build_result = build_imputation(self.all_feature_specs, get_registry())
+        extra_specs = [
+            s
+            for s in compute_only + self._build_result.aux_base_specs
+            if s not in self.all_feature_specs
         ]
+        all_specs = self.all_feature_specs + list(dict.fromkeys(extra_specs))
 
         # MTL detection: same flag the runner uses. Drives the completeness
         # gate (RET/DEF/UNP exclusion), aux target derivation, and the
@@ -497,7 +506,8 @@ class FastForwardSelector:
 
         all_col_names = get_feature_columns(self.all_feature_specs)
         registry = get_registry()
-        self._build_result = build_imputation(self.all_feature_specs, registry)
+        # _build_result was computed up front (so its aux base specs could be
+        # folded into the load above); reuse it for the augmented columns.
         augmented_col_names = all_col_names + self._build_result.aux_base_col_names
         self.col_to_idx = {c: i for i, c in enumerate(augmented_col_names)}
 

@@ -69,6 +69,10 @@ class ImputeBuildResult:
 
     specs: list[ImputeSpec]
     aux_base_col_names: list[str] = field(default_factory=list)
+    # Loadable feature specs for the aux base columns above (index-aligned).
+    # Lets spec-based loaders (the FS engine) pull the player/opp parts a
+    # recomputable diff needs even when those parts aren't selection candidates.
+    aux_base_specs: list[str] = field(default_factory=list)
     n_model_features: int = 0
 
 
@@ -126,6 +130,19 @@ def _spec_for(col_idx: int, impute_val: float | str | None) -> ImputeSpec:
     )
 
 
+def _aux_spec(name: str, params: dict) -> str:
+    """Reconstruct a loadable feature spec from a prefixed base name + params.
+
+    Matches the format the FS engine's loader parses — ``name`` for no params,
+    ``name(k=v,...)`` otherwise (``name()`` would fail ``parse_feature_spec``).
+    Lets aux base columns be loaded alongside the diffs that depend on them.
+    """
+    if not params:
+        return name
+    param_str = ",".join(f"{k}={v}" for k, v in params.items())
+    return f"{name}({param_str})"
+
+
 def build_imputation(
     feature_specs: list[str],
     registry: FeatureRegistry,
@@ -152,6 +169,7 @@ def build_imputation(
     }
 
     aux_col_names: list[str] = []
+    aux_base_specs: list[str] = []
     model_specs: list[ImputeSpec] = []
     aux_specs: list[ImputeSpec] = []
 
@@ -195,6 +213,7 @@ def build_imputation(
                 aux_idx = n_model + len(aux_col_names)
                 col_name_to_idx[player_col] = aux_idx
                 aux_col_names.append(player_col)
+                aux_base_specs.append(_aux_spec(f"player_{player_dep}", params))
                 base_def = registry.get(player_dep)
                 aux_specs.append(_spec_for(aux_idx, base_def.impute))
 
@@ -203,6 +222,7 @@ def build_imputation(
                 aux_idx = n_model + len(aux_col_names)
                 col_name_to_idx[opp_col] = aux_idx
                 aux_col_names.append(opp_col)
+                aux_base_specs.append(_aux_spec(f"opp_{opp_dep}", params))
                 base_def = registry.get(opp_dep)
                 aux_specs.append(_spec_for(aux_idx, base_def.impute))
 
@@ -222,6 +242,7 @@ def build_imputation(
     return ImputeBuildResult(
         specs=model_specs + aux_specs,
         aux_base_col_names=aux_col_names,
+        aux_base_specs=aux_base_specs,
         n_model_features=n_model,
     )
 
