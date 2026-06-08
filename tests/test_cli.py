@@ -1,6 +1,7 @@
 """Tests for unified CLI."""
 
 
+import json
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -116,6 +117,13 @@ class TestCmdTrain:
 
 
 class TestCmdLive:
+    @pytest.fixture(autouse=True)
+    def _no_books_wait(self):
+        # The books job is a separate process in production; tests stage no
+        # sentinel, so skip cmd_live's bounded wait for it (avoids 120s/test).
+        with patch("mvp.cli._wait_for_books", return_value=True):
+            yield
+
     @patch("mvp.cli._fetch_book_quiet", return_value=0)
     @patch("mvp.model.predictor.ProductionPredictor")
     @patch("mvp.atptour.aggregators.matches.MatchesAggregator")
@@ -230,8 +238,64 @@ class TestCmdLive:
             cmd_live(args)
 
 
+class TestBookOutageAlert:
+    """_alert_book_outages: onset-only alert after X consecutive 0-entry runs."""
+
+    def _write_books_runs(self, data_root: Path, br_counts: list[int]) -> None:
+        path = data_root / "pipeline" / "runs.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w") as f:
+            for c in br_counts:
+                f.write(
+                    json.dumps({"job": "books", "books_fetched": {"br": c}}) + "\n"
+                )
+
+    def _br_book(self):
+        from mvp.cli import BOOK_REGISTRY
+
+        return [b for b in BOOK_REGISTRY if b.code == "br"]
+
+    @patch("mvp.cli.notify.post_failure")
+    def test_fires_on_outage_onset(self, mock_fail, tmp_path):
+        from mvp.cli import _alert_book_outages
+
+        # last good 4 runs ago; this run makes the 4th consecutive zero
+        self._write_books_runs(tmp_path, [5, 0, 0, 0])
+        _alert_book_outages(tmp_path, {"br": 0}, self._br_book())
+        mock_fail.assert_called_once()
+
+    @patch("mvp.cli.notify.post_failure")
+    def test_ignores_transient_blip(self, mock_fail, tmp_path):
+        from mvp.cli import _alert_book_outages
+
+        self._write_books_runs(tmp_path, [5, 5, 5, 5])
+        _alert_book_outages(tmp_path, {"br": 0}, self._br_book())  # single 0
+        mock_fail.assert_not_called()
+
+    @patch("mvp.cli.notify.post_failure")
+    def test_no_realert_when_already_down(self, mock_fail, tmp_path):
+        from mvp.cli import _alert_book_outages
+
+        self._write_books_runs(tmp_path, [0, 0, 0, 0])
+        _alert_book_outages(tmp_path, {"br": 0}, self._br_book())
+        mock_fail.assert_not_called()
+
+    @patch("mvp.cli.notify.post_failure")
+    def test_no_alert_without_enough_history(self, mock_fail, tmp_path):
+        from mvp.cli import _alert_book_outages
+
+        self._write_books_runs(tmp_path, [0, 0])
+        _alert_book_outages(tmp_path, {"br": 0}, self._br_book())
+        mock_fail.assert_not_called()
+
+
 class TestCmdLiveSheets:
     """Tests for Sheets sync integration in cmd_live."""
+
+    @pytest.fixture(autouse=True)
+    def _no_books_wait(self):
+        with patch("mvp.cli._wait_for_books", return_value=True):
+            yield
 
     @patch("mvp.cli._fetch_book_quiet", return_value=0)
     @patch("mvp.gsheets.sheets.SheetsSync")

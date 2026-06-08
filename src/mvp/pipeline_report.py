@@ -13,9 +13,13 @@ from pathlib import Path
 class PipelineReport:
     """Accumulates pipeline health metrics and writes to JSONL."""
 
-    def __init__(self) -> None:
+    def __init__(self, job: str = "main") -> None:
+        # ``job`` distinguishes the split live processes: "main" (ATP fetch +
+        # predict + publish, off-VPN) vs "books" (odds scraping, on-VPN). Both
+        # append to the same runs.jsonl; dashboard views filter to "main".
         self.data: dict = {
             "timestamp": datetime.now().isoformat(),
+            "job": job,
             "tournaments_processed": 0,
             "tournaments_failed": 0,
             "tournament_failures": [],
@@ -24,6 +28,7 @@ class PipelineReport:
             "predictions_total": 0,
             "predictions_without_odds": [],
             "sheets_sync": {"success": False, "count": 0, "error": None},
+            "books_stale": False,
             "errors": [],
         }
 
@@ -62,6 +67,11 @@ class PipelineReport:
         self.data["sheets_sync"] = {
             "success": success, "count": count, "error": error
         }
+
+    def record_books_stale(self, stale: bool = True) -> None:
+        """Main job: odds were possibly stale because the books job hadn't
+        finished staging fresh odds before the mapping/matching stages."""
+        self.data["books_stale"] = stale
 
     def set_errors(self, errors: list[str]) -> None:
         self.data["errors"] = list(errors)

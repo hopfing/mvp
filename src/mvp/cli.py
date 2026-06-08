@@ -2,8 +2,11 @@
 
 
 import argparse
+import json
 import logging
+import os
 import sys
+import time
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -956,6 +959,12 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         "--refresh-players",
         action="store_true",
         help="Run activity extraction/staging (skipped by default)",
+    )
+
+    # books subcommand — odds scraping, split from `live` so it can run on the
+    # VPN while `live` runs off-VPN (mullvad-exclude).
+    subparsers.add_parser(
+        "books", help="Fetch sportsbook odds (VPN egress; split from live)"
     )
 
     # confidence subcommand
@@ -2809,6 +2818,107 @@ def _fetch_book_quiet(book: BookConfig, run_at=None) -> int:
     return scraper.run()
 
 
+# --- Book-scrape / ATP-fetch egress split ---------------------------------
+# Books run on the VPN (the `books` job); the ATP fetch + predict + publish
+# work runs off-VPN under mullvad-exclude (the `live` job). cgroup split-tunnel
+# is whole-process, so the two cannot share a process. They hand off through
+# the staged odds parquet on the local filesystem, coordinated by a completion
+# sentinel the live job waits on before mapping/matching odds.
+
+_BOOKS_SENTINEL_REL = "pipeline/.books_done"
+_BOOKS_WAIT_TIMEOUT_S = 120     # live job's max wait for the books job per tick
+_BOOK_FETCH_TIMEOUT_S = 90      # per-book scrape cap in the books job
+_BOOKS_OUTAGE_X = 4             # consecutive 0-entry runs that fire the alert
+
+
+def _books_sentinel_path(data_root: Path) -> Path:
+    return data_root / _BOOKS_SENTINEL_REL
+
+
+def _touch_books_sentinel(data_root: Path) -> None:
+    """Signal that this tick's book-scrape job finished staging odds."""
+    from datetime import datetime
+
+    path = _books_sentinel_path(data_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(datetime.now().isoformat())
+
+
+def _wait_for_books(
+    data_root: Path, since_ts: float, timeout_s: int = _BOOKS_WAIT_TIMEOUT_S
+) -> bool:
+    """Block until the books job signals completion fresh for this tick.
+
+    Returns True once the sentinel's mtime is at/after ``since_ts`` (this tick's
+    start), False on timeout (caller flags the run books-stale). Typically a
+    near-no-op: the ATP fetch usually outlasts the books job.
+    """
+    path = _books_sentinel_path(data_root)
+    deadline = time.monotonic() + timeout_s
+    while True:
+        try:
+            if path.exists() and path.stat().st_mtime >= since_ts:
+                return True
+        except OSError:
+            pass
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(2)
+
+
+def _recent_books_runs(data_root: Path, limit: int) -> list[dict]:
+    """Return the last ``limit`` book-job report rows from runs.jsonl."""
+    path = data_root / "pipeline" / "runs.jsonl"
+    if not path.exists():
+        return []
+    rows: list[dict] = []
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if row.get("job") == "books":
+                rows.append(row)
+    return rows[-limit:]
+
+
+def _alert_book_outages(
+    data_root: Path,
+    current_counts: dict[str, int],
+    enabled_books: list[BookConfig],
+) -> None:
+    """Alert when an enabled book returns 0 entries for X consecutive runs
+    (this run + the prior X-1) having produced >0 just before — a sustained
+    outage, not a transient single-tick blip. Onset-only: fires once when the
+    run before the window was the last >0, so a prolonged outage doesn't
+    re-alert every tick. Must run BEFORE this run's report is appended.
+    """
+    x = _BOOKS_OUTAGE_X
+    prior = _recent_books_runs(data_root, x)  # the X runs before this one
+    if len(prior) < x:
+        return  # not enough history to judge an X-run outage onset
+    for book in enabled_books:
+        counts = [r.get("books_fetched", {}).get(book.code) for r in prior]
+        if any(c is None for c in counts):
+            continue  # incomplete history (book newly enabled)
+        window = counts[1:] + [current_counts.get(book.code, 0)]  # most recent X
+        before = counts[0]                                        # run before window
+        if all(c == 0 for c in window) and (before or 0) > 0:
+            logger.warning(
+                "%s: 0 odds entries for %d consecutive runs — likely outage",
+                book.label, x,
+            )
+            notify.post_failure(
+                "mvp-books",
+                f"{book.label}: 0 odds entries for {x} consecutive runs "
+                f"— likely scrape outage (was producing {x} runs ago).",
+            )
+
+
 def cmd_live(args: argparse.Namespace) -> int:
     """Run live pipeline: extract, aggregate, predict."""
     from concurrent.futures import ThreadPoolExecutor
@@ -2830,15 +2940,10 @@ def cmd_live(args: argparse.Namespace) -> int:
     from mvp.pipeline_report import PipelineReport
     report = PipelineReport()
 
-    # Start odds fetch in background (fully independent of pipeline).
-    # Filtered to _SCRAPE_ENABLED_BOOKS so disabled books don't fire requests
-    # against egresses where they're known to fail (DK/FD via Mullvad).
-    enabled_books = [b for b in BOOK_REGISTRY if b.code in _SCRAPE_ENABLED_BOOKS]
-    odds_pool = ThreadPoolExecutor(max_workers=max(1, len(enabled_books)))
-    book_futures = {
-        b.code: odds_pool.submit(_fetch_book_quiet, b, pipeline_run_at)
-        for b in enabled_books
-    }
+    # Book odds are scraped by the separate `books` job (on the VPN). This job
+    # runs off-VPN (mullvad-exclude) and consumes the staged odds from disk in
+    # the mapping/matching stages below, after waiting for the books job to
+    # signal completion for this tick.
 
     errors: list[str] = []
     predictions = None
@@ -2897,7 +3002,6 @@ def cmd_live(args: argparse.Namespace) -> int:
         errors.append(f"extract/aggregate: {e}")
         report.set_errors(errors)
         report.save(get_data_root() / "pipeline" / "runs.jsonl")
-        odds_pool.shutdown(wait=False)
         raise RuntimeError(
             f"Pipeline cannot continue — extract/aggregate failed: {e}"
         )
@@ -2949,18 +3053,17 @@ def cmd_live(args: argparse.Namespace) -> int:
                 logger.error("%s prediction failed: %s", section, e)
                 errors.append(f"{section} predictions: {e}")
 
-    # --- Stage 4: Odds fetching ---
-    for book in BOOK_REGISTRY:
-        if book.code not in _SCRAPE_ENABLED_BOOKS:
-            continue
-        try:
-            n = book_futures[book.code].result(timeout=30)
-            print(f"Fetched {n} {book.label} moneyline odds entries")
-            report.record_book_fetched(book.code, n)
-        except Exception as e:
-            logger.error("%s odds fetch failed: %s", book.label, e)
-            errors.append(f"{book.label} odds fetch: {e}")
-            report.record_book_fetched(book.code, 0)
+    # --- Stage 4: Wait for the book-scrape job to stage fresh odds ---
+    # Books are fetched by the separate `books` job (on the VPN). The ATP fetch
+    # above usually outlasts it, so this wait is typically a near-no-op; on
+    # timeout we proceed with whatever odds are already staged and flag the run.
+    if not _wait_for_books(get_data_root(), pipeline_run_at.timestamp()):
+        logger.warning(
+            "Books job did not signal completion within %ds — proceeding with "
+            "possibly-stale odds",
+            _BOOKS_WAIT_TIMEOUT_S,
+        )
+        report.record_books_stale(True)
 
     # --- Stage 5: Event mapping ---
     try:
@@ -3084,8 +3187,6 @@ def cmd_live(args: argparse.Namespace) -> int:
                 logger.error("%s odds lookup failed: %s", book.label, e)
                 errors.append(f"{book.label} odds lookup: {e}")
 
-    odds_pool.shutdown(wait=False)
-
     # --- Stage 7: Log unmapped predictions ---
     if predictions is not None and len(predictions) > 0 and existing_map is not None:
         try:
@@ -3186,6 +3287,56 @@ def cmd_live(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_books(args: argparse.Namespace) -> int:
+    """Fetch sportsbook odds — runs on the VPN, split from the off-VPN live job.
+
+    Scrapes the enabled books into the staged odds parquets, then signals
+    completion via a sentinel the live (ATP) job waits on. A sustained 0-entry
+    outage on any book raises a Discord alert; transient single-tick blips are
+    ignored (see ``_alert_book_outages``). Individual book failures are recorded
+    but do not raise — only an unexpected crash propagates to the failure alert.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    from datetime import datetime
+
+    from mvp.pipeline_report import PipelineReport
+
+    run_at = datetime.now()
+    data_root = get_data_root()
+    report = PipelineReport(job="books")
+    errors: list[str] = []
+
+    enabled_books = [b for b in BOOK_REGISTRY if b.code in _SCRAPE_ENABLED_BOOKS]
+    counts: dict[str, int] = {}
+    pool = ThreadPoolExecutor(max_workers=max(1, len(enabled_books)))
+    futures = {
+        b.code: pool.submit(_fetch_book_quiet, b, run_at) for b in enabled_books
+    }
+    for book in enabled_books:
+        try:
+            n = futures[book.code].result(timeout=_BOOK_FETCH_TIMEOUT_S)
+            counts[book.code] = n
+            print(f"Fetched {n} {book.label} moneyline odds entries")
+        except Exception as e:
+            logger.error("%s odds fetch failed: %s", book.label, e)
+            errors.append(f"{book.label} odds fetch: {e}")
+            counts[book.code] = 0
+        report.record_book_fetched(book.code, counts[book.code])
+    # Don't block process exit on a hung scraper thread.
+    pool.shutdown(wait=False)
+
+    # Sustained-outage alert — reads prior book runs BEFORE this one is saved.
+    _alert_book_outages(data_root, counts, enabled_books)
+
+    report.set_errors(errors)
+    report.save(data_root / "pipeline" / "runs.jsonl")
+
+    # Signal completion so the live (ATP) job maps/matches against fresh odds.
+    _touch_books_sentinel(data_root)
+
+    return 0
+
+
 def cmd_analysis(parsed: argparse.Namespace) -> int:
     """Run standalone analysis pipeline: odds → dataset → simulations."""
 
@@ -3249,6 +3400,12 @@ def main(args: list[str] | None = None) -> int:
             return cmd_live(parsed)
         except Exception as e:
             notify.post_failure("mvp-live", f"{type(e).__name__}: {e}")
+            raise
+    elif parsed.command == "books":
+        try:
+            return cmd_books(parsed)
+        except Exception as e:
+            notify.post_failure("mvp-books", f"{type(e).__name__}: {e}")
             raise
     elif parsed.command == "confidence":
         return cmd_confidence(parsed)
