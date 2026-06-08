@@ -19,3 +19,5 @@ projections/
 
 # Discovery runtime artifacts (resume checkpoints)
 discovery_stability_checkpoint_*.json
+# Durable per-round FS score logs (append-only, kept after run)
+fs_history_*.jsonl
