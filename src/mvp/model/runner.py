@@ -651,6 +651,13 @@ class ExperimentRunner:
             self.config.model.type, len(feature_cols), len(df),
         )
 
+        # Per-fold pruning requires a single-objective study: Optuna's
+        # trial.report()/should_prune() raise on multi-objective studies (there's
+        # no single value to prune on). When tuning multiple metrics, skip pruning
+        # so trials run to completion and still record their metrics, rather than
+        # crashing at the first outer-fold boundary.
+        pruning_enabled = trial is not None and len(trial.study.directions) == 1
+
         # Train and evaluate
         check_memory("before training loop")
         all_metrics: list[dict[str, float]] = []
@@ -1130,7 +1137,7 @@ class ExperimentRunner:
                 # otherwise), compute the outer-fold log_loss, report to
                 # the trial, and consult the pruner. Holdout folds are
                 # excluded (only the tuning folds 0..n_tuning-1 are reported).
-                if trial is not None:
+                if pruning_enabled:
                     current_outer = iteration_to_outer[fold_idx]
                     next_outer = (
                         iteration_to_outer[fold_idx + 1]
