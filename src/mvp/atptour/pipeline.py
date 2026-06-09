@@ -171,6 +171,9 @@ def _process_single_tournament(
                 DataType.MATCH_BEATS,
                 DataType.STROKE_ANALYSIS,
                 DataType.RALLY_ANALYSIS,
+                DataType.STATS_PLUS,
+                DataType.COURT_VISION,
+                DataType.BELOW_COURT,
             ],
         ).run(tournament, refresh=stats_refresh)
         if new_centre > 0:

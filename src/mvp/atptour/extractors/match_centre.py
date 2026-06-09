@@ -18,6 +18,7 @@ from mvp.common.base_extractor import BaseExtractor
 logger = logging.getLogger(__name__)
 
 API_BASE = "https://itp-atp-sls.infosys-platforms.com/prod/api"
+STATIC_BASE = "https://itp-atp-sls.infosys-platforms.com/static/prod"
 
 
 class DataType(StrEnum):
@@ -26,6 +27,9 @@ class DataType(StrEnum):
     MATCH_BEATS = "match_beats"
     STROKE_ANALYSIS = "stroke_analysis"
     RALLY_ANALYSIS = "rally_analysis"
+    STATS_PLUS = "stats_plus"
+    COURT_VISION = "court_vision"
+    BELOW_COURT = "below_court"
 
 
 @dataclass
@@ -33,8 +37,9 @@ class DataTypeConfig:
     """Configuration for a data type."""
 
     status_flag: str  # Key in matchCenter status object
-    endpoint: str  # API endpoint path
     folder: str  # Output folder name
+    endpoint: str | None = None  # API endpoint path (None for static feeds)
+    static_url_template: str | None = None  # Full static URL w/ {year}{event_id}{match_id}
     completeness_check: str | None = None  # Field to check for complete data
 
 
@@ -56,6 +61,26 @@ DATA_TYPE_CONFIGS: dict[DataType, DataTypeConfig] = {
         endpoint=f"{API_BASE}/rally-analysis",
         folder="rally_analysis",
         completeness_check="matchCompleted",
+    ),
+    DataType.STATS_PLUS: DataTypeConfig(
+        status_flag="statsPlus",
+        endpoint=f"{API_BASE}/stats-plus/v1/keystats",
+        folder="stats_plus",
+        completeness_check="matchCompleted",
+    ),
+    DataType.COURT_VISION: DataTypeConfig(
+        status_flag="courtVision",
+        static_url_template=(
+            f"{STATIC_BASE}/court-vision/{{year}}/{{event_id}}/{{match_id}}/data.json"
+        ),
+        folder="court_vision",
+    ),
+    DataType.BELOW_COURT: DataTypeConfig(
+        status_flag="courtVision",
+        static_url_template=(
+            f"{STATIC_BASE}/court-vision/{{year}}/{{event_id}}/{{match_id}}/belowCourt.json"
+        ),
+        folder="below_court",
     ),
 }
 
@@ -160,7 +185,7 @@ class MatchCentreExtractor(BaseExtractor):
                     continue
 
                 data = self._fetch_data(
-                    config.endpoint,
+                    config,
                     tournament.year,
                     tournament.tournament_id,
                     mid,
@@ -255,10 +280,15 @@ class MatchCentreExtractor(BaseExtractor):
             return None
 
     def _fetch_data(
-        self, endpoint: str, year: int, event_id: str, match_id: str
+        self, config: DataTypeConfig, year: int, event_id: str, match_id: str
     ) -> dict | None:
-        """Fetch and decrypt data from an endpoint."""
-        url = f"{endpoint}/year/{year}/eventId/{event_id}/matchId/{match_id}"
+        """Fetch and decrypt data from a data type (API endpoint or static URL)."""
+        if config.static_url_template:
+            url = config.static_url_template.format(
+                year=year, event_id=event_id, match_id=match_id
+            )
+        else:
+            url = f"{config.endpoint}/year/{year}/eventId/{event_id}/matchId/{match_id}"
         try:
             response = self.session.get(url, timeout=30)
             response.raise_for_status()
@@ -271,5 +301,5 @@ class MatchCentreExtractor(BaseExtractor):
 
             return decrypt_response(encrypted, last_modified)
         except (requests.RequestsError, ValueError, KeyError) as e:
-            logger.warning("Fetch failed for %s: %s", endpoint, e)
+            logger.warning("Fetch failed for %s: %s", config.folder, e)
             return None
