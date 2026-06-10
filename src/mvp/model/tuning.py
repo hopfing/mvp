@@ -13,17 +13,21 @@ import yaml
 from optuna.exceptions import ExperimentalWarning
 
 from mvp.common.base_job import get_data_root
+from mvp.model.metrics import MAXIMIZE_METRICS as _MODEL_MAXIMIZE_METRICS
 from mvp.projection.iid.metric_registry import METRICS as _IID_METRICS
 
 logger = logging.getLogger(__name__)
 
 _PROJECTION_MODEL_TYPES = {"xgb_regressor", "linear", "ridge"}
 
-# Manually-tracked maximize metrics that aren't in the IID registry, plus
+# Maximize metrics: the classification set (single-sourced from metrics.py,
+# includes the tail-sensitive ranking objectives weighted_concordance /
+# partial_auc_tail), plus projection/IID extras — r_squared and the
 # point-grain variants (re-emitted with a "point_" prefix by the score-state
 # serve model) for any registry entry whose direction is "maximize".
 _MAXIMIZE_METRICS = (
-    {"accuracy", "roc_auc", "r_squared"}
+    _MODEL_MAXIMIZE_METRICS
+    | {"r_squared"}
     | {
         f"point_{name}"
         for name, spec in _IID_METRICS.items()

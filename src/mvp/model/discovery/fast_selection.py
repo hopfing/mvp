@@ -146,8 +146,14 @@ def _make_metric_fn(
 
     from mvp.model.metrics import (
         compute_asymmetric_logloss,
+        compute_beta_tail_score,
         compute_calibration_error,
+        compute_calibration_penalized_logloss,
         compute_error_rate_80plus,
+        compute_partial_auc_tail,
+        compute_restricted_logloss,
+        compute_threshold_weighted_brier,
+        compute_weighted_concordance,
     )
 
     asym_kwargs = {"lambda_over": lambda_over} if lambda_over is not None else {}
@@ -164,6 +170,15 @@ def _make_metric_fn(
         "calibration_error": lambda yt, yp: compute_calibration_error(yt, yp),
         "error_rate_80plus": lambda yt, yp: compute_error_rate_80plus(yt, yp),
         "asymmetric_logloss": lambda yt, yp: compute_asymmetric_logloss(yt, yp, **asym_kwargs),
+        # Tail-sensitive objectives. beta_tail_score_sharp reuses the a=b=0.25
+        # variant; pass it through compute_beta_tail_score with the sharper shape.
+        "beta_tail_score": lambda yt, yp: compute_beta_tail_score(yt, yp),
+        "beta_tail_score_sharp": lambda yt, yp: compute_beta_tail_score(yt, yp, a=0.25, b=0.25),
+        "threshold_weighted_brier": lambda yt, yp: compute_threshold_weighted_brier(yt, yp),
+        "calibration_penalized_logloss": lambda yt, yp: compute_calibration_penalized_logloss(yt, yp),
+        "restricted_logloss": lambda yt, yp: compute_restricted_logloss(yt, yp),
+        "weighted_concordance": lambda yt, yp: compute_weighted_concordance(yt, yp),
+        "partial_auc_tail": lambda yt, yp: compute_partial_auc_tail(yt, yp),
     }
     if metric not in metric_fns:
         # Fall back to full compute_metrics for unknown metrics
