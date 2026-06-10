@@ -67,6 +67,19 @@ class TestComputeMetrics:
         # None falls back to default 2.0 exactly.
         assert compute_metrics(y_true, y_prob, lambda_over=None)["asymmetric_logloss"] == default
 
+    def test_float32_extremes_emit_no_warning(self):
+        """float32 predictions at exactly 0.0/1.0 must not trigger a
+        divide-by-zero in any metric (the 1-1e-15 clip bound rounds to 1.0 in
+        float32, so the clip must cast to float64 first)."""
+        import warnings
+
+        y_true = np.array([1, 0, 1, 0])
+        y_prob = np.array([1.0, 0.0, 0.999, 0.001], dtype=np.float32)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            metrics = compute_metrics(y_true, y_prob)
+        assert all(np.isfinite(v) for v in metrics.values())
+
     def test_tail_metrics_present(self):
         """All tail-sensitive objectives are returned by compute_metrics."""
         y_true = np.array([1, 0, 1, 0, 1, 0])

@@ -140,7 +140,10 @@ def compute_asymmetric_logloss(
     HP tuning can target the same loss surface the model is trained against.
     Overconfident = predicted prob > actual outcome.
     """
-    p = np.clip(y_prob, 1e-15, 1 - 1e-15)
+    # Cast to float64 before clipping: in float32 the upper bound 1 - 1e-15
+    # rounds to exactly 1.0, so a prediction at 1.0 survives the clip and
+    # log(1 - p) = log(0) (divide-by-zero RuntimeWarning + inf in the mean).
+    p = np.clip(np.asarray(y_prob, dtype=np.float64), 1e-15, 1 - 1e-15)
     base = -(y_true * np.log(p) + (1 - y_true) * np.log(1 - p))
     weight = np.where(p > y_true, lambda_over, 1.0)
     return float(np.mean(base * weight))
