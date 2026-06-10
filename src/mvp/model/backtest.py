@@ -18,7 +18,7 @@ from typing import Any
 import polars as pl
 import yaml
 
-from mvp.common.base_job import get_data_root
+from mvp.common.base_job import get_data_root, get_local_data_root
 from mvp.model import backtest_views as views
 from mvp.model.cal_tiers import (
     classify_cal_tier,
@@ -33,6 +33,13 @@ ARTIFACT_ROOT = Path("B:/backtests/lead")
 ODDS_PATH = get_data_root() / "aggregate" / "odds" / "odds.parquet"
 MATCHES_PATH = get_data_root() / "aggregate" / "atptour" / "matches.parquet"
 PRODUCTION_CONFIG_PATH = Path("production.yaml")
+
+# Dedicated feature cache, isolated from the shared FS/live cache
+# (get_local_data_root()/features/cache). The backtest runs ProductionPredictor
+# in file-bytes hash mode (no cutoff), so it would otherwise invalidate the
+# cutoff-keyed FS cache on every run (matches.parquet is rewritten every 15 min
+# by the live pipeline). A separate dir keeps the next FS run's cache intact.
+BACKTEST_CACHE_DIR = get_local_data_root() / "features" / "backtest_cache"
 
 
 def artifact_dir(config_path: Path) -> Path:
@@ -356,7 +363,10 @@ def run_backtest(
         temp_yaml_path = Path(f.name)
 
     try:
-        predictor = ProductionPredictor(production_config_path=temp_yaml_path)
+        predictor = ProductionPredictor(
+            production_config_path=temp_yaml_path,
+            cache_dir=BACKTEST_CACHE_DIR,
+        )
 
         # Train (or skip if artifact exists)
         lead_artifact = Path(temp_config["winner"]["active"]["artifact"])
