@@ -2,7 +2,7 @@
 
 
 import numpy as np
-from scipy.special import beta as _beta_fn, betainc as _betainc
+from scipy.special import betainc as _betainc
 from sklearn.metrics import (
     accuracy_score,
     brier_score_loss,
@@ -160,9 +160,11 @@ def compute_beta_tail_score(
     score; a = b = 0.5 (default, arcsine) is a mild tail emphasis; smaller
     a = b sharpens it.
 
-    Closed form (B = beta function, I_x = regularized incomplete beta):
-        y = 1:  B(a, b+1) * (1 - I_p(a, b+1))
-        y = 0:  B(a+1, b) * I_p(a+1, b)
+    Closed form under the normalized Beta(a,b) weight (I_x = regularized
+    incomplete beta). The 1/B(a,b) normalization collapses the
+    B(a,b+1)/B(a,b) and B(a+1,b)/B(a,b) prefactors to b/(a+b) and a/(a+b):
+        y = 1:  b/(a+b) * (1 - I_p(a, b+1))
+        y = 0:  a/(a+b) * I_p(a+1, b)
 
     Proper by construction (positive-weighted mixture of proper threshold
     scores). Unlike weighting log-loss/Brier by a function of p — which is
@@ -170,8 +172,8 @@ def compute_beta_tail_score(
     predictions toward the tails.
     """
     p = np.clip(y_prob, 1e-15, 1 - 1e-15)
-    loss_pos = _beta_fn(a, b + 1.0) * (1.0 - _betainc(a, b + 1.0, p))
-    loss_neg = _beta_fn(a + 1.0, b) * _betainc(a + 1.0, b, p)
+    loss_pos = (b / (a + b)) * (1.0 - _betainc(a, b + 1.0, p))
+    loss_neg = (a / (a + b)) * _betainc(a + 1.0, b, p)
     loss = np.where(np.asarray(y_true) == 1, loss_pos, loss_neg)
     return float(np.mean(loss))
 
@@ -303,13 +305,16 @@ def _standardized_partial_auc(
     if len(np.unique(y_true)) < 2:
         return 0.5
     fpr, tpr, _ = roc_curve(y_true, y_prob)
-    if beta < fpr[-1]:
-        tpr_beta = float(np.interp(beta, fpr, tpr))
-        keep = fpr <= beta
-        fpr_c = np.concatenate([fpr[keep], [beta]])
-        tpr_c = np.concatenate([tpr[keep], [tpr_beta]])
-    else:
-        fpr_c, tpr_c = fpr, tpr
+    # roc_curve can emit duplicate fpr values (score ties → vertical steps).
+    # Collapse each to its top-of-step (max tpr, the last point in the group
+    # since both arrays are non-decreasing) so fpr is strictly increasing and
+    # np.interp at beta is well-defined.
+    last_of_group = np.concatenate([np.diff(fpr) > 0, [True]])
+    fpr, tpr = fpr[last_of_group], tpr[last_of_group]
+    tpr_beta = float(np.interp(beta, fpr, tpr))
+    keep = fpr <= beta
+    fpr_c = np.concatenate([fpr[keep], [beta]])
+    tpr_c = np.concatenate([tpr[keep], [tpr_beta]])
     pauc = float(np.trapezoid(tpr_c, fpr_c))
     pauc_min = beta * beta / 2.0  # area under the chance diagonal over [0, beta]
     pauc_max = beta               # perfect classifier
