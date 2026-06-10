@@ -153,7 +153,32 @@ class TestDiscoveryOptions:
         assert options.sweep_params is False
         assert options.segment_analysis is False
         assert options.metric == "calibration_error"
-        assert options.direction == "minimize"
+        # direction defaults to None and is derived from the metric at use time.
+        assert options.direction is None
+        assert options.resolved_direction() == "minimize"
+
+    def test_direction_derived_from_metric(self):
+        """resolved_direction() derives from the metric when not set explicitly."""
+        assert DiscoveryOptions(metric="log_loss").resolved_direction() == "minimize"
+        assert DiscoveryOptions(metric="beta_tail_score").resolved_direction() == "minimize"
+        assert DiscoveryOptions(metric="roc_auc").resolved_direction() == "maximize"
+        assert (
+            DiscoveryOptions(metric="weighted_concordance").resolved_direction()
+            == "maximize"
+        )
+        assert (
+            DiscoveryOptions(metric="partial_auc_tail").resolved_direction() == "maximize"
+        )
+
+    def test_explicit_direction_overrides_and_warns(self, caplog):
+        """An explicit direction is honored even when it contradicts the metric,
+        and the contradiction is warned about."""
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            options = DiscoveryOptions(metric="roc_auc", direction="minimize")
+        assert options.resolved_direction() == "minimize"
+        assert any("contradicts" in r.message for r in caplog.records)
 
     def test_features_defaults(self):
         """Feature config should have sensible defaults."""

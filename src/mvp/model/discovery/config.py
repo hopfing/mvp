@@ -1,6 +1,7 @@
 """Configuration schema for feature discovery."""
 
 
+import logging
 from datetime import date
 from pathlib import Path
 from typing import Any, Literal
@@ -9,6 +10,9 @@ import yaml
 from pydantic import BaseModel, field_validator, model_validator
 
 from mvp.model.config import MTLConfig, SampleWeightConfig
+from mvp.model.metrics import metric_direction
+
+logger = logging.getLogger(__name__)
 
 
 class DateRange(BaseModel):
@@ -115,13 +119,33 @@ class DiscoveryOptions(BaseModel):
     sweep_params: bool = False
     segment_analysis: bool = False
     metric: str = "calibration_error"
-    direction: Literal["minimize", "maximize"] = "minimize"
+    # None = derive direction from `metric` (the natural direction registered in
+    # metrics.MAXIMIZE_METRICS). Set explicitly only to override that default;
+    # an override that contradicts the metric's natural direction is honored but
+    # warned about. See resolved_direction().
+    direction: Literal["minimize", "maximize"] | None = None
     importance_threshold: float = 0.05
     min_delta: float = 0.0  # forward selection: minimum absolute improvement to accept a candidate
     meta_discovery: MetaDiscoveryConfig | None = None
     stability_selection: StabilitySelectionConfig | None = None
     null_importance: NullImportanceConfig | None = None
     features: DiscoveryFeaturesConfig = DiscoveryFeaturesConfig()
+
+    @model_validator(mode="after")
+    def _warn_direction_mismatch(self) -> "DiscoveryOptions":
+        if self.direction is not None:
+            derived = metric_direction(self.metric)
+            if self.direction != derived:
+                logger.warning(
+                    "discovery.direction=%r contradicts the natural direction "
+                    "of metric %r (%s) — honoring the explicit override.",
+                    self.direction, self.metric, derived,
+                )
+        return self
+
+    def resolved_direction(self) -> str:
+        """FS optimization direction: explicit override, else derived from metric."""
+        return self.direction if self.direction is not None else metric_direction(self.metric)
 
 
 class ModelConfig(BaseModel):
