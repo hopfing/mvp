@@ -28,24 +28,37 @@ from mvp.model.primitives import (
 from mvp.model.registry import feature, register_diff, register_sum
 
 
+def _per_set(numerator: pl.Expr) -> pl.Expr:
+    """Per-completed-set rate of ``numerator``.
+
+    Null when ``sets_played`` is 0 (e.g. a first-set retirement: games were
+    played but no set completed). Without the guard the bare divide yields
+    ``inf`` — which, unlike a null, survives imputation and poisons every
+    rolling/cumulative-window row that includes the match. Null matches these
+    features' ``impute=None`` policy (it reaches the model as missing).
+    """
+    sets = pl.col("sets_played").cast(pl.Float64)
+    return pl.when(sets > 0).then(numerator.cast(pl.Float64) / sets).otherwise(None)
+
+
 def _games_won_per_set() -> pl.Expr:
     """Games won per set in this match."""
-    return _total_games_won().cast(pl.Float64) / pl.col("sets_played").cast(pl.Float64)
+    return _per_set(_total_games_won())
 
 
 def _games_lost_per_set() -> pl.Expr:
     """Games lost per set in this match."""
-    return _total_games_lost().cast(pl.Float64) / pl.col("sets_played").cast(pl.Float64)
+    return _per_set(_total_games_lost())
 
 
 def _games_margin_per_set() -> pl.Expr:
     """(Games won - games lost) per set in this match."""
-    return (_total_games_won() - _total_games_lost()).cast(pl.Float64) / pl.col("sets_played").cast(pl.Float64)
+    return _per_set(_total_games_won() - _total_games_lost())
 
 
 def _games_per_set() -> pl.Expr:
     """Total games per set in this match."""
-    return (_total_games_won() + _total_games_lost()).cast(pl.Float64) / pl.col("sets_played").cast(pl.Float64)
+    return _per_set(_total_games_won() + _total_games_lost())
 
 
 # --- Base features ---

@@ -379,4 +379,30 @@ class TestCumulativeMean:
         # Row 3: 3 prior matches (10, 20, 30) → 20.0
         assert result["avg_score"].to_list() == [None, 10.0, 15.0, 20.0]
 
+    def test_cumulative_mean_ignores_null_values(self):
+        """A null source row must not dilute the mean: it sits out of both the
+        sum and the count, rather than counting as a 0 in the denominator."""
+        df = pl.DataFrame(
+            {
+                "player_id": ["A", "A", "A", "A"],
+                "effective_match_date": [
+                    date(2024, 1, 1),
+                    date(2024, 1, 5),
+                    date(2024, 1, 10),
+                    date(2024, 1, 15),
+                ],
+                "score": [10.0, None, 20.0, 30.0],
+            }
+        ).lazy()
+
+        result = df.with_columns(
+            cumulative_mean("score", group_by="player_id").alias("avg")
+        ).collect()
+
+        # Row 0: no prior → null
+        # Row 1: prior=[10] → 10.0
+        # Row 2: prior=[10, null] → null ignored → 10.0 (NOT 5.0)
+        # Row 3: prior=[10, null, 20] → mean(10, 20) = 15.0 (NOT 10.0)
+        assert result["avg"].to_list() == [None, 10.0, 10.0, 15.0]
+
 

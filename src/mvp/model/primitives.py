@@ -217,17 +217,17 @@ def cumulative_mean(
     if isinstance(group_by, str):
         group_by = [group_by]
 
-    cum_sum = _to_expr(col).cum_sum().shift(1).over(group_by, order_by=date_col)
-    # Use is_not_null().cast(Int64) because pl.lit(1) doesn't work with .over()
-    cum_count = (
-        pl.col(date_col)
-        .is_not_null()
-        .cast(pl.Int64)
-        .cum_sum()
-        .shift(1)
-        .over(group_by, order_by=date_col)
-    )
-    return cum_sum / cum_count
+    # Count only non-null values of `col`, not every row: a null source (e.g. a
+    # per-set rate on a match with no completed sets) must not sit in the
+    # denominator without contributing to the sum, which would dilute the mean
+    # toward 0. Mirror cumulative_std's bookkeeping — fill nulls to 0 for the
+    # sum, count via the value's own non-null mask — and return null (not a
+    # 0/0 NaN) when there is no prior non-null history.
+    x = _to_expr(col)
+    valid = x.is_not_null().cast(pl.Float64)
+    cum_sum = x.fill_null(0.0).cum_sum().shift(1).over(group_by, order_by=date_col)
+    cum_count = valid.cum_sum().shift(1).over(group_by, order_by=date_col)
+    return pl.when(cum_count > 0).then(cum_sum / cum_count).otherwise(None)
 
 
 def ratio_feature(

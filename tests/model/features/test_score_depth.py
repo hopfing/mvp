@@ -134,6 +134,44 @@ class TestScoreDepthBaseFeatures:
         # Row 1: prior=[(12+7)/2=9.5] -> 9.5
         assert result["val"][1] == pytest.approx(9.5)
 
+    def test_per_set_zero_completed_sets_is_null_not_inf(self):
+        """A match with games but zero completed sets (first-set retirement)
+        yields a null per-set rate, not inf — otherwise the inf survives impute
+        and poisons every downstream rolling/cumulative window row."""
+        from mvp.model.features.score_depth import games_won_per_set
+
+        df = pl.DataFrame({
+            "player_id": ["A", "A", "A"],
+            "effective_match_date": [
+                date(2024, 1, 1), date(2024, 2, 1), date(2024, 3, 1),
+            ],
+            "won": [1, 0, 1],
+            "sets_played": [2, 0, 2],   # match 2: retired in first set → 0 sets
+            "best_of": [3, 3, 3],
+            "player_set1_games": [6, 3, 6],
+            "opp_set1_games": [3, 2, 4],
+            "player_set2_games": [6, None, 6],
+            "opp_set2_games": [4, None, 4],
+            "player_set3_games": [None, None, None],
+            "opp_set3_games": [None, None, None],
+            "player_set4_games": [None, None, None],
+            "opp_set4_games": [None, None, None],
+            "player_set5_games": [None, None, None],
+            "opp_set5_games": [None, None, None],
+        }).sort("effective_match_date")
+
+        rolling = df.with_columns(games_won_per_set(days=365).alias("val"))["val"]
+        cumulative = df.with_columns(games_won_per_set(days=None).alias("val"))["val"]
+
+        # The bug: the zero-sets match must not produce inf anywhere.
+        assert not rolling.is_infinite().fill_null(False).any()
+        assert not cumulative.is_infinite().fill_null(False).any()
+
+        # Row 2's window = [match1=12/2=6.0, match2=null]. The degenerate match
+        # is ignored, not averaged in: 6.0, NOT 3.0 (dilution) and NOT inf.
+        assert rolling[2] == pytest.approx(6.0)
+        assert cumulative[2] == pytest.approx(6.0)
+
     def test_alltime_variant(self):
         from mvp.model.features.score_depth import sets_per_match
 
