@@ -49,6 +49,8 @@ class TestRollingSum:
                 "player_id": ["A", "A"],
                 "effective_match_date": [date(2024, 1, 1), date(2024, 1, 2)],
                 "won": [1, 1],
+                "match_uid": ["m1", "m2"],
+                "round_order": [12, 12],
             }
         ).lazy()
 
@@ -115,6 +117,8 @@ class TestRollingSum:
                     date(2024, 1, 4),
                 ],
                 "won": [1, 1, 1, 0],
+                "match_uid": ["m1", "m2", "m3", "m4"],
+                "round_order": [12, 12, 12, 12],
             }
         ).lazy()
 
@@ -144,6 +148,8 @@ class TestRollingMean:
                     date(2024, 1, 15),
                 ],
                 "score": [10.0, 20.0, 30.0, 40.0],
+                "match_uid": ["m1", "m2", "m3", "m4"],
+                "round_order": [12, 12, 12, 12],
             }
         ).lazy()
 
@@ -294,6 +300,8 @@ class TestCumulativeSum:
                     date(2024, 1, 15),
                 ],
                 "won": [1, 0, 1, 1],
+                "match_uid": ["m1", "m2", "m3", "m4"],
+                "round_order": [12, 12, 12, 12],
             }
         ).lazy()
 
@@ -314,6 +322,8 @@ class TestCumulativeSum:
                 "player_id": ["A", "A"],
                 "effective_match_date": [date(2024, 1, 1), date(2024, 1, 2)],
                 "won": [1, 1],
+                "match_uid": ["m1", "m2"],
+                "round_order": [12, 12],
             }
         ).lazy()
 
@@ -337,6 +347,8 @@ class TestCumulativeSum:
                     date(2024, 1, 4),
                 ],
                 "won": [1, 1, 1, 0],
+                "match_uid": ["m1", "m2", "m3", "m4"],
+                "round_order": [12, 12, 12, 12],
             }
         ).lazy()
 
@@ -366,6 +378,8 @@ class TestCumulativeMean:
                     date(2024, 1, 15),
                 ],
                 "score": [10.0, 20.0, 30.0, 40.0],
+                "match_uid": ["m1", "m2", "m3", "m4"],
+                "round_order": [12, 12, 12, 12],
             }
         ).lazy()
 
@@ -392,6 +406,8 @@ class TestCumulativeMean:
                     date(2024, 1, 15),
                 ],
                 "score": [10.0, None, 20.0, 30.0],
+                "match_uid": ["m1", "m2", "m3", "m4"],
+                "round_order": [12, 12, 12, 12],
             }
         ).lazy()
 

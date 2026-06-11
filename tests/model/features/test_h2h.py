@@ -42,6 +42,8 @@ class TestH2HWinsFeature:
                     date(2024, 1, 20),
                 ],
                 "won": [1, 0, 1],
+                "match_uid": ["m1", "m2", "m3"],
+                "round_order": [12, 12, 12],
             }
         ).lazy()
 
@@ -64,6 +66,8 @@ class TestH2HWinsFeature:
                 "opp_id": ["B", "B"],
                 "effective_match_date": [date(2024, 1, 1), date(2024, 1, 10)],
                 "won": [0, 1],
+                "match_uid": ["m1", "m2"],
+                "round_order": [12, 12],
             }
         ).lazy()
 
@@ -86,6 +90,8 @@ class TestH2HWinsFeature:
                     date(2024, 1, 20),
                 ],
                 "won": [1, 1, 1],
+                "match_uid": ["m1", "m2", "m3"],
+                "round_order": [12, 12, 12],
             }
         ).lazy()
 
@@ -129,6 +135,8 @@ class TestH2HSurfaceWinsFeature:
                     date(2024, 3, 1),
                 ],
                 "won": [1, 0, 1],
+                "match_uid": ["m1", "m2", "m3"],
+                "round_order": [12, 12, 12],
             }
         ).lazy()
 
@@ -149,6 +157,8 @@ class TestH2HSurfaceWinsFeature:
                 "surface": ["Hard", "Hard"],
                 "effective_match_date": [date(2024, 1, 1), date(2024, 2, 1)],
                 "won": [0, 1],
+                "match_uid": ["m1", "m2"],
+                "round_order": [12, 12],
             }
         ).lazy()
 
@@ -174,6 +184,8 @@ class TestH2HWinPctFeature:
                     date(2024, 3, 1),
                 ],
                 "won": [1, 0, 1],
+                "match_uid": ["m1", "m2", "m3"],
+                "round_order": [12, 12, 12],
             }
         ).lazy()
 
@@ -201,6 +213,8 @@ class TestH2HSurfaceWinPctFeature:
                     date(2024, 3, 1),
                 ],
                 "won": [1, 0, 1],
+                "match_uid": ["m1", "m2", "m3"],
+                "round_order": [12, 12, 12],
             }
         ).lazy()
 

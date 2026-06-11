@@ -33,6 +33,8 @@ def _make_score_df() -> pl.DataFrame:
         "won": [1, 1, 0, 1],
         "sets_played": [2, 3, 3, 2],
         "best_of": [3, 3, 3, 3],
+        "match_uid": ["m1", "m2", "m3", "m4"],
+        "round_order": [12, 12, 12, 12],
         "player_set1_games": [6, 7, 4, 6],
         "opp_set1_games": [3, 6, 6, 1],
         "player_set2_games": [6, 3, 6, 6],
@@ -148,6 +150,8 @@ class TestScoreDepthBaseFeatures:
             "won": [1, 0, 1],
             "sets_played": [2, 0, 2],   # match 2: retired in first set → 0 sets
             "best_of": [3, 3, 3],
+            "match_uid": ["m1", "m2", "m3"],
+            "round_order": [12, 12, 12],
             "player_set1_games": [6, 3, 6],
             "opp_set1_games": [3, 2, 4],
             "player_set2_games": [6, None, 6],

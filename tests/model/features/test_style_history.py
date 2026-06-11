@@ -100,6 +100,8 @@ class TestUniversalLabelComputation:
             ],
             "won": [1, 1, 0, 1, 1],
             "opp_is_power_server": [1, 0, 1, 1, 1],
+            "match_uid": ["m1", "m2", "m3", "m4", "m5"],
+            "round_order": [12, 12, 12, 12, 12],
         }).sort("effective_match_date")
 
     def test_matches_vs(self):
@@ -154,6 +156,8 @@ class TestSurfaceSpecialistComposite:
             "surface": ["Clay", "Hard", "Clay", "Hard", "Grass", "Clay", "Hard", "Grass"],
             "opp_is_clay_specialist": [1, 0, 1, 0, 0, 1, 0, 0],
             "opp_is_hard_specialist": [0, 1, 0, 1, 0, 0, 1, 0],
+            "match_uid": ["m1", "m2", "m3", "m4", "m5", "m6", "m7", "m8"],
+            "round_order": [12, 12, 12, 12, 12, 12, 12, 12],
         }).sort("effective_match_date")
 
     def test_matches_vs_surface_specialists(self):
@@ -219,6 +223,8 @@ class TestTemporalSafety:
             "effective_match_date": [date(2024, 1, 1)],
             "won": [1],
             "opp_is_power_server": [1],
+            "match_uid": ["m1"],
+            "round_order": [12],
         })
         assert df.with_columns(
             registry.get("matches_vs_power_server").func().alias("v")
@@ -247,6 +253,8 @@ class TestVsOppType:
             "won": [1, 0, 0, 1, 1, 1],
             "opp_is_power_server": pl.Series([1, 0, 1, 0, 1, None], dtype=pl.Int8),
             "opp_is_placement_server": pl.Series([0, 1, 0, 0, 0, None], dtype=pl.Int8),
+            "match_uid": ["m1", "m2", "m3", "m4", "m5", "m6"],
+            "round_order": [12, 12, 12, 12, 12, 12],
         }).sort("effective_match_date")
 
     def test_registration(self):
@@ -282,6 +290,8 @@ class TestVsOppType:
             "surface": ["Hard", "Clay", "Hard", "Hard"],
             "opp_is_power_server": pl.Series([1, 1, 1, 1], dtype=pl.Int8),
             "opp_is_placement_server": pl.Series([0, 0, 0, 0], dtype=pl.Int8),
+            "match_uid": ["m1", "m2", "m3", "m4"],
+            "round_order": [12, 12, 12, 12],
         }).sort("effective_match_date")
         xsurf = get_registry().get("matches_vs_opp_serve_type").func
         surf = get_registry().get("surface_matches_vs_opp_serve_type").func
@@ -331,6 +341,8 @@ class TestSurfSpecRatios:
             "opp_is_clay_specialist": pl.Series([0, 0, 1, 0, 0], dtype=pl.Int8),
             "svc_first_serve_pts_won": [30, 40, 20, 10, 25],
             "svc_first_serve_pts_played": [50, 50, 50, 50, 50],
+            "match_uid": ["m1", "m2", "m3", "m4", "m5"],
+            "round_order": [12, 12, 12, 12, 12],
         }).sort("effective_match_date")
         v = df.with_columns(fn().alias("v"))["v"].to_list()
         # m1 Hard: no prior Hard-vs-hardspec -> null

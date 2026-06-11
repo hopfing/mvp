@@ -141,6 +141,40 @@ def rolling_count(
     )
 
 
+def rolling_std(
+    col: str | pl.Expr,
+    days: int,
+    group_by: str | list[str],
+    date_col: str = "effective_match_date",
+) -> pl.Expr:
+    """Sample std of column over past N days, excluding current row.
+
+    Null on rows with fewer than 2 prior observations in the window (a std
+    needs at least two points). Pair the feature with ``impute=None`` so the
+    thin-history null survives to a NaN-tolerant model rather than being
+    fabricated into a spurious "low volatility".
+
+    Args:
+        col: Column name or expression to take the std of.
+        days: Window size in days.
+        group_by: Column(s) to group by (e.g., "player_id").
+        date_col: Date column for temporal ordering.
+
+    Returns:
+        Polars expression computing the rolling sample std.
+    """
+    if isinstance(group_by, str):
+        group_by = [group_by]
+
+    return (
+        _to_expr(col)
+        .rolling_std_by(
+            by=date_col, window_size=f"{days}d", closed="left", min_samples=2,
+        )
+        .over(group_by)
+    )
+
+
 def cumulative_sum(
     col: str | pl.Expr,
     group_by: str | list[str],
@@ -166,7 +200,7 @@ def cumulative_sum(
     if isinstance(group_by, str):
         group_by = [group_by]
 
-    cum = _to_expr(col).cum_sum().shift(1).over(group_by, order_by=date_col)
+    cum = _to_expr(col).cum_sum().shift(1).over(group_by, order_by=[date_col, "round_order", "match_uid"])
     if fill_with is None:
         return cum
     return cum.fill_null(fill_with)
@@ -194,7 +228,7 @@ def cumulative_count(
         .cast(pl.Int64)
         .cum_sum()
         .shift(1)
-        .over(group_by, order_by=date_col)
+        .over(group_by, order_by=[date_col, "round_order", "match_uid"])
         .fill_null(0)
     )
 
@@ -225,9 +259,44 @@ def cumulative_mean(
     # 0/0 NaN) when there is no prior non-null history.
     x = _to_expr(col)
     valid = x.is_not_null().cast(pl.Float64)
-    cum_sum = x.fill_null(0.0).cum_sum().shift(1).over(group_by, order_by=date_col)
-    cum_count = valid.cum_sum().shift(1).over(group_by, order_by=date_col)
+    cum_sum = x.fill_null(0.0).cum_sum().shift(1).over(group_by, order_by=[date_col, "round_order", "match_uid"])
+    cum_count = valid.cum_sum().shift(1).over(group_by, order_by=[date_col, "round_order", "match_uid"])
     return pl.when(cum_count > 0).then(cum_sum / cum_count).otherwise(None)
+
+
+def cumulative_std(
+    col: str | pl.Expr,
+    group_by: str | list[str],
+    date_col: str = "effective_match_date",
+) -> pl.Expr:
+    """Sample std over all prior rows, excluding current row.
+
+    Computed from running first/second moments (sum, sum-of-squares, count),
+    each shifted by 1 so the current row is excluded. Null-valued source rows
+    are dropped from the moments (they contribute to neither count nor sums),
+    so a missing-outcome match doesn't distort the std. Null on rows with fewer
+    than 2 prior non-null observations.
+
+    Args:
+        col: Column name or expression to take the std of.
+        group_by: Column(s) to group by (e.g., "player_id").
+        date_col: Date column for temporal ordering.
+
+    Returns:
+        Polars expression computing the cumulative sample std.
+    """
+    if isinstance(group_by, str):
+        group_by = [group_by]
+
+    x = _to_expr(col)
+    valid = x.is_not_null().cast(pl.Float64)
+    xf = x.fill_null(0.0)
+    n = valid.cum_sum().shift(1).over(group_by, order_by=[date_col, "round_order", "match_uid"])
+    s1 = xf.cum_sum().shift(1).over(group_by, order_by=[date_col, "round_order", "match_uid"])
+    s2 = (xf ** 2).cum_sum().shift(1).over(group_by, order_by=[date_col, "round_order", "match_uid"])
+    # Sample variance via the moment identity; clip tiny negatives from float error.
+    var = ((s2 - s1 ** 2 / n) / (n - 1)).clip(lower_bound=0.0)
+    return pl.when(n >= 2).then(var.sqrt()).otherwise(None)
 
 
 def ratio_feature(

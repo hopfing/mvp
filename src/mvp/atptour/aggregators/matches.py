@@ -29,6 +29,28 @@ ROUND_ORDER: dict[str, int] = {
     "F": 12,
 }
 
+# Draw-size-aware day-offsets from tournament_end_date, one profile per draw-size
+# bucket. Each value is "days before the Final" for that round_order, derived from
+# the empirical median (round -> days before the Final) over matches that carry a
+# real scheduled_datetime, rounded and forced strictly decreasing in round_order
+# so every round still lands on a distinct calendar day. A 128-draw plays ~2
+# days/round, a 32-draw ~1 — the flat ladder split the difference and missed both
+# ends. round_order keys: Q1=1 Q2=2 Q3=3 R128=5 R64=6 R32=7 R16=8 QF=9 SF=10 F=12.
+# Rounds absent from a profile fall back to the flat (F - round_order) ladder.
+_DRAW_ROUND_OFFSETS: dict[str, dict[int, int]] = {
+    "P32":  {1: 7,  2: 6,                       7: 5, 8: 3, 9: 2, 10: 1, 12: 0},
+    "P64":  {1: 8,  2: 7,              6: 6,     7: 4, 8: 3, 9: 2, 10: 1, 12: 0},
+    "P96":  {1: 13, 2: 12, 5: 10,      6: 8,     7: 6, 8: 5, 9: 3, 10: 2, 12: 0},
+    "P128": {1: 19, 2: 18, 3: 17, 5: 13, 6: 11,  7: 9, 8: 7, 9: 5, 10: 2, 12: 0},
+}
+
+# Flattened {"<bucket>_<round_order>": offset} for a single replace_strict lookup.
+_DRAW_OFFSET_MAP: dict[str, int] = {
+    f"{bucket}_{ro}": off
+    for bucket, prof in _DRAW_ROUND_OFFSETS.items()
+    for ro, off in prof.items()
+}
+
 # Main-draw rounds in elimination order, mapped to depth from a 128 draw.
 # round_order has a gap at 11 (playoff rounds) so depth != round_order; this
 # map is what makes the tournament round ordinal evenly spaced.
@@ -410,86 +432,63 @@ def add_effective_match_date(df: pl.DataFrame) -> pl.DataFrame:
         .alias("_all_scheduled"),
     )
 
-    # Compute round offset: rank round_order ascending within group.
-    # Lowest round_order (Q1) gets offset 0, highest (F) gets max.
-    df = df.with_columns(
-        pl.col("round_order")
-        .rank(method="dense", descending=False)
-        .over(group_keys)
-        .cast(pl.Int64)
-        .sub(1)
-        .alias("_round_offset"),
+    # Estimated dates: anchor the Final to tournament_end_date and step back a
+    # draw-size-aware number of days per round (_DRAW_ROUND_OFFSETS). Every round
+    # lands on a distinct calendar day, so a player's rounds never share a
+    # timestamp — which keeps the Elo/Glicko chain, the cumulative features, and
+    # the rolling windows deterministic and correctly ordered. The estimate
+    # depends only on (tournament_start/end_date, round_order, draw size), not on
+    # which rounds have been played, so an in-progress draw doesn't re-spread as
+    # it fills in.
+    #
+    # Main-draw rounds (round_order >= 4) are floored at tournament_start_date so
+    # a short event's opening round never precedes the listed start. Qualifying
+    # (round_order 1-3) is exempt — it genuinely happens before the main draw —
+    # and is placed by its own offset; this subsumes the old Grand-Slam-qualifying
+    # special case, since a 128-draw's Q1 offset lands ~5 days before start.
+    ro = pl.col("round_order").cast(pl.Int64)
+    draw_size = (
+        pl.col("singles_draw_size")
+        if "singles_draw_size" in df.columns
+        else pl.lit(None, dtype=pl.Int64)
+    )
+    # First main-draw round per tournament, to bucket events whose draw size is
+    # null (R128 -> 96/128-style, R64 -> 64-style, R32 or smaller -> 32-style).
+    first_main_ro = ro.filter(ro > 4).min().over(group_keys)
+    draw_bucket = (
+        pl.when(draw_size.is_not_null() & (draw_size <= 34)).then(pl.lit("P32"))
+        .when(draw_size.is_not_null() & (draw_size <= 72)).then(pl.lit("P64"))
+        .when(draw_size.is_not_null() & (draw_size <= 112)).then(pl.lit("P96"))
+        .when(draw_size.is_not_null()).then(pl.lit("P128"))
+        .when(first_main_ro == 5).then(pl.lit("P96"))
+        .when(first_main_ro == 6).then(pl.lit("P64"))
+        .otherwise(pl.lit("P32"))
+    )
+    offset = pl.coalesce(
+        (draw_bucket + "_" + ro.cast(pl.String)).replace_strict(
+            _DRAW_OFFSET_MAP, default=None, return_dtype=pl.Int64
+        ),
+        ROUND_ORDER["F"] - ro,  # flat fallback for rounds absent from the profile
+    )
+    start_dt = pl.col("tournament_start_date").cast(pl.Datetime)
+    raw_est = pl.col("tournament_end_date").cast(pl.Datetime) - pl.duration(days=offset)
+    estimated = (
+        pl.when(ro.is_null())
+        # Unknown/unmapped round: can't place it by round, fall back to start.
+        .then(start_dt)
+        .when(ro <= 3)
+        # Qualifying precedes the main draw — no start floor.
+        .then(raw_est)
+        # Main draw + RR: floor the opening round at the listed start.
+        .otherwise(pl.max_horizontal(start_dt, raw_est))
     )
 
-    # Get max offset per group (for scaling)
     df = df.with_columns(
-        pl.col("_round_offset").max().over(group_keys).alias("_max_offset"),
+        pl.when(pl.col("_all_scheduled"))
+        .then(pl.col("_resolved_sched"))
+        .otherwise(estimated)
+        .alias("effective_match_date"),
     )
-
-    # Compute tournament duration in days.
-    # Cap ITF/Challenger to 7 days - historical Activity data sometimes merges
-    # consecutive weeks (e.g., "Mexico F3" + "Mexico F4") into 13-day spans.
-    has_circuit = "circuit" in df.columns
-    raw_duration = (
-        pl.col("tournament_end_date") - pl.col("tournament_start_date")
-    ).dt.total_days()
-
-    if has_circuit:
-        is_itf_chal = pl.col("circuit").is_in(["itf", "chal"])
-        capped_duration = pl.when(is_itf_chal & (raw_duration > 6)).then(6).otherwise(raw_duration)
-        df = df.with_columns(capped_duration.alias("_duration_days"))
-    else:
-        df = df.with_columns(raw_duration.alias("_duration_days"))
-
-    # Compute scaled day offset: (round_offset / max_offset) * duration
-    # When max_offset is 0 (single round), use 0. Replace 0 with 1 before division
-    # to avoid NaN, since the result will be masked anyway.
-    df = df.with_columns(
-        pl.when(pl.col("_max_offset") > 0)
-        .then(
-            (
-                pl.col("_round_offset")
-                * pl.col("_duration_days")
-                / pl.col("_max_offset").replace(0, 1)
-            )
-            .round()
-            .cast(pl.Int64)
-        )
-        .otherwise(0)
-        .alias("_scaled_offset"),
-    )
-
-    # For Grand Slams, qualifying rounds happen before the listed start date.
-    # Q1 (round_order=1) -> start - 3 days, Q2 -> start - 2, Q3 -> start - 1
-    has_event_type = "event_type" in df.columns
-    if has_event_type:
-        is_gs_qualifying = (pl.col("event_type") == "GS") & (pl.col("round_order") <= 3)
-        gs_qual_offset = pl.col("round_order") - 4  # Q1=-3, Q2=-2, Q3=-1
-
-        df = df.with_columns(
-            pl.when(pl.col("_all_scheduled"))
-            .then(pl.col("_resolved_sched"))
-            .when(is_gs_qualifying)
-            .then(
-                pl.col("tournament_start_date").cast(pl.Datetime)
-                + pl.duration(days=gs_qual_offset)
-            )
-            .otherwise(
-                pl.col("tournament_start_date").cast(pl.Datetime)
-                + pl.duration(days=pl.col("_scaled_offset"))
-            )
-            .alias("effective_match_date"),
-        )
-    else:
-        df = df.with_columns(
-            pl.when(pl.col("_all_scheduled"))
-            .then(pl.col("_resolved_sched"))
-            .otherwise(
-                pl.col("tournament_start_date").cast(pl.Datetime)
-                + pl.duration(days=pl.col("_scaled_offset"))
-            )
-            .alias("effective_match_date"),
-        )
 
     # Validate no nulls
     bad_rows = df.filter(pl.col("effective_match_date").is_null())
@@ -816,7 +815,7 @@ class MatchesAggregator(BaseJob):
         # Compute Elo ratings for singles matches only
         # Pass only the columns ratings needs to avoid .to_dicts() on the full wide DF
         _RATINGS_INPUT_COLS = [
-            "match_uid", "player_id", "opp_id", "effective_match_date",
+            "match_uid", "player_id", "opp_id", "effective_match_date", "round_order",
             "surface", "round", "tournament_level", "won", "indoor",
             "player_rank", "opp_rank",
             "pts_service_pts_won", "pts_service_pts_played",

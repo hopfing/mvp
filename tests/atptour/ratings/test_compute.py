@@ -19,6 +19,7 @@ def _make_match_df() -> pl.DataFrame:
         "won": [True, False, True, False, True, False],
         "surface": ["Hard", "Hard", "Clay", "Clay", "Grass", "Grass"],
         "round": ["F", "F", "R32", "R32", "QF", "QF"],
+        "round_order": [12, 12, 7, 7, 9, 9],
         "tournament_level": ["GS", "GS", "250", "250", "500", "500"],
         "effective_match_date": [
             date(2024, 1, 1), date(2024, 1, 1),

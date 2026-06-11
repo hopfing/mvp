@@ -30,6 +30,8 @@ def _make_transition_df() -> pl.DataFrame:
         ],
         "surface": ["Hard", "Hard", "Clay", "Clay", "Hard"],
         "won": [1, 0, 1, 1, 0],
+        "match_uid": ["m1", "m2", "m3", "m4", "m5"],
+        "round_order": [12, 12, 12, 12, 12],
     }).sort("effective_match_date")
 
 

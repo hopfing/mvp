@@ -36,7 +36,7 @@ def retirement_rate(days: int | None = None) -> pl.Expr:
     retired = _player_retired()
     if days is None:
         ret_count = (
-            retired.cum_sum().shift(1).over(group_by, order_by=DATE_COL).fill_null(0)
+            retired.cum_sum().shift(1).over(group_by, order_by=[DATE_COL, "round_order", "match_uid"]).fill_null(0)
         )
         total = cumulative_count(group_by=group_by)
     else:
@@ -61,7 +61,7 @@ def last_match_retirement() -> pl.Expr:
     """Whether the player retired/walked over in their most recent same-draw-type match."""
     # Group by draw_type so a doubles retirement doesn't flag a singles match
     group_by = ["player_id", "draw_type"]
-    return _player_retired().cast(pl.Float64).shift(1).over(group_by, order_by=DATE_COL)
+    return _player_retired().cast(pl.Float64).shift(1).over(group_by, order_by=[DATE_COL, "round_order", "match_uid"])
 
 
 # --- Derived diff features ---

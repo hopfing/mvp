@@ -130,7 +130,13 @@ def compute_all_ratings(df: pl.DataFrame) -> pl.DataFrame:
     Returns:
         DataFrame with additional rating columns.
     """
-    df = df.sort("effective_match_date")
+    # Deterministic total order. effective_match_date is unique per match after
+    # the round-anchored estimator, but on the rare same-day collision (very short
+    # or anomalous draws) round_order keeps the two rounds in correct sequence —
+    # the earlier round must update the chain first. match_uid/player_id make the
+    # order total so the sequential rating chain can never depend on input row
+    # order. round_order is carried by _RATINGS_INPUT_COLS upstream.
+    df = df.sort(["effective_match_date", "round_order", "match_uid", "player_id"])
 
     # Extract columns as Python lists to avoid 3GB .to_dicts() overhead.
     # Null values become None, matching the old row.get() behavior.
