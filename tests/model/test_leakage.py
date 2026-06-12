@@ -47,12 +47,16 @@ class TestWinRateNoFutureLeakage:
 
         result = df.with_columns(win_pct(days=365).alias("win_pct"))
 
-        # At row 3 (first win), win_pct should be 0.0 (0/3 from losses)
-        # NOT 0.5 (3/6) which would indicate leakage from future wins
+        # win_pct applies EB shrinkage toward the pooled win rate, so the
+        # no-leakage value isn't 0.0. But the count is leakage-free only if the 3
+        # future wins stay OUT of row 3's numerator: with no leakage the rate is
+        # 0/3 and shrinks BELOW the pooled prior; if the future wins leaked in it
+        # would be 3/6 and land at/above the pooled (~0.5). (The shrinkage target
+        # is a global ~0.5 by win/loss symmetry, not future-specific info.)
         win_pct_at_first_win = result["win_pct"][3]
-        assert win_pct_at_first_win == 0.0, (
-            f"Expected win_pct=0.0 at first win, got {win_pct_at_first_win}. "
-            "This indicates future leakage!"
+        assert win_pct_at_first_win < 0.5, (
+            f"Expected win_pct below pooled at the first win (3 prior losses), "
+            f"got {win_pct_at_first_win} — future wins leaked into the count."
         )
 
     def test_win_pct_no_same_day_leakage(self):
@@ -75,15 +79,23 @@ class TestWinRateNoFutureLeakage:
 
         result = df.with_columns(win_pct(days=365).alias("win_pct"))
 
-        # All day-5 matches should see only the day-1 win (win_pct = 1.0)
-        # They should NOT see each other's results
+        # Each day-5 match must see only the prior-day history (the Jan 1 win),
+        # never the other same-day results. Shrinkage makes the absolute value
+        # implementation-specific, so assert the leakage-relevant property: all
+        # three day-5 rows see identical history -> identical win_pct.
         day5_win_pcts = result.filter(
             pl.col("effective_match_date") == date(2024, 1, 5)
         )["win_pct"].to_list()
 
-        assert all(wr == 1.0 for wr in day5_win_pcts), (
-            f"Expected all day-5 win_pcts to be 1.0, got {day5_win_pcts}. "
-            "Same-day leakage detected!"
+        assert len(set(day5_win_pcts)) == 1, (
+            f"Day-5 win_pcts differ ({day5_win_pcts}) — a same-day result "
+            "leaked into its peers."
+        )
+        # The shared value reflects one prior win, so it sits above the pooled
+        # prior; a same-day loss leaking in would drag it down.
+        assert day5_win_pcts[0] > 0.5, (
+            f"Expected day-5 win_pct above pooled (one prior win), got "
+            f"{day5_win_pcts[0]} — same-day loss leaked in."
         )
 
 
@@ -105,6 +117,8 @@ class TestH2HNoCurrentMatchLeakage:
                     date(2024, 1, 30),
                 ],
                 "won": [1, 0, 1, 1],  # A wins: match 1, 3, 4
+                "match_uid": ["m1", "m2", "m3", "m4"],
+                "round_order": [7, 7, 7, 7],
             }
         ).sort("effective_match_date")
 
@@ -135,6 +149,8 @@ class TestH2HNoCurrentMatchLeakage:
                     date(2024, 1, 20),
                 ],
                 "score": [10.0, 20.0, 30.0],
+                "match_uid": ["m1", "m2", "m3"],
+                "round_order": [7, 7, 7],
             }
         ).sort("effective_match_date")
 

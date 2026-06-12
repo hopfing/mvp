@@ -41,6 +41,8 @@ def sample_matches_df() -> pl.DataFrame:
     return pl.DataFrame(
         {
             "match_id": [f"M{i:03d}" for i in range(1, 13)],
+            "match_uid": [f"M{i:03d}" for i in range(1, 13)],
+            "round_order": [7] * 12,
             "player_id": ["A", "B", "A", "C", "B", "D", "A", "B", "C", "D", "A", "B"],
             "opp_id": ["B", "A", "C", "A", "D", "B", "B", "A", "D", "C", "C", "D"],
             "effective_match_date": [
@@ -120,14 +122,15 @@ class TestAllFeaturesIntegration:
             win_pct(days=30).alias("player_win_pct_30d")
         )
 
-        # Player A's matches (rows 0, 2, 6, 10):
-        # Row 0 (Jan 1): no prior -> null
-        # Row 2 (Jan 3): 1 win -> 1.0
-        # Row 6 (Jan 10): 2 wins -> 1.0
-        # Row 10 (Jan 17): 3 wins -> 1.0
+        # Player A wins every match. Row 0 has no prior history -> null. The
+        # rest are EB-shrunk toward the pooled rate, so they land between 0.5
+        # and 1.0 and rise as the win count grows (shrinkage weakens).
         player_a = result.filter(pl.col("player_id") == "A")
         win_pcts = player_a["player_win_pct_30d"].to_list()
-        assert win_pcts == [None, 1.0, 1.0, 1.0]
+        assert win_pcts[0] is None
+        later = win_pcts[1:]
+        assert all(0.5 < v < 1.0 for v in later)
+        assert later[-1] >= later[0], f"all-win win_pct should rise, got {later}"
 
     def test_matches_played_on_sample_data(self, sample_matches_df: pl.DataFrame):
         """matches_played computes correctly on sample data."""
@@ -152,12 +155,14 @@ class TestAllFeaturesIntegration:
 
         result = sample_matches_df.with_columns(h2h_wins().alias("h2h_wins_vs_opp"))
 
-        # A vs B matches (rows 0, 6): A wins both
-        # Row 0 (Jan 1, A vs B): no prior H2H -> 0
+        # A vs B matches (rows 0, 6): A wins both. h2h_wins is NaN-passthrough,
+        # so the first encounter (no prior H2H) is null, not 0 — keeping "never
+        # played" distinct from "played and won 0".
+        # Row 0 (Jan 1, A vs B): no prior H2H -> None
         # Row 6 (Jan 10, A vs B): 1 prior win -> 1
         a_vs_b = result.filter((pl.col("player_id") == "A") & (pl.col("opp_id") == "B"))
         h2h = a_vs_b["h2h_wins_vs_opp"].to_list()
-        assert h2h == [0, 1]
+        assert h2h == [None, 1]
 
     def test_ranking_points_diff_on_sample_data(self, sample_matches_df: pl.DataFrame):
         """ranking_points_diff computes correctly on sample data."""
@@ -293,9 +298,11 @@ class TestTemporalSafety:
         # First match: null (no prior data)
         assert player_a["win_pct"][0] is None
 
-        # Subsequent matches: should be 1.0 (100% win rate from prior matches)
-        for i in range(1, len(player_a)):
-            assert player_a["win_pct"][i] == 1.0
+        # Subsequent matches: EB-shrunk toward pooled, so above 0.5 (all wins)
+        # and rising as the win count accumulates.
+        later = [player_a["win_pct"][i] for i in range(1, len(player_a))]
+        assert all(0.5 < v < 1.0 for v in later)
+        assert later[-1] >= later[0], f"all-win win_pct should rise, got {later}"
 
     def test_features_player_isolation(self, sample_matches_df: pl.DataFrame):
         """Each player's features are computed independently."""
