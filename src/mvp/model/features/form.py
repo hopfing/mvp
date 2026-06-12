@@ -63,6 +63,31 @@ register_diff("days_since_last_match")
 
 
 @feature(
+    name="days_since_singles",
+    params=[],
+    description="Days since player's most recent singles match (doubles excluded)",
+    mirror=True,
+    impute=None,
+)
+def days_since_singles() -> pl.Expr:
+    """Days since this player last played a SINGLES match.
+
+    Sibling to days_since_last_match, which counts any match as total court
+    workload. This gates the look-back to singles, so a same-day doubles match
+    no longer reads as zero rest — a doubles-free recency/rust signal. The most
+    recent prior singles date is carried forward across intervening doubles rows.
+    """
+    singles_date = pl.when(pl.col("draw_type") == "singles").then(pl.col(DATE_COL))
+    prev_singles = (
+        singles_date.shift(1).forward_fill().over("player_id", order_by=DATE_COL)
+    )
+    return (pl.col(DATE_COL) - prev_singles).dt.total_days().cast(pl.Float64)
+
+
+register_diff("days_since_singles")
+
+
+@feature(
     name="prev_tourn_round_reached",
     params=[],
     description="Round ordinal of player's last match in their previous same-draw-type tournament",

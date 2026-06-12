@@ -268,6 +268,74 @@ class TestFormDiffFeatures:
         assert result["diff"][1] == pytest.approx(-1.0)
 
 
+class TestDaysSinceSingles:
+    """Tests for days_since_singles — the doubles-gated workload sibling."""
+
+    def test_registered(self):
+        feat = get_registry().get("days_since_singles")
+        assert feat.mirror is True
+        assert feat.params == []
+        assert feat.impute is None
+
+    def test_excludes_doubles(self):
+        """A doubles match must NOT reset the singles clock — the mirror image
+        of days_since_last_match's test_includes_doubles."""
+        from mvp.model.features.form import days_since_singles
+
+        df = pl.DataFrame({
+            "player_id": ["A", "A", "A"],
+            "effective_match_date": [date(2024, 1, 1), date(2024, 1, 5), date(2024, 1, 20)],
+            "match_uid": ["m1", "m2", "m3"],
+            "round_order": [4, 4, 4],
+            "won": [True, True, True],
+            "draw_type": ["singles", "doubles", "singles"],
+        }).sort("effective_match_date")
+
+        result = df.with_columns(days_since_singles().alias("val"))
+        # Row 0: first singles -> null
+        assert result["val"][0] is None
+        # Row 2 (singles): previous SINGLES is Jan 1, skipping the Jan 5 doubles
+        # -> 19 days (days_since_last_match would give 15).
+        assert result["val"][2] == pytest.approx(19.0)
+
+    def test_null_when_no_prior_singles(self):
+        """Only doubles before the first singles -> null (no fabricate)."""
+        from mvp.model.features.form import days_since_singles
+
+        df = pl.DataFrame({
+            "player_id": ["A", "A"],
+            "effective_match_date": [date(2024, 1, 1), date(2024, 1, 10)],
+            "match_uid": ["m1", "m2"],
+            "round_order": [4, 4],
+            "won": [True, True],
+            "draw_type": ["doubles", "singles"],
+        }).sort("effective_match_date")
+
+        result = df.with_columns(days_since_singles().alias("val"))
+        assert result["val"][1] is None
+
+    def test_multi_player_independence(self):
+        from mvp.model.features.form import days_since_singles
+
+        df = pl.DataFrame({
+            "player_id": ["A", "B", "A", "B"],
+            "effective_match_date": [
+                date(2024, 1, 1), date(2024, 1, 1),
+                date(2024, 1, 10), date(2024, 1, 12),
+            ],
+            "match_uid": ["m1", "m2", "m3", "m4"],
+            "round_order": [4, 4, 5, 5],
+            "won": [True, True, True, True],
+            "draw_type": ["singles"] * 4,
+        }).sort("effective_match_date")
+
+        result = df.with_columns(days_since_singles().alias("val"))
+        a = result.filter(pl.col("player_id") == "A").sort("effective_match_date")
+        b = result.filter(pl.col("player_id") == "B").sort("effective_match_date")
+        assert a["val"][0] is None and a["val"][1] == pytest.approx(9.0)
+        assert b["val"][0] is None and b["val"][1] == pytest.approx(11.0)
+
+
 class TestFormFeatureCount:
     """Verify total feature count including new features."""
 
@@ -277,8 +345,9 @@ class TestFormFeatureCount:
             "match_count", "match_count_diff",
             "match_count_max",
             "days_since_last_match", "days_since_last_match_diff",
+            "days_since_singles", "days_since_singles_diff",
             "prev_tourn_round_reached", "prev_tourn_round_reached_diff",
         ]
         for name in names:
             registry.get(name)
-        assert len(names) == 7
+        assert len(names) == 9
