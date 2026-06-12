@@ -3,6 +3,7 @@
 
 import json
 import logging
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -18,6 +19,9 @@ from mvp.model.discovery.checkpoint import (
 )
 
 logger = logging.getLogger(__name__)
+
+# TEMP TIMING (FS throughput diagnosis) — remove after. [total_seconds, n_writes]
+_CKPT_T = [0.0, 0]
 
 
 def _fs_history_path(checkpoint_path: Path | None) -> Path | None:
@@ -156,6 +160,9 @@ class FeatureSelector:
         cp = load_checkpoint(checkpoint_path) if checkpoint_path else None
         if cp is not None:
             selected: list[str] = [r["feature"] for r in cp.completed_rounds]
+            selected_metrics: list[float] = [
+                r.get("metric", 0.0) for r in cp.completed_rounds
+            ]
             remaining = set(self.all_features) - set(selected)
             best_metric = cp.best_metric
             history: list[dict[str, Any]] = []
@@ -172,9 +179,10 @@ class FeatureSelector:
             # ranking has already been logged on the previous run.
             first_round_logged = len(cp.completed_rounds) > 0
             logger.info(
-                "Resumed from checkpoint: %d completed rounds, "
-                "%d candidates scored in round %d",
+                "Resumed from checkpoint: %d completed rounds "
+                "(current metric=%.4f), %d candidates scored in round %d",
                 len(cp.completed_rounds),
+                best_metric,
                 len(resumed_round_scores),
                 cp.current_round,
             )
@@ -184,6 +192,9 @@ class FeatureSelector:
             history = []
             if selected:
                 best_metric = self.scorer(selected)
+                # Base features are scored as a set; record the set metric for
+                # each so the checkpoint carries a real number, not a 0 stub.
+                selected_metrics = [best_metric] * len(selected)
                 history.append({
                     "step": 0,
                     "action": "base",
@@ -192,6 +203,7 @@ class FeatureSelector:
                 })
             else:
                 best_metric = self._worst_value()
+                selected_metrics = []
 
         # Durable per-round score log (append-only, kept after completion).
         # Fresh start wipes any stale log; resume appends to the existing one.
@@ -234,6 +246,7 @@ class FeatureSelector:
 
             if best_feature is not None and hasattr(feature_iter, "set_postfix"):
                 feature_iter.set_postfix(
+                    current=f"{best_metric:.4f}",
                     best=f"{best_feature_metric:.4f}", feat=best_feature,
                     refresh=False,
                 )
@@ -255,6 +268,7 @@ class FeatureSelector:
                     best_feature_metric = metric
                     if hasattr(feature_iter, "set_postfix"):
                         feature_iter.set_postfix(
+                            current=f"{best_metric:.4f}",
                             best=f"{best_feature_metric:.4f}", feat=best_feature,
                         )
 
@@ -264,15 +278,25 @@ class FeatureSelector:
                     and checkpoint_interval > 0
                     and eval_count % checkpoint_interval == 0
                 ):
+                    _tc = time.perf_counter()  # TEMP TIMING
                     self._write_checkpoint(
                         checkpoint_path,
                         started_at=started_at,
                         selected=selected,
+                        selected_metrics=selected_metrics,
                         best_metric=best_metric,
                         current_round=round_num,
                         total_candidates=len(remaining),
                         scores=scores_this_round,
                     )
+                    _CKPT_T[0] += time.perf_counter() - _tc  # TEMP TIMING
+                    _CKPT_T[1] += 1  # TEMP TIMING
+                    if _CKPT_T[1] % 100 == 0:  # TEMP TIMING
+                        logger.info(
+                            "[FS TIMING] %d checkpoint writes, %.1fs total "
+                            "(%.3fs/write)",
+                            _CKPT_T[1], _CKPT_T[0], _CKPT_T[0] / _CKPT_T[1],
+                        )
 
             # If no improvement (or improvement < min_delta), stop
             if best_feature is None:
@@ -320,6 +344,7 @@ class FeatureSelector:
 
             # Add best feature
             selected.append(best_feature)
+            selected_metrics.append(best_feature_metric)
             remaining.remove(best_feature)
             best_metric = best_feature_metric
 
@@ -353,6 +378,7 @@ class FeatureSelector:
                     checkpoint_path,
                     started_at=started_at,
                     selected=selected,
+                    selected_metrics=selected_metrics,
                     best_metric=best_metric,
                     current_round=round_num + 1,
                     total_candidates=len(remaining),
@@ -410,6 +436,7 @@ class FeatureSelector:
         *,
         started_at: datetime,
         selected: list[str],
+        selected_metrics: list[float],
         best_metric: float,
         current_round: int,
         total_candidates: int,
@@ -426,7 +453,10 @@ class FeatureSelector:
             run_name=run_name,
             started_at=started_at,
             updated_at=datetime.now(timezone.utc),
-            completed_rounds=[{"feature": f, "metric": 0.0} for f in selected],
+            completed_rounds=[
+                {"feature": f, "metric": m}
+                for f, m in zip(selected, selected_metrics)
+            ],
             current_round=current_round,
             total_candidates=total_candidates,
             current_round_scores=scores,
