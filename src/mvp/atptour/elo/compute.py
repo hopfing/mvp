@@ -122,10 +122,11 @@ def compute_elo_ratings(df: pl.DataFrame) -> pl.DataFrame:
     Returns:
         DataFrame with additional Elo columns.
     """
-    # Deterministic total order; round_order keeps same-day collisions (short or
-    # anomalous draws) in correct round sequence before the match_uid/player_id
-    # tiebreak. See compute_all_ratings for the rationale.
-    df = df.sort(["effective_match_date", "round_order", "match_uid", "player_id"])
+    # Deterministic total order. tournament_start_date sorts a player's two
+    # same-day events finishing-first (earlier-starting event ahead of the one
+    # just beginning); round_order then keeps same-day rounds within a tournament
+    # in sequence, before the match_uid/player_id tiebreak. See compute_all_ratings.
+    df = df.sort(["effective_match_date", "tournament_start_date", "round_order", "match_uid", "player_id"])
 
     ratings: dict[str, PlayerRating] = {}
     output: dict[str, list[float | None]] = {col: [] for col in ELO_COLUMNS}

@@ -102,6 +102,7 @@ class TestUniversalLabelComputation:
             "opp_is_power_server": [1, 0, 1, 1, 1],
             "match_uid": ["m1", "m2", "m3", "m4", "m5"],
             "round_order": [12, 12, 12, 12, 12],
+            "tournament_start_date": date(2020, 1, 1),
         }).sort("effective_match_date")
 
     def test_matches_vs(self):
@@ -158,6 +159,7 @@ class TestSurfaceSpecialistComposite:
             "opp_is_hard_specialist": [0, 1, 0, 1, 0, 0, 1, 0],
             "match_uid": ["m1", "m2", "m3", "m4", "m5", "m6", "m7", "m8"],
             "round_order": [12, 12, 12, 12, 12, 12, 12, 12],
+            "tournament_start_date": date(2020, 1, 1),
         }).sort("effective_match_date")
 
     def test_matches_vs_surface_specialists(self):
@@ -225,6 +227,7 @@ class TestTemporalSafety:
             "opp_is_power_server": [1],
             "match_uid": ["m1"],
             "round_order": [12],
+            "tournament_start_date": date(2020, 1, 1),
         })
         assert df.with_columns(
             registry.get("matches_vs_power_server").func().alias("v")
@@ -255,6 +258,7 @@ class TestVsOppType:
             "opp_is_placement_server": pl.Series([0, 1, 0, 0, 0, None], dtype=pl.Int8),
             "match_uid": ["m1", "m2", "m3", "m4", "m5", "m6"],
             "round_order": [12, 12, 12, 12, 12, 12],
+            "tournament_start_date": date(2020, 1, 1),
         }).sort("effective_match_date")
 
     def test_registration(self):
@@ -292,6 +296,7 @@ class TestVsOppType:
             "opp_is_placement_server": pl.Series([0, 0, 0, 0], dtype=pl.Int8),
             "match_uid": ["m1", "m2", "m3", "m4"],
             "round_order": [12, 12, 12, 12],
+            "tournament_start_date": date(2020, 1, 1),
         }).sort("effective_match_date")
         xsurf = get_registry().get("matches_vs_opp_serve_type").func
         surf = get_registry().get("surface_matches_vs_opp_serve_type").func
@@ -343,6 +348,7 @@ class TestSurfSpecRatios:
             "svc_first_serve_pts_played": [50, 50, 50, 50, 50],
             "match_uid": ["m1", "m2", "m3", "m4", "m5"],
             "round_order": [12, 12, 12, 12, 12],
+            "tournament_start_date": date(2020, 1, 1),
         }).sort("effective_match_date")
         v = df.with_columns(fn().alias("v"))["v"].to_list()
         # m1 Hard: no prior Hard-vs-hardspec -> null

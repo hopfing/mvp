@@ -69,7 +69,7 @@ def tour_match_pct(days: int | None = None) -> pl.Expr:
     tour_indicator = (pl.col("circuit") == "tour").cast(pl.Int64)
     if days is None:
         tour_count = (
-            tour_indicator.cum_sum().shift(1).over(group_by, order_by=["effective_match_date", "round_order", "match_uid"]).fill_null(0)
+            tour_indicator.cum_sum().shift(1).over(group_by, order_by=["effective_match_date", "tournament_start_date", "round_order", "match_uid"]).fill_null(0)
         )
         total = cumulative_count(group_by=group_by)
     else:
@@ -99,7 +99,7 @@ def chal_match_pct(days: int | None = None) -> pl.Expr:
     chal_indicator = (pl.col("circuit") == "chal").cast(pl.Int64)
     if days is None:
         chal_count = (
-            chal_indicator.cum_sum().shift(1).over(group_by, order_by=["effective_match_date", "round_order", "match_uid"]).fill_null(0)
+            chal_indicator.cum_sum().shift(1).over(group_by, order_by=["effective_match_date", "tournament_start_date", "round_order", "match_uid"]).fill_null(0)
         )
         total = cumulative_count(group_by=group_by)
     else:
@@ -129,7 +129,7 @@ def itf_match_pct(days: int | None = None) -> pl.Expr:
     itf_indicator = (pl.col("circuit") == "itf").cast(pl.Int64)
     if days is None:
         itf_count = (
-            itf_indicator.cum_sum().shift(1).over(group_by, order_by=["effective_match_date", "round_order", "match_uid"]).fill_null(0)
+            itf_indicator.cum_sum().shift(1).over(group_by, order_by=["effective_match_date", "tournament_start_date", "round_order", "match_uid"]).fill_null(0)
         )
         total = cumulative_count(group_by=group_by)
     else:

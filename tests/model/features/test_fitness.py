@@ -35,6 +35,7 @@ def _make_fitness_df() -> pl.DataFrame:
         "won": [True, False, True, False, True],
         "match_uid": ["m1", "m2", "m3", "m4", "m5"],
         "round_order": [12, 12, 12, 12, 12],
+        "tournament_start_date": date(2020, 1, 1),
         "reason": [None, "RET", None, "W/O", None],
         "draw_type": ["singles"] * 5,
     }).sort("effective_match_date")
@@ -89,6 +90,7 @@ class TestFitnessBaseFeatures:
             "won": [True, True, True],
             "match_uid": ["m1", "m2", "m3"],
             "round_order": [12, 12, 12],
+            "tournament_start_date": date(2020, 1, 1),
             "reason": [None, "RET", None],
             "draw_type": ["singles"] * 3,
         }).sort("effective_match_date")
@@ -110,6 +112,7 @@ class TestFitnessBaseFeatures:
             "won": [True, False, True],
             "match_uid": ["m1", "m2", "m3"],
             "round_order": [12, 12, 12],
+            "tournament_start_date": date(2020, 1, 1),
             "reason": [None, "RET", None],
             "draw_type": ["singles", "doubles", "singles"],
         }).sort("effective_match_date")
@@ -152,6 +155,7 @@ class TestFitnessMultiPlayer:
             "won": [False, True, True, True],
             "match_uid": ["m1", "m2", "m3", "m4"],
             "round_order": [12, 12, 12, 12],
+            "tournament_start_date": date(2020, 1, 1),
             "reason": ["RET", None, None, None],
             "draw_type": ["singles"] * 4,
         }).sort("effective_match_date")

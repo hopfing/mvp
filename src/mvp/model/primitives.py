@@ -200,7 +200,7 @@ def cumulative_sum(
     if isinstance(group_by, str):
         group_by = [group_by]
 
-    cum = _to_expr(col).cum_sum().shift(1).over(group_by, order_by=[date_col, "round_order", "match_uid"])
+    cum = _to_expr(col).cum_sum().shift(1).over(group_by, order_by=[date_col, "tournament_start_date", "round_order", "match_uid"])
     if fill_with is None:
         return cum
     return cum.fill_null(fill_with)
@@ -228,7 +228,7 @@ def cumulative_count(
         .cast(pl.Int64)
         .cum_sum()
         .shift(1)
-        .over(group_by, order_by=[date_col, "round_order", "match_uid"])
+        .over(group_by, order_by=[date_col, "tournament_start_date", "round_order", "match_uid"])
         .fill_null(0)
     )
 
@@ -259,8 +259,8 @@ def cumulative_mean(
     # 0/0 NaN) when there is no prior non-null history.
     x = _to_expr(col)
     valid = x.is_not_null().cast(pl.Float64)
-    cum_sum = x.fill_null(0.0).cum_sum().shift(1).over(group_by, order_by=[date_col, "round_order", "match_uid"])
-    cum_count = valid.cum_sum().shift(1).over(group_by, order_by=[date_col, "round_order", "match_uid"])
+    cum_sum = x.fill_null(0.0).cum_sum().shift(1).over(group_by, order_by=[date_col, "tournament_start_date", "round_order", "match_uid"])
+    cum_count = valid.cum_sum().shift(1).over(group_by, order_by=[date_col, "tournament_start_date", "round_order", "match_uid"])
     return pl.when(cum_count > 0).then(cum_sum / cum_count).otherwise(None)
 
 
@@ -291,9 +291,9 @@ def cumulative_std(
     x = _to_expr(col)
     valid = x.is_not_null().cast(pl.Float64)
     xf = x.fill_null(0.0)
-    n = valid.cum_sum().shift(1).over(group_by, order_by=[date_col, "round_order", "match_uid"])
-    s1 = xf.cum_sum().shift(1).over(group_by, order_by=[date_col, "round_order", "match_uid"])
-    s2 = (xf ** 2).cum_sum().shift(1).over(group_by, order_by=[date_col, "round_order", "match_uid"])
+    n = valid.cum_sum().shift(1).over(group_by, order_by=[date_col, "tournament_start_date", "round_order", "match_uid"])
+    s1 = xf.cum_sum().shift(1).over(group_by, order_by=[date_col, "tournament_start_date", "round_order", "match_uid"])
+    s2 = (xf ** 2).cum_sum().shift(1).over(group_by, order_by=[date_col, "tournament_start_date", "round_order", "match_uid"])
     # Sample variance via the moment identity; clip tiny negatives from float error.
     var = ((s2 - s1 ** 2 / n) / (n - 1)).clip(lower_bound=0.0)
     return pl.when(n >= 2).then(var.sqrt()).otherwise(None)

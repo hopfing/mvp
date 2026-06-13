@@ -29,14 +29,21 @@ ROUND_ORDER: dict[str, int] = {
     "F": 12,
 }
 
-# Draw-size-aware day-offsets from tournament_end_date, one profile per draw-size
-# bucket. Each value is "days before the Final" for that round_order, derived from
-# the empirical median (round -> days before the Final) over matches that carry a
-# real scheduled_datetime, rounded and forced strictly decreasing in round_order
-# so every round still lands on a distinct calendar day. A 128-draw plays ~2
-# days/round, a 32-draw ~1 — the flat ladder split the difference and missed both
-# ends. round_order keys: Q1=1 Q2=2 Q3=3 R128=5 R64=6 R32=7 R16=8 QF=9 SF=10 F=12.
-# Rounds absent from a profile fall back to the flat (F - round_order) ladder.
+# Effective-span cap (days) for ITF/Challenger date estimation. Historical
+# Activity data merges consecutive weeks into long spans, and the live end_date
+# can run past a player's real last match; anchoring the round offsets to
+# min(end, start + CAP) keeps a tournament's estimated rounds inside a realistic
+# window so adjacent weeks can't overlap and interleave a player's two events.
+# Tour events legitimately span 1-2 weeks and are NOT capped.
+_ITF_CHAL_SPAN_CAP_DAYS = 6
+
+# Draw-size-aware day-offsets from the (capped) tournament end, one profile per
+# draw-size bucket. Each value is "days before the Final" for that round_order,
+# from the empirical median (round -> days before the Final) over matches with a
+# real scheduled_datetime. A 128-draw plays ~2 days/round, a 32-draw ~1. Each
+# profile lists only the rounds its bucket usually has; _complete_offsets fills
+# the rest monotonically. round_order keys: Q1=1 Q2=2 Q3=3 RR=4 R128=5 R64=6
+# R32=7 R16=8 QF=9 SF=10 (playoff=11) F=12.
 _DRAW_ROUND_OFFSETS: dict[str, dict[int, int]] = {
     "P32":  {1: 7,  2: 6,                       7: 5, 8: 3, 9: 2, 10: 1, 12: 0},
     "P64":  {1: 8,  2: 7,              6: 6,     7: 4, 8: 3, 9: 2, 10: 1, 12: 0},
@@ -44,10 +51,59 @@ _DRAW_ROUND_OFFSETS: dict[str, dict[int, int]] = {
     "P128": {1: 19, 2: 18, 3: 17, 5: 13, 6: 11,  7: 9, 8: 7, 9: 5, 10: 2, 12: 0},
 }
 
+_ALL_ROUND_ORDERS = list(range(1, 13))
+
+
+def _complete_offsets(listed: dict[int, int]) -> dict[int, int]:
+    """Fill every round_order 1-12 with a monotonic non-increasing day-offset.
+
+    Listed rounds keep their empirical offset; an unlisted round (e.g. Q3/RR in a
+    small draw) is linearly interpolated between its nearest listed neighbours and
+    then clamped so the offset never *increases* as round_order increases. Ties
+    are fine — the ``[date, ..., round_order, ...]`` sort key keeps tied-date
+    rounds in true round order. This replaces the old flat ``F - round_order``
+    fallback, which handed unlisted early rounds a larger offset than the round
+    before them and inverted them (Q3 landing before Q2 in P32/P64).
+    """
+    ros = sorted(listed)
+    full: dict[int, int] = {}
+    for ro in _ALL_ROUND_ORDERS:
+        if ro in listed:
+            full[ro] = listed[ro]
+            continue
+        lower = [r for r in ros if r < ro]
+        higher = [r for r in ros if r > ro]
+        if lower and higher:
+            rl, rh = max(lower), min(higher)
+            frac = (ro - rl) / (rh - rl)
+            full[ro] = round(listed[rl] + frac * (listed[rh] - listed[rl]))
+        elif higher:  # earlier than any listed round: step up from the first
+            rh = min(higher)
+            full[ro] = listed[rh] + (rh - ro)
+        else:  # later than the last listed round (F=12 is always listed: unused)
+            full[ro] = listed[max(lower)]
+    # Enforce monotonic non-increasing offset as round_order rises.
+    prev = None
+    for ro in _ALL_ROUND_ORDERS:
+        if prev is not None and full[ro] > prev:
+            full[ro] = prev
+        prev = full[ro]
+    return full
+
+
+_DRAW_FULL_OFFSETS: dict[str, dict[int, int]] = {
+    bucket: _complete_offsets(prof) for bucket, prof in _DRAW_ROUND_OFFSETS.items()
+}
+# Guard: no profile may increase in offset as round_order rises (i.e. no round
+# may be dated before an earlier round of the same tournament).
+for _bucket, _prof in _DRAW_FULL_OFFSETS.items():
+    _seq = [_prof[r] for r in _ALL_ROUND_ORDERS]
+    assert all(a >= b for a, b in zip(_seq, _seq[1:])), f"non-monotonic offsets: {_bucket}"
+
 # Flattened {"<bucket>_<round_order>": offset} for a single replace_strict lookup.
 _DRAW_OFFSET_MAP: dict[str, int] = {
     f"{bucket}_{ro}": off
-    for bucket, prof in _DRAW_ROUND_OFFSETS.items()
+    for bucket, prof in _DRAW_FULL_OFFSETS.items()
     for ro, off in prof.items()
 }
 
@@ -187,19 +243,20 @@ def join_player_bio(matches: pl.DataFrame, bio: pl.DataFrame) -> pl.DataFrame:
 
 
 def fill_tournament_dates(df: pl.DataFrame) -> pl.DataFrame:
-    """Fill tournament_start_date and tournament_end_date within each tournament.
+    """Normalize tournament_start_date and tournament_end_date within each tournament.
 
-    If any row in a tournament has a date, all rows get that date.
-    Only tournaments with ALL nulls remain null.
+    Every row in a (tournament_id, year) takes the group's max date. This both
+    fills nulls AND collapses conflicting non-null dates to a single value, so a
+    tournament can never carry two start/end dates. The round-anchored date
+    estimator floors rounds at tournament_start_date and the rating/feature sort
+    key tiebreaks on it — both require one value per tournament, or a tournament
+    with two listed starts inverts its own rounds (e.g. Q1 floored a day after
+    Q2). Only tournaments with ALL nulls remain null.
     """
     group_keys = ["tournament_id", "year"]
     return df.with_columns([
-        pl.col("tournament_start_date")
-        .fill_null(pl.col("tournament_start_date").max().over(group_keys))
-        .alias("tournament_start_date"),
-        pl.col("tournament_end_date")
-        .fill_null(pl.col("tournament_end_date").max().over(group_keys))
-        .alias("tournament_end_date"),
+        pl.col("tournament_start_date").max().over(group_keys).alias("tournament_start_date"),
+        pl.col("tournament_end_date").max().over(group_keys).alias("tournament_end_date"),
     ])
 
 
@@ -432,20 +489,20 @@ def add_effective_match_date(df: pl.DataFrame) -> pl.DataFrame:
         .alias("_all_scheduled"),
     )
 
-    # Estimated dates: anchor the Final to tournament_end_date and step back a
-    # draw-size-aware number of days per round (_DRAW_ROUND_OFFSETS). Every round
-    # lands on a distinct calendar day, so a player's rounds never share a
-    # timestamp — which keeps the Elo/Glicko chain, the cumulative features, and
-    # the rolling windows deterministic and correctly ordered. The estimate
-    # depends only on (tournament_start/end_date, round_order, draw size), not on
-    # which rounds have been played, so an in-progress draw doesn't re-spread as
-    # it fills in.
+    # Estimated dates: anchor the Final to the (capped) tournament end and step
+    # back a draw-size-aware number of days per round (_DRAW_FULL_OFFSETS). Within
+    # a tournament offsets are monotonic non-increasing in round_order, so rounds
+    # never invert; rounds that share a day (compression near a short event's
+    # start) stay correctly ordered via the [date, ..., round_order, match_uid]
+    # sort key in the rating chain and cumulative features. The estimate depends
+    # only on (tournament_start/end_date, round_order, draw size), so an
+    # in-progress draw doesn't re-spread as it fills in.
     #
-    # Main-draw rounds (round_order >= 4) are floored at tournament_start_date so
-    # a short event's opening round never precedes the listed start. Qualifying
-    # (round_order 1-3) is exempt — it genuinely happens before the main draw —
-    # and is placed by its own offset; this subsumes the old Grand-Slam-qualifying
-    # special case, since a 128-draw's Q1 offset lands ~5 days before start.
+    # Every round — qualifying included — is floored at tournament_start so no
+    # round can be dated before its own tournament's start and bleed into the
+    # prior week's event. (Old code exempted qualifying, which let a large draw's
+    # Q1 land ~5 days pre-start and interleave with the player's previous event.)
+    # The ITF/Challenger span cap keeps the anchor from running into the next week.
     ro = pl.col("round_order").cast(pl.Int64)
     draw_size = (
         pl.col("singles_draw_size")
@@ -468,18 +525,29 @@ def add_effective_match_date(df: pl.DataFrame) -> pl.DataFrame:
         (draw_bucket + "_" + ro.cast(pl.String)).replace_strict(
             _DRAW_OFFSET_MAP, default=None, return_dtype=pl.Int64
         ),
-        ROUND_ORDER["F"] - ro,  # flat fallback for rounds absent from the profile
+        ROUND_ORDER["F"] - ro,  # safety for any round_order outside 1-12
     )
     start_dt = pl.col("tournament_start_date").cast(pl.Datetime)
-    raw_est = pl.col("tournament_end_date").cast(pl.Datetime) - pl.duration(days=offset)
+    end_dt = pl.col("tournament_end_date").cast(pl.Datetime)
+    # Cap the anchor for ITF/Challenger so a merged/overlong source window (or a
+    # live end_date past the player's real last match) can't spread the rounds
+    # into the following week. Tour events span 1-2 weeks legitimately: not capped.
+    if "circuit" in df.columns:
+        capped_end = (
+            pl.when(pl.col("circuit").is_in(["itf", "chal"]))
+            .then(pl.min_horizontal(
+                end_dt, start_dt + pl.duration(days=_ITF_CHAL_SPAN_CAP_DAYS)
+            ))
+            .otherwise(end_dt)
+        )
+    else:
+        capped_end = end_dt
+    raw_est = capped_end - pl.duration(days=offset)
     estimated = (
         pl.when(ro.is_null())
         # Unknown/unmapped round: can't place it by round, fall back to start.
         .then(start_dt)
-        .when(ro <= 3)
-        # Qualifying precedes the main draw — no start floor.
-        .then(raw_est)
-        # Main draw + RR: floor the opening round at the listed start.
+        # All rounds (qualifying included) floored at the listed start.
         .otherwise(pl.max_horizontal(start_dt, raw_est))
     )
 
@@ -816,6 +884,7 @@ class MatchesAggregator(BaseJob):
         # Pass only the columns ratings needs to avoid .to_dicts() on the full wide DF
         _RATINGS_INPUT_COLS = [
             "match_uid", "player_id", "opp_id", "effective_match_date", "round_order",
+            "tournament_start_date",
             "surface", "round", "tournament_level", "won", "indoor",
             "player_rank", "opp_rank",
             "pts_service_pts_won", "pts_service_pts_played",

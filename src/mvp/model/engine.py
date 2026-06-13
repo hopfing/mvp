@@ -703,10 +703,11 @@ class FeatureEngine:
             "match_uid", "player_id", "opp_id", "effective_match_date",
             # always loaded so the walkover completeness filter can apply
             "reason", "result_type",
-            # always loaded as the deterministic tiebreaker for date-ordered
-            # cumulative features: round_order breaks same-day ties in true
-            # chronological order, match_uid finalizes determinism.
-            "round_order",
+            # always loaded as the deterministic tiebreakers for date-ordered
+            # cumulative/chain features: tournament_start_date orders a player's
+            # same-day cross-tournament rows finishing-first, round_order breaks
+            # same-day within-tournament ties, match_uid finalizes determinism.
+            "round_order", "tournament_start_date",
         }
 
         if extra_columns:

@@ -51,6 +51,7 @@ class TestRollingSum:
                 "won": [1, 1],
                 "match_uid": ["m1", "m2"],
                 "round_order": [12, 12],
+                "tournament_start_date": date(2020, 1, 1),
             }
         ).lazy()
 
@@ -119,6 +120,7 @@ class TestRollingSum:
                 "won": [1, 1, 1, 0],
                 "match_uid": ["m1", "m2", "m3", "m4"],
                 "round_order": [12, 12, 12, 12],
+                "tournament_start_date": date(2020, 1, 1),
             }
         ).lazy()
 
@@ -150,6 +152,7 @@ class TestRollingMean:
                 "score": [10.0, 20.0, 30.0, 40.0],
                 "match_uid": ["m1", "m2", "m3", "m4"],
                 "round_order": [12, 12, 12, 12],
+                "tournament_start_date": date(2020, 1, 1),
             }
         ).lazy()
 
@@ -302,6 +305,7 @@ class TestCumulativeSum:
                 "won": [1, 0, 1, 1],
                 "match_uid": ["m1", "m2", "m3", "m4"],
                 "round_order": [12, 12, 12, 12],
+                "tournament_start_date": date(2020, 1, 1),
             }
         ).lazy()
 
@@ -324,6 +328,7 @@ class TestCumulativeSum:
                 "won": [1, 1],
                 "match_uid": ["m1", "m2"],
                 "round_order": [12, 12],
+                "tournament_start_date": date(2020, 1, 1),
             }
         ).lazy()
 
@@ -349,6 +354,7 @@ class TestCumulativeSum:
                 "won": [1, 1, 1, 0],
                 "match_uid": ["m1", "m2", "m3", "m4"],
                 "round_order": [12, 12, 12, 12],
+                "tournament_start_date": date(2020, 1, 1),
             }
         ).lazy()
 
@@ -380,6 +386,7 @@ class TestCumulativeMean:
                 "score": [10.0, 20.0, 30.0, 40.0],
                 "match_uid": ["m1", "m2", "m3", "m4"],
                 "round_order": [12, 12, 12, 12],
+                "tournament_start_date": date(2020, 1, 1),
             }
         ).lazy()
 
@@ -408,6 +415,7 @@ class TestCumulativeMean:
                 "score": [10.0, None, 20.0, 30.0],
                 "match_uid": ["m1", "m2", "m3", "m4"],
                 "round_order": [12, 12, 12, 12],
+                "tournament_start_date": date(2020, 1, 1),
             }
         ).lazy()
 

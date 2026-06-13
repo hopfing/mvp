@@ -141,6 +141,7 @@ class TestTourMatchPctFeature:
             "circuit": ["tour", "chal", "tour", "chal"],
             "match_uid": ["m1", "m2", "m3", "m4"],
             "round_order": [12, 12, 12, 12],
+            "tournament_start_date": date(2020, 1, 1),
         }).sort("effective_match_date")
 
         result = df.with_columns(tour_match_pct(days=None).alias("pct"))

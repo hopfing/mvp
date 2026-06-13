@@ -44,6 +44,7 @@ class TestH2HWinsFeature:
                 "won": [1, 0, 1],
                 "match_uid": ["m1", "m2", "m3"],
                 "round_order": [12, 12, 12],
+                "tournament_start_date": date(2020, 1, 1),
             }
         ).lazy()
 
@@ -68,6 +69,7 @@ class TestH2HWinsFeature:
                 "won": [0, 1],
                 "match_uid": ["m1", "m2"],
                 "round_order": [12, 12],
+                "tournament_start_date": date(2020, 1, 1),
             }
         ).lazy()
 
@@ -92,6 +94,7 @@ class TestH2HWinsFeature:
                 "won": [1, 1, 1],
                 "match_uid": ["m1", "m2", "m3"],
                 "round_order": [12, 12, 12],
+                "tournament_start_date": date(2020, 1, 1),
             }
         ).lazy()
 
@@ -137,6 +140,7 @@ class TestH2HSurfaceWinsFeature:
                 "won": [1, 0, 1],
                 "match_uid": ["m1", "m2", "m3"],
                 "round_order": [12, 12, 12],
+                "tournament_start_date": date(2020, 1, 1),
             }
         ).lazy()
 
@@ -159,6 +163,7 @@ class TestH2HSurfaceWinsFeature:
                 "won": [0, 1],
                 "match_uid": ["m1", "m2"],
                 "round_order": [12, 12],
+                "tournament_start_date": date(2020, 1, 1),
             }
         ).lazy()
 
@@ -186,6 +191,7 @@ class TestH2HWinPctFeature:
                 "won": [1, 0, 1],
                 "match_uid": ["m1", "m2", "m3"],
                 "round_order": [12, 12, 12],
+                "tournament_start_date": date(2020, 1, 1),
             }
         ).lazy()
 
@@ -215,6 +221,7 @@ class TestH2HSurfaceWinPctFeature:
                 "won": [1, 0, 1],
                 "match_uid": ["m1", "m2", "m3"],
                 "round_order": [12, 12, 12],
+                "tournament_start_date": date(2020, 1, 1),
             }
         ).lazy()
 

@@ -37,7 +37,7 @@ def _tourn_cumulative(expr: pl.Expr, fill_with: int | None = 0) -> pl.Expr:
             average features where "no prior data" is not the same as "net
             zero" and should propagate as NaN to NaN-tolerant models.
     """
-    cum = expr.cum_sum().shift(1).over(TOURN_GROUP, order_by=[DATE_COL, "round_order", "match_uid"])
+    cum = expr.cum_sum().shift(1).over(TOURN_GROUP, order_by=[DATE_COL, "tournament_start_date", "round_order", "match_uid"])
     if fill_with is None:
         return cum
     return cum.fill_null(fill_with)
@@ -144,7 +144,7 @@ def tourn_matches_played() -> pl.Expr:
         .cast(pl.Int64)
         .cum_sum()
         .shift(1)
-        .over(TOURN_WORKLOAD_GROUP, order_by=[DATE_COL, "round_order", "match_uid"])
+        .over(TOURN_WORKLOAD_GROUP, order_by=[DATE_COL, "tournament_start_date", "round_order", "match_uid"])
         .fill_null(0)
     )
 
@@ -172,7 +172,7 @@ def _is_last_in_year_instance() -> pl.Expr:
     """Shift-based marker: row is the last match of a year-instance if the next row
     in (player, tournament, draw_type) has a different year (or doesn't exist).
     """
-    next_year = pl.col("year").shift(-1).over(TOURN_HISTORY_GROUP, order_by=[DATE_COL, "round_order", "match_uid"])
+    next_year = pl.col("year").shift(-1).over(TOURN_HISTORY_GROUP, order_by=[DATE_COL, "tournament_start_date", "round_order", "match_uid"])
     return (pl.col("year") != next_year) | next_year.is_null()
 
 
@@ -186,7 +186,7 @@ def tourn_history_year_instances_completed() -> pl.Expr:
     is_last_int = _is_last_in_year_instance().cast(pl.Int64)
     return (
         is_last_int.cum_sum().shift(1)
-        .over(TOURN_HISTORY_GROUP, order_by=[DATE_COL, "round_order", "match_uid"])
+        .over(TOURN_HISTORY_GROUP, order_by=[DATE_COL, "tournament_start_date", "round_order", "match_uid"])
         .fill_null(0)
     )
 
@@ -203,7 +203,7 @@ def _per_year_instance_avg(value_per_match: pl.Expr) -> pl.Expr:
     contribution = pl.when(is_last).then(year_total).otherwise(pl.lit(0, dtype=pl.Float64))
     cum_sum_expr = (
         contribution.cum_sum().shift(1)
-        .over(TOURN_HISTORY_GROUP, order_by=[DATE_COL, "round_order", "match_uid"])
+        .over(TOURN_HISTORY_GROUP, order_by=[DATE_COL, "tournament_start_date", "round_order", "match_uid"])
         .fill_null(0)
     )
     cum_count_expr = pl.col("player_tourn_history_year_instances_completed")

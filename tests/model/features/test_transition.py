@@ -32,6 +32,7 @@ def _make_transition_df() -> pl.DataFrame:
         "won": [1, 0, 1, 1, 0],
         "match_uid": ["m1", "m2", "m3", "m4", "m5"],
         "round_order": [12, 12, 12, 12, 12],
+        "tournament_start_date": date(2020, 1, 1),
     }).sort("effective_match_date")
 
 

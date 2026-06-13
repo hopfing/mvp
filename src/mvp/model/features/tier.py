@@ -255,14 +255,14 @@ def high_tier_match_pct(days: int | None = None) -> pl.Expr:
             .cast(pl.Int64)
             .cum_sum()
             .shift(1)
-            .over(group_by, order_by=["effective_match_date", "round_order", "match_uid"])
+            .over(group_by, order_by=["effective_match_date", "tournament_start_date", "round_order", "match_uid"])
             .fill_null(0)
         )
         high_count = (
             high_indicator
             .cum_sum()
             .shift(1)
-            .over(group_by, order_by=["effective_match_date", "round_order", "match_uid"])
+            .over(group_by, order_by=["effective_match_date", "tournament_start_date", "round_order", "match_uid"])
             .fill_null(0)
         )
     else:
@@ -294,7 +294,7 @@ def tier_ordinal_avg(days: int | None = None) -> pl.Expr:
             .fill_null(0)
             .cum_sum()
             .shift(1)
-            .over(group_by, order_by=["effective_match_date", "round_order", "match_uid"])
+            .over(group_by, order_by=["effective_match_date", "tournament_start_date", "round_order", "match_uid"])
             .fill_null(0)
         )
         total = (
@@ -303,7 +303,7 @@ def tier_ordinal_avg(days: int | None = None) -> pl.Expr:
             .cast(pl.Int64)
             .cum_sum()
             .shift(1)
-            .over(group_by, order_by=["effective_match_date", "round_order", "match_uid"])
+            .over(group_by, order_by=["effective_match_date", "tournament_start_date", "round_order", "match_uid"])
             .fill_null(0)
         )
         return pl.when(total > 0).then(ordinal_sum / total).otherwise(None)
@@ -337,7 +337,7 @@ def prize_money_log_avg(days: int | None = None) -> pl.Expr:
             .fill_null(0)
             .cum_sum()
             .shift(1)
-            .over(group_by, order_by=["effective_match_date", "round_order", "match_uid"])
+            .over(group_by, order_by=["effective_match_date", "tournament_start_date", "round_order", "match_uid"])
             .fill_null(0)
         )
         total = (
@@ -346,7 +346,7 @@ def prize_money_log_avg(days: int | None = None) -> pl.Expr:
             .cast(pl.Int64)
             .cum_sum()
             .shift(1)
-            .over(group_by, order_by=["effective_match_date", "round_order", "match_uid"])
+            .over(group_by, order_by=["effective_match_date", "tournament_start_date", "round_order", "match_uid"])
             .fill_null(0)
         )
         return pl.when(total > 0).then(prize_sum / total).otherwise(None)

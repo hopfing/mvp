@@ -34,6 +34,7 @@ def _make_quality_df() -> pl.DataFrame:
         "opp_elo": [1500.0, 1800.0, 1600.0, 1400.0],
         "match_uid": ["m1", "m2", "m3", "m4"],
         "round_order": [12, 12, 12, 12],
+        "tournament_start_date": date(2020, 1, 1),
     }).sort("effective_match_date")
 
 
