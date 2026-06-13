@@ -31,6 +31,8 @@ def _make_form_df() -> pl.DataFrame:
         ],
         "tournament_id": ["T1", "T1", "T2", "T3"],
         "round_order": [4, 5, 4, 6],
+        "tournament_start_date": date(2020, 1, 1),
+        "match_uid": "m",
         "won": [True, True, False, True],
         "draw_type": ["singles"] * 4,
     }).sort("effective_match_date")
@@ -71,6 +73,8 @@ class TestDaysSinceLastMatch:
             ],
             "tournament_id": ["T1", "T1", "T2"],
             "round_order": [4, 4, 4],
+            "tournament_start_date": date(2020, 1, 1),
+            "match_uid": "m",
             "won": [True, True, True],
             "draw_type": ["singles", "doubles", "singles"],
         }).sort("effective_match_date")
@@ -92,6 +96,8 @@ class TestDaysSinceLastMatch:
             ],
             "tournament_id": ["T1", "T1", "T2", "T2"],
             "round_order": [4, 4, 5, 5],
+            "tournament_start_date": date(2020, 1, 1),
+            "match_uid": "m",
             "won": [True, True, True, True],
             "draw_type": ["singles"] * 4,
         }).sort("effective_match_date")
@@ -142,6 +148,8 @@ class TestPrevTournRoundReached:
             ],
             "tournament_id": ["T1", "T1", "T2", "T2", "T2"],
             "round_order": [4, 5, 4, 5, 6],
+            "tournament_start_date": date(2020, 1, 1),
+            "match_uid": "m",
             "won": [True, True, True, True, False],
             "draw_type": ["singles"] * 5,
         }).sort("effective_match_date")
@@ -169,6 +177,8 @@ class TestPrevTournRoundReached:
             ],
             "tournament_id": ["T1", "T1", "T2"],
             "round_order": [5, 4, 4],
+            "tournament_start_date": date(2020, 1, 1),
+            "match_uid": "m",
             "won": [True, True, True],
             "draw_type": ["singles", "doubles", "singles"],
         }).sort("effective_match_date")
@@ -191,6 +201,8 @@ class TestPrevTournRoundReached:
             ],
             "tournament_id": ["T1", "T1", "T2", "T2"],
             "round_order": [6, 4, 4, 5],
+            "tournament_start_date": date(2020, 1, 1),
+            "match_uid": "m",
             "won": [True, True, True, True],
             "draw_type": ["singles"] * 4,
         }).sort("effective_match_date")
@@ -287,6 +299,7 @@ class TestDaysSinceSingles:
             "effective_match_date": [date(2024, 1, 1), date(2024, 1, 5), date(2024, 1, 20)],
             "match_uid": ["m1", "m2", "m3"],
             "round_order": [4, 4, 4],
+            "tournament_start_date": date(2020, 1, 1),
             "won": [True, True, True],
             "draw_type": ["singles", "doubles", "singles"],
         }).sort("effective_match_date")
@@ -307,6 +320,7 @@ class TestDaysSinceSingles:
             "effective_match_date": [date(2024, 1, 1), date(2024, 1, 10)],
             "match_uid": ["m1", "m2"],
             "round_order": [4, 4],
+            "tournament_start_date": date(2020, 1, 1),
             "won": [True, True],
             "draw_type": ["doubles", "singles"],
         }).sort("effective_match_date")
@@ -325,6 +339,7 @@ class TestDaysSinceSingles:
             ],
             "match_uid": ["m1", "m2", "m3", "m4"],
             "round_order": [4, 4, 5, 5],
+            "tournament_start_date": date(2020, 1, 1),
             "won": [True, True, True, True],
             "draw_type": ["singles"] * 4,
         }).sort("effective_match_date")

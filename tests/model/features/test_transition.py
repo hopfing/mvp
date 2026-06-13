@@ -121,6 +121,9 @@ class TestTransitionMultiPlayer:
             ],
             "surface": ["Hard", "Clay", "Hard", "Clay"],
             "won": [1, 1, 0, 0],
+            "round_order": [12, 12, 12, 12],
+            "match_uid": ["m1", "m2", "m3", "m4"],
+            "tournament_start_date": date(2020, 1, 1),
         }).sort("effective_match_date")
 
         result = df.with_columns(days_since_surface().alias("val"))

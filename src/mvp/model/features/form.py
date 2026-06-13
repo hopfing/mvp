@@ -55,7 +55,7 @@ def match_count_max(days: int | None = None) -> pl.Expr:
 )
 def days_since_last_match() -> pl.Expr:
     """Days since this player last played any match."""
-    prev_date = pl.col(DATE_COL).shift(1).over("player_id", order_by=DATE_COL)
+    prev_date = pl.col(DATE_COL).shift(1).over("player_id", order_by=[DATE_COL, "tournament_start_date", "round_order", "match_uid"])
     return (pl.col(DATE_COL) - prev_date).dt.total_days().cast(pl.Float64)
 
 
@@ -79,7 +79,7 @@ def days_since_singles() -> pl.Expr:
     """
     singles_date = pl.when(pl.col("draw_type") == "singles").then(pl.col(DATE_COL))
     prev_singles = (
-        singles_date.shift(1).forward_fill().over("player_id", order_by=DATE_COL)
+        singles_date.shift(1).forward_fill().over("player_id", order_by=[DATE_COL, "tournament_start_date", "round_order", "match_uid"])
     )
     return (pl.col(DATE_COL) - prev_singles).dt.total_days().cast(pl.Float64)
 
@@ -102,7 +102,7 @@ def prev_tourn_round_reached() -> pl.Expr:
         .then(pl.col("round_order").shift(1).cast(pl.Float64))
         .otherwise(None)
         .forward_fill()
-    ).over(["player_id", "draw_type"], order_by=DATE_COL)
+    ).over(["player_id", "draw_type"], order_by=[DATE_COL, "tournament_start_date", "round_order", "match_uid"])
 
 
 register_diff("prev_tourn_round_reached")

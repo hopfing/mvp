@@ -19,7 +19,7 @@ DATE_COL = "effective_match_date"
 def days_since_surface() -> pl.Expr:
     """Days since this player last played on the current surface."""
     group_by = ["player_id", "surface"]
-    prev_date = pl.col(DATE_COL).shift(1).over(group_by, order_by=DATE_COL)
+    prev_date = pl.col(DATE_COL).shift(1).over(group_by, order_by=[DATE_COL, "tournament_start_date", "round_order", "match_uid"])
     return (pl.col(DATE_COL) - prev_date).dt.total_days().cast(pl.Float64)
 
 
@@ -32,7 +32,7 @@ def days_since_surface() -> pl.Expr:
 )
 def surface_switch() -> pl.Expr:
     """Whether player switched surfaces since their previous match."""
-    prev_surface = pl.col("surface").shift(1).over("player_id", order_by=DATE_COL)
+    prev_surface = pl.col("surface").shift(1).over("player_id", order_by=[DATE_COL, "tournament_start_date", "round_order", "match_uid"])
     return (pl.col("surface") != prev_surface).cast(pl.Float64)
 
 
