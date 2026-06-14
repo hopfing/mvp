@@ -516,21 +516,20 @@ class TestMatchesAggregator:
 
 class TestEffectiveMatchDate:
     def test_estimated_from_round_offsets(self):
-        """Groups without schedule data get estimated dates by anchoring the
-        Final to tournament_end_date and stepping back a draw-size-aware number
-        of days per round."""
+        """Groups without Schedule data get estimated dates via scaled offset."""
         from mvp.atptour.aggregators.matches import add_effective_match_date
 
-        # Tournament Mar 5-10. Rounds R32 (order 7), SF (order 10), F (order 12).
-        # No draw size -> inferred 32-draw (P32): F = end - 0 = Mar 10,
-        # SF = end - 1 = Mar 9, R32 = end - 5 = Mar 5.
+        # Tournament Mar 8-10 (2 day duration)
+        # Rounds: R32 (order 7), SF (order 10), F (order 12)
+        # Offsets after rank: R32=0, SF=1, F=2; max=2
+        # Scaled: R32=0, SF=1, F=2 days from start
         df = pl.DataFrame({
             "tournament_id": ["T1"] * 4,
             "year": [2024] * 4,
             "draw_type": ["singles"] * 4,
             "round": ["F", "SF", "R32", "R32"],
             "round_order": [12, 10, 7, 7],
-            "tournament_start_date": [date(2024, 3, 5)] * 4,
+            "tournament_start_date": [date(2024, 3, 8)] * 4,
             "tournament_end_date": [date(2024, 3, 10)] * 4,
             "scheduled_datetime": [None] * 4,
         }).cast({
@@ -549,7 +548,7 @@ class TestEffectiveMatchDate:
 
         assert f_date == datetime(2024, 3, 10)
         assert sf_date == datetime(2024, 3, 9)
-        assert all(d == datetime(2024, 3, 5) for d in r32_dates)
+        assert all(d == datetime(2024, 3, 8) for d in r32_dates)
 
     def test_schedule_override_when_all_present(self):
         """Groups where 100% have scheduled_datetime use that value."""
@@ -578,8 +577,8 @@ class TestEffectiveMatchDate:
         """Partial schedule coverage falls back to estimation."""
         from mvp.atptour.aggregators.matches import add_effective_match_date
 
-        # No draw size -> inferred 32-draw (P32). F = end = Mar 10,
-        # SF = end - 1 = Mar 9.
+        # 2 rounds, duration=2, max_offset=1
+        # SF offset=0 -> start+0=Mar 8, F offset=1 -> start+2=Mar 10
         df = pl.DataFrame({
             "tournament_id": ["T1"] * 2,
             "year": [2024] * 2,
@@ -593,9 +592,9 @@ class TestEffectiveMatchDate:
         result = add_effective_match_date(df)
         f_date = result.filter(pl.col("round") == "F")["effective_match_date"][0]
         sf_date = result.filter(pl.col("round") == "SF")["effective_match_date"][0]
-        # Both estimated: F = end = Mar 10, SF = end - 1 = Mar 9
+        # Both estimated: SF=start, F=start+2
         assert f_date == datetime(2024, 3, 10)
-        assert sf_date == datetime(2024, 3, 9)
+        assert sf_date == datetime(2024, 3, 8)
 
     def test_null_within_round_fills_from_peer_and_keeps_passthrough(self):
         """A null schedule that has scheduled peers in its round is filled from
@@ -656,7 +655,7 @@ class TestEffectiveMatchDate:
             "round_order": [12, 10, 12, 9],
             "tournament_start_date": [
                 date(2024, 3, 8), date(2024, 3, 8),
-                date(2024, 6, 12), date(2024, 6, 12),
+                date(2024, 6, 13), date(2024, 6, 13),
             ],
             "tournament_end_date": [
                 date(2024, 3, 10), date(2024, 3, 10),
@@ -680,7 +679,6 @@ class TestEffectiveMatchDate:
             (pl.col("tournament_id") == "T2") & (pl.col("round") == "QF")
         )["effective_match_date"][0]
 
-        # T1: F = end = Mar 10. T2 (32-draw): F = end = Jun 15, QF = end - 2 = Jun 13.
         assert t1_f == datetime(2024, 3, 10)
         assert t2_f == datetime(2024, 6, 15)
         assert t2_qf == datetime(2024, 6, 13)
