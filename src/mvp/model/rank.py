@@ -396,13 +396,25 @@ def _all_fingerprints_for_source(source_name: str) -> list[dict]:
 
 def _all_mlruns_for_model(model_name: str) -> list[dict]:
     """Return list of {run_id, run_ts, diagnostics_path, diagnostics, mtime} for every
-    mlrun whose artifacts dir contains a `<model_name>.yaml`. Used by the
-    regression view, which needs historical runs not just the latest.
+    historical run of a model. Used by the regression view and the leader
+    table, which need historical runs not just the latest.
 
-    During the fp transition, also includes fingerprint-dir diagnostics for
-    any fp whose source.txt lists this model name.
+    Two record types exist for the same training: an mlflow run under
+    `mlruns/<exp>/<hash>/` (diagnostics only — backtests are never logged
+    there) and a fingerprint dir under `model_evaluations/<fp>/` (diagnostics
+    + confidence + backtest, keyed by config content-hash). A single
+    `model-report` produces several mlflow hashes for one config (training
+    pass + the backtest stage's own retrain), all mapping to one fingerprint.
+
+    Fingerprint entries are preferred: they carry every dataset, so historical
+    rows show under their content-hash with backtest data intact. An mlflow run
+    is only included when it has no fingerprint-dir twin (matched by full
+    fingerprint) — i.e. a genuine orphan whose fp dir was pruned/never written.
     """
-    out: list[dict] = []
+    # Fingerprint-dir entries first — these carry all datasets.
+    out: list[dict] = list(_all_fingerprints_for_source(model_name))
+    fp_fingerprints = {e["fp"] for e in out if e.get("fp")}
+
     if MLRUNS_DIR.exists():
         for exp_dir in MLRUNS_DIR.iterdir():
             if not exp_dir.is_dir() or exp_dir.name.startswith("."):
@@ -425,15 +437,18 @@ def _all_mlruns_for_model(model_name: str) -> list[dict]:
                     continue
                 if "segments" not in diag:
                     continue
-                # Compute fingerprint of this mlrun's stored YAML so we can
-                # dedup historical runs whose content matches the current YAML
-                # (or each other).
+                # Compute the fingerprint of this mlrun's stored YAML. If a
+                # fingerprint dir already covers it, that dir is the fuller
+                # record (it has the backtest) — skip the mlflow copy so the
+                # run shows under its content-hash, not a stray mlflow hash.
                 run_fp: str | None = None
                 try:
                     run_cfg = ExperimentConfig.from_file(str(yaml_artifact))
                     run_fp = compute_fingerprint(run_cfg, config_path=yaml_artifact)
                 except Exception:
                     pass
+                if run_fp is not None and run_fp in fp_fingerprints:
+                    continue
                 mtime = json_path.stat().st_mtime
                 out.append({
                     "run_id": run_dir.name[:8],
@@ -442,16 +457,6 @@ def _all_mlruns_for_model(model_name: str) -> list[dict]:
                     "mtime": mtime,
                     "fp": run_fp,
                 })
-    # Union with fp-dir entries (deduped on (mtime, source) since fp dirs are
-    # the same diagnostics copied from mlruns — but the fp_dir copy may be
-    # the only source of truth once mlruns is pruned). Dedup conservatively
-    # by `run_id`: fp short-id is 8 hex; mlrun is 8 hex; collision possible
-    # but unlikely and harmless (duplicate row, not wrong data).
-    seen_ids = {e["run_id"] for e in out}
-    for fp_entry in _all_fingerprints_for_source(model_name):
-        if fp_entry["run_id"] in seen_ids:
-            continue
-        out.append(fp_entry)
     return out
 
 
