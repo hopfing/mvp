@@ -515,17 +515,9 @@ def _extract_confidence(model_name: str, config_path: Path | None = None) -> dic
     return out
 
 
-def _extract_backtest(
-    model_name: str,
-    train_end: str | _dt.date | None,
-    config_path: Path | None = None,
-) -> dict:
-    """Compute model-eval backtest aggregates: positive bet-time edge, model-side only.
-
-    Prefers the fp-scoped backtest.csv when `config_path` is given; falls back
-    to legacy `B:/backtests/lead/<name>.csv`.
-    """
-    out = {
+def _empty_backtest_dict() -> dict:
+    """Default (all-missing) backtest aggregate dict shape used on ModelSummary."""
+    return {
         "bt_period_lo": "", "bt_period_hi": "", "bt_n": 0,
         "bt_hit": None, "bt_roi_o": None, "bt_roi_c": None,
         "bt_units_o": None, "bt_units_c": None,
@@ -533,36 +525,18 @@ def _extract_backtest(
         "bt_clv_pos": None, "bt_avg_clv": None,
         "bt_me_pos": None, "bt_avg_me": None,
     }
-    p: Path | None = None
-    if config_path is not None:
-        try:
-            cand = fp_backtest_path(config_path)
-            if cand.exists():
-                p = cand
-        except Exception:
-            p = None
-    if p is None:
-        legacy = backtest_path(model_name)
-        if legacy.exists():
-            p = legacy
-    if p is None:
-        return out
-    df = read_backtest_csv(p)
 
-    # Scope = day after training end -> today
-    if train_end is not None and "effective_match_date" in df.columns:
-        if isinstance(train_end, (_dt.date, _dt.datetime)):
-            scope_start = (train_end + _dt.timedelta(days=1)).isoformat()[:10]
-        else:
-            scope_start = (
-                _dt.date.fromisoformat(str(train_end)) + _dt.timedelta(days=1)
-            ).isoformat()
-        df = df.filter(pl.col("effective_match_date") >= scope_start)
 
-    # Apply user's betting filters: consensus=1.0 (lead+voter agree) and model
-    # is on this side (prob > 0.5). The edge filter is applied *after* the
-    # "_all" snapshot is taken, so bt_units_o_all reflects consensus picks
-    # without the edge gate (matches user's "all" lens).
+def _backtest_aggregates(df: pl.DataFrame) -> dict:
+    """Apply the betting filters and compute aggregate backtest stats from a
+    per-row backtest df.
+
+    Filters: consensus==1.0 (lead+voter agree) and model-side (model_prob>0.5).
+    ``bt_units_o_all`` is the consensus-side net units BEFORE the edge gate (the
+    "all" lens); every other stat adds the opening_edge>=0 gate. Shared by the
+    latest-run path (date-scoped) and the fp-version path (whole CSV).
+    """
+    out = _empty_backtest_dict()
     if "consensus" in df.columns:
         df = df.filter(pl.col("consensus") == 1.0)
     if "model_prob" in df.columns:
@@ -595,6 +569,61 @@ def _extract_backtest(
         out["bt_me_pos"] = (df["closing_edge"] > 0).mean()
         out["bt_avg_me"] = df["closing_edge"].mean()
     return out
+
+
+def _fp_backtest_aggregates(fp_dir: Path) -> dict:
+    """Full backtest aggregates from a fingerprint dir's backtest.csv (whole CSV,
+    no train-end scope — matches the leader table's historical-entry semantics).
+    All-missing dict when the file is absent/unreadable.
+    """
+    p = fp_dir / "backtest.csv"
+    if not p.exists():
+        return _empty_backtest_dict()
+    try:
+        df = read_backtest_csv(p)
+    except Exception:
+        return _empty_backtest_dict()
+    return _backtest_aggregates(df)
+
+
+def _extract_backtest(
+    model_name: str,
+    train_end: str | _dt.date | None,
+    config_path: Path | None = None,
+) -> dict:
+    """Compute model-eval backtest aggregates: positive bet-time edge, model-side only.
+
+    Prefers the fp-scoped backtest.csv when `config_path` is given; falls back
+    to legacy `B:/backtests/lead/<name>.csv`. Scoped to the post-training
+    window (day after train end -> today).
+    """
+    p: Path | None = None
+    if config_path is not None:
+        try:
+            cand = fp_backtest_path(config_path)
+            if cand.exists():
+                p = cand
+        except Exception:
+            p = None
+    if p is None:
+        legacy = backtest_path(model_name)
+        if legacy.exists():
+            p = legacy
+    if p is None:
+        return _empty_backtest_dict()
+    df = read_backtest_csv(p)
+
+    # Scope = day after training end -> today
+    if train_end is not None and "effective_match_date" in df.columns:
+        if isinstance(train_end, (_dt.date, _dt.datetime)):
+            scope_start = (train_end + _dt.timedelta(days=1)).isoformat()[:10]
+        else:
+            scope_start = (
+                _dt.date.fromisoformat(str(train_end)) + _dt.timedelta(days=1)
+            ).isoformat()
+        df = df.filter(pl.col("effective_match_date") >= scope_start)
+
+    return _backtest_aggregates(df)
 
 
 def _load_train_end(config_path: Path) -> str | None:
@@ -720,35 +749,12 @@ def _confidence_at(fp_dir: Path) -> dict:
 def _backtest_stats_at(
     fp_dir: Path,
 ) -> tuple[float | None, float | None, float | None, float | None]:
-    """Return (bt_clv_pos, bt_avg_clv, bt_units_o, bt_units_o_all) from an
-    fp dir's backtest.csv.
-
-    Filters: consensus==1.0 + model_prob>0.5 for all metrics; an additional
-    opening_edge>=0 gate for the standard set. ``bt_units_o_all`` is the
-    consensus-side units WITHOUT the edge gate (the "all" lens).
-
-    All-None when the file is missing/unreadable.
+    """Return (bt_clv_pos, bt_avg_clv, bt_units_o, bt_units_o_all) from an fp
+    dir's backtest.csv. Thin wrapper over `_fp_backtest_aggregates` for the
+    leader table's B/U axes. All-None when the file is missing/unreadable.
     """
-    p = fp_dir / "backtest.csv"
-    if not p.exists():
-        return None, None, None, None
-    try:
-        df = read_backtest_csv(p)
-    except Exception:
-        return None, None, None, None
-    if "consensus" in df.columns:
-        df = df.filter(pl.col("consensus") == 1.0)
-    if "model_prob" in df.columns:
-        df = df.filter(pl.col("model_prob") > 0.5)
-    units_o_all = df["pnl_open"].sum() if "pnl_open" in df.columns else None
-    if "opening_edge" in df.columns:
-        df = df.filter(pl.col("opening_edge") >= 0)
-    if len(df) == 0:
-        return None, None, None, units_o_all
-    clv_pos = (df["clv"] > 0).mean() if "clv" in df.columns else None
-    clv_avg = df["clv"].mean() if "clv" in df.columns else None
-    units_o = df["pnl_open"].sum() if "pnl_open" in df.columns else None
-    return clv_pos, clv_avg, units_o, units_o_all
+    bt = _fp_backtest_aggregates(fp_dir)
+    return bt["bt_clv_pos"], bt["bt_avg_clv"], bt["bt_units_o"], bt["bt_units_o_all"]
 
 
 def _build_leader_candidates(summaries: list[ModelSummary]) -> list[LeaderCandidate]:
@@ -1015,14 +1021,62 @@ def render_confidence_table(summaries: list[ModelSummary]) -> str:
     return "\n".join(lines)
 
 
+def _backtest_summary_rows(summaries: list[ModelSummary]) -> list[ModelSummary]:
+    """Backtest-table rows: the latest run per model plus every historical
+    fingerprint-dir version that carries a backtest, labelled `<name> (<run_id>)`.
+
+    Latest rows keep their post-training-scoped stats (already on the summary);
+    version rows use whole-CSV stats, matching the cross-axis leader table's
+    B/U axes. mlrun-only versions are skipped — they have no backtest CSV.
+    """
+    rows: list[ModelSummary] = []
+    for s in summaries:
+        rows.append(s)
+        try:
+            current_fp = fingerprint_for(s.config_path)
+        except Exception:
+            current_fp = None
+        runs = _all_mlruns_for_model(s.name)
+        if len(runs) <= 1:
+            continue
+        latest = max(runs, key=lambda r: r["mtime"])
+        for r in runs:
+            if r["run_id"] == latest["run_id"]:
+                continue
+            if "fp_dir" not in r:
+                continue  # mlrun-only: no backtest CSV
+            if current_fp is not None and r.get("fp") == current_fp:
+                continue  # this version IS the latest; don't double-count
+            hist = ModelSummary(
+                name=f"{s.name} ({r['run_id']})", config_path=s.config_path
+            )
+            hist.run_id = r["run_id"]
+            hist.run_ts = r["run_ts"]
+            for k, v in _fp_backtest_aggregates(r["fp_dir"]).items():
+                setattr(hist, k, v)
+            rows.append(hist)
+    return rows
+
+
 def render_backtest_table(summaries: list[ModelSummary]) -> str:
-    """Table 3 — Backtest summary (positive bet-time edge, model-side only)."""
-    rows = sorted(summaries, key=lambda s: -s.optimal_pct)
-    lines = ["=" * 80, "Table 3: Backtest summary (positive bet-time edge, model-side only)", "=" * 80]
+    """Table 2 — Backtest (consensus + model-side, sorted by Uo>=0 desc).
+
+    One row per latest model run plus every historical fingerprint-dir version
+    that carries a backtest, labelled `<name> (<run_id>)`. ``Uo>=0`` adds the
+    opening_edge>=0 gate; ``Uo_all`` is consensus-side without it. Latest rows
+    are scoped to the post-training window; version rows use the whole CSV.
+    """
+    rows = _backtest_summary_rows(summaries)
+    rows.sort(key=lambda s: -(s.bt_units_o if s.bt_units_o is not None else -1e18))
+    lines = [
+        "=" * 80,
+        "Table 2: Backtest (consensus + model-side, sorted by Uo>=0 desc)",
+        "=" * 80,
+    ]
     header = (
-        f"{'Model':<50} {'Period':<23} "
+        f"{'Model':<50} {'Period':<24} "
         f"{'N':>5} {'Hit%':>5} "
-        f"{'ROIo%':>6} {'ROIc%':>6} {'Uo':>7} {'Uc':>7} "
+        f"{'ROIo%':>6} {'ROIc%':>6} {'Uo>=0':>7} {'Uo_all':>7} {'Uc':>7} "
         f"{'CLV+%':>5} {'avgCLV':>6} {'ME+%':>5} {'avgME':>6}"
     )
     lines.append(header)
@@ -1033,18 +1087,14 @@ def render_backtest_table(summaries: list[ModelSummary]) -> str:
             if s.bt_period_lo and s.bt_period_hi
             else "(no data)"
         )
-        def f(x, w, prec=2, signed=False):
-            if x is None:
-                return f"{'--':>{w}}"
-            fmt = f"+{w}.{prec}f" if signed else f"{w}.{prec}f"
-            return f"{x:{fmt}}"
         lines.append(
-            f"{s.name[:50]:<50} {period[:23]:<23} "
+            f"{s.name[:50]:<50} {period[:24]:<24} "
             f"{s.bt_n:>5} "
             f"{(s.bt_hit*100 if s.bt_hit is not None else 0):>5.1f} "
             f"{(s.bt_roi_o*100 if s.bt_roi_o is not None else 0):>+6.2f} "
             f"{(s.bt_roi_c*100 if s.bt_roi_c is not None else 0):>+6.2f} "
             f"{(s.bt_units_o if s.bt_units_o is not None else 0):>+7.1f} "
+            f"{(s.bt_units_o_all if s.bt_units_o_all is not None else 0):>+7.1f} "
             f"{(s.bt_units_c if s.bt_units_c is not None else 0):>+7.1f} "
             f"{(s.bt_clv_pos*100 if s.bt_clv_pos is not None else 0):>5.1f} "
             f"{(s.bt_avg_clv*100 if s.bt_avg_clv is not None else 0):>+6.2f} "
@@ -1345,6 +1395,7 @@ def run_rank(*, force_refresh: bool = False, no_refresh: bool = False) -> str:
 
     sections.append(render_leader_table(summaries))
     sections.append(render_static_table(summaries))
+    sections.append(render_backtest_table(summaries))
     sections.append(render_matrix(summaries))
 
     regressions = render_regressions(summaries)
