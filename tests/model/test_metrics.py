@@ -5,7 +5,6 @@ from sklearn.metrics import brier_score_loss
 
 from mvp.model.metrics import (
     compute_beta_tail_score,
-    compute_calibration_penalized_logloss,
     compute_metrics,
     compute_partial_auc_tail,
     compute_restricted_logloss,
@@ -91,7 +90,6 @@ class TestComputeMetrics:
             "beta_tail_score",
             "beta_tail_score_sharp",
             "threshold_weighted_brier",
-            "calibration_penalized_logloss",
             "restricted_logloss",
             "weighted_concordance",
             "partial_auc_tail",
@@ -134,18 +132,6 @@ class TestThresholdWeightedBrier:
         good = compute_threshold_weighted_brier(y_true, np.array([0.9, 0.9, 0.1, 0.1]))
         bad = compute_threshold_weighted_brier(y_true, np.array([0.1, 0.1, 0.9, 0.9]))
         assert good < bad
-
-
-class TestCalibrationPenalizedLogloss:
-    """Tests for log loss + tail-calibration penalty."""
-
-    def test_penalty_raises_value_for_miscalibrated(self):
-        # Overconfident in the high bucket: predicts 0.9 but wins only half.
-        y_true = np.array([1, 0, 1, 0])
-        y_prob = np.array([0.9, 0.9, 0.9, 0.9])
-        low = compute_calibration_penalized_logloss(y_true, y_prob, lambda_cal=0.0)
-        high = compute_calibration_penalized_logloss(y_true, y_prob, lambda_cal=4.0)
-        assert high > low  # the calibration penalty adds to the loss
 
 
 class TestRestrictedLogloss:

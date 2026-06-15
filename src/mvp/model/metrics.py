@@ -213,24 +213,6 @@ def compute_threshold_weighted_brier(
     return float(s.mean())
 
 
-def compute_calibration_penalized_logloss(
-    y_true: np.ndarray, y_prob: np.ndarray, lambda_cal: float = 2.0
-) -> float:
-    """Log loss plus a high-confidence calibration penalty (lower better).
-
-    Adds ``lambda_cal * compute_calibration_error`` (weighted |calibration
-    error| over buckets with p >= 0.50) to log loss. The log-loss term is
-    proper; the penalty term is not a proper score alone, but as an additive
-    penalty it cannot be improved by tail overconfidence — it charges for it
-    directly. Targets the reliability-averaging failure where aggregate
-    calibration hides confident-region miscalibration. ``lambda_cal`` is a
-    fixed design constant, not swept as the objective.
-    """
-    p = np.clip(y_prob, 1e-15, 1 - 1e-15)
-    ll = float(log_loss(y_true, p, labels=[0, 1]))
-    return ll + lambda_cal * compute_calibration_error(y_true, y_prob)
-
-
 def compute_restricted_logloss(
     y_true: np.ndarray,
     y_prob: np.ndarray,
@@ -385,13 +367,12 @@ def compute_metrics(
         "asymmetric_logloss": compute_asymmetric_logloss(y_true, y_prob, **asym_kwargs),
         # Tail-sensitive objectives (see each compute_* docstring). Lead /
         # calibration-sizing path: beta_tail_score, threshold_weighted_brier,
-        # calibration_penalized_logloss, restricted_logloss (lower = better).
+        # restricted_logloss (lower = better).
         # Voter / discrimination path: weighted_concordance, partial_auc_tail
         # (higher = better — listed in tuning._MAXIMIZE_METRICS).
         "beta_tail_score": compute_beta_tail_score(y_true, y_prob),
         "beta_tail_score_sharp": compute_beta_tail_score(y_true, y_prob, a=0.25, b=0.25),
         "threshold_weighted_brier": compute_threshold_weighted_brier(y_true, y_prob),
-        "calibration_penalized_logloss": compute_calibration_penalized_logloss(y_true, y_prob),
         "restricted_logloss": compute_restricted_logloss(y_true, y_prob),
         "weighted_concordance": compute_weighted_concordance(y_true, y_prob),
         "partial_auc_tail": compute_partial_auc_tail(y_true, y_prob),

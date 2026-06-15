@@ -392,18 +392,18 @@ def print_run_summary(results: dict[str, Any], name: str | None = None) -> None:
         print(f"\nTest: {test_acc:.1%} acc | {test_auc:.3f} AUC | {test_ll:.4f} LL | {test_brier:.4f} Brier")
 
     # Tail-sensitive objectives (see metrics.compute_* docstrings): lead /
-    # calibration path BetaTail/BetaShrp/TWBrier/CalPenLL/RestrLL (lower better),
+    # calibration path BetaTail/BetaShrp/TWBrier/RestrLL (lower better),
     # voter / ranking path wConcrd/pAUCtl (higher better). They live in the same
     # metrics dicts, so they print for Train/Test/Holdout alike.
     _tail_keys = [
         "beta_tail_score", "beta_tail_score_sharp", "threshold_weighted_brier",
-        "calibration_penalized_logloss", "restricted_logloss",
+        "restricted_logloss",
         "weighted_concordance", "partial_auc_tail",
     ]
     if any(k in metrics for k in _tail_keys):
         print(
             f"\n{'':8} {'BetaTail(-)':>11} {'BetaShrp(-)':>11} {'TWBrier(-)':>11}"
-            f" {'CalPenLL(-)':>11} {'RestrLL(-)':>11} {'wConcrd(+)':>11} {'pAUCtl(+)':>11}"
+            f" {'RestrLL(-)':>11} {'wConcrd(+)':>11} {'pAUCtl(+)':>11}"
         )
         for _lbl, _md in (("Train", train_metrics), ("Test", metrics), ("Holdout", holdout_metrics)):
             if not _md:
