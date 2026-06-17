@@ -1,0 +1,112 @@
+calibration:
+  method: isotonic
+data:
+  date_range:
+    end: 2025-12-31
+    start: 2020-01-01
+  filters:
+    circuit:
+    - tour
+    - chal
+    draw_type: singles
+features:
+  include:
+  - player_glicko_mu_over_sigma
+  - opp_glicko_mu_over_sigma
+  - player_elo_surface_diff
+  - player_glicko_rd_diff
+  - player_age_diff
+  - player_opp_elo_faced_avg_diff
+  - player_surface_win_pct_diff
+  - player_pts_service_won_pct_diff(days=15)
+  - player_days_since_surface_diff
+  - player_tourn_games_margin_diff
+  - player_deciding_set_win_pct_diff(days=90)
+  - player_opp_elo_faced_avg_diff(days=365)
+  - player_pts_total_won_pct_diff(days=365)
+  - player_hard_adj
+  - player_elo_rd
+metrics:
+  primary: log_loss
+model:
+  params:
+    colsample_bylevel: 0.503335319598656
+    colsample_bynode: 0.9474919058506049
+    colsample_bytree: 0.6749996994566065
+    gamma: 6.5239613633969045
+    grow_policy: lossguide
+    learning_rate: 0.01759691924386635
+    max_bin: 256
+    max_delta_step: 5
+    max_depth: 6
+    max_leaves: 0
+    min_child_weight: 6
+    n_estimators: 700
+    n_jobs: 8
+    random_state: 42
+    reg_alpha: 0.09722997985102008
+    reg_lambda: 1.0713866737579933
+    scale_pos_weight: 0.9939914749522132
+    subsample: 0.5191137586847817
+    tree_method: exact
+  type: xgboost
+selection_history:
+- feature: player_glicko_diff_over_sigma_sum
+  metric: 0.612635
+  step: 1
+- delta: -0.003388
+  feature: player_elo_surface_diff
+  metric: 0.609248
+  step: 2
+- delta: -0.001618
+  feature: player_glicko_rd_diff
+  metric: 0.60763
+  step: 3
+- delta: -0.000778
+  feature: player_age_diff
+  metric: 0.606852
+  step: 4
+- delta: -0.002455
+  feature: player_opp_elo_faced_avg_diff
+  metric: 0.604397
+  step: 5
+- delta: -0.001761
+  feature: player_surface_win_pct_diff
+  metric: 0.602636
+  step: 6
+- delta: -0.000801
+  feature: player_pts_service_won_pct_diff(days=15)
+  metric: 0.601835
+  step: 7
+- delta: -0.000738
+  feature: player_days_since_surface_diff
+  metric: 0.601097
+  step: 8
+- delta: -0.000673
+  feature: player_tourn_games_margin_diff
+  metric: 0.600424
+  step: 9
+- delta: -0.000522
+  feature: player_deciding_set_win_pct_diff(days=90)
+  metric: 0.599902
+  step: 10
+- delta: -0.000413
+  feature: player_opp_elo_faced_avg_diff(days=365)
+  metric: 0.59949
+  step: 11
+- delta: -0.000742
+  feature: player_pts_total_won_pct_diff(days=365)
+  metric: 0.598747
+  step: 12
+- delta: -0.000191
+  feature: player_hard_adj
+  metric: 0.598557
+  step: 13
+- delta: -0.000424
+  feature: player_elo_rd
+  metric: 0.598132
+  step: 14
+validation:
+  test_months: 12
+  train_months: 24
+  type: date_sliding
