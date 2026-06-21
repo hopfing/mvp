@@ -10,6 +10,7 @@ with banded views by consensus / opening-edge / calibration tier.
 
 import json
 import logging
+import shutil
 import tempfile
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -40,6 +41,45 @@ PRODUCTION_CONFIG_PATH = Path("production.yaml")
 # cutoff-keyed FS cache on every run (matches.parquet is rewritten every 15 min
 # by the live pipeline). A separate dir keeps the next FS run's cache intact.
 BACKTEST_CACHE_DIR = get_local_data_root() / "features" / "backtest_cache"
+
+# Per-day frozen snapshot of matches.parquet. The live file is rewritten every
+# 15 min by the pipeline, so two backtests minutes apart otherwise refit on
+# different data and aren't comparable. We copy the live file once per day to a
+# scratch path and read from that copy, so every backtest run in the same day
+# sees byte-identical matches — a within-day batch is internally comparable.
+FROZEN_MATCHES_PATH = ARTIFACT_ROOT.parent / "frozen" / "matches.parquet"
+_frozen_matches_cache: Path | None = None
+
+
+def _frozen_matches_path() -> Path:
+    """Return today's frozen matches snapshot, refreshing it from the live
+    matches.parquet when missing or stale (mtime from a prior day).
+
+    Memoized per process: the staleness check + copy happen at most once per
+    backtest run, and every matches read in that run resolves to one file.
+    """
+    global _frozen_matches_cache
+    if _frozen_matches_cache is not None:
+        return _frozen_matches_cache
+    today = date.today()
+    fresh = FROZEN_MATCHES_PATH.exists() and (
+        datetime.fromtimestamp(FROZEN_MATCHES_PATH.stat().st_mtime).date() >= today
+    )
+    if fresh:
+        logger.info(
+            "Using frozen matches snapshot %s (frozen %s)",
+            FROZEN_MATCHES_PATH,
+            datetime.fromtimestamp(FROZEN_MATCHES_PATH.stat().st_mtime),
+        )
+    else:
+        FROZEN_MATCHES_PATH.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(MATCHES_PATH, FROZEN_MATCHES_PATH)
+        logger.info(
+            "Froze matches snapshot for %s: %s -> %s",
+            today, MATCHES_PATH, FROZEN_MATCHES_PATH,
+        )
+    _frozen_matches_cache = FROZEN_MATCHES_PATH
+    return FROZEN_MATCHES_PATH
 
 
 def artifact_dir(config_path: Path) -> Path:
@@ -274,7 +314,7 @@ def _build_bet_rows(
     )
 
     # Settle outcomes — `won` is per-(match_uid, player_id) in matches.parquet
-    matches = pl.read_parquet(MATCHES_PATH).select(
+    matches = pl.read_parquet(_frozen_matches_path()).select(
         "match_uid", "player_id", "won"
     ).unique(subset=["match_uid", "player_id"])
     bets = bets.join(matches, on=["match_uid", "player_id"], how="left")
@@ -366,6 +406,7 @@ def run_backtest(
         predictor = ProductionPredictor(
             production_config_path=temp_yaml_path,
             cache_dir=BACKTEST_CACHE_DIR,
+            matches_path=_frozen_matches_path(),
         )
 
         # Train (or skip if artifact exists)
