@@ -295,6 +295,15 @@ class MTLConfig(_StrictModel):
         ]
     ]
 
+    select_on: Literal["combined", "primary"] = "combined"
+    """How forward selection scores candidates when MTL is active.
+
+    "combined" (default): the multi-task loss (primary log_loss + weighted
+    standardized aux MSE); the aux term acts as a selection regularizer.
+    "primary": score the primary head only via ``discovery.metric`` (which is
+    otherwise ignored under MTL). Training stays multi-task in both cases.
+    """
+
     @field_validator("auxiliary_targets")
     @classmethod
     def at_least_one_aux(cls, v: list[str]) -> list[str]:

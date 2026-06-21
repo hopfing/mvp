@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from pydantic import ValidationError
 
 from mvp.model.discovery.config import DiscoveryConfig, DiscoveryOptions
 from mvp.model.discovery.discover import (
@@ -11,6 +12,60 @@ from mvp.model.discovery.discover import (
     FeatureDiscovery,
     get_all_feature_specs,
 )
+
+
+def _mtl_cfg(metric="log_loss", select_on=None, extra_discovery=None):
+    """Minimal MTL DiscoveryConfig dict for validator tests."""
+    mtl = {"auxiliary_targets": ["game_margin"]}
+    if select_on is not None:
+        mtl["select_on"] = select_on
+    discovery = {"metric": metric}
+    if extra_discovery:
+        discovery.update(extra_discovery)
+    return {
+        "data": {"date_range": {"start": "2020-01-01", "end": "2025-12-31"}},
+        "discovery": discovery,
+        "model": {"type": "xgboost"},
+        "mtl": mtl,
+    }
+
+
+class TestMTLSelectOn:
+    """Tests for the MTL select_on field and its validators."""
+
+    def test_default_is_combined(self):
+        cfg = DiscoveryConfig.model_validate(_mtl_cfg())
+        assert cfg.mtl.select_on == "combined"
+
+    def test_primary_parses(self):
+        cfg = DiscoveryConfig.model_validate(_mtl_cfg(select_on="primary"))
+        assert cfg.mtl.select_on == "primary"
+
+    def test_primary_with_proper_tail_metric(self):
+        cfg = DiscoveryConfig.model_validate(
+            _mtl_cfg(metric="beta_tail_score", select_on="primary")
+        )
+        assert cfg.mtl.select_on == "primary"
+
+    def test_accuracy_rejected_under_primary(self):
+        with pytest.raises(ValidationError, match="threshold-based"):
+            DiscoveryConfig.model_validate(_mtl_cfg(metric="accuracy", select_on="primary"))
+
+    def test_accuracy_allowed_under_combined(self):
+        # discovery.metric is ignored under combined, so accuracy is harmless.
+        DiscoveryConfig.model_validate(_mtl_cfg(metric="accuracy", select_on="combined"))
+
+    def test_mtl_rejected_with_stability_selection(self):
+        with pytest.raises(ValidationError, match="stability_selection"):
+            DiscoveryConfig.model_validate(
+                _mtl_cfg(extra_discovery={"stability_selection": {}})
+            )
+
+    def test_mtl_rejected_with_meta_discovery(self):
+        with pytest.raises(ValidationError, match="meta_discovery"):
+            DiscoveryConfig.model_validate(
+                _mtl_cfg(extra_discovery={"meta_discovery": {"ensemble_config": "x.yaml"}})
+            )
 
 
 class TestDiscoveryConfig:

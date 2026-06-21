@@ -231,6 +231,42 @@ class DiscoveryConfig(BaseModel):
             )
         return self
 
+    @model_validator(mode="after")
+    def validate_mtl_select_on(self) -> "DiscoveryConfig":
+        """Under MTL ``select_on='primary'``, ``discovery.metric`` scores the
+        primary head, so threshold-based metrics (degenerate / no usable
+        selection gradient at small feature counts) are rejected."""
+        if (
+            self.mtl is not None
+            and self.mtl.select_on == "primary"
+            and self.discovery.metric in {"accuracy"}
+        ):
+            raise ValueError(
+                f"mtl.select_on='primary' scores the primary head on "
+                f"discovery.metric={self.discovery.metric!r}, which is "
+                f"threshold-based and unsuitable for forward selection; use a "
+                f"probability metric (e.g. log_loss, beta_tail_score)."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def validate_mtl_selection_path(self) -> "DiscoveryConfig":
+        """MTL is wired only for the single forward-selection pass. The
+        stability-selection and meta-discovery paths pass the metric-derived
+        direction straight through (no MTL minimize/scale handling), so reject
+        those combinations rather than run them with an inverted direction."""
+        if self.mtl is not None and self.discovery.stability_selection is not None:
+            raise ValueError(
+                "MTL is not supported with stability_selection; run MTL through "
+                "the standard forward-selection path."
+            )
+        if self.mtl is not None and self.discovery.meta_discovery is not None:
+            raise ValueError(
+                "MTL is not supported with meta_discovery; run MTL through the "
+                "standard forward-selection path."
+            )
+        return self
+
     @classmethod
     def from_yaml(cls, yaml_str: str) -> "DiscoveryConfig":
         """Parse config from YAML string."""

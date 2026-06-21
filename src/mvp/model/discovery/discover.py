@@ -568,26 +568,53 @@ class FeatureDiscovery:
             "accuracy": 0.50,
             "roc_auc": 0.50,
         }
+        # MTL combined selection scores the multi-task loss; primary selection
+        # scores the primary head with discovery.metric (single-task scale).
+        mtl_combined = (
+            self.config.mtl is not None
+            and self.config.mtl.select_on == "combined"
+        )
         round1_baseline = no_skill_baselines.get(self.config.discovery.metric)
-        # When MTL is active, the scorer returns multi-task loss (primary
+        # Under combined MTL the scorer returns multi-task loss (primary
         # log_loss + sum_i weight_i * MSE_std(aux_i)) — different scale than
         # raw primary log_loss. Bump the baseline by the aux contribution:
         # standardized targets have unit variance, so the no-model MSE per
         # aux is ~1.0; multiplied by per-target weights and summed. Without
         # this, all candidates would report as "below baseline" because the
         # 0.693 primary baseline is well under the multi-task loss values.
-        if round1_baseline is not None and self.config.mtl is not None:
+        # Under primary selection the scorer returns the primary metric, so
+        # no bump.
+        if round1_baseline is not None and mtl_combined:
             aux_weights_sum = sum(
                 float((self.config.model.params or {}).get(f"weight_{name}", 0.1))
                 for name in self.config.mtl.auxiliary_targets
             )
             round1_baseline = round1_baseline + aux_weights_sum
 
+        # Direction: combined MTL minimizes a loss regardless of discovery.metric.
+        # Force minimize (and warn on contradiction); primary selection uses the
+        # metric's natural/overridden direction.
+        direction = self.config.discovery.resolved_direction()
+        if mtl_combined:
+            logger.info(
+                "MTL select_on='combined': discovery.metric=%r is ignored; "
+                "selection minimizes the multi-task loss. Use "
+                "select_on='primary' to score the primary head on it.",
+                self.config.discovery.metric,
+            )
+            if direction != "minimize":
+                logger.warning(
+                    "discovery.metric=%r implies direction=%r, but combined MTL "
+                    "selection is minimize — forcing 'minimize'.",
+                    self.config.discovery.metric, direction,
+                )
+                direction = "minimize"
+
         selector = FeatureSelector(
             scorer=scorer,
             all_features=all_features,
             method=method,
-            direction=self.config.discovery.resolved_direction(),
+            direction=direction,
             importance_fn=importance_fn,
             min_features=feat_cfg.min,
             max_features=feat_cfg.max,

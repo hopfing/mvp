@@ -694,6 +694,7 @@ class FastForwardSelector:
         # model so its weight_{target_name} extraction lines up with the
         # config's `model.params.weight_*` keys.
         is_mtl = self.config.mtl is not None
+        mtl_select_on = self.config.mtl.select_on if is_mtl else "combined"
         y_aux = self.y_aux if is_mtl else None
         target_names_mtl = (
             [self.config.target, *self.config.mtl.auxiliary_targets]
@@ -838,10 +839,11 @@ class FastForwardSelector:
                     y_prob = model.predict_proba(X_test)
                     _FS_T["predict"] += time.perf_counter() - _t  # TEMP TIMING
 
-                # MTL: score on the full multi-task loss per design (primary
-                # log_loss + weighted standardized aux MSE). Single-task uses
-                # the existing single-target metric_fn against y_prob.
-                if is_mtl:
+                # MTL combined: score the full multi-task loss (primary log_loss
+                # + weighted standardized aux MSE). MTL primary and single-task
+                # both score the primary head via metric_fn (predict_proba
+                # returns the primary head for the MTL model).
+                if is_mtl and mtl_select_on == "combined":
                     assert y_aux is not None
                     fold_metrics.append(
                         _compute_mtl_loss(model, X_test, y_test, y_aux[test_idx])
