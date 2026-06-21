@@ -156,18 +156,14 @@ class ExperimentRunner:
         # targets are undefined for partial scores; non-MTL configs use the
         # flag to match the MTL path's row set so MTL-vs-baseline comparisons
         # are apples-to-apples.
-        exclude_incomplete = mtl_cfg is not None or self.config.data.exclude_incomplete
-
-        # Primary completeness filter:
-        #  - Walkovers always excluded (today's behavior).
-        #  - When `exclude_incomplete` is true, also exclude RET / DEF / UNP.
-        df = df.filter(~is_incomplete_match(df.columns, exclude_incomplete))
-
-        # When the completeness gate is active, additionally require sets_played
-        # not null. For MTL, this is necessary for any aux target derivation;
-        # the dropna gate below catches remaining edge cases per-aux-column.
-        if exclude_incomplete:
-            df = df.filter(pl.col("sets_played").is_not_null())
+        # Primary completeness filter: walkovers (voided, no on-court play) are
+        # always excluded — not gradeable/bettable matches. RET/DEF/UNP are NOT
+        # excluded here: they are real, graded matches that must stay in the test
+        # fold and at prediction time. The RET/DEF/UNP exclusion, the sets_played
+        # requirement, and the aux drop_nulls exist only because aux LABELS are
+        # undefined for partial scores — a TRAINING concern — so they're applied
+        # to the training slice in the fold loop, not globally pre-split.
+        df = df.filter(~is_incomplete_match(df.columns, False))
 
         # Resolve primary target column
         if target == "won":
@@ -177,10 +173,10 @@ class ExperimentRunner:
             df = df.filter(pl.col("sets_played").is_not_null())
             # Retirements where sets_played == best_of are settled (deciding set
             # started, over graded a winner). Retirements before that point are
-            # voided — outcome uncertain. DEF/UNP always excluded.
-            # When the completeness gate already removed RET/DEF/UNP above,
-            # this branch is a no-op.
-            if "reason" in df.columns and not exclude_incomplete:
+            # voided — outcome uncertain. DEF/UNP always excluded. Always runs:
+            # RET/DEF/UNP are no longer dropped globally, so the deciding-set
+            # primary target must handle them here for both train and test.
+            if "reason" in df.columns:
                 reason = pl.col("reason").fill_null("")
                 df = df.filter(
                     ~reason.is_in(["DEF", "UNP"])
@@ -314,14 +310,34 @@ class ExperimentRunner:
                 col_name, expr = aux_exprs[aux_name]
                 df = df.with_columns(expr.alias(col_name))
                 aux_cols.append(col_name)
-            # Secondary completeness gate: catch any null aux values from
-            # edge cases (e.g., reason null/unrecognized but set columns
-            # still partially missing). Strict: drop the row if any aux
-            # target is null.
-            df = df.drop_nulls(subset=aux_cols)
+            # Aux columns are left nullable here (retirements/partial scores
+            # have undefined aux labels). They are NOT dropped globally: such
+            # rows stay in the test fold (primary eval doesn't need aux) and at
+            # predict time. The training slice drops them in the fold loop,
+            # where the aux labels must be valid for the fit.
             target_cols.extend(aux_cols)
 
         return df, target_cols
+
+    def _filter_training_completeness(
+        self, train_df: pl.DataFrame, target_cols: list[str]
+    ) -> pl.DataFrame:
+        """Drop incomplete matches from the TRAINING slice only.
+
+        Aux regression labels are undefined for incomplete matches (RET/DEF/UNP)
+        and partial scores, so the fit must exclude them. The test fold keeps
+        them — they are real graded matches and belong in eval/backtest. Called
+        per-fold on the training rows, never globally pre-split. No-op unless MTL
+        or data.exclude_incomplete is set.
+        """
+        if not (self.config.mtl is not None or self.config.data.exclude_incomplete):
+            return train_df
+        train_df = train_df.filter(
+            ~is_incomplete_match(train_df.columns, True)
+        ).filter(pl.col("sets_played").is_not_null())
+        if self.config.mtl is not None:
+            train_df = train_df.drop_nulls(subset=target_cols[1:])
+        return train_df
 
     def _get_splitter(self) -> BaseSplitter:
         """Get the appropriate splitter for validation strategy."""
@@ -810,6 +826,10 @@ class ExperimentRunner:
                     train_df = apply_filters(train_df, self.config.data.train_filters)
                 if self.config.data.eval_filters:
                     test_df = apply_filters(test_df, self.config.data.eval_filters)
+                # Completeness gate is TRAINING-ONLY: incomplete matches
+                # (RET/DEF/UNP, partial scores) are dropped from the fit but kept
+                # in the test fold — they're real graded matches for eval/backtest.
+                train_df = self._filter_training_completeness(train_df, target_cols)
                 run_logger.info(
                     "Iter %d/%d (outer fold %d): train=%d, test=%d",
                     fold_idx + 1, len(iteration_splits),
@@ -1077,9 +1097,16 @@ class ExperimentRunner:
                     fold_aux_r2: dict[str, float] = {}
                     for i, aux_col in enumerate(aux_col_names):
                         friendly = aux_col.removeprefix("_aux_")
+                        # Retirements/incompletes are kept in the test fold but
+                        # carry null aux labels — score R² only on rows where the
+                        # aux target is defined.
+                        col = y_test_aux[:, i]
+                        valid = ~np.isnan(col)
                         try:
+                            if int(valid.sum()) < 2:
+                                raise ValueError("insufficient non-null aux")
                             fold_aux_r2[friendly] = float(
-                                r2_score(y_test_aux[:, i], aux_pred_test[:, i])
+                                r2_score(col[valid], aux_pred_test[valid, i])
                             )
                         except (ValueError, RuntimeWarning):
                             fold_aux_r2[friendly] = float("nan")

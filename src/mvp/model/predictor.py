@@ -163,6 +163,8 @@ class ProductionPredictor:
         mtl_cfg = getattr(cfg, "mtl", None)
 
         # Primary completeness filter: walkovers always; RET/DEF/UNP when MTL.
+        # This path resolves TRAINING data (deploy fit + calibration CV), so the
+        # MTL completeness gate is correct here — the fit needs valid aux labels.
         df = df.filter(~is_incomplete_match(df.columns, mtl_cfg is not None))
 
         # When MTL is active, also require sets_played not null (necessary for

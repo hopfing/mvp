@@ -135,6 +135,96 @@ metrics:
         assert results["metrics"]["log_loss"] > 0
         assert 0 <= results["metrics"]["brier_score"] <= 0.25
 
+    def test_mtl_full_flow_with_retirements(self, tmp_path: Path):
+        """Full runner.run() on an MTL config with retirements/walkovers present.
+
+        Regression guard for the gap that let a deploy-fit crash slip through:
+        the fit must succeed (incompletes dropped from TRAINING, kept in the
+        test fold) rather than feeding null aux labels into XGBoost. Before the
+        train-only-completeness fix, retirements reached the fit and XGBoost
+        raised "Label contains NaN".
+        """
+        import mlflow
+
+        random.seed(7)
+        base_date = date(2024, 1, 1)
+        rows = []
+        for i in range(260):
+            match_date = base_date + timedelta(days=i // 3)
+            pr, orank = random.randint(1, 200), random.randint(1, 200)
+            won = random.random() < (0.6 if pr < orank else 0.4)
+            r = random.random()
+            if r < 0.03:        # walkover — excluded everywhere
+                reason, rtype, sp = "W/O", "walkover", None
+                P, O = [None] * 5, [None] * 5
+            elif r < 0.11:      # retirement — dropped from training, kept in test
+                reason, rtype, sp = "RET", None, 1
+                P, O = [6, None, None, None, None], [3, None, None, None, None]
+            else:               # complete
+                reason, rtype, sp = None, None, 2
+                P, O = [6, 6, None, None, None], [4, 3, None, None, None]
+            rp_p, rp_o = 1000 - pr * 4, 1000 - orank * 4
+
+            def mk(pid, opid, w, rp, op, sets_p, sets_o):
+                d = {
+                    "match_uid": f"M{i:04d}", "player_id": pid, "opp_id": opid,
+                    "effective_match_date": match_date, "won": w,
+                    "player_rankings_points": rp, "opp_rankings_points": op,
+                    "circuit": "tour", "surface": "hard", "round": "R32",
+                    "reason": reason, "result_type": rtype,
+                    "sets_played": sp, "best_of": 3,
+                }
+                for s in range(5):
+                    d[f"player_set{s + 1}_games"] = sets_p[s]
+                    d[f"opp_set{s + 1}_games"] = sets_o[s]
+                return d
+
+            rows.append(mk(f"P{i % 20:02d}", f"P{(i + 10) % 20:02d}", won, rp_p, rp_o, P, O))
+            rows.append(mk(f"P{(i + 10) % 20:02d}", f"P{i % 20:02d}", not won, rp_o, rp_p, O, P))
+
+        matches_path = tmp_path / "mtl_matches.parquet"
+        pl.DataFrame(rows).write_parquet(matches_path)
+
+        config_str = """
+data:
+  date_range:
+    start: "2024-01-01"
+    end: "2024-12-31"
+features:
+  include:
+    - player_ranking_points_diff
+model:
+  type: xgboost
+mtl:
+  auxiliary_targets:
+    - set_margin
+    - set_count
+validation:
+  type: walk_forward
+  n_splits: 2
+  min_train_size: 100
+  test_size: 50
+metrics:
+  primary: log_loss
+  secondary:
+    - accuracy
+"""
+        config_path = tmp_path / "mtl_config.yaml"
+        config_path.write_text(config_str)
+        mlflow_dir = tmp_path / "mlruns"
+        mlflow.set_tracking_uri(f"file://{mlflow_dir}")
+
+        runner = ExperimentRunner(
+            config_path=config_path,
+            matches_path=matches_path,
+            cache_dir=tmp_path / "cache",
+            mlflow_dir=mlflow_dir,
+        )
+
+        results = runner.run()  # must not raise "Label contains NaN"
+        assert results["n_folds"] == 2
+        assert results["metrics"]["log_loss"] > 0
+
     def test_xgboost_model_experiment(
         self,
         realistic_matches: Path,

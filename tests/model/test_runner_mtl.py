@@ -153,44 +153,62 @@ validation:
         runner = ExperimentRunner(config_path=cfg, matches_path=empty_matches)
         df_out, _ = runner._resolve_target(self._synthetic_matches_df())
 
-        # After MTL filtering: rows 0, 1, 2, 7 survive (W/O, RET, DEF, null
-        # sets_played all dropped).
-        kept_uids = df_out["match_uid"].to_list()
-        assert kept_uids == ["M0", "M1", "M2", "M7"]
+        # _resolve_target now excludes ONLY walkovers (M3). RET/DEF/null-sets
+        # rows are kept here — they're filtered later, in the training slice.
+        assert set(df_out["match_uid"].to_list()) == {
+            "M0", "M1", "M2", "M4", "M5", "M6", "M7"
+        }
 
-        # Verify aux values
-        gm = df_out["_aux_game_margin"].to_list()
-        sm = df_out["_aux_set_margin"].to_list()
-        sc = df_out["_aux_set_count"].to_list()
-        assert gm == [+6, +2, -3, +6]  # 6-4 6-2; 4-6 6-4 7-5; 6-7 4-6; 6-4 6-4 6-4
-        assert sm == [+2, +1, -2, +3]
-        assert sc == [2, 3, 2, 3]
+        # Aux derivations are correct on the completed rows.
+        completed = df_out.filter(
+            pl.col("match_uid").is_in(["M0", "M1", "M2", "M7"])
+        )
+        assert completed["_aux_game_margin"].to_list() == [+6, +2, -3, +6]
+        assert completed["_aux_set_margin"].to_list() == [+2, +1, -2, +3]
+        assert completed["_aux_set_count"].to_list() == [2, 3, 2, 3]
 
-    def test_mtl_filters_all_invalid_reasons(
+    def test_mtl_resolve_target_excludes_only_walkovers(
         self, empty_matches: Path, tmp_path: Path
     ):
-        """MTL path excludes W/O, RET, DEF, UNP rows (vs single-task only W/O)."""
+        """_resolve_target excludes ONLY walkovers; RET/DEF/UNP are kept — they
+        are real graded matches that belong in the test fold. The RET/DEF/UNP
+        gate applies later, to the training slice only."""
         cfg = self._make_config(tmp_path, with_mtl=True)
         runner = ExperimentRunner(config_path=cfg, matches_path=empty_matches)
         df_out, _ = runner._resolve_target(self._synthetic_matches_df())
 
-        # No row with any of W/O, RET, DEF should survive.
         kept_reasons = df_out["reason"].drop_nulls().to_list()
-        for r in {"W/O", "RET", "DEF", "UNP"}:
-            assert r not in kept_reasons
+        assert "W/O" not in kept_reasons   # walkovers always excluded
+        assert "RET" in kept_reasons       # retirements kept for eval
+        assert "DEF" in kept_reasons       # defaults kept for eval
 
-    def test_mtl_drops_rows_with_null_sets_played(
+    def test_mtl_keeps_null_sets_played_in_resolve_target(
         self, empty_matches: Path, tmp_path: Path
     ):
-        """Even when reason is null/unrecognized, sets_played-null rows are
-        excluded under MTL — the explicit sets_played-not-null gate catches
-        them."""
+        """sets_played-null rows are KEPT by _resolve_target (the sets_played
+        gate moved to the training slice). M6 (reason=None, sets_played=None) is
+        a real match and belongs in the test fold."""
         cfg = self._make_config(tmp_path, with_mtl=True)
         runner = ExperimentRunner(config_path=cfg, matches_path=empty_matches)
         df_out, _ = runner._resolve_target(self._synthetic_matches_df())
 
-        # Row M6 has reason=None and sets_played=None — must be excluded.
-        assert "M6" not in df_out["match_uid"].to_list()
+        assert "M6" in df_out["match_uid"].to_list()
+
+    def test_training_completeness_gate_drops_incomplete(
+        self, empty_matches: Path, tmp_path: Path
+    ):
+        """The training-only gate drops RET/DEF/UNP, null-sets_played, and
+        null-aux rows — so the fit never sees incomplete matches even though
+        _resolve_target (and thus the test fold) keeps them."""
+        cfg = self._make_config(tmp_path, with_mtl=True)
+        runner = ExperimentRunner(config_path=cfg, matches_path=empty_matches)
+        df_out, target_cols = runner._resolve_target(self._synthetic_matches_df())
+        train = runner._filter_training_completeness(df_out, target_cols)
+
+        kept = set(train["match_uid"].to_list())
+        assert kept == {"M0", "M1", "M2", "M7"}  # only fully-complete rows
+        for uid in ["M4", "M5", "M6"]:  # RET, DEF, null sets_played
+            assert uid not in kept
 
     def test_mtl_subset_aux_targets(
         self, empty_matches: Path, tmp_path: Path
