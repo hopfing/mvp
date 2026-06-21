@@ -28,6 +28,7 @@ from mvp.model.features import (
     tier,
     tournament,
     transition,
+    volatility,
     win_rate,
 )
 from mvp.model.registry import get_registry
@@ -56,5 +57,6 @@ __all__ = [
     "tier",
     "tournament",
     "transition",
+    "volatility",
     "win_rate",
 ]
