@@ -83,8 +83,9 @@ class TestForwardSelection:
         assert first["feature"] == "a"
         # full round ranking retained — every candidate, not just the winner
         assert {r[0] for r in first["ranking"]} == {"a", "b", "c", "noise"}
-        # checkpoint is cleaned up on completion; history is kept
-        assert not cp.exists()
+        # checkpoint is retained on completion (caller deletes after the config
+        # is written, so a downstream crash stays resumable); history is kept
+        assert cp.exists()
         assert lines[-1]["action"] == "stop"
 
     def test_fresh_run_resets_history(self, mock_scorer, tmp_path):
@@ -218,8 +219,9 @@ class TestForwardSelectionCheckpoint:
         assert result.selected_features[0] == "a"
         # "b" should be selected next (best remaining)
         assert result.selected_features[1] == "b"
-        # Checkpoint file should be cleaned up on success
-        assert not cp_path.exists()
+        # Checkpoint is retained on completion now (caller deletes it after the
+        # config write), so the whole post-selection tail stays resumable.
+        assert cp_path.exists()
 
     def test_resume_skips_evaluated_candidates(self, mock_scorer, tmp_path):
         """Resuming mid-round skips already-evaluated candidates."""
@@ -264,8 +266,15 @@ class TestForwardSelectionCheckpoint:
         # Result should still pick the best overall: a (score 0.7 from ckpt)
         assert result.selected_features[0] == "a"
 
-    def test_checkpoint_deleted_on_completion(self, mock_scorer, tmp_path):
-        """Checkpoint file is deleted after successful forward selection."""
+    def test_checkpoint_retained_on_completion(self, mock_scorer, tmp_path):
+        """Checkpoint is retained after forward selection completes.
+
+        Selection finishing is not the end of the run — sweep, segment
+        analysis, the final experiment, and the config write happen downstream
+        and can fail. The selector must NOT delete the checkpoint; the caller
+        removes it only after the output config is written, so a crash in the
+        tail leaves a resumable run instead of an orphaned multi-hour one.
+        """
         cp_path = tmp_path / "checkpoint.json"
 
         selector = FeatureSelector(
@@ -281,8 +290,8 @@ class TestForwardSelectionCheckpoint:
             checkpoint_interval=1,
         )
 
-        # Checkpoint should be deleted on successful completion
-        assert not cp_path.exists()
+        # Checkpoint persists past completion (caller's job to delete it).
+        assert cp_path.exists()
         # Selection should have worked normally
         assert result.selected_features[0] == "a"
 

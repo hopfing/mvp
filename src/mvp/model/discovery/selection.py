@@ -145,8 +145,10 @@ class FeatureSelector:
             verbose: Print progress.
             checkpoint_path: Path to write/read checkpoint JSON. If the
                 file exists when this method is called, the run resumes
-                from the saved state. On successful completion the file
-                is deleted.
+                from the saved state. The file is NOT deleted on completion
+                here — the caller removes it only after the output config is
+                written, so a downstream failure (sweep / final fit / save)
+                stays resumable.
             checkpoint_interval: Write checkpoint every N candidate
                 evaluations within a round.
         """
@@ -419,9 +421,14 @@ class FeatureSelector:
                             "  (%d features rejected / returned inf)", n_dropped,
                         )
 
-        # Clean up checkpoint on successful completion
-        if checkpoint_path is not None and checkpoint_path.exists():
-            checkpoint_path.unlink()
+        # NOTE: the checkpoint is intentionally NOT deleted here. Forward
+        # selection completing is not the end of the run — sweep, segment
+        # analysis, the final experiment, and the config write all happen
+        # downstream and can fail (e.g. OOM in the final fit). Deleting here
+        # would orphan a multi-hour run with no resume point. The caller (CLI)
+        # removes the checkpoint only after the output config is written, so a
+        # crash anywhere in the tail is resumable (restored round scores make
+        # the resume cheap — it does not re-run completed rounds).
 
         return SelectionResult(
             selected_features=selected,

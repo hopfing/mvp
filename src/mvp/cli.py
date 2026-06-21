@@ -2122,6 +2122,11 @@ def _cmd_experiment_classification(
         discovery.save_config(output_path)
         print(f"\nSaved config to: {output_path}")
         print(f"Run with: poetry run py -m mvp model {output_path.stem}")
+        # Only now is the run truly complete — the config (the deliverable)
+        # exists on disk. Remove the resume checkpoint here, not when forward
+        # selection finished, so any failure in the tail (sweep / final fit /
+        # save) leaves the run resumable instead of orphaned.
+        checkpoint_path.unlink(missing_ok=True)
     else:
         print("\nNo features selected - no config saved")
 
