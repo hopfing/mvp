@@ -1,25 +1,31 @@
-"""Schema for stats_plus match-level data.
+"""Schema for stats_plus staged data — normalized long format.
 
-One row per match, built from the feed's own match-total slot (``setStats.set0``).
-Per-set splits (``set1``/``set2``/...) are intentionally not staged here; raw is
-preserved and can be re-staged at a finer grain later if needed.
+One row per ``(match, set_num, stat)``. ``set_num=0`` is the whole-match total;
+``set_num=1..N`` are the individual sets (the feed's ``setStats.set0`` = match
+total, ``set1..setN`` = the sets — verified on raw payloads). The raw payload is
+itself a *list of stat rows per set*, so a long table mirrors it faithfully and
+is the same staging shape as ``match_beats.parquet`` (one row per point, match
+context denormalized onto every row).
 
-The set0 payload is a *list* of stat rows, each identified by a ``name`` string
-(not list position — the ``order`` field is non-contiguous). We key off ``name`` and
-flatten to one row per match.
+Stat values come in two kinds (``STAT_REGISTRY`` carries the split):
+  - ``frac`` (``"N/M (P%)"``) -> ``(num, den)``
+  - ``num`` (bare int, incl. opaque composites like Serve/Return Rating and the
+    km/h serve speeds) -> ``num`` with ``den = None``.
+All value columns are nullable: a missing/unparseable value stages as ``None``
+(we null the single bad value rather than drop the whole match), while a present
+``"0/0 (0%)"`` stages as ``(0, 0)`` — distinct from absent.
 
-Column names for the 16 always-present stats mirror ``MatchStatsRecord`` exactly
-(same datapoints, a different ATP source) for backwards compatibility — including the
-``svc_``/``ret_``/``pts_`` grouping and the explicit numerator/denominator columns
-(``..._won``/``..._played``, ``first_serve_in``/``first_serve_att``,
-``bp_saved``/``bp_faced``, ``bp_converted``/``bp_opportunities``). These are required.
+``influence`` is the ATP per-stat "share of match outcome" (e.g. ``"6%"``) parsed
+to a float fraction in ``[0, 1]`` (``"6%" -> 0.06``); absent/unparseable -> ``None``.
 
-Six stats have no ``match_stats`` counterpart and are reported only on a subset of
-matches/courts, so they are nullable: net points (won/played), winners, unforced
-errors, and the three serve speeds (km/h). An absent stat name yields NULL columns;
-a present ``"0/0 (0%)"`` yields ``(0, 0)`` — these are distinct states.
+Raw fields intentionally NOT staged (see spec
+``2026-06-22-statsplus-staging-aggregation``):
+  - ``player{1,2}Points`` / ``CrucialPoints`` — empty across the corpus sample.
+  - ``player*Bar`` / ``order`` — UI render artifacts, redundant with parsed values.
+  - ``tm1*`` / ``tm2*`` — doubles slots, empty in singles.
 
-``serve_rating``/``return_rating`` are opaque ATP composite scores, not event counts.
+The wide / ``match_stats``-mirrored view is a Phase-2 integration concern,
+recoverable by pivoting this table; it is deliberately not produced here.
 """
 
 from datetime import datetime
@@ -29,45 +35,49 @@ from pydantic import BaseModel, field_validator
 from mvp.atptour.mappings import map_player_id
 from mvp.common.schema_hash import compute_schema_hash
 
-# set0 stat name -> (numerator column stem, denominator column stem).
-# Stems mirror MatchStatsRecord for the 10 shared frac stats; net points is
-# stats_plus-only (nullable).
-FRAC_STATS: dict[str, tuple[str, str]] = {
-    "1st Serve": ("svc_first_serve_in", "svc_first_serve_att"),
-    "1st Serve Points Won": ("svc_first_serve_pts_won", "svc_first_serve_pts_played"),
-    "2nd Serve Points Won": ("svc_second_serve_pts_won", "svc_second_serve_pts_played"),
-    "Break Points Saved": ("svc_bp_saved", "svc_bp_faced"),
-    "1st Serve Return Points Won": ("ret_first_serve_pts_won", "ret_first_serve_pts_played"),
-    "2nd Serve Return Points Won": ("ret_second_serve_pts_won", "ret_second_serve_pts_played"),
-    "Break Points Converted": ("ret_bp_converted", "ret_bp_opportunities"),
-    "Service Points Won": ("pts_service_pts_won", "pts_service_pts_played"),
-    "Return Points Won": ("pts_return_pts_won", "pts_return_pts_played"),
-    "Total Points Won": ("pts_total_pts_won", "pts_total_pts_played"),
-    # stats_plus-only (no match_stats counterpart), nullable:
-    "Net Points Won": ("pts_net_pts_won", "pts_net_pts_played"),
+# Raw ATP stat ``name`` -> (stat_key, kind). kind in {"frac", "num"}.
+# stat_key is a stable snake_case identifier (survives ATP display-string
+# renames); the keys mirror the prior match_stats column stems so a Phase-2
+# pivot lands on familiar names. Speed keys carry the km/h unit, since the
+# generic ``num`` column drops the unit annotation the wide schema had.
+STAT_REGISTRY: dict[str, tuple[str, str]] = {
+    # --- frac ("N/M (P%)") ---
+    "1st Serve": ("svc_first_serve", "frac"),
+    "1st Serve Points Won": ("svc_first_serve_pts_won", "frac"),
+    "2nd Serve Points Won": ("svc_second_serve_pts_won", "frac"),
+    "Break Points Saved": ("svc_bp_saved", "frac"),
+    "1st Serve Return Points Won": ("ret_first_serve_pts_won", "frac"),
+    "2nd Serve Return Points Won": ("ret_second_serve_pts_won", "frac"),
+    "Break Points Converted": ("ret_bp_converted", "frac"),
+    "Service Points Won": ("pts_service_pts_won", "frac"),
+    "Return Points Won": ("pts_return_pts_won", "frac"),
+    "Total Points Won": ("pts_total_pts_won", "frac"),
+    # stats_plus-only (no match_stats counterpart):
+    "Net Points Won": ("pts_net_pts_won", "frac"),
+    # --- num (bare int) ---
+    "Serve Rating": ("svc_serve_rating", "num"),
+    "Aces": ("svc_aces", "num"),
+    "Double Faults": ("svc_double_faults", "num"),
+    "Service Games Played": ("svc_games_played", "num"),
+    "Return Rating": ("ret_return_rating", "num"),
+    "Return Games Played": ("ret_games_played", "num"),
+    # stats_plus-only (no match_stats counterpart):
+    "Winners": ("winners", "num"),
+    "Unforced Errors": ("unforced_errors", "num"),
+    "Max Speed": ("max_serve_speed_kmh", "num"),
+    "1st Serve Average Speed": ("first_serve_avg_speed_kmh", "num"),
+    "2nd Serve Average Speed": ("second_serve_avg_speed_kmh", "num"),
 }
 
-# set0 stat name -> column stem (single int per player).
-NUM_STATS: dict[str, str] = {
-    "Serve Rating": "svc_serve_rating",
-    "Aces": "svc_aces",
-    "Double Faults": "svc_double_faults",
-    "Service Games Played": "svc_games_played",
-    "Return Rating": "ret_return_rating",
-    "Return Games Played": "ret_games_played",
-    # stats_plus-only (no match_stats counterpart), nullable:
-    "Winners": "winners",
-    "Unforced Errors": "unforced_errors",
-    "Max Speed": "max_serve_speed_kmh",
-    "1st Serve Average Speed": "first_serve_avg_speed_kmh",
-    "2nd Serve Average Speed": "second_serve_avg_speed_kmh",
-}
 
+class StatsPlusRowRecord(BaseModel):
+    """A single staged stats_plus observation: one ``(match, set_num, stat)``.
 
-class StatsPlusRecord(BaseModel):
-    """Match-level stats_plus record — one row per match, from set0."""
+    Match context is denormalized onto every row (same pattern as
+    ``MatchBeatsPointRecord``) for efficient querying without a join.
+    """
 
-    # Match context
+    # Match context (denormalized onto every row)
     tournament_id: str
     year: int
     match_id: str
@@ -76,86 +86,26 @@ class StatsPlusRecord(BaseModel):
     p2_id: str
     sets_completed: int | None = None
 
-    # --- P1 service (shared with match_stats, required) ---
-    p1_svc_aces: int
-    p1_svc_double_faults: int
-    p1_svc_first_serve_in: int
-    p1_svc_first_serve_att: int
-    p1_svc_first_serve_pts_won: int
-    p1_svc_first_serve_pts_played: int
-    p1_svc_second_serve_pts_won: int
-    p1_svc_second_serve_pts_played: int
-    p1_svc_bp_saved: int
-    p1_svc_bp_faced: int
-    p1_svc_games_played: int
-    p1_svc_serve_rating: int
-    # --- P1 return (shared with match_stats, required) ---
-    p1_ret_first_serve_pts_won: int
-    p1_ret_first_serve_pts_played: int
-    p1_ret_second_serve_pts_won: int
-    p1_ret_second_serve_pts_played: int
-    p1_ret_bp_converted: int
-    p1_ret_bp_opportunities: int
-    p1_ret_games_played: int
-    p1_ret_return_rating: int
-    # --- P1 points (shared with match_stats, required) ---
-    p1_pts_service_pts_won: int
-    p1_pts_service_pts_played: int
-    p1_pts_return_pts_won: int
-    p1_pts_return_pts_played: int
-    p1_pts_total_pts_won: int
-    p1_pts_total_pts_played: int
-    # --- P1 stats_plus-only (nullable) ---
-    p1_pts_net_pts_won: int | None = None
-    p1_pts_net_pts_played: int | None = None
-    p1_winners: int | None = None
-    p1_unforced_errors: int | None = None
-    p1_max_serve_speed_kmh: int | None = None
-    p1_first_serve_avg_speed_kmh: int | None = None
-    p1_second_serve_avg_speed_kmh: int | None = None
+    # Grain keys
+    set_num: int  # 0 = match total, 1..N = individual sets
+    stat_key: str
+    stat_name: str  # raw ATP display name (provenance)
 
-    # --- P2 service (shared with match_stats, required) ---
-    p2_svc_aces: int
-    p2_svc_double_faults: int
-    p2_svc_first_serve_in: int
-    p2_svc_first_serve_att: int
-    p2_svc_first_serve_pts_won: int
-    p2_svc_first_serve_pts_played: int
-    p2_svc_second_serve_pts_won: int
-    p2_svc_second_serve_pts_played: int
-    p2_svc_bp_saved: int
-    p2_svc_bp_faced: int
-    p2_svc_games_played: int
-    p2_svc_serve_rating: int
-    # --- P2 return (shared with match_stats, required) ---
-    p2_ret_first_serve_pts_won: int
-    p2_ret_first_serve_pts_played: int
-    p2_ret_second_serve_pts_won: int
-    p2_ret_second_serve_pts_played: int
-    p2_ret_bp_converted: int
-    p2_ret_bp_opportunities: int
-    p2_ret_games_played: int
-    p2_ret_return_rating: int
-    # --- P2 points (shared with match_stats, required) ---
-    p2_pts_service_pts_won: int
-    p2_pts_service_pts_played: int
-    p2_pts_return_pts_won: int
-    p2_pts_return_pts_played: int
-    p2_pts_total_pts_won: int
-    p2_pts_total_pts_played: int
-    # --- P2 stats_plus-only (nullable) ---
-    p2_pts_net_pts_won: int | None = None
-    p2_pts_net_pts_played: int | None = None
-    p2_winners: int | None = None
-    p2_unforced_errors: int | None = None
-    p2_max_serve_speed_kmh: int | None = None
-    p2_first_serve_avg_speed_kmh: int | None = None
-    p2_second_serve_avg_speed_kmh: int | None = None
+    # Values: frac -> num/den; num -> num with den = None. All nullable.
+    p1_num: int | None = None
+    p1_den: int | None = None
+    p2_num: int | None = None
+    p2_den: int | None = None
+    influence: float | None = None
 
     # Traceability
     source_file: str
     parsed_at: datetime
 
+    # Player IDs normalized via map_player_id (ADR-002): ATP IDs uppercased,
+    # Sportradar IDs mapped. An UNMAPPED SR id raises ValueError, which drops
+    # that match's file in the transformer. SR ids aren't expected from the
+    # match-centre feed (it emits ATP ids), so this is a guard, not a hot path.
     _normalize_ids = field_validator("p1_id", "p2_id", mode="before")(map_player_id)
 
     @field_validator("match_id", mode="before")
@@ -164,5 +114,5 @@ class StatsPlusRecord(BaseModel):
         return v.upper().strip()
 
 
-SCHEMA_HASH = compute_schema_hash(StatsPlusRecord)
-StatsPlusRecord.SCHEMA_HASH = SCHEMA_HASH
+SCHEMA_HASH = compute_schema_hash(StatsPlusRowRecord)
+StatsPlusRowRecord.SCHEMA_HASH = SCHEMA_HASH
