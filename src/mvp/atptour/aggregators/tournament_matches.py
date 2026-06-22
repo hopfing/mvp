@@ -12,6 +12,11 @@ from mvp.atptour.aggregators.helpers import (
     pivot_to_player_match,
 )
 from mvp.atptour.aggregators.match_beats import MatchBeatsAggregator
+from mvp.atptour.aggregators.stats_plus import (
+    STATSPLUS_PLAYER_FIELDS,
+    STATSPLUS_SHARED_FIELDS,
+    stats_plus_to_player_match,
+)
 from mvp.common.base_job import BaseJob
 from mvp.common.enums import Circuit
 
@@ -229,6 +234,11 @@ MATCHES_SCHEMA: dict[str, pl.DataType] = {
     **{f"player_{f}": pl.Int64 for f in _RALLY_ANALYSIS_FIELDS},
     **{f"opp_{f}": pl.Int64 for f in _RALLY_ANALYSIS_FIELDS},
     "ra_points_missing": pl.Boolean,
+    # Stats Plus - player/opp set-total fields (sp_ prefix)
+    **{f"player_{f}": pl.Int64 for f in STATSPLUS_PLAYER_FIELDS},
+    **{f"opp_{f}": pl.Int64 for f in STATSPLUS_PLAYER_FIELDS},
+    # Stats Plus - shared per-stat influence (ATP outcome share)
+    **{f: pl.Float64 for f in STATSPLUS_SHARED_FIELDS},
 }
 
 
@@ -344,6 +354,10 @@ class TournamentMatchesAggregator(BaseJob):
         # Step 11: LEFT JOIN Rally Analysis
         rally_df = self._load_and_prepare_rally_analysis()
         joined = self._join_rally_analysis(joined, rally_df)
+
+        # Step 11b: LEFT JOIN Stats Plus (set_num=0 match totals)
+        stats_plus_df = self._load_and_prepare_stats_plus()
+        joined = self._join_stats_plus(joined, stats_plus_df)
 
         # Step 12: Add draw_p1_id from authority
         if authority:
@@ -727,6 +741,27 @@ class TournamentMatchesAggregator(BaseJob):
             suffix="_rally",
         )
 
+    def _load_and_prepare_stats_plus(self) -> pl.DataFrame:
+        """Load staged stats_plus, pivot set-total stats to player-match level."""
+        raw = self._load_parquet("stats_plus.parquet")
+        if raw.is_empty():
+            return pl.DataFrame()
+        return stats_plus_to_player_match(raw)
+
+    def _join_stats_plus(
+        self, joined: pl.DataFrame, stats_plus_df: pl.DataFrame
+    ) -> pl.DataFrame:
+        """LEFT JOIN Stats Plus on (tournament_id, year, match_id, player_id)."""
+        if joined.is_empty() or stats_plus_df.is_empty():
+            return joined
+
+        return joined.join(
+            stats_plus_df,
+            on=["tournament_id", "year", "match_id", "player_id"],
+            how="left",
+            suffix="_stats_plus",
+        )
+
     def _apply_waterfall(self, df: pl.DataFrame) -> pl.DataFrame:
         """Apply coalesce waterfall and select final output columns."""
         if df.is_empty():
@@ -1107,6 +1142,11 @@ class TournamentMatchesAggregator(BaseJob):
             *[f"player_{f}" for f in _RALLY_ANALYSIS_FIELDS],
             *[f"opp_{f}" for f in _RALLY_ANALYSIS_FIELDS],
             "ra_points_missing",
+            # Stats Plus - player/opp set-total fields
+            *[f"player_{f}" for f in STATSPLUS_PLAYER_FIELDS],
+            *[f"opp_{f}" for f in STATSPLUS_PLAYER_FIELDS],
+            # Stats Plus - shared per-stat influence
+            *STATSPLUS_SHARED_FIELDS,
         ]
 
         return output_cols
