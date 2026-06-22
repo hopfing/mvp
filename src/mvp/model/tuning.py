@@ -61,7 +61,19 @@ DEFAULT_SEARCH_SPACES: dict[str, dict[str, dict[str, Any]]] = {
         "subsample": {"type": "float", "low": 0.5, "high": 1.0},
         "colsample_bytree": {"type": "float", "low": 0.5, "high": 1.0},
         "colsample_bylevel": {"type": "float", "low": 0.5, "high": 1.0},
-        "colsample_bynode": {"type": "float", "low": 0.5, "high": 1.0},
+        # tree_method: how splits are searched. hist (default) uses binned
+        # histograms; approx uses quantile sketches; exact evaluates every
+        # value (most precise, much slower). Placed before the params that
+        # depend on it (colsample_bynode, grow_policy, max_bin) so the
+        # conditional sampler sees its controller first.
+        "tree_method": {"type": "categorical", "choices": ["hist", "approx", "exact"]},
+        # colsample_bynode is unsupported under tree_method=exact, so only
+        # sample it under hist/approx (the wrapper would otherwise strip it,
+        # leaving an inert value in the winning config).
+        "colsample_bynode": {
+            "type": "float", "low": 0.5, "high": 1.0,
+            "condition": {"param": "tree_method", "in": ["hist", "approx"]},
+        },
         "gamma": {"type": "float", "low": 0.0, "high": 10.0},
         "reg_alpha": {"type": "float", "low": 0.0, "high": 1.0},
         "reg_lambda": {"type": "float", "low": 0.1, "high": 10.0, "log": True},
@@ -71,7 +83,14 @@ DEFAULT_SEARCH_SPACES: dict[str, dict[str, dict[str, Any]]] = {
         # control); lossguide = split the leaf with highest loss reduction
         # next regardless of depth (max_leaves becomes binding). lossguide
         # is what LightGBM does by default.
-        "grow_policy": {"type": "categorical", "choices": ["depthwise", "lossguide"]},
+        # lossguide requires a histogram-based tree_method; condition on
+        # hist/approx so the tuner never samples the invalid exact+lossguide
+        # pair (the wrapper would otherwise coerce lossguide to depthwise,
+        # leaving a misleading value in the winning config).
+        "grow_policy": {
+            "type": "categorical", "choices": ["depthwise", "lossguide"],
+            "condition": {"param": "tree_method", "in": ["hist", "approx"]},
+        },
         # max_leaves: cap on total leaves per tree. 0=no limit (fine for
         # depthwise, where max_depth caps the tree shape). Constraining
         # makes lossguide grow narrower trees focused on high-loss regions.
@@ -81,10 +100,6 @@ DEFAULT_SEARCH_SPACES: dict[str, dict[str, dict[str, Any]]] = {
             "type": "int", "low": 0, "high": 256, "step": 16,
             "condition": {"param": "grow_policy", "in": ["lossguide"]},
         },
-        # tree_method: how splits are searched. hist (default) uses binned
-        # histograms; approx uses quantile sketches; exact evaluates every
-        # value (most precise, much slower).
-        "tree_method": {"type": "categorical", "choices": ["hist", "approx", "exact"]},
         # max_bin: histogram bins for tree_method=hist (and approx). More
         # bins = finer split candidates but slower and more memory.
         # Conditional: tree_method=exact doesn't bin, so max_bin is inert there.
