@@ -1,6 +1,7 @@
 """Tests for pipeline orchestration."""
 
 
+import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -12,6 +13,8 @@ from mvp.common.enums import Circuit
 
 
 class TestProcessTournaments:
+    @patch("mvp.atptour.pipeline._feed_stage_is_stale")
+    @patch("mvp.atptour.pipeline.StatsPlusTransformer")
     @patch("mvp.atptour.pipeline.RallyAnalysisTransformer")
     @patch("mvp.atptour.pipeline.StrokeAnalysisTransformer")
     @patch("mvp.atptour.pipeline.MatchBeatsTransformer")
@@ -38,6 +41,8 @@ class TestProcessTournaments:
         MockMatchBeatsTx,
         MockStrokeTx,
         MockRallyTx,
+        MockStatsPlusTx,
+        MockStale,
     ):
         from mvp.atptour.pipeline import _process_tournaments
 
@@ -46,6 +51,8 @@ class TestProcessTournaments:
         MockOverviewExt.return_value.run.return_value = mock_tournament
         MockMatchStatsExt.return_value.run.return_value = 3
         MockMatchCentreExt.return_value.run.return_value = 2
+        # Match-centre feeds have unstaged/newer raw -> transforms run.
+        MockStale.return_value = True
 
         tournaments = [("580", 2023, True, Circuit.tour)]
         failed = _process_tournaments(tournaments, data_root=None, refresh=False)
@@ -69,6 +76,7 @@ class TestProcessTournaments:
         MockMatchBeatsTx.return_value.run.assert_called_once()
         MockStrokeTx.return_value.run.assert_called_once()
         MockRallyTx.return_value.run.assert_called_once()
+        MockStatsPlusTx.return_value.run.assert_called_once()
 
     @patch("mvp.atptour.pipeline.MatchCentreExtractor")
     @patch("mvp.atptour.pipeline.MatchStatsTransformer")
@@ -282,6 +290,105 @@ class TestProcessTournaments:
         MockResultsTx.assert_called_once_with(mock_tournament, data_root=data_root)
         MockMatchStatsExt.assert_called_once_with(data_root=data_root)
         MockMatchStatsTx.assert_called_once_with(mock_tournament, data_root=data_root)
+
+
+class TestFeedStageIsStale:
+    """The match-centre staging gate: (re)stage when raw is unstaged or newer
+    than the stage, decoupled from the extract event."""
+
+    def _transformer(self, tmp_path):
+        from mvp.atptour.tournament import Tournament
+        from mvp.atptour.transformers.stats_plus import StatsPlusTransformer
+
+        tournament = Tournament(
+            tournament_id="339",
+            year=2023,
+            circuit=Circuit.tour,
+            location="Indian Wells, USA",
+        )
+        return StatsPlusTransformer(tournament, data_root=tmp_path)
+
+    def _paths(self, tx):
+        path = tx.tournament.path
+        return (
+            tx.build_path("raw", path, "stats_plus"),
+            tx.build_path("stage", path, "stats_plus.parquet"),
+        )
+
+    def test_no_raw_dir_not_stale(self, tmp_path):
+        from mvp.atptour.pipeline import _feed_stage_is_stale
+
+        tx = self._transformer(tmp_path)
+        assert _feed_stage_is_stale(tx, "stats_plus") is False
+
+    def test_empty_raw_dir_not_stale(self, tmp_path):
+        from mvp.atptour.pipeline import _feed_stage_is_stale
+
+        tx = self._transformer(tmp_path)
+        raw_dir, _ = self._paths(tx)
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        assert _feed_stage_is_stale(tx, "stats_plus") is False
+
+    def test_missing_stage_is_stale(self, tmp_path):
+        from mvp.atptour.pipeline import _feed_stage_is_stale
+
+        tx = self._transformer(tmp_path)
+        raw_dir, _ = self._paths(tx)
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        (raw_dir / "MS001.json").write_text("{}")
+        assert _feed_stage_is_stale(tx, "stats_plus") is True
+
+    def test_stage_newer_not_stale(self, tmp_path):
+        from mvp.atptour.pipeline import _feed_stage_is_stale
+
+        tx = self._transformer(tmp_path)
+        raw_dir, out = self._paths(tx)
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        raw = raw_dir / "MS001.json"
+        raw.write_text("{}")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text("x")
+        os.utime(raw, (1000, 1000))
+        os.utime(out, (2000, 2000))
+        assert _feed_stage_is_stale(tx, "stats_plus") is False
+
+    def test_raw_newer_is_stale(self, tmp_path):
+        from mvp.atptour.pipeline import _feed_stage_is_stale
+
+        tx = self._transformer(tmp_path)
+        raw_dir, out = self._paths(tx)
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        raw = raw_dir / "MS001.json"
+        raw.write_text("{}")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text("x")
+        os.utime(out, (1000, 1000))
+        os.utime(raw, (2000, 2000))
+        assert _feed_stage_is_stale(tx, "stats_plus") is True
+
+    def test_schema_drift_is_stale(self, tmp_path):
+        """A stage with a current mtime but a stale metadata schema hash must
+        re-stage when a hash is supplied (stats_plus); with no hash (sibling
+        feeds) it must not."""
+        import polars as pl
+
+        from mvp.atptour.pipeline import _feed_stage_is_stale
+        from mvp.atptour.schemas.stats_plus import SCHEMA_HASH
+
+        tx = self._transformer(tmp_path)
+        raw_dir, out = self._paths(tx)
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        raw = raw_dir / "MS001.json"
+        raw.write_text("{}")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        # Stage carries a STALE pydantic_schema_hash but is newer than raw.
+        pl.DataFrame({"x": [1]}).write_parquet(
+            out, metadata={"pydantic_schema_hash": "stale_hash"}
+        )
+        os.utime(raw, (1000, 1000))
+        os.utime(out, (2000, 2000))
+        assert _feed_stage_is_stale(tx, "stats_plus", SCHEMA_HASH) is True
+        assert _feed_stage_is_stale(tx, "stats_plus", None) is False
 
     @patch("mvp.atptour.pipeline.MatchCentreExtractor")
     @patch("mvp.atptour.pipeline.MatchStatsTransformer")

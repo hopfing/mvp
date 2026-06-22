@@ -17,6 +17,7 @@ from mvp.atptour.extractors.rankings import RankingsExtractor
 from mvp.atptour.extractors.results import ResultsExtractor
 from mvp.atptour.extractors.schedule import ScheduleExtractor
 from mvp.atptour.pipeline_utils import get_active_players, get_players_with_results
+from mvp.atptour.schemas.stats_plus import SCHEMA_HASH as _STATS_PLUS_SCHEMA_HASH
 from mvp.atptour.transformers.match_beats import MatchBeatsTransformer
 from mvp.atptour.transformers.match_stats import MatchStatsTransformer
 from mvp.atptour.transformers.overview import OverviewTransformer
@@ -32,6 +33,7 @@ from mvp.atptour.transformers.rally_analysis import RallyAnalysisTransformer
 from mvp.atptour.transformers.rankings import RankingsTransformer
 from mvp.atptour.transformers.results import ResultsTransformer
 from mvp.atptour.transformers.schedule import ScheduleTransformer
+from mvp.atptour.transformers.stats_plus import StatsPlusTransformer
 from mvp.atptour.transformers.stroke_analysis import StrokeAnalysisTransformer
 from mvp.common.enums import Circuit
 
@@ -105,6 +107,47 @@ class PlayerDataResult:
         )
 
 
+def _feed_stage_is_stale(
+    transformer, feed: str, schema_hash: str | None = None
+) -> bool:
+    """Whether a match-centre feed needs (re)staging.
+
+    Mirrors the codebase's staging idiom (ScheduleTransformer /
+    PlayerActivityStager: (re)stage when the output is missing, the raw is
+    newer, or the schema hash drifted) adapted to this family's combined
+    output — one parquet per tournament rather than one per raw file. Gating on
+    raw-vs-stage state instead of the extract count means already-landed raw (a
+    newly added transformer, a no-refresh backfill, or a schema change) still
+    stages; in steady state it matches the old ``new_centre`` gate (fresh raw is
+    newer than the stage, so it runs; unchanged raw skips).
+
+    ``schema_hash`` enables the drift clause and is passed only for feeds that
+    write their hash to parquet metadata (stats_plus via ``save_parquet``). The
+    in-band-hash transformers (match_beats / stroke / rally) pass ``None``: they
+    store the hash as a column, not metadata, so ``is_schema_current`` would
+    always report them stale and re-stage them every run. Bringing those three
+    onto metadata hashes (so they get drift detection too) is a follow-up.
+    """
+    path = transformer.tournament.path
+    raw_dir = transformer.build_path("raw", path, feed)
+    if not raw_dir.exists():
+        return False
+    raw_files = list(raw_dir.glob("*.json"))
+    if not raw_files:
+        return False
+    output_path = transformer.build_path("stage", path, f"{feed}.parquet")
+    if not output_path.exists():
+        return True
+    output_mtime = output_path.stat().st_mtime
+    if any(f.stat().st_mtime > output_mtime for f in raw_files):
+        return True
+    if schema_hash is not None and not transformer.is_schema_current(
+        output_path, schema_hash
+    ):
+        return True
+    return False
+
+
 def _process_single_tournament(
     tid: str,
     year: int,
@@ -165,7 +208,7 @@ def _process_single_tournament(
                 logging_id,
             )
 
-        new_centre = MatchCentreExtractor(
+        MatchCentreExtractor(
             data_root=data_root,
             data_types=[
                 DataType.MATCH_BEATS,
@@ -176,15 +219,21 @@ def _process_single_tournament(
                 DataType.BELOW_COURT,
             ],
         ).run(tournament, refresh=stats_refresh)
-        if new_centre > 0:
-            MatchBeatsTransformer(tournament, data_root=data_root).run()
-            StrokeAnalysisTransformer(tournament, data_root=data_root).run()
-            RallyAnalysisTransformer(tournament, data_root=data_root).run()
-        else:
-            logger.info(
-                "%s: no new match centre data, skipping transforms",
-                logging_id,
-            )
+        # Stage each match-centre feed whose raw is unstaged or newer than its
+        # stage — gated on raw-vs-stage state, not the extract count, so
+        # already-landed raw still stages (see _feed_stage_is_stale). The list
+        # is built here (not module-level) so the class names resolve at call
+        # time and stay patchable in tests.
+        match_centre_transformers = [
+            (MatchBeatsTransformer, "match_beats", None),
+            (StrokeAnalysisTransformer, "stroke_analysis", None),
+            (RallyAnalysisTransformer, "rally_analysis", None),
+            (StatsPlusTransformer, "stats_plus", _STATS_PLUS_SCHEMA_HASH),
+        ]
+        for transformer_cls, feed, schema_hash in match_centre_transformers:
+            transformer = transformer_cls(tournament, data_root=data_root)
+            if _feed_stage_is_stale(transformer, feed, schema_hash):
+                transformer.run()
 
         TournamentMatchesAggregator(
             circuit=tournament.circuit,
