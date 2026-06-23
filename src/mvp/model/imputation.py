@@ -91,7 +91,10 @@ def build_impute_specs(
     """
     specs: list[ImputeSpec] = []
     for idx, spec_str in enumerate(feature_specs):
-        _prefix, base_name, _full_name, _params = parse_feature_spec(spec_str)
+        _prefix, base_name, full_name, _params = parse_feature_spec(spec_str)
+        if registry.transform_for_output(full_name) is not None:
+            specs.append(ImputeSpec(col_index=idx, strategy="passthrough"))
+            continue
         feature_def = registry.get(base_name)
         impute_val = feature_def.impute
 
@@ -174,7 +177,12 @@ def build_imputation(
     aux_specs: list[ImputeSpec] = []
 
     for idx, spec_str in enumerate(feature_specs):
-        _prefix, base_name, _full_name, params = parse_feature_spec(spec_str)
+        _prefix, base_name, full_name, params = parse_feature_spec(spec_str)
+        # Transform outputs (e.g. vs_opp_style_*) aren't registry @features; they
+        # carry no impute and are NaN-tolerant — passthrough, never recomputed.
+        if registry.transform_for_output(full_name) is not None:
+            model_specs.append(ImputeSpec(col_index=idx, strategy="passthrough"))
+            continue
         feature_def = registry.get(base_name)
         impute_val = feature_def.impute
 
