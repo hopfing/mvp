@@ -701,6 +701,10 @@ class FeatureEngine:
         # Structural columns the engine always needs
         needed: set[str] = {
             "match_uid", "player_id", "opp_id", "effective_match_date",
+            # the match outcome — fundamental, and rolling-over-past-outcomes
+            # features (rating residual, etc.) reference it from a derived
+            # feature where root-name introspection doesn't reach it.
+            "won",
             # always loaded so the walkover completeness filter can apply
             "reason", "result_type",
             # always loaded as the deterministic tiebreakers for date-ordered
