@@ -18,6 +18,8 @@ or post-engine) is the §4 integration step. Match-level combination
 (feat_A − feat_B, separate confs) via `combine_match_level`.
 """
 
+from pathlib import Path
+
 import polars as pl
 
 _GRP = "player_id"
@@ -114,3 +116,35 @@ def combine_match_level(form_a: pl.DataFrame) -> pl.DataFrame:
         pl.min_horizontal("n_eff_a", "n_eff_b").alias("style_matchup_conf"),
         pl.col("mean_opp_rating").alias("mean_opp_rating_pool"),
     )
+
+
+def build_style_matchup_table(
+    matches_path: str | Path,
+    out_path: str | Path,
+    cache_dir: str | Path,
+    h: float = H_DEFAULT,
+    lam: float = LAMBDA_DEFAULT,
+    window_days: int = WINDOW_DAYS_DEFAULT,
+) -> pl.DataFrame:
+    """Materialize the radar over `matches_path`, run the Form A self-join, and
+    write the matchup feature table (one row per (match_uid, player_id)) to
+    `out_path` — piece 1 of the integration (the table the passthrough layer loads).
+
+    The caller scopes `matches_path` (full history, or a window whose earliest
+    matches accept a truncated pool). Heavy over full history (radar chain +
+    self-join) — a periodic offline job, not the 15-min tick.
+    """
+    # Engine imported here, not at module top: the transform functions above are
+    # pure-polars and importable standalone; only this build entrypoint needs the
+    # (heavy) feature engine.
+    from mvp.model.engine import FeatureEngine
+
+    eng = FeatureEngine(matches_path=Path(matches_path), cache_dir=Path(cache_dir))
+    feats = [f"opp_style_radar_{k}" for k in _AXES] + ["player_elo_surface_diff"]
+    df = eng.compute(feats, extra_columns=["won", "opp_elo"])
+    table = combine_match_level(compute_form_a(df, h=h, lam=lam, window_days=window_days))
+
+    out = Path(out_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    table.write_parquet(out)
+    return table
