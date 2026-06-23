@@ -681,34 +681,34 @@ class FeatureEngine:
 
         return result
 
-    def _expand_transform_requests(
-        self, feature_specs: list[str],
-    ) -> tuple[list[str], dict[str, list[str]]]:
-        """Map requested transform-OUTPUT specs to their transform feature.
+    def _expand_transform_requests(self, feature_specs: list[str]) -> list[str]:
+        """Map requested transform-OUTPUT specs to their transform's compute spec.
 
-        A config selects output columns (e.g. ``style_matchup_residual``); the
-        producing transform is computed once. Returns the rewritten spec list
-        (each output replaced by its transform's name, deduped; non-outputs
-        kept as-is) and a ``{transform_name: [requested output cols]}`` map for
-        the load path. Must run BEFORE ``_resolve_dependencies`` (which would
-        ``registry.get`` an output name and fail).
+        A config selects output columns (e.g. ``style_matchup_residual`` or the
+        windowed ``style_matchup_residual(days=365)``); each maps to the producing
+        transform's spec carrying the SAME params, deduped — so a parameterized
+        transform is computed once per param variant. Non-outputs are kept as-is.
+        Must run BEFORE ``_resolve_dependencies`` (which would ``registry.get`` an
+        output name and fail).
         """
         rewritten: list[str] = []
-        requested: dict[str, list[str]] = {}
-        seen_transform: set[str] = set()
+        seen: set[str] = set()
         for spec in feature_specs:
-            _prefix, base_name, _full, _params = parse_feature_spec(spec)
-            transform = self._registry.transform_for_output(base_name)
+            _prefix, _base, full_name, params = parse_feature_spec(spec)
+            # outputs carry their own player_/opp_ (self-emitted), so resolve on
+            # the FULL name, not the prefix-stripped base.
+            transform = self._registry.transform_for_output(full_name)
             if transform is None:
                 rewritten.append(spec)
                 continue
-            cols = requested.setdefault(transform.name, [])
-            if base_name not in cols:
-                cols.append(base_name)
-            if transform.name not in seen_transform:
-                rewritten.append(transform.name)
-                seen_transform.add(transform.name)
-        return rewritten, requested
+            transform_spec = transform.name
+            if params:
+                param_str = ",".join(f"{k}={v}" for k, v in params.items())
+                transform_spec = f"{transform.name}({param_str})"
+            if transform_spec not in seen:
+                rewritten.append(transform_spec)
+                seen.add(transform_spec)
+        return rewritten
 
     def _resolve_source_columns(
         self, feature_specs: list[str], extra_columns: list[str] | None = None,
@@ -817,9 +817,9 @@ class FeatureEngine:
         self._feature_timings: list[tuple[str, str, float]] = []
         from tqdm import tqdm
 
-        # Rewrite requested transform outputs to their transform feature, then
-        # resolve dependencies (the transform's deps + the transform itself).
-        feature_specs, _ = self._expand_transform_requests(feature_specs)
+        # Rewrite requested transform outputs to their transform compute spec,
+        # then resolve dependencies (the transform's deps + the transform itself).
+        feature_specs = self._expand_transform_requests(feature_specs)
         feature_specs = self._resolve_dependencies(feature_specs)
 
         # Categorize
@@ -1065,15 +1065,18 @@ class FeatureEngine:
         # Phase 7: transform features (whole-matrix, e.g. self-join retrieval).
         # Run AFTER all per-row features are cached: the batched flow caches and
         # drops dep columns, so reassemble them (player_ from cache + mirrored
-        # opp_), run the df->df func, and cache its output column group. Raw cols
-        # the transform reads (won, opp_elo) are preserved parquet columns.
+        # opp_), run the func (per param variant), and cache its window-suffixed
+        # output frame. Raw cols the func reads (won, opp_elo) are preserved.
         for spec in tqdm(
             transform_specs, desc="Phase 7: transforms",
             leave=False, ncols=120, disable=not transform_specs,
         ):
-            _prefix, base_name, _full, _params = parse_feature_spec(spec)
+            _prefix, base_name, _full, params = parse_feature_spec(spec)
             feature_def = self._registry.get(base_name)
             cache_spec = base_name
+            if params:
+                param_str = ",".join(f"{k}={v}" for k, v in params.items())
+                cache_spec = f"{base_name}({param_str})"
             if self._is_cached(cache_spec, cache_key):
                 continue
 
@@ -1088,11 +1091,17 @@ class FeatureEngine:
                 df = self._mirror_features(df, player_dep_cols)
 
             t0_t = time.perf_counter()
-            df = feature_def.func(df)
+            out = feature_def.func(df, **params)  # keyed output frame (bare cols)
+            output_cols = feature_def.outputs
+            if params:
+                out = out.rename(
+                    {o: build_column_name(o, params) for o in output_cols}
+                )
+                output_cols = [build_column_name(o, params) for o in feature_def.outputs]
             self._feature_timings.append(
                 ("transform", cache_spec, time.perf_counter() - t0_t)
             )
-            self._cache_feature(cache_spec, df, feature_def.outputs, cache_key)
+            self._cache_feature(cache_spec, out, output_cols, cache_key)
 
             added_cols = [c for c in df.columns if c not in dep_cols_before]
             if added_cols:
@@ -1128,24 +1137,31 @@ class FeatureEngine:
         """
         join_on = ["match_uid", "player_id"]
 
-        # Transform outputs: load each producing transform's cached column group
-        # ONCE, taking only the requested outputs. These bypass the per-feature
-        # impute logic (they're not @feature columns) — a structural "no prior
-        # history" null stays null (NaN-tolerant model), never median-filled.
-        transform_requests: dict[str, list[str]] = {}
+        # Transform outputs: load each producing transform variant's cached column
+        # group ONCE (keyed by the param-specific cache spec), taking only the
+        # requested outputs (window-suffixed). These bypass the per-feature impute
+        # logic (they're not @feature columns) — a structural "no prior history"
+        # null stays null (NaN-tolerant model), never median-filled.
+        transform_requests: dict[str, list[str]] = {}  # cache_spec -> [col names]
         passthrough_specs: list[str] = []
         for spec in feature_specs:
-            _p, base_name, _f, _pm = parse_feature_spec(spec)
-            transform = self._registry.transform_for_output(base_name)
-            if transform is not None:
-                cols = transform_requests.setdefault(transform.name, [])
-                if base_name not in cols:
-                    cols.append(base_name)
-            else:
+            _p, _base, full_name, params = parse_feature_spec(spec)
+            # outputs self-emit player_/opp_, so resolve + name on the FULL name.
+            transform = self._registry.transform_for_output(full_name)
+            if transform is None:
                 passthrough_specs.append(spec)
+                continue
+            cache_spec = transform.name
+            if params:
+                param_str = ",".join(f"{k}={v}" for k, v in params.items())
+                cache_spec = f"{transform.name}({param_str})"
+            col = build_column_name(full_name, params)
+            cols = transform_requests.setdefault(cache_spec, [])
+            if col not in cols:
+                cols.append(col)
 
-        for tname, out_cols in transform_requests.items():
-            cached = self._load_cached_feature(tname).select(
+        for cache_spec, out_cols in transform_requests.items():
+            cached = self._load_cached_feature(cache_spec).select(
                 [*join_on, *out_cols]
             )
             base_df = base_df.join(cached, on=join_on, how="left")
@@ -1254,8 +1270,8 @@ class FeatureEngine:
                     f"(use 'player_{spec}' instead)"
                 )
 
-        # Rewrite requested transform outputs to their transform feature first.
-        feature_specs, _ = self._expand_transform_requests(feature_specs)
+        # Rewrite requested transform outputs to their transform compute spec.
+        feature_specs = self._expand_transform_requests(feature_specs)
         # Resolve dependencies first
         feature_specs = self._resolve_dependencies(feature_specs)
 
@@ -1518,12 +1534,19 @@ class FeatureEngine:
                 df, base_name, cache_spec, col_name, params, cache_key,
             )
 
-        # Phase 7: transform features (whole-matrix df->df). Runs last — all the
-        # per-row dep columns (opp_style_radar_*, opp_style_conf_*,
-        # player_elo_surface_diff) and raw cols (won, opp_elo) are now in df.
+        # Phase 7: transform features (whole-matrix). Runs last — all the per-row
+        # dep columns (opp_style_radar_*, opp_style_conf_*, player_elo_surface_diff)
+        # and raw cols (won, opp_elo) are in df. Each param variant runs and its
+        # keyed output frame merges in with window-suffixed columns.
         for spec in transform_specs:
-            _prefix, base_name, _full, _params = parse_feature_spec(spec)
-            df = self._registry.get(base_name).func(df)
+            _prefix, base_name, _full, params = parse_feature_spec(spec)
+            feature_def = self._registry.get(base_name)
+            out = feature_def.func(df, **params)
+            if params:
+                out = out.rename(
+                    {o: build_column_name(o, params) for o in feature_def.outputs}
+                )
+            df = df.join(out, on=["match_uid", "player_id"], how="left")
 
         elapsed = time.perf_counter() - t0
         logger.info("Feature computation complete in %.1fs", elapsed)

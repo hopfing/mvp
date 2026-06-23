@@ -52,7 +52,7 @@ def _form_a_core(
     df: pl.DataFrame,
     h: float = H_DEFAULT,
     lam: float = LAMBDA_DEFAULT,
-    window_days: int = WINDOW_DAYS_DEFAULT,
+    window_days: int | None = WINDOW_DAYS_DEFAULT,
 ) -> pl.DataFrame:
     """Per (match_uid, player_id): feat_a, n_eff_a, mean_opp_rating, mean_pool_conf.
 
@@ -61,6 +61,9 @@ def _form_a_core(
     won, player_elo_surface_diff, opp_elo. Leakage-safe (pool = strictly-prior).
     The retrieval is within-player, so this is exact on any player-complete subset
     of `df` — which is what lets `compute_form_a` chunk it by player.
+
+    ``window_days=None`` = alltime pool (all strictly-prior matches); ``N`` =
+    the [t_m − N, t_m) pool. The ``t_p < t_m`` leakage guard is independent of it.
     """
     cur = df.select(
         _GRP, "opp_id", "match_uid",
@@ -77,10 +80,10 @@ def _form_a_core(
         pl.min_horizontal([pl.col(f"opp_style_conf_{k}") for k in _AXES]).alias("minconf"),
     )
 
-    pairs = cur.join(pool, on=_GRP).filter(
-        (pl.col("t_p") < pl.col("t_m"))
-        & (pl.col("t_p") >= pl.col("t_m") - pl.duration(days=window_days))
-    )
+    prior = pl.col("t_p") < pl.col("t_m")  # leakage guard (always)
+    if window_days is not None:
+        prior = prior & (pl.col("t_p") >= pl.col("t_m") - pl.duration(days=window_days))
+    pairs = cur.join(pool, on=_GRP).filter(prior)
     # squared radar distance, ‖b − o‖² (explicit accumulation, codebase convention)
     dist2 = (pl.col(f"b_{_AXES[0]}") - pl.col(f"o_{_AXES[0]}")) ** 2
     for k in _AXES[1:]:
@@ -125,7 +128,7 @@ def compute_form_a(
     df: pl.DataFrame,
     h: float = H_DEFAULT,
     lam: float = LAMBDA_DEFAULT,
-    window_days: int = WINDOW_DAYS_DEFAULT,
+    window_days: int | None = WINDOW_DAYS_DEFAULT,
     player_batch_size: int | None = _PLAYER_BATCH,
 ) -> pl.DataFrame:
     """`_form_a_core` chunked by player to bound the self-join's peak memory.
@@ -149,30 +152,54 @@ def compute_form_a(
 
 
 def combine_match_level(form_a: pl.DataFrame) -> pl.DataFrame:
-    """Per (match_uid, player_id): style_matchup_residual = feat_a − opp.feat_a,
-    carrying both N_eff sides + the min (review F3)."""
+    """Assemble the Form A output frame per (match_uid, player_id): the row-
+    player's quantities (`player_…`), the opponent's (`opp_…`, paired via the
+    self-join), and the player−opp `…_diff` for the two signal columns.
+
+    Each column is a member of the `vs_opp_style_*` family — the row-player's
+    residual against opponents who play like *their* current opponent. The
+    transform self-emits both perspectives (the engine doesn't mirror transform
+    outputs), and a LEFT join keeps the row-player's value even when the opponent
+    has no pool (the `opp_`/`_diff` are then null).
+    """
     opp = form_a.select(
         "match_uid",
         pl.col(_GRP).alias("_opp_pid"),
         pl.col("feat_a").alias("feat_b"),
-        pl.col("n_eff_a").alias("n_eff_b"),
         pl.col("feat_a_flat").alias("feat_b_flat"),
+        pl.col("n_eff_a").alias("n_eff_b"),
+        pl.col("mean_opp_rating").alias("opp_rating_b"),
+        pl.col("mean_pool_conf").alias("pool_conf_b"),
     )
-    # pair this row to its opponent's row precisely: this.opp_id == opp.player_id
-    # (robust to anything but a clean 2-perspective match_uid).
+    # pair this row to its opponent's row precisely: this.opp_id == opp.player_id.
     m = form_a.join(
-        opp, left_on=["match_uid", "opp_id"], right_on=["match_uid", "_opp_pid"], how="inner",
+        opp, left_on=["match_uid", "opp_id"], right_on=["match_uid", "_opp_pid"], how="left",
     )
     return m.select(
         "match_uid", _GRP,
-        (pl.col("feat_a") - pl.col("feat_b")).alias("style_matchup_residual"),
-        pl.col("n_eff_a").alias("style_matchup_n_eff_a"),
-        pl.col("n_eff_b").alias("style_matchup_n_eff_b"),
-        pl.min_horizontal("n_eff_a", "n_eff_b").alias("style_matchup_conf"),
-        pl.col("mean_opp_rating").alias("mean_opp_rating_pool"),
-        pl.col("mean_pool_conf").alias("style_matchup_pool_conf"),
-        # flat (h->inf, style-blind) control contrast — the kernel-off baseline
-        (pl.col("feat_a_flat") - pl.col("feat_b_flat")).alias("style_matchup_residual_flat"),
+        # residual (the signal): player, opp, diff
+        pl.col("feat_a").alias("player_vs_opp_style_resid"),
+        pl.col("feat_b").alias("opp_vs_opp_style_resid"),
+        (pl.col("feat_a") - pl.col("feat_b")).alias("vs_opp_style_resid_diff"),
+        # flat (h->inf, style-blind) control: player, opp, diff
+        pl.col("feat_a_flat").alias("player_vs_opp_style_resid_flat"),
+        pl.col("feat_b_flat").alias("opp_vs_opp_style_resid_flat"),
+        (pl.col("feat_a_flat") - pl.col("feat_b_flat")).alias("vs_opp_style_resid_flat_diff"),
+        # style-specific excess (kernel − flat): the matchup signal net of general
+        # form — the purest non-transitivity component. player, opp, diff.
+        (pl.col("feat_a") - pl.col("feat_a_flat")).alias("player_vs_opp_style_resid_xs"),
+        (pl.col("feat_b") - pl.col("feat_b_flat")).alias("opp_vs_opp_style_resid_xs"),
+        ((pl.col("feat_a") - pl.col("feat_a_flat"))
+         - (pl.col("feat_b") - pl.col("feat_b_flat"))).alias("vs_opp_style_resid_xs_diff"),
+        # effective pool size (reliability): player, opp
+        pl.col("n_eff_a").alias("player_vs_opp_style_neff"),
+        pl.col("n_eff_b").alias("opp_vs_opp_style_neff"),
+        # mean pool-opponent Elo (strength confound): player, opp
+        pl.col("mean_opp_rating").alias("player_vs_opp_style_pool_elo"),
+        pl.col("opp_rating_b").alias("opp_vs_opp_style_pool_elo"),
+        # pool radar quality (F8): player, opp
+        pl.col("mean_pool_conf").alias("player_vs_opp_style_pool_conf"),
+        pl.col("pool_conf_b").alias("opp_vs_opp_style_pool_conf"),
     )
 
 
@@ -215,13 +242,17 @@ def build_style_matchup_table(
 # --- engine-computed transform feature (Form A, config-selectable) ---
 
 _OUTPUTS = [
-    "style_matchup_residual",
-    "style_matchup_n_eff_a",
-    "style_matchup_n_eff_b",
-    "style_matchup_conf",
-    "mean_opp_rating_pool",
-    "style_matchup_pool_conf",
-    "style_matchup_residual_flat",  # h->inf control (kernel off, style-blind)
+    # residual (the signal) + flat (h->inf) control: per-player + diff
+    "player_vs_opp_style_resid", "opp_vs_opp_style_resid", "vs_opp_style_resid_diff",
+    "player_vs_opp_style_resid_flat", "opp_vs_opp_style_resid_flat",
+    "vs_opp_style_resid_flat_diff",
+    # style-specific excess (kernel - flat): per-player + diff
+    "player_vs_opp_style_resid_xs", "opp_vs_opp_style_resid_xs",
+    "vs_opp_style_resid_xs_diff",
+    # reliability / pool descriptors: per-player
+    "player_vs_opp_style_neff", "opp_vs_opp_style_neff",
+    "player_vs_opp_style_pool_elo", "opp_vs_opp_style_pool_elo",
+    "player_vs_opp_style_pool_conf", "opp_vs_opp_style_pool_conf",
 ]
 
 
@@ -242,18 +273,23 @@ def _assert_radar_as_of_time(df: pl.DataFrame) -> None:
         raise ValueError(f"[F1] {col} constant — radar not rolling (possible leak)")
 
 
-def _matchup_transform(df: pl.DataFrame) -> pl.DataFrame:
-    """Engine transform: append the Form A style-matchup columns to the matrix
-    via the within-player kNN self-join (one row per match_uid/player_id)."""
+def _matchup_transform(df: pl.DataFrame, days: int | None = None) -> pl.DataFrame:
+    """Engine transform: the Form A style-matchup output frame (one row per
+    match_uid/player_id, the bare `_OUTPUTS` columns) from the within-player kNN
+    self-join. The engine renames the outputs per the days variant (`_{N}d`) and
+    merges/caches them — so this returns just the keyed outputs, not the matrix.
+
+    ``days`` is the pool lookback (Window 2): ``None`` = alltime, ``N`` = N-day.
+    """
     _assert_radar_as_of_time(df)
-    ml = combine_match_level(compute_form_a(df))
-    return df.join(ml, on=["match_uid", _GRP], how="left")
+    return combine_match_level(compute_form_a(df, window_days=days))
 
 
 register_transform(
     name="style_matchup",
     func=_matchup_transform,
     outputs=_OUTPUTS,
+    params=["days"],  # Window 2 (pool lookback) — swept via window_sizes
     # base names — the engine resolves each to player_ + opp_ (the func reads the
     # opp_ radar/conf and player_elo_surface_diff).
     depends_on=(

@@ -116,6 +116,23 @@ def get_all_feature_specs(window_sizes: list[int] | None = None) -> list[str]:
     for name in feature_names:
         feature_def = registry.get(name)
 
+        # Transform features expose their OUTPUT columns (bare, match-level),
+        # never `player_<name>`. Parameterized transforms (e.g. days) expand each
+        # output over window_sizes exactly like a parameterized @feature.
+        if feature_def.transform:
+            has_days = (
+                "days" in feature_def.params and len(feature_def.params) == 1
+            )
+            for out in feature_def.outputs:
+                if has_days:
+                    if include_alltime:
+                        specs.append(out)
+                    for days in sized_windows:
+                        specs.append(f"{out}(days={days})")
+                else:
+                    specs.append(out)
+            continue
+
         # Match-level features have no prefix
         if feature_def.match_level:
             if not feature_def.params:

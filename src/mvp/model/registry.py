@@ -23,12 +23,14 @@ class FeatureDef:
     mirror: bool = True  # Whether to generate opp_* column
     match_level: bool = False  # Whether this is a match-level feature (no prefix)
     # Transform feature: a whole-matrix step, not a per-row expression. Its
-    # ``func`` is ``(df) -> df`` (appends ``outputs`` columns via a cross-row op
-    # like a self-join), run in a dedicated phase AFTER its ``depends_on`` are
-    # materialized. ``outputs`` lists every column it produces; a request for any
-    # of them resolves to this feature. Cached as a column group under the
-    # standard cache key, so it auto-invalidates on code/cutoff change like any
-    # feature (no separate artifact to sync).
+    # ``func`` is ``(df[, **params]) -> output_frame`` keyed by (match_uid,
+    # player_id) carrying the ``outputs`` columns (a cross-row op like a
+    # self-join), run in a dedicated phase AFTER its ``depends_on`` are
+    # materialized. The engine renames the outputs per the param variant
+    # (``_{N}d``), then merges/caches them. ``outputs`` lists every (bare) column
+    # it produces; a request for any of them resolves to this feature. Cached as
+    # a column group under the standard cache key, so it auto-invalidates on
+    # code/cutoff change like any feature (no separate artifact to sync).
     transform: bool = False
     outputs: list[str] = field(default_factory=list)
     # Raw matches.parquet columns a transform's func reads directly (e.g.
@@ -256,13 +258,14 @@ def register_sum(base_name: str, description: str = "") -> None:
 
 def register_transform(
     name: str,
-    func: Callable[[pl.DataFrame], pl.DataFrame],
+    func: Callable[..., pl.DataFrame],
     outputs: list[str],
     depends_on: list[str] | None = None,
     raw_columns: list[str] | None = None,
+    params: list[str] | None = None,
     description: str = "",
 ) -> None:
-    """Register a whole-matrix transform feature (``func``: df -> df).
+    """Register a whole-matrix transform feature (``func``: df[, **params] -> df).
 
     ``func`` appends the ``outputs`` columns via a cross-row op (e.g. a
     self-join) and is run in a dedicated engine phase after ``depends_on`` are
@@ -271,12 +274,17 @@ def register_transform(
 
     ``raw_columns`` are matches.parquet columns the func reads directly (the
     engine can't introspect them from a df->df func, so they're declared here).
+
+    ``params`` (e.g. ``["days"]``) makes the transform parameterized: each param
+    combination is a distinct compute/cache unit, the func is called with those
+    params, and the output columns are suffixed per the variant (``_{N}d``) —
+    exactly like a parameterized @feature, so it expands over ``window_sizes``.
     """
     get_registry().register(
         FeatureDef(
             name=name,
-            func=func,  # type: ignore[arg-type]  # (df)->df, not (...)->Expr
-            params=[],
+            func=func,  # type: ignore[arg-type]  # (df,**p)->df, not (...)->Expr
+            params=params or [],
             description=description,
             depends_on=depends_on or [],
             mirror=False,
