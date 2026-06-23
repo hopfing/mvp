@@ -145,3 +145,44 @@ class TestRegisterSum:
         register_sum("desc_feat", description="Combined serve dominance")
         feat = isolated_registry.get("desc_feat_sum")
         assert feat.description == "Combined serve dominance"
+
+
+class TestRegisterTransform:
+    """Tests for register_transform (whole-matrix transform feature kind)."""
+
+    def test_registers_with_transform_metadata(self, isolated_registry):
+        from mvp.model.registry import register_transform
+
+        def _t(df):
+            return df
+
+        register_transform(
+            "mt", _t, outputs=["a_out", "b_out"], depends_on=["dep1"],
+            description="test transform",
+        )
+        feat = isolated_registry.get("mt")
+        assert feat.transform is True
+        assert feat.outputs == ["a_out", "b_out"]
+        assert feat.depends_on == ["dep1"]
+        assert feat.mirror is False
+        assert feat.impute is None
+
+    def test_output_resolves_to_transform(self, isolated_registry):
+        from mvp.model.registry import register_transform
+
+        register_transform("mt", lambda df: df, outputs=["a_out", "b_out"])
+        assert isolated_registry.transform_for_output("a_out").name == "mt"
+        assert isolated_registry.transform_for_output("b_out").name == "mt"
+        assert isolated_registry.transform_for_output("missing") is None
+
+    def test_duplicate_output_raises_and_is_atomic(self, isolated_registry):
+        from mvp.model.registry import register_transform
+
+        register_transform("mt1", lambda df: df, outputs=["shared"])
+        with pytest.raises(ValueError, match="already produced"):
+            register_transform("mt2", lambda df: df, outputs=["new", "shared"])
+        # atomic: the failed registration left NO trace — neither the feature
+        # nor its other output leaked into the registry.
+        assert "mt2" not in isolated_registry.list_features()
+        assert isolated_registry.transform_for_output("new") is None
+        assert isolated_registry.transform_for_output("shared").name == "mt1"

@@ -49,7 +49,9 @@ def isolated_registry():
     """
     registry = get_registry()
     saved = dict(registry._features)
+    saved_outputs = dict(registry._output_to_feature)
     registry.clear()
     yield registry
     registry.clear()
     registry._features.update(saved)
+    registry._output_to_feature.update(saved_outputs)

@@ -22,6 +22,15 @@ class FeatureDef:
     depends_on: list[str] = field(default_factory=list)
     mirror: bool = True  # Whether to generate opp_* column
     match_level: bool = False  # Whether this is a match-level feature (no prefix)
+    # Transform feature: a whole-matrix step, not a per-row expression. Its
+    # ``func`` is ``(df) -> df`` (appends ``outputs`` columns via a cross-row op
+    # like a self-join), run in a dedicated phase AFTER its ``depends_on`` are
+    # materialized. ``outputs`` lists every column it produces; a request for any
+    # of them resolves to this feature. Cached as a column group under the
+    # standard cache key, so it auto-invalidates on code/cutoff change like any
+    # feature (no separate artifact to sync).
+    transform: bool = False
+    outputs: list[str] = field(default_factory=list)
     # Imputation strategy:
     #   "median" — per-circuit median (default)
     #   numeric constant — fill missing with that value
@@ -34,12 +43,29 @@ class FeatureRegistry:
 
     def __init__(self) -> None:
         self._features: dict[str, FeatureDef] = {}
+        # output column name -> transform feature name (for transform features)
+        self._output_to_feature: dict[str, str] = {}
 
     def register(self, feature_def: FeatureDef) -> None:
         """Register a feature definition."""
         if feature_def.name in self._features:
             raise ValueError(f"Feature '{feature_def.name}' already registered")
+        # Validate outputs BEFORE mutating any state, so a duplicate-output
+        # raise leaves the registry fully unchanged (atomic registration).
+        for out in feature_def.outputs:
+            if out in self._output_to_feature:
+                raise ValueError(
+                    f"Transform output '{out}' already produced by "
+                    f"'{self._output_to_feature[out]}'"
+                )
         self._features[feature_def.name] = feature_def
+        for out in feature_def.outputs:
+            self._output_to_feature[out] = feature_def.name
+
+    def transform_for_output(self, col: str) -> FeatureDef | None:
+        """The transform feature that produces output column ``col``, if any."""
+        name = self._output_to_feature.get(col)
+        return self._features[name] if name else None
 
     def get(self, name: str) -> FeatureDef:
         """Get a feature by name."""
@@ -54,6 +80,7 @@ class FeatureRegistry:
     def clear(self) -> None:
         """Clear all registered features. For testing."""
         self._features.clear()
+        self._output_to_feature.clear()
 
 
 # Global singleton registry
@@ -220,3 +247,32 @@ def register_sum(base_name: str, description: str = "") -> None:
         if days is None:
             return pl.col(f"player_{_bn}") + pl.col(f"opp_{_bn}")
         return pl.col(f"player_{_bn}_{days}d") + pl.col(f"opp_{_bn}_{days}d")
+
+
+def register_transform(
+    name: str,
+    func: Callable[[pl.DataFrame], pl.DataFrame],
+    outputs: list[str],
+    depends_on: list[str] | None = None,
+    description: str = "",
+) -> None:
+    """Register a whole-matrix transform feature (``func``: df -> df).
+
+    ``func`` appends the ``outputs`` columns via a cross-row op (e.g. a
+    self-join) and is run in a dedicated engine phase after ``depends_on`` are
+    materialized. A request for any output column resolves to this feature; its
+    outputs cache as a column group under the standard cache key.
+    """
+    get_registry().register(
+        FeatureDef(
+            name=name,
+            func=func,  # type: ignore[arg-type]  # (df)->df, not (...)->Expr
+            params=[],
+            description=description,
+            depends_on=depends_on or [],
+            mirror=False,
+            impute=None,
+            transform=True,
+            outputs=outputs,
+        )
+    )
