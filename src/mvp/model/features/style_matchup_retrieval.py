@@ -13,14 +13,17 @@ The weight depends on the CURRENT match's opponent B, so this can't be a rolling
 filtered to strictly-prior and a window W). resid = won − Elo-implied(surface)
 win prob (the Form-B residual). Leakage-safe: the pool is `t_p < t_m` only.
 
-This is the transform; wiring it into the feature pipeline (precompute → table,
-or post-engine) is the §4 integration step. Match-level combination
-(feat_A − feat_B, separate confs) via `combine_match_level`.
+Match-level combination (feat_A − feat_B, separate confs) via `combine_match_level`.
+It's wired into the engine as a `register_transform` feature kind (engine-computed,
+cached/invalidated like any feature — no separate synced table); `build_style_
+matchup_table` remains the standalone offline/verification path.
 """
 
 from pathlib import Path
 
 import polars as pl
+
+from mvp.model.registry import register_transform
 
 _GRP = "player_id"
 _DATE = "effective_match_date"
@@ -34,6 +37,10 @@ _AXES = ["serve", "net", "aggression", "error", "rally"]
 H_DEFAULT = 0.3
 LAMBDA_DEFAULT = 1.0  # ridge on the slope denominator (review F2)
 WINDOW_DAYS_DEFAULT = 1095  # pool window (spec D-POOL)
+# Players per self-join chunk — bounds the transient `pairs` frame so the
+# full-history retrieval stays under the engine memory guard. Within-player, so
+# chunking is exact (no cross-batch pairs).
+_PLAYER_BATCH = 500
 
 
 def _residual() -> pl.Expr:
@@ -41,17 +48,19 @@ def _residual() -> pl.Expr:
     return pl.col("won").cast(pl.Float64) - e
 
 
-def compute_form_a(
+def _form_a_core(
     df: pl.DataFrame,
     h: float = H_DEFAULT,
     lam: float = LAMBDA_DEFAULT,
     window_days: int = WINDOW_DAYS_DEFAULT,
 ) -> pl.DataFrame:
-    """Per (match_uid, player_id): feat_a, n_eff_a, mean_opp_rating.
+    """Per (match_uid, player_id): feat_a, n_eff_a, mean_opp_rating, mean_pool_conf.
 
     `df` must carry: player_id, match_uid, effective_match_date,
-    opp_style_radar_{axis} (the opponent's radar this match), won,
-    player_elo_surface_diff, opp_elo. Leakage-safe (pool = strictly-prior).
+    opp_style_radar_{axis} (the opponent's radar this match), opp_style_conf_{axis},
+    won, player_elo_surface_diff, opp_elo. Leakage-safe (pool = strictly-prior).
+    The retrieval is within-player, so this is exact on any player-complete subset
+    of `df` — which is what lets `compute_form_a` chunk it by player.
     """
     cur = df.select(
         _GRP, "opp_id", "match_uid",
@@ -97,6 +106,33 @@ def compute_form_a(
         pl.when(pl.col("sw") > 0).then(pl.col("swc") / pl.col("sw"))
             .otherwise(None).alias("mean_pool_conf"),
     )
+
+
+def compute_form_a(
+    df: pl.DataFrame,
+    h: float = H_DEFAULT,
+    lam: float = LAMBDA_DEFAULT,
+    window_days: int = WINDOW_DAYS_DEFAULT,
+    player_batch_size: int | None = _PLAYER_BATCH,
+) -> pl.DataFrame:
+    """`_form_a_core` chunked by player to bound the self-join's peak memory.
+
+    The retrieval is within-player (the join is on `player_id`), so processing a
+    disjoint subset of players is exact — each batch's `pairs` frame is bounded,
+    and the per-batch aggregates concatenate with no cross-batch interaction.
+    `player_batch_size=None` runs the whole frame at once (small inputs / tests).
+    """
+    if player_batch_size is None:
+        return _form_a_core(df, h, lam, window_days)
+    players = df.get_column(_GRP).unique().to_list()
+    parts = [
+        _form_a_core(
+            df.filter(pl.col(_GRP).is_in(players[i : i + player_batch_size])),
+            h, lam, window_days,
+        )
+        for i in range(0, len(players), player_batch_size)
+    ]
+    return pl.concat(parts) if parts else _form_a_core(df, h, lam, window_days)
 
 
 def combine_match_level(form_a: pl.DataFrame) -> pl.DataFrame:
@@ -158,3 +194,56 @@ def build_style_matchup_table(
     out.parent.mkdir(parents=True, exist_ok=True)
     table.write_parquet(out)
     return table
+
+
+# --- engine-computed transform feature (Form A, config-selectable) ---
+
+_OUTPUTS = [
+    "style_matchup_residual",
+    "style_matchup_n_eff_a",
+    "style_matchup_n_eff_b",
+    "style_matchup_conf",
+    "mean_opp_rating_pool",
+    "style_matchup_pool_conf",
+]
+
+
+def _assert_radar_as_of_time(df: pl.DataFrame) -> None:
+    """[F1] defensive guard against a radar-leakage regression.
+
+    The rigorous closed-left guarantee lives in the radar code (`_roll730` /
+    `_eff_n` use `closed="left"`, reviewed) and the `t_p < t_m` pool filter
+    (verify_matchup_a). This is a cheap sample check that the radar columns are
+    materialized and non-degenerate — catching a gross break (all-null or a
+    constant radar) that would silently invalidate the leakage story.
+    """
+    col = f"opp_style_radar_{_AXES[0]}"
+    s = df.get_column(col)
+    if s.null_count() == s.len():
+        raise ValueError(f"[F1] {col} entirely null — radar not materialized")
+    if s.drop_nulls().n_unique() <= 1:
+        raise ValueError(f"[F1] {col} constant — radar not rolling (possible leak)")
+
+
+def _matchup_transform(df: pl.DataFrame) -> pl.DataFrame:
+    """Engine transform: append the Form A style-matchup columns to the matrix
+    via the within-player kNN self-join (one row per match_uid/player_id)."""
+    _assert_radar_as_of_time(df)
+    ml = combine_match_level(compute_form_a(df))
+    return df.join(ml, on=["match_uid", _GRP], how="left")
+
+
+register_transform(
+    name="style_matchup",
+    func=_matchup_transform,
+    outputs=_OUTPUTS,
+    # base names — the engine resolves each to player_ + opp_ (the func reads the
+    # opp_ radar/conf and player_elo_surface_diff).
+    depends_on=(
+        [f"style_radar_{k}" for k in _AXES]
+        + [f"style_conf_{k}" for k in _AXES]
+        + ["elo_surface_diff"]
+    ),
+    raw_columns=["opp_elo"],
+    description="Form A joint-kNN style-matchup retrieval (whole-matrix self-join)",
+)

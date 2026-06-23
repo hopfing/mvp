@@ -681,6 +681,35 @@ class FeatureEngine:
 
         return result
 
+    def _expand_transform_requests(
+        self, feature_specs: list[str],
+    ) -> tuple[list[str], dict[str, list[str]]]:
+        """Map requested transform-OUTPUT specs to their transform feature.
+
+        A config selects output columns (e.g. ``style_matchup_residual``); the
+        producing transform is computed once. Returns the rewritten spec list
+        (each output replaced by its transform's name, deduped; non-outputs
+        kept as-is) and a ``{transform_name: [requested output cols]}`` map for
+        the load path. Must run BEFORE ``_resolve_dependencies`` (which would
+        ``registry.get`` an output name and fail).
+        """
+        rewritten: list[str] = []
+        requested: dict[str, list[str]] = {}
+        seen_transform: set[str] = set()
+        for spec in feature_specs:
+            _prefix, base_name, _full, _params = parse_feature_spec(spec)
+            transform = self._registry.transform_for_output(base_name)
+            if transform is None:
+                rewritten.append(spec)
+                continue
+            cols = requested.setdefault(transform.name, [])
+            if base_name not in cols:
+                cols.append(base_name)
+            if transform.name not in seen_transform:
+                rewritten.append(transform.name)
+                seen_transform.add(transform.name)
+        return rewritten, requested
+
     def _resolve_source_columns(
         self, feature_specs: list[str], extra_columns: list[str] | None = None,
     ) -> list[str]:
@@ -734,6 +763,11 @@ class FeatureEngine:
                 continue
             seen_bases.add(base_name)
 
+            # A transform's func reads these raw columns directly (can't be
+            # introspected from a df->df func); load them.
+            if feature_def.transform:
+                needed.update(feature_def.transform_columns)
+
             if feature_def.depends_on:
                 continue  # derived — references computed columns, not source
 
@@ -783,7 +817,9 @@ class FeatureEngine:
         self._feature_timings: list[tuple[str, str, float]] = []
         from tqdm import tqdm
 
-        # Resolve dependencies
+        # Rewrite requested transform outputs to their transform feature, then
+        # resolve dependencies (the transform's deps + the transform itself).
+        feature_specs, _ = self._expand_transform_requests(feature_specs)
         feature_specs = self._resolve_dependencies(feature_specs)
 
         # Categorize
@@ -791,10 +827,13 @@ class FeatureEngine:
         match_level_derived_specs: list[str] = []
         base_specs: list[str] = []
         derived_specs: list[str] = []
+        transform_specs: list[str] = []
         for spec in feature_specs:
             prefix, base_name, full_name, params = parse_feature_spec(spec)
             feature_def = self._registry.get(base_name)
-            if prefix is None:
+            if feature_def.transform:
+                transform_specs.append(spec)
+            elif prefix is None:
                 if feature_def.depends_on:
                     match_level_derived_specs.append(spec)
                 else:
@@ -1023,6 +1062,46 @@ class FeatureEngine:
             if added_cols:
                 df = df.drop(added_cols)
 
+        # Phase 7: transform features (whole-matrix, e.g. self-join retrieval).
+        # Run AFTER all per-row features are cached: the batched flow caches and
+        # drops dep columns, so reassemble them (player_ from cache + mirrored
+        # opp_), run the df->df func, and cache its output column group. Raw cols
+        # the transform reads (won, opp_elo) are preserved parquet columns.
+        for spec in tqdm(
+            transform_specs, desc="Phase 7: transforms",
+            leave=False, ncols=120, disable=not transform_specs,
+        ):
+            _prefix, base_name, _full, _params = parse_feature_spec(spec)
+            feature_def = self._registry.get(base_name)
+            cache_spec = base_name
+            if self._is_cached(cache_spec, cache_key):
+                continue
+
+            dep_cols_before = set(df.columns)
+            dep_cache_specs = [f"player_{d}" for d in feature_def.depends_on]
+            df = self._batch_join_cached(df, dep_cache_specs)
+            player_dep_cols = [
+                c for c in df.columns
+                if c not in dep_cols_before and c.startswith("player_")
+            ]
+            if player_dep_cols:
+                df = self._mirror_features(df, player_dep_cols)
+
+            t0_t = time.perf_counter()
+            df = feature_def.func(df)
+            self._feature_timings.append(
+                ("transform", cache_spec, time.perf_counter() - t0_t)
+            )
+            self._cache_feature(cache_spec, df, feature_def.outputs, cache_key)
+
+            added_cols = [c for c in df.columns if c not in dep_cols_before]
+            if added_cols:
+                df = df.drop(added_cols)
+
+        if transform_specs:
+            logger.info("Phase 7: %d transform(s) cached", len(transform_specs))
+            check_memory("ensure_cached: after transforms")
+
         self._log_timing_summary()
         elapsed = time.perf_counter() - t0
         logger.info("ensure_cached complete in %.1fs", elapsed)
@@ -1049,11 +1128,33 @@ class FeatureEngine:
         """
         join_on = ["match_uid", "player_id"]
 
+        # Transform outputs: load each producing transform's cached column group
+        # ONCE, taking only the requested outputs. These bypass the per-feature
+        # impute logic (they're not @feature columns) — a structural "no prior
+        # history" null stays null (NaN-tolerant model), never median-filled.
+        transform_requests: dict[str, list[str]] = {}
+        passthrough_specs: list[str] = []
+        for spec in feature_specs:
+            _p, base_name, _f, _pm = parse_feature_spec(spec)
+            transform = self._registry.transform_for_output(base_name)
+            if transform is not None:
+                cols = transform_requests.setdefault(transform.name, [])
+                if base_name not in cols:
+                    cols.append(base_name)
+            else:
+                passthrough_specs.append(spec)
+
+        for tname, out_cols in transform_requests.items():
+            cached = self._load_cached_feature(tname).select(
+                [*join_on, *out_cols]
+            )
+            base_df = base_df.join(cached, on=join_on, how="left")
+
         # Group specs by their cache spec to avoid duplicate loads
         specs_to_load: list[tuple[str, str]] = []  # (cache_spec, col_name)
         seen: set[str] = set()
 
-        for spec in feature_specs:
+        for spec in passthrough_specs:
             prefix, base_name, full_name, params = parse_feature_spec(spec)
             col_name = build_column_name(full_name, params)
             feature_def = self._registry.get(base_name)
@@ -1112,7 +1213,7 @@ class FeatureEngine:
 
         # Mirror player_ → opp_ for any opp specs
         player_cols_to_mirror: list[str] = []
-        for spec in feature_specs:
+        for spec in passthrough_specs:
             prefix, base_name, full_name, params = parse_feature_spec(spec)
             if prefix == "opp":
                 player_col = build_column_name(f"player_{base_name}", params)
@@ -1153,6 +1254,8 @@ class FeatureEngine:
                     f"(use 'player_{spec}' instead)"
                 )
 
+        # Rewrite requested transform outputs to their transform feature first.
+        feature_specs, _ = self._expand_transform_requests(feature_specs)
         # Resolve dependencies first
         feature_specs = self._resolve_dependencies(feature_specs)
 
@@ -1161,14 +1264,18 @@ class FeatureEngine:
         # - match_level_derived_specs: no prefix, has depends_on (needs deps first)
         # - base_specs: player/opp prefixed, no depends_on
         # - derived_specs: player/opp prefixed, has depends_on
+        # - transform_specs: whole-matrix df->df features (run last)
         match_level_specs = []
         match_level_derived_specs = []
         base_specs = []
         derived_specs = []
+        transform_specs = []
         for spec in feature_specs:
             prefix, base_name, full_name, params = parse_feature_spec(spec)
             feature_def = self._registry.get(base_name)
-            if prefix is None:
+            if feature_def.transform:
+                transform_specs.append(spec)
+            elif prefix is None:
                 if feature_def.depends_on:
                     match_level_derived_specs.append(spec)
                 else:
@@ -1410,6 +1517,13 @@ class FeatureEngine:
             df = self._compute_and_cache_feature(
                 df, base_name, cache_spec, col_name, params, cache_key,
             )
+
+        # Phase 7: transform features (whole-matrix df->df). Runs last — all the
+        # per-row dep columns (opp_style_radar_*, opp_style_conf_*,
+        # player_elo_surface_diff) and raw cols (won, opp_elo) are now in df.
+        for spec in transform_specs:
+            _prefix, base_name, _full, _params = parse_feature_spec(spec)
+            df = self._registry.get(base_name).func(df)
 
         elapsed = time.perf_counter() - t0
         logger.info("Feature computation complete in %.1fs", elapsed)

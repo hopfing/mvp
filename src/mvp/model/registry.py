@@ -31,6 +31,11 @@ class FeatureDef:
     # feature (no separate artifact to sync).
     transform: bool = False
     outputs: list[str] = field(default_factory=list)
+    # Raw matches.parquet columns a transform's func reads directly (e.g.
+    # "opp_elo"). Unlike an expr feature, a (df)->df transform can't be
+    # introspected for its column needs, so it declares them; the engine adds
+    # them to the load set. (Per-row deps come via ``depends_on``.)
+    transform_columns: list[str] = field(default_factory=list)
     # Imputation strategy:
     #   "median" — per-circuit median (default)
     #   numeric constant — fill missing with that value
@@ -254,6 +259,7 @@ def register_transform(
     func: Callable[[pl.DataFrame], pl.DataFrame],
     outputs: list[str],
     depends_on: list[str] | None = None,
+    raw_columns: list[str] | None = None,
     description: str = "",
 ) -> None:
     """Register a whole-matrix transform feature (``func``: df -> df).
@@ -262,6 +268,9 @@ def register_transform(
     self-join) and is run in a dedicated engine phase after ``depends_on`` are
     materialized. A request for any output column resolves to this feature; its
     outputs cache as a column group under the standard cache key.
+
+    ``raw_columns`` are matches.parquet columns the func reads directly (the
+    engine can't introspect them from a df->df func, so they're declared here).
     """
     get_registry().register(
         FeatureDef(
@@ -274,5 +283,6 @@ def register_transform(
             impute=None,
             transform=True,
             outputs=outputs,
+            transform_columns=raw_columns or [],
         )
     )
