@@ -261,7 +261,20 @@ def _register_radar(axis: str) -> None:
         return pl.col(f"player_style_axis_{_axis}") - total / len(_AXES)
 
 
+def _register_conf(axis: str, source_present: pl.Expr) -> None:
+    """Per-spoke confidence n/(n+kappa) — the effective sample behind the axis
+    (the same weight the shrinkage uses). Used by the Form A pool-quality
+    diagnostic (mean_pool_conf, review F8). Always defined in [0, 1)."""
+    @feature(name=f"style_conf_{axis}", params=[], mirror=True, impute=None,
+             description=f"{axis} per-spoke radar confidence n/(n+kappa)")
+    def _f(_sp: pl.Expr = source_present) -> pl.Expr:
+        n = _eff_n(_sp)
+        return n / (n + _KAPPA)
+
+
 for _a in _AXES:
     _register_shrunk(_a, _SOURCE_PRESENT[_a])
 for _a in _AXES:
     _register_radar(_a)
+for _a in _AXES:
+    _register_conf(_a, _SOURCE_PRESENT[_a])

@@ -64,6 +64,8 @@ def compute_form_a(
         *[pl.col(f"opp_style_radar_{k}").alias(f"o_{k}") for k in _AXES],
         _residual().alias("resid"),
         pl.col("opp_elo").alias("opp_elo"),
+        # pool opponent's worst-spoke radar confidence (F8 diagnostic input)
+        pl.min_horizontal([pl.col(f"opp_style_conf_{k}") for k in _AXES]).alias("minconf"),
     )
 
     pairs = cur.join(pool, on=_GRP).filter(
@@ -78,11 +80,11 @@ def compute_form_a(
 
     agg = pairs.group_by("match_uid", _GRP).agg(
         pl.col("opp_id").first(),  # constant within the (match_uid, player_id) group
-
         sw=pl.col("w").sum(),
         swr=(pl.col("w") * pl.col("resid")).sum(),
         sw2=(pl.col("w") ** 2).sum(),
         swrat=(pl.col("w") * pl.col("opp_elo")).sum(),
+        swc=(pl.col("w") * pl.col("minconf")).sum(),
     )
     return agg.select(
         "match_uid", _GRP, "opp_id",
@@ -91,6 +93,9 @@ def compute_form_a(
             .otherwise(None).alias("n_eff_a"),
         pl.when(pl.col("sw") > 0).then(pl.col("swrat") / pl.col("sw"))
             .otherwise(None).alias("mean_opp_rating"),
+        # kernel-weighted pool radar quality (F8): low => shrinkage-homogenized pool
+        pl.when(pl.col("sw") > 0).then(pl.col("swc") / pl.col("sw"))
+            .otherwise(None).alias("mean_pool_conf"),
     )
 
 
@@ -115,6 +120,7 @@ def combine_match_level(form_a: pl.DataFrame) -> pl.DataFrame:
         pl.col("n_eff_b").alias("style_matchup_n_eff_b"),
         pl.min_horizontal("n_eff_a", "n_eff_b").alias("style_matchup_conf"),
         pl.col("mean_opp_rating").alias("mean_opp_rating_pool"),
+        pl.col("mean_pool_conf").alias("style_matchup_pool_conf"),
     )
 
 
@@ -140,7 +146,11 @@ def build_style_matchup_table(
     from mvp.model.engine import FeatureEngine
 
     eng = FeatureEngine(matches_path=Path(matches_path), cache_dir=Path(cache_dir))
-    feats = [f"opp_style_radar_{k}" for k in _AXES] + ["player_elo_surface_diff"]
+    feats = (
+        [f"opp_style_radar_{k}" for k in _AXES]
+        + [f"opp_style_conf_{k}" for k in _AXES]
+        + ["player_elo_surface_diff"]
+    )
     df = eng.compute(feats, extra_columns=["won", "opp_elo"])
     table = combine_match_level(compute_form_a(df, h=h, lam=lam, window_days=window_days))
 
