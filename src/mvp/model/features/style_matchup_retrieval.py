@@ -177,20 +177,21 @@ def combine_match_level(form_a: pl.DataFrame) -> pl.DataFrame:
     )
     return m.select(
         "match_uid", _GRP,
-        # residual (the signal): player, opp, diff
+        # residual (the signal): player, opp, diff (diff is player-perspective,
+        # mirror=False convention -> player_ prefix, like player_elo_surface_diff)
         pl.col("feat_a").alias("player_vs_opp_style_resid"),
         pl.col("feat_b").alias("opp_vs_opp_style_resid"),
-        (pl.col("feat_a") - pl.col("feat_b")).alias("vs_opp_style_resid_diff"),
+        (pl.col("feat_a") - pl.col("feat_b")).alias("player_vs_opp_style_resid_diff"),
         # flat (h->inf, style-blind) control: player, opp, diff
         pl.col("feat_a_flat").alias("player_vs_opp_style_resid_flat"),
         pl.col("feat_b_flat").alias("opp_vs_opp_style_resid_flat"),
-        (pl.col("feat_a_flat") - pl.col("feat_b_flat")).alias("vs_opp_style_resid_flat_diff"),
+        (pl.col("feat_a_flat") - pl.col("feat_b_flat")).alias("player_vs_opp_style_resid_flat_diff"),
         # style-specific excess (kernel − flat): the matchup signal net of general
         # form — the purest non-transitivity component. player, opp, diff.
         (pl.col("feat_a") - pl.col("feat_a_flat")).alias("player_vs_opp_style_resid_xs"),
         (pl.col("feat_b") - pl.col("feat_b_flat")).alias("opp_vs_opp_style_resid_xs"),
         ((pl.col("feat_a") - pl.col("feat_a_flat"))
-         - (pl.col("feat_b") - pl.col("feat_b_flat"))).alias("vs_opp_style_resid_xs_diff"),
+         - (pl.col("feat_b") - pl.col("feat_b_flat"))).alias("player_vs_opp_style_resid_xs_diff"),
         # effective pool size (reliability): player, opp
         pl.col("n_eff_a").alias("player_vs_opp_style_neff"),
         pl.col("n_eff_b").alias("opp_vs_opp_style_neff"),
@@ -243,12 +244,12 @@ def build_style_matchup_table(
 
 _OUTPUTS = [
     # residual (the signal) + flat (h->inf) control: per-player + diff
-    "player_vs_opp_style_resid", "opp_vs_opp_style_resid", "vs_opp_style_resid_diff",
+    "player_vs_opp_style_resid", "opp_vs_opp_style_resid", "player_vs_opp_style_resid_diff",
     "player_vs_opp_style_resid_flat", "opp_vs_opp_style_resid_flat",
-    "vs_opp_style_resid_flat_diff",
+    "player_vs_opp_style_resid_flat_diff",
     # style-specific excess (kernel - flat): per-player + diff
     "player_vs_opp_style_resid_xs", "opp_vs_opp_style_resid_xs",
-    "vs_opp_style_resid_xs_diff",
+    "player_vs_opp_style_resid_xs_diff",
     # reliability / pool descriptors: per-player
     "player_vs_opp_style_neff", "opp_vs_opp_style_neff",
     "player_vs_opp_style_pool_elo", "opp_vs_opp_style_pool_elo",
