@@ -178,3 +178,90 @@ def style_z_error() -> pl.Expr:
          depends_on=["style_rally_lean"], description="A5 rally axis: LOO z-score of rally lean")
 def style_z_rally() -> pl.Expr:
     return _loo_z("player_style_rally_lean")
+
+
+# =============================================================================
+# Stage 2b: shrink-to-peer-prior, then within-player centering -> the radar
+#
+# Step 4 (spec §4): each z-axis is shrunk toward a prior, weighted by how much
+# data the player has on that axis (w = n/(n+kappa)). A data-rich axis stays near
+# the player's own z; a sparse or absent axis collapses toward the prior — so
+# every player carries a full 5-axis vector (required for the Stage-3 similarity),
+# with thin axes pulled to a sensible default rather than reading as a confident
+# extreme. Shrink BEFORE centering, in z-space, so the zero-sum centering
+# invariant holds (review MLE-4).
+#
+# v1 prior = the field mean (z=0): an unknown tendency should default to
+# field-average. The circuit x surface peer prior (spec D-SHRINK) is the deferred
+# refinement — it needs raw partition columns the engine doesn't load for a
+# derived feature, so it lands as its own change.
+#
+# Step 5: within-player center — subtract the player's own across-axis mean.
+# Strips overall level, leaving the lean (type-not-level). The 5 outputs sum to
+# zero by construction.
+# =============================================================================
+
+_AXES = ["serve", "net", "aggression", "error", "rally"]
+
+# Shrinkage strength: w = n/(n+kappa) hits 0.5 at n=10 matches on the axis
+# (spec D-SHRINK; tunable).
+_KAPPA = 10.0
+
+# Per-axis "this match carries data for the axis" indicator (drives the
+# effective sample n_k). Mirrors each axis's signal source.
+_SOURCE_PRESENT: dict[str, pl.Expr] = {
+    "serve": pl.col("svc_aces").is_not_null(),
+    "net": pl.col("player_sp_net_points_played").is_not_null(),
+    "aggression": pl.col("player_sp_winners").is_not_null(),
+    "error": pl.col("player_sp_unforced_errors").is_not_null(),
+    "rally": pl.col("rally_points_with_data") > 0,
+}
+
+
+def _eff_n(source_present: pl.Expr) -> pl.Expr:
+    """Per-player count of source-present matches over the radar window."""
+    return (
+        source_present.cast(pl.Int64)
+        .rolling_sum_by(by=_DATE, window_size=f"{_RADAR_DAYS}d", closed="left")
+        .over(_GRP)
+        .fill_null(0)
+    )
+
+
+def _shrink(z_col: str, source_present: pl.Expr) -> pl.Expr:
+    """Shrink the z-axis toward the field mean (0), weighted by effective sample.
+
+    w = n/(n+kappa): a data-rich axis keeps its own z, a thin/absent axis decays
+    to 0 (field-average). An absent axis (z null, n=0) -> 0, so every player
+    carries a full 5-axis vector for centering.
+    """
+    z = pl.col(z_col)
+    n = _eff_n(source_present)
+    w = n / (n + _KAPPA)
+    return pl.when(z.is_not_null()).then(w * z).otherwise(0.0)
+
+
+def _register_shrunk(axis: str, source_present: pl.Expr) -> None:
+    @feature(name=f"style_axis_{axis}", params=[], mirror=True, impute=None,
+             depends_on=[f"style_z_{axis}"],
+             description=f"{axis} axis: z shrunk toward field mean, weight n/(n+kappa)")
+    def _f(_z: str = f"player_style_z_{axis}", _sp: pl.Expr = source_present) -> pl.Expr:
+        return _shrink(_z, _sp)
+
+
+def _register_radar(axis: str) -> None:
+    @feature(name=f"style_radar_{axis}", params=[], mirror=True, impute=None,
+             depends_on=[f"style_axis_{b}" for b in _AXES],
+             description=f"{axis} radar axis: within-player centered lean (sums to 0 across axes)")
+    def _f(_axis: str = axis) -> pl.Expr:
+        cols = [f"player_style_axis_{b}" for b in _AXES]
+        total = pl.col(cols[0])
+        for c in cols[1:]:
+            total = total + pl.col(c)
+        return pl.col(f"player_style_axis_{_axis}") - total / len(_AXES)
+
+
+for _a in _AXES:
+    _register_shrunk(_a, _SOURCE_PRESENT[_a])
+for _a in _AXES:
+    _register_radar(_a)

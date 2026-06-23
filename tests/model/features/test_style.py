@@ -578,9 +578,9 @@ class TestStyleFeatureCount:
             if self._is_style_feature(n)
         ]
         # style.py: 29 single + 29 diff + 15 matchup + 8 bool + 7 interaction = 88
-        # style_radar.py: 5 rolling signals + 5 LOO z-axes = 10 (radar build in progress)
-        assert len(style_features) == 98, (
-            f"Expected 98 style features, got {len(style_features)}: {sorted(style_features)}"
+        # style_radar.py: 5 signals + 5 z-axes + 5 shrunk axes + 5 radar = 20
+        assert len(style_features) == 108, (
+            f"Expected 108 style features, got {len(style_features)}: {sorted(style_features)}"
         )
 
     def test_no_duplicate_registrations(self):
