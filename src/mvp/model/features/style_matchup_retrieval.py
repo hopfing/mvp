@@ -86,6 +86,13 @@ def _form_a_core(
     for k in _AXES[1:]:
         dist2 = dist2 + (pl.col(f"b_{k}") - pl.col(f"o_{k}")) ** 2
     pairs = pairs.with_columns((-dist2 / (2.0 * h * h)).exp().alias("w"))
+    # Drop pairs with no residual signal (null Elo baseline, e.g. a pool match
+    # before the opponent had a rating) or a null radar, so every aggregate below
+    # shares ONE support. Otherwise a null-resid pair adds weight to the kernel
+    # denominator (Σw) without contributing to the numerator (Σw·resid) — diluting
+    # feat_a — and the flat control's pl.len() would count it too, so the flat
+    # would not equal the kernel's h->inf limit.
+    pairs = pairs.filter(pl.col("resid").is_not_null() & pl.col("w").is_not_null())
 
     agg = pairs.group_by("match_uid", _GRP).agg(
         pl.col("opp_id").first(),  # constant within the (match_uid, player_id) group
@@ -94,6 +101,10 @@ def _form_a_core(
         sw2=(pl.col("w") ** 2).sum(),
         swrat=(pl.col("w") * pl.col("opp_elo")).sum(),
         swc=(pl.col("w") * pl.col("minconf")).sum(),
+        # flat (h->inf) control: uniform weights over the SAME pairs — the
+        # unconditional pool-mean residual, kernel/style switched off.
+        sr=pl.col("resid").sum(),
+        npairs=pl.len(),
     )
     return agg.select(
         "match_uid", _GRP, "opp_id",
@@ -105,6 +116,8 @@ def _form_a_core(
         # kernel-weighted pool radar quality (F8): low => shrinkage-homogenized pool
         pl.when(pl.col("sw") > 0).then(pl.col("swc") / pl.col("sw"))
             .otherwise(None).alias("mean_pool_conf"),
+        # flat control: same ridge, uniform weights (style-blind)
+        (pl.col("sr") / (pl.col("npairs") + lam)).alias("feat_a_flat"),
     )
 
 
@@ -143,6 +156,7 @@ def combine_match_level(form_a: pl.DataFrame) -> pl.DataFrame:
         pl.col(_GRP).alias("_opp_pid"),
         pl.col("feat_a").alias("feat_b"),
         pl.col("n_eff_a").alias("n_eff_b"),
+        pl.col("feat_a_flat").alias("feat_b_flat"),
     )
     # pair this row to its opponent's row precisely: this.opp_id == opp.player_id
     # (robust to anything but a clean 2-perspective match_uid).
@@ -157,6 +171,8 @@ def combine_match_level(form_a: pl.DataFrame) -> pl.DataFrame:
         pl.min_horizontal("n_eff_a", "n_eff_b").alias("style_matchup_conf"),
         pl.col("mean_opp_rating").alias("mean_opp_rating_pool"),
         pl.col("mean_pool_conf").alias("style_matchup_pool_conf"),
+        # flat (h->inf, style-blind) control contrast — the kernel-off baseline
+        (pl.col("feat_a_flat") - pl.col("feat_b_flat")).alias("style_matchup_residual_flat"),
     )
 
 
@@ -205,6 +221,7 @@ _OUTPUTS = [
     "style_matchup_conf",
     "mean_opp_rating_pool",
     "style_matchup_pool_conf",
+    "style_matchup_residual_flat",  # h->inf control (kernel off, style-blind)
 ]
 
 
