@@ -579,8 +579,9 @@ class TestStyleFeatureCount:
         ]
         # style.py: 29 single + 29 diff + 15 matchup + 8 bool + 7 interaction = 88
         # style_radar.py: 5 signals + 5 z-axes + 5 shrunk axes + 5 radar = 20
-        assert len(style_features) == 108, (
-            f"Expected 108 style features, got {len(style_features)}: {sorted(style_features)}"
+        # style_matchup.py: 5 resid-vs-axis (Form B lookup) = 5
+        assert len(style_features) == 113, (
+            f"Expected 113 style features, got {len(style_features)}: {sorted(style_features)}"
         )
 
     def test_no_duplicate_registrations(self):
