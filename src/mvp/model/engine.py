@@ -495,7 +495,18 @@ class FeatureEngine:
         for name in sorted(self._registry.list_features()):
             feat = self._registry.get(name)
             try:
-                sig = inspect.getsource(feat.func)
+                if feat.transform:
+                    # A transform's func calls module-level helpers (e.g.
+                    # combine_match_level / compute_form_a) and declares its
+                    # column names in `outputs` (data, not code) — neither is in
+                    # the func source, so a change there would leave the cache
+                    # stale under an unchanged key. Fingerprint the whole defining
+                    # module + the output names instead.
+                    mod = inspect.getmodule(feat.func)
+                    sig = inspect.getsource(mod) if mod else inspect.getsource(feat.func)
+                    sig += "\noutputs=" + ",".join(feat.outputs)
+                else:
+                    sig = inspect.getsource(feat.func)
             except OSError:
                 sig = feat.func.__code__.co_code.hex()
             sources.append(f"{name}:{sig}")
