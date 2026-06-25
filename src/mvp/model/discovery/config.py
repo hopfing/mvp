@@ -304,7 +304,10 @@ class DiscoveryConfig(BaseModel):
             "features": features_dict,
             "model": model_dump,
             "validation": self._ordered_validation_dump(),
-            "metrics": {"primary": self.discovery.metric},
+            # objective = the FS metric (the optimization target for a downstream
+            # tune + early stopping). A tune reuses it as-is, or the user edits it
+            # for a different metric. (No `primary` — nothing reads it.)
+            "metrics": {"objective": [self.discovery.metric]},
         }
         if self.description:
             result = {"description": self.description, **result}

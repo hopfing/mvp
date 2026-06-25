@@ -916,8 +916,10 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         help="Search strategy (default: grid)",
     )
     tune_parser.add_argument(
-        "--metric", type=str, nargs="+", default=["log_loss"],
-        help="Metric(s) to optimize (default: log_loss). Multiple = multi-objective (bayesian only).",
+        "--metric", type=str, nargs="+", default=None,
+        help="[grid + IID/projection only] Metric(s) to optimize. Classification "
+             "bayesian tuning reads metrics.objective from the config and rejects "
+             "--metric.",
     )
     tune_parser.add_argument(
         "--memory-limit", type=int, default=None,
@@ -1258,11 +1260,6 @@ def cmd_tune(args: argparse.Namespace) -> int:
             f"(tried models/ and projections/)"
         )
 
-    # Auto-detect projection configs and default metric to mae
-    if _is_projection_discovery(config_path):
-        if args.metric == ["log_loss"]:
-            args.metric = ["mae"]
-
     param_overrides = _parse_param_overrides(args.param)
 
     if args.limit is not None and args.cap is not None:
@@ -1271,10 +1268,18 @@ def cmd_tune(args: argparse.Namespace) -> int:
     if args.strategy == "grid":
         from mvp.model.grid_tuning import GridTuner
 
+        # Grid still takes its objective from --metric (issue #96); default it
+        # locally now that --metric has no global default — mae for projection
+        # regression, log_loss otherwise.
+        grid_metric = args.metric
+        if grid_metric is None:
+            grid_metric = (
+                ["mae"] if _is_projection_discovery(config_path) else ["log_loss"]
+            )
         tuner = GridTuner(
             config_path=config_path,
             param_overrides=param_overrides or None,
-            metric=args.metric[0],
+            metric=grid_metric[0],
         )
 
         total = tuner._count_combos()
@@ -1313,10 +1318,21 @@ def cmd_tune(args: argparse.Namespace) -> int:
                 "--limit or --cap is required for bayesian strategy"
             )
 
+        # Classification bayesian: the objective is metrics.objective in the
+        # config (one source shared by tuning, early stopping, and the pruner).
+        # Reject --metric here so it can't silently diverge from the config.
+        # IID/projection legitimately still uses --metric (issue #96).
+        if not _is_projection_discovery(config_path) and args.metric is not None:
+            raise ValueError(
+                "--metric is not accepted for classification bayesian tuning; set "
+                "metrics.objective in the config instead (it drives tuning, early "
+                f"stopping, and the pruner together). Got --metric {args.metric}."
+            )
+
         tuner = HyperparamTuner(
             config_path=config_path,
             param_overrides=param_overrides or None,
-            metrics=args.metric,
+            metrics=args.metric,  # IID uses it (issue #96); classification reads the config
             n_startup_trials=args.n_startup_trials,
         )
 

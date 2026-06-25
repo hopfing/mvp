@@ -220,10 +220,41 @@ class ValidationConfig(_StrictModel):
 
 
 class MetricsConfig(_StrictModel):
-    """Metrics configuration."""
+    """Metrics configuration.
+
+    `objective` is the optimization target (tuning + early stopping); `primary`
+    and `secondary` are REPORTING metrics only (what to compute/display), never
+    an optimization input.
+    """
 
     primary: str = "log_loss"
     secondary: list[str] = ["accuracy", "brier_score", "roc_auc"]
+    # No default: the objective is set explicitly wherever it's consumed (tuner /
+    # early stopping) — never a silent log_loss fallback. A multi-element list =
+    # multi-objective (Pareto) tuning; valid only with ES off (see
+    # ExperimentConfig.validate_early_stopping_objective).
+    objective: list[str] | None = None
+
+    @field_validator("objective")
+    @classmethod
+    def _validate_objective(cls, v: list[str] | None) -> list[str] | None:
+        # Imported here, not at module top: config is a foundational module and
+        # metrics pulls in sklearn — keep that off the config import path.
+        from mvp.model.metrics import OPTIMIZABLE_METRICS
+
+        if v is None:
+            return v
+        if len(v) == 0:
+            raise ValueError("metrics.objective must be non-empty when set")
+        if len(v) != len(set(v)):
+            raise ValueError(f"metrics.objective has duplicate metrics: {v}")
+        unknown = [m for m in v if m not in OPTIMIZABLE_METRICS]
+        if unknown:
+            raise ValueError(
+                f"metrics.objective has unknown metric(s) {unknown}; valid "
+                f"optimization metrics: {sorted(OPTIMIZABLE_METRICS)}"
+            )
+        return v
 
 
 class SampleWeightConfig(_StrictModel):
@@ -318,9 +349,10 @@ class EarlyStoppingConfig(_StrictModel):
     """XGBoost early stopping (spec 2026-06-24). Off by default.
 
     The early-stop metric is NOT set here — it's inherited from
-    ``metrics.primary`` (the run's objective) so it can't silently drift from
-    what the run actually optimizes. ``ceiling`` is the n_estimators ceiling that
-    early stopping selects rounds within.
+    ``metrics.objective`` (the run's objective; the ES validator requires it to be
+    a single metric) so it can't silently drift from what the run optimizes.
+    ``ceiling`` is the n_estimators ceiling that early stopping selects rounds
+    within.
     """
 
     enabled: bool = False
@@ -366,6 +398,31 @@ class ExperimentConfig(_StrictModel):
             raise ValueError(
                 f"MTL requires model.type='xgboost'; got {self.model.type!r}"
             )
+        return self
+
+    @model_validator(mode="after")
+    def validate_early_stopping_objective(self) -> "ExperimentConfig":
+        """Early stopping stops on a single scalar, so it needs exactly one
+        objective metric.
+
+        Scoped to ES: plain runs (no tuning, no ES) leave `metrics.objective`
+        None and never trip this. The tuner enforces its own "objective required"
+        in __init__ — not here — so non-tuning configs aren't forced to set it.
+        """
+        es = self.early_stopping
+        if es is not None and es.enabled:
+            obj = self.metrics.objective
+            if not obj:
+                raise ValueError(
+                    "early_stopping.enabled requires metrics.objective "
+                    "(the metric to early-stop on)"
+                )
+            if len(obj) > 1:
+                raise ValueError(
+                    "early_stopping needs a single objective metric; "
+                    f"metrics.objective is multi-objective ({obj}). Pareto tuning "
+                    "and early stopping are mutually exclusive."
+                )
         return self
 
     @classmethod

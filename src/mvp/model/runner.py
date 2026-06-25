@@ -1069,8 +1069,8 @@ class ExperimentRunner:
                         and self.config.model.type == "xgboost"
                     ):
                         # Two-stage early stopping (sklearn or MTL xgb.train path).
-                        # Stops on metrics.primary (the run's objective), refits on
-                        # full train at best_iteration. FS scorer is NOT this path.
+                        # Stops on metrics.objective[0] (the run's objective),
+                        # refits on full train at best_iteration. Not the FS path.
                         params = self.config.model.params or {}
 
                         def _es_factory(n_rounds: int):
@@ -1090,7 +1090,7 @@ class ExperimentRunner:
                             _es_factory, X_train, y_train_for_fit, train_weights,
                             train_df["effective_match_date"].to_numpy(),
                             _ts.date() if hasattr(_ts, "date") else _ts,
-                            es, metric=self.config.metrics.primary,
+                            es, metric=self.config.metrics.objective[0],
                             lambda_over=params.get("lambda_over"), is_mtl=is_mtl,
                         )
                     else:
@@ -1216,11 +1216,27 @@ class ExperimentRunner:
                         outer_y_prob = np.concatenate(
                             [all_predictions[i]["y_prob"] for i in outer_iter_idxs]
                         )
-                        outer_ll = float(compute_metrics(
+                        # Prune on the tuning OBJECTIVE, not a hardcoded log_loss:
+                        # a single-objective study ranks/stops on metrics.objective,
+                        # so the pruner must too (else it kills trials by a metric
+                        # the study isn't optimizing). objective is single here (the
+                        # ES validator / single-objective pruning both guarantee it).
+                        obj = self.config.metrics.objective
+                        prune_metric = obj[0] if obj else "log_loss"
+                        outer_val = float(compute_metrics(
                             outer_y_true, outer_y_prob, lambda_over=lambda_over_eval,
-                        ).get("log_loss", float("nan")))
-                        if not np.isnan(outer_ll):
-                            trial.report(outer_ll, step=current_outer)
+                        ).get(prune_metric, float("nan")))
+                        if np.isnan(outer_val):
+                            # The objective should be in the computed metrics (the
+                            # study optimizes it). If not, skip pruning rather than
+                            # prune on a direction-mismatched log_loss fallback.
+                            run_logger.warning(
+                                "pruner: objective %r missing from computed metrics; "
+                                "skipping prune at outer fold %d",
+                                prune_metric, current_outer,
+                            )
+                        else:
+                            trial.report(outer_val, step=current_outer)
                             if trial.should_prune():
                                 # Inline import: runner is also called from
                                 # `mvp model` (no optuna dep). Importing at the

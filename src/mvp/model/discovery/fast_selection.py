@@ -149,6 +149,7 @@ def _make_metric_fn(
     )
 
     from mvp.model.metrics import (
+        OPTIMIZABLE_METRICS,
         compute_asymmetric_logloss,
         compute_beta_tail_score,
         compute_calibration_error,
@@ -182,6 +183,12 @@ def _make_metric_fn(
         "weighted_concordance": lambda yt, yp: compute_weighted_concordance(yt, yp),
         "partial_auc_tail": lambda yt, yp: compute_partial_auc_tail(yt, yp),
     }
+    # Drift guard: the config-load objective validator trusts OPTIMIZABLE_METRICS
+    # to mirror these keys exactly. Keep them in lockstep.
+    assert set(metric_fns) == OPTIMIZABLE_METRICS, (
+        "OPTIMIZABLE_METRICS out of sync with _make_metric_fn: "
+        f"{set(metric_fns) ^ OPTIMIZABLE_METRICS}"
+    )
     if metric not in metric_fns:
         # Fall back to full compute_metrics for unknown metrics
         return lambda yt, yp: compute_metrics(yt, yp, lambda_over=lambda_over)[metric]

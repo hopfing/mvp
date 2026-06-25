@@ -291,6 +291,9 @@ model:
     # Full logistic search space (C + l1_ratio) so the baseline is complete and
     # is enqueued as trial 0. A partial config intentionally skips the baseline.
     l1_ratio: 0.0
+metrics:
+  objective:
+    - log_loss
 validation:
   type: walk_forward
   n_splits: 2
@@ -356,7 +359,6 @@ validation:
             matches_path=sample_matches,
             cache_dir=tmp_path / "cache",
             state_dir=tmp_path / "tuning",
-            metrics=["log_loss"],
         )
         tuner.run(n_trials=2)
 
@@ -376,7 +378,6 @@ validation:
             matches_path=sample_matches,
             cache_dir=tmp_path / "cache",
             state_dir=tmp_path / "tuning",
-            metrics=["log_loss"],
         )
         tuner.run(n_trials=1)
 
@@ -393,7 +394,6 @@ validation:
             matches_path=sample_matches,
             cache_dir=tmp_path / "cache",
             state_dir=tmp_path / "tuning",
-            metrics=["log_loss"],
         )
         tuner1 = HyperparamTuner(**kwargs)
         tuner1.run(n_trials=2)
@@ -406,14 +406,20 @@ validation:
     def test_multi_objective(self, sample_config, sample_matches, tmp_path):
         """Tuner supports multi-objective optimization."""
         import mlflow
+        import yaml
         mlflow.set_tracking_uri((tmp_path / "mlruns").as_uri())
+
+        # Multi-objective = a 2-metric objective in the config (ES off). The
+        # classification tuner reads metrics.objective, not a `metrics=` arg.
+        cfg = yaml.safe_load(sample_config.read_text())
+        cfg["metrics"]["objective"] = ["log_loss", "calibration_error"]
+        sample_config.write_text(yaml.safe_dump(cfg))
 
         tuner = HyperparamTuner(
             config_path=sample_config,
             matches_path=sample_matches,
             cache_dir=tmp_path / "cache",
             state_dir=tmp_path / "tuning",
-            metrics=["log_loss", "calibration_error"],
         )
         tuner.run(n_trials=2)
 

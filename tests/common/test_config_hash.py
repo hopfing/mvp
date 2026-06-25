@@ -144,14 +144,23 @@ def test_date_range_change_produces_different_fingerprint():
     assert compute_fingerprint(_from_dict(base)) != compute_fingerprint(_from_dict(different))
 
 
-def test_metrics_primary_change_produces_different_fingerprint():
-    """metrics.primary is provenance: documents which FS metric selected
-    these features. Different primary = different config row, even if
-    training output is identical."""
+def test_metrics_objective_change_produces_different_fingerprint():
+    """metrics.objective is the optimization target (tuning / early stopping /
+    pruner) — a training-affecting input, so it changes the fingerprint."""
+    base = _make_base_config_dict()
+    base["metrics"]["objective"] = ["log_loss"]
+    different = copy.deepcopy(base)
+    different["metrics"]["objective"] = ["brier_score"]
+    assert compute_fingerprint(_from_dict(base)) != compute_fingerprint(_from_dict(different))
+
+
+def test_metrics_primary_change_does_not_change_fingerprint():
+    """metrics.primary is descriptive only now (nothing reads it for training);
+    it must NOT affect the fingerprint."""
     base = _make_base_config_dict()
     different = copy.deepcopy(base)
     different["metrics"]["primary"] = "brier_score"
-    assert compute_fingerprint(_from_dict(base)) != compute_fingerprint(_from_dict(different))
+    assert compute_fingerprint(_from_dict(base)) == compute_fingerprint(_from_dict(different))
 
 
 def test_feature_addition_changes_fingerprint():

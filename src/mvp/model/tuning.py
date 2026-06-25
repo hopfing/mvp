@@ -268,7 +268,6 @@ class HyperparamTuner:
         n_startup_trials: int | None = None,
     ) -> None:
         self.config_path = Path(config_path)
-        self.metrics = metrics or ["log_loss"]
         self.matches_path = matches_path
         self.cache_dir = cache_dir
         self.n_startup_trials = n_startup_trials
@@ -277,6 +276,23 @@ class HyperparamTuner:
             self.base_config = yaml.safe_load(f)
 
         self.is_iid = _is_iid_config(self.base_config)
+
+        # Objective source. CLASSIFICATION: metrics.objective from the config —
+        # the single source shared with early stopping + the pruner; no --metric,
+        # no log_loss default, absent = hard error (never a silent fallback to an
+        # arbitrary metric). A multi-element list = multi-objective (Pareto).
+        # IID/projection keeps the `metrics=` (--metric) mechanism for now —
+        # regression regime, no metrics block in serve_model configs (issue #96).
+        if self.is_iid:
+            self.metrics = metrics or ["mae"]
+        else:
+            objective = (self.base_config.get("metrics") or {}).get("objective")
+            if not objective:
+                raise ValueError(
+                    f"tuning requires metrics.objective in {self.config_path} "
+                    "(the metric(s) to optimize); none is set"
+                )
+            self.metrics = objective
         if self.is_iid:
             self.model_type = self.base_config["serve_model"].get("model_type", "xgboost")
         else:
@@ -317,6 +333,12 @@ class HyperparamTuner:
         ):
             self.search_space["rate_drop"] = {"type": "float", "low": 0.05, "high": 0.25}
             self.search_space["skip_drop"] = {"type": "float", "low": 0.0, "high": 0.5}
+
+        # Early stopping owns the round count (it searches within es.ceiling), so
+        # n_estimators is not a tunable HP under ES — drop it from the search to
+        # avoid wasting a dead dimension the runner's ES factory would override.
+        if (self.base_config.get("early_stopping") or {}).get("enabled"):
+            self.search_space.pop("n_estimators", None)
 
         # MTL: extend the search space with per-target loss-weight dimensions
         # (one per configured aux target). Range widened to 0.01-5.0 after H38

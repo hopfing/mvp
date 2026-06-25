@@ -33,6 +33,19 @@ def metric_direction(name: str) -> str:
     return "maximize" if name in MAXIMIZE_METRICS else "minimize"
 
 
+# Metric names usable as an optimization OBJECTIVE (tuning / early stopping) — the
+# explicit single-metric keys of discovery.fast_selection._make_metric_fn. A
+# config's metrics.objective is validated against this at load, so a stale/typo'd
+# name (e.g. "brier" vs "brier_score") fails fast instead of KeyError-ing mid-run.
+# Kept in sync with _make_metric_fn by an assertion there.
+OPTIMIZABLE_METRICS = frozenset({
+    "log_loss", "accuracy", "brier_score", "roc_auc", "calibration_error",
+    "error_rate_80plus", "asymmetric_logloss", "beta_tail_score",
+    "beta_tail_score_sharp", "threshold_weighted_brier", "restricted_logloss",
+    "weighted_concordance", "partial_auc_tail",
+})
+
+
 def _bucket_errors(
     y_true: np.ndarray, y_prob: np.ndarray, signed: bool
 ) -> tuple[list[float], list[int]]:

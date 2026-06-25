@@ -1,12 +1,12 @@
 """Content-hash fingerprint for ExperimentConfig.
 
 Same (data, features, params, validation, sample_weight, calibration,
-metrics.primary) → same fingerprint → shared evaluation artifacts. Any
+metrics.objective) → same fingerprint → shared evaluation artifacts. Any
 training-affecting change produces a new fingerprint and a new artifact dir.
 
-Excluded from the hash: `description`, `metrics.secondary` (descriptive /
-non-training-affecting). `name` and `selection_history` are already stripped
-by `ExperimentConfig.from_yaml` and never reach this module.
+Excluded from the hash: `description`, `metrics.primary` / `metrics.secondary`
+(descriptive / non-training-affecting). `name` and `selection_history` are
+already stripped by `ExperimentConfig.from_yaml` and never reach this module.
 
 See spec at mvp-docs/specs/2026-05-17-model-evaluation-cli.md (and plan at
 ~/.claude/plans/linked-crafting-wadler.md).
@@ -155,9 +155,10 @@ def _canonicalize_config(
     canon["sample_weight"] = _deep_sort(dump.get("sample_weight"))
     canon["calibration"] = _deep_sort(dump.get("calibration"))
 
-    # metrics.primary only (secondary is descriptive)
+    # metrics.objective drives the run (tuning / early stopping / pruner). primary
+    # and secondary are descriptive and do NOT affect the fingerprint.
     metrics = dump.get("metrics") or {}
-    canon["metrics_primary"] = metrics.get("primary")
+    canon["metrics_objective"] = metrics.get("objective")
 
     return canon
 
