@@ -368,6 +368,29 @@ validation:
             assert "log_loss" in trial.user_attrs
             assert "calibration_error" in trial.user_attrs
 
+    def test_run_parallel_trials(self, sample_config, sample_matches, tmp_path):
+        """parallel_trials=2 runs all trials (1 serial warm-up + fan-out), sets a
+        positive per-trial thread split, and does NOT leak the injected n_jobs
+        into the recorded search params (so a promoted config keeps its own)."""
+        import mlflow
+        mlflow.set_tracking_uri((tmp_path / "mlruns").as_uri())
+
+        tuner = HyperparamTuner(
+            config_path=sample_config,
+            matches_path=sample_matches,
+            cache_dir=tmp_path / "cache",
+            state_dir=tmp_path / "tuning",
+        )
+        tuner.run(n_trials=3, parallel_trials=2)
+
+        # 1 synchronous warm-up trial + 2 fanned-out = 3 total.
+        assert len(tuner.study.trials) == 3
+        assert tuner._per_trial_n_jobs is not None and tuner._per_trial_n_jobs >= 1
+        # n_jobs is injected only into the transient fit config, never the
+        # recorded search params (it isn't a tuned dimension).
+        for trial in tuner.study.trials:
+            assert "n_jobs" not in trial.params
+
     def test_run_enqueues_baseline(self, sample_config, sample_matches, tmp_path):
         """First trial uses the baseline params from config."""
         import mlflow

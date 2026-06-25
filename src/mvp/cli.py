@@ -952,6 +952,17 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
             "to keep pruning behavior consistent)."
         ),
     )
+    tune_parser.add_argument(
+        "--parallel-trials", type=int, choices=[1, 2], default=1,
+        help=(
+            "[bayesian only] Run K trials concurrently, splitting the config's "
+            "thread budget T into T//K threads per trial (xgb scales sub-linearly "
+            "past a knee, so more in-flight trials beats idle threads). The first "
+            "trial runs serially to warm the feature cache before fan-out. Capped "
+            "at 2 (K>=3 needs constant_liar, which conflicts with the TPE "
+            "group sampler). K=1 = serial (default)."
+        ),
+    )
 
     # tune-review subcommand
     tune_review_parser = subparsers.add_parser(
@@ -1362,7 +1373,7 @@ def cmd_tune(args: argparse.Namespace) -> int:
         else:
             n_trials = args.limit
 
-        study = tuner.run(n_trials=n_trials)
+        study = tuner.run(n_trials=n_trials, parallel_trials=args.parallel_trials)
         logger.info("Results saved to %s", tuner.db_path)
         end_counts = _state_counts(study)
         logger.info(

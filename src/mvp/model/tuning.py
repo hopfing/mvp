@@ -14,6 +14,7 @@ from optuna.exceptions import ExperimentalWarning
 
 from mvp.common.base_job import get_data_root
 from mvp.model.metrics import MAXIMIZE_METRICS as _MODEL_MAXIMIZE_METRICS
+from mvp.model.models import _default_n_jobs
 from mvp.projection.iid.metric_registry import METRICS as _IID_METRICS
 
 logger = logging.getLogger(__name__)
@@ -271,6 +272,9 @@ class HyperparamTuner:
         self.matches_path = matches_path
         self.cache_dir = cache_dir
         self.n_startup_trials = n_startup_trials
+        # Per-trial xgb thread budget when running parallel trials (set in run()
+        # when parallel_trials > 1); None = serial, use the config's own n_jobs.
+        self._per_trial_n_jobs: int | None = None
 
         with open(self.config_path) as f:
             self.base_config = yaml.safe_load(f)
@@ -367,7 +371,10 @@ class HyperparamTuner:
         state_dir_path = Path(state_dir) if state_dir else (get_data_root() / "tuning")
         state_dir_path.mkdir(parents=True, exist_ok=True)
         self.db_path = state_dir_path / f"{self.config_path.stem}.db"
-        storage = f"sqlite:///{self.db_path}"
+        # ?timeout=30: SQLite busy-timeout (seconds) so concurrent trials under a
+        # parallel study.optimize retry on a transient write lock rather than
+        # raising OperationalError. No effect when running serially.
+        storage = f"sqlite:///{self.db_path}?timeout=30"
 
         # Create or load study
         directions = [
@@ -531,11 +538,20 @@ class HyperparamTuner:
             config["serve_model"] = dict(config["serve_model"])
             base_params = dict(config["serve_model"].get("params") or {})
             base_params.update(params)
+            if self._per_trial_n_jobs is not None:
+                base_params["n_jobs"] = self._per_trial_n_jobs
             config["serve_model"]["params"] = base_params
         else:
             config["model"] = dict(config["model"])
             base_params = dict(config["model"].get("params") or {})
             base_params.update(params)
+            # Per-trial thread split for parallel tuning. Injected into the
+            # transient temp-config only — NOT into trial.params or
+            # result["params"], so the persisted winning config keeps its own
+            # n_jobs. Spread last in models.py (**resolved), so it wins over the
+            # config value and the --n-jobs override for the duration of a fit.
+            if self._per_trial_n_jobs is not None:
+                base_params["n_jobs"] = self._per_trial_n_jobs
             config["model"]["params"] = base_params
 
         with tempfile.NamedTemporaryFile(
@@ -546,92 +562,76 @@ class HyperparamTuner:
 
         try:
             t0 = time.perf_counter()
-            # Suppress per-fold logging during tuning
-            runner_logger = logging.getLogger("mvp.model.runner")
-            engine_logger = logging.getLogger("mvp.model.engine")
-            proj_logger = logging.getLogger("mvp.projection.runner")
-            iid_logger = logging.getLogger("mvp.projection.iid.runner")
-            prev_runner = runner_logger.level
-            prev_engine = engine_logger.level
-            prev_proj = proj_logger.level
-            prev_iid = iid_logger.level
-            runner_logger.setLevel(logging.WARNING)
-            engine_logger.setLevel(logging.WARNING)
-            proj_logger.setLevel(logging.WARNING)
-            iid_logger.setLevel(logging.WARNING)
-            try:
-                if self.is_iid:
-                    from mvp.projection.iid.runner import IIDProjectionRunner
+            # Per-fold runner/engine logging is quieted once in run() — NOT
+            # per-trial here — so concurrent trials (parallel_trials>1) don't
+            # race on the shared logger levels.
+            if self.is_iid:
+                from mvp.projection.iid.runner import IIDProjectionRunner
 
-                    runner = IIDProjectionRunner(
-                        config_path=temp_path,
-                        matches_path=self.matches_path,
-                        cache_dir=self.cache_dir,
-                        run_name=f"tune_{self.config_path.stem}",
-                        log_to_mlflow=False,
-                    )
-                elif self.model_type in _PROJECTION_MODEL_TYPES:
-                    from mvp.projection.runner import ProjectionRunner
+                runner = IIDProjectionRunner(
+                    config_path=temp_path,
+                    matches_path=self.matches_path,
+                    cache_dir=self.cache_dir,
+                    run_name=f"tune_{self.config_path.stem}",
+                    log_to_mlflow=False,
+                )
+            elif self.model_type in _PROJECTION_MODEL_TYPES:
+                from mvp.projection.runner import ProjectionRunner
 
-                    runner = ProjectionRunner(
-                        config_path=temp_path,
-                        matches_path=self.matches_path,
-                        cache_dir=self.cache_dir,
-                        run_name=f"tune_{self.config_path.stem}",
-                        log_to_mlflow=False,
-                    )
-                else:
-                    from mvp.model.runner import ExperimentRunner
+                runner = ProjectionRunner(
+                    config_path=temp_path,
+                    matches_path=self.matches_path,
+                    cache_dir=self.cache_dir,
+                    run_name=f"tune_{self.config_path.stem}",
+                    log_to_mlflow=False,
+                )
+            else:
+                from mvp.model.runner import ExperimentRunner
 
-                    # calibrate=False: HP search optimizes raw discrimination.
-                    # Calibration is a deployment concern handled by `mvp model`
-                    # (ProductionPredictor), not an HP-tuning concern. The
-                    # projection / IID runners above don't fit Platt today so
-                    # they don't need an analogous flag.
-                    runner = ExperimentRunner(
-                        config_path=temp_path,
-                        matches_path=self.matches_path,
-                        cache_dir=self.cache_dir,
-                        run_name=f"tune_{self.config_path.stem}",
-                        log_to_mlflow=False,
-                        holdout_folds=1,
-                        inner_cv_folds=4,
-                        calibrate=False,
-                    )
-                # IID / projection runners don't currently support pruning;
-                # only ExperimentRunner threads `trial` through. Pass it where
-                # accepted, ignore where not.
-                if self.is_iid or self.model_type in _PROJECTION_MODEL_TYPES:
-                    result = runner.run()
-                else:
-                    result = runner.run(trial=trial)
-                metrics = dict(result["metrics"])
-                holdout_metrics = (
-                    dict(result["holdout_metrics"])
-                    if result.get("holdout_metrics") is not None
-                    else None
+                # calibrate=False: HP search optimizes raw discrimination.
+                # Calibration is a deployment concern handled by `mvp model`
+                # (ProductionPredictor), not an HP-tuning concern. The
+                # projection / IID runners above don't fit Platt today so
+                # they don't need an analogous flag.
+                runner = ExperimentRunner(
+                    config_path=temp_path,
+                    matches_path=self.matches_path,
+                    cache_dir=self.cache_dir,
+                    run_name=f"tune_{self.config_path.stem}",
+                    log_to_mlflow=False,
+                    holdout_folds=1,
+                    inner_cv_folds=4,
+                    calibrate=False,
                 )
-                inner_cv_folds_used = result.get("inner_cv_folds") or 0
-                inner_fold_count_per_outer = (
-                    list(result["inner_fold_count_per_outer"])
-                    if result.get("inner_fold_count_per_outer") is not None
-                    else None
-                )
-                fold_metrics = (
-                    [dict(f) for f in result["fold_metrics"]]
-                    if result.get("fold_metrics") is not None
-                    else None
-                )
-                holdout_fold_metrics = (
-                    [dict(f) for f in result["holdout_fold_metrics"]]
-                    if result.get("holdout_fold_metrics") is not None
-                    else None
-                )
-            finally:
-                runner_logger.setLevel(prev_runner)
-                engine_logger.setLevel(prev_engine)
-                proj_logger.setLevel(prev_proj)
-                iid_logger.setLevel(prev_iid)
+            # IID / projection runners don't currently support pruning;
+            # only ExperimentRunner threads `trial` through. Pass it where
+            # accepted, ignore where not.
+            if self.is_iid or self.model_type in _PROJECTION_MODEL_TYPES:
+                result = runner.run()
+            else:
+                result = runner.run(trial=trial)
+            metrics = dict(result["metrics"])
+            holdout_metrics = (
+                dict(result["holdout_metrics"])
+                if result.get("holdout_metrics") is not None
+                else None
+            )
+            inner_cv_folds_used = result.get("inner_cv_folds") or 0
+            inner_fold_count_per_outer = (
+                list(result["inner_fold_count_per_outer"])
+                if result.get("inner_fold_count_per_outer") is not None
+                else None
+            )
+            fold_metrics = (
+                [dict(f) for f in result["fold_metrics"]]
+                if result.get("fold_metrics") is not None
+                else None
+            )
+            holdout_fold_metrics = (
+                [dict(f) for f in result["holdout_fold_metrics"]]
+                if result.get("holdout_fold_metrics") is not None
+                else None
+            )
             duration = time.perf_counter() - t0
 
             # Drop large per-trial state (fold predictions, diagnostics, mlflow
@@ -654,8 +654,19 @@ class HyperparamTuner:
         finally:
             temp_path.unlink(missing_ok=True)
 
-    def run(self, n_trials: int, verbose: bool = True) -> optuna.Study:
-        """Run Bayesian optimization for n_trials."""
+    def run(
+        self, n_trials: int, verbose: bool = True, parallel_trials: int = 1,
+    ) -> optuna.Study:
+        """Run Bayesian optimization for n_trials.
+
+        parallel_trials (K): run K trials concurrently via Optuna's thread pool.
+        Each concurrent trial's xgb gets ``T // K`` threads (T = the config's
+        n_jobs, else the cpu-2 default), so the total thread budget is unchanged
+        — this trades idle threads (xgb scales sub-linearly past a knee) for more
+        in-flight trials. K is capped at 2 by the CLI (K>=3 would need
+        constant_liar, which conflicts with the group=True TPE sampler). K=1 =
+        serial (default, unchanged behavior).
+        """
         completed = sum(
             1 for t in self.study.trials
             if t.state == optuna.trial.TrialState.COMPLETE
@@ -676,11 +687,52 @@ class HyperparamTuner:
         if verbose:
             callbacks.append(self._log_trial_callback)
 
-        self.study.optimize(
-            self._objective,
-            n_trials=n_trials,
-            callbacks=callbacks,
-        )
+        # Quiet the per-fold runner/engine logs for the whole tune. Done ONCE
+        # here (not per-trial in _run_one) so concurrent trials under
+        # parallel_trials>1 don't race on these shared logger levels. The
+        # early_stopping logger is intentionally left alone so its per-fold
+        # best_iteration lines still show.
+        _quiet = [
+            logging.getLogger(name) for name in (
+                "mvp.model.runner", "mvp.model.engine",
+                "mvp.projection.runner", "mvp.projection.iid.runner",
+            )
+        ]
+        _prev_levels = [lg.level for lg in _quiet]
+        for lg in _quiet:
+            lg.setLevel(logging.WARNING)
+        try:
+            if parallel_trials > 1:
+                # Split the config's thread budget across the K concurrent trials.
+                budget = self._get_base_params().get("n_jobs")
+                if budget is None:
+                    budget = _default_n_jobs()
+                self._per_trial_n_jobs = max(1, int(budget) // parallel_trials)
+                logger.info(
+                    "Parallel trials: K=%d, per-trial n_jobs=%d (budget %s)",
+                    parallel_trials, self._per_trial_n_jobs, budget,
+                )
+                # Warm the feature/transform cache with ONE synchronous trial
+                # before fanning out, so K cold-start trials don't each recompute
+                # the whole-matrix transform self-join concurrently.
+                self.study.optimize(self._objective, n_trials=1, callbacks=callbacks)
+                remaining = max(0, n_trials - 1)
+                if remaining:
+                    self.study.optimize(
+                        self._objective,
+                        n_trials=remaining,
+                        n_jobs=parallel_trials,
+                        callbacks=callbacks,
+                    )
+            else:
+                self.study.optimize(
+                    self._objective,
+                    n_trials=n_trials,
+                    callbacks=callbacks,
+                )
+        finally:
+            for lg, lvl in zip(_quiet, _prev_levels):
+                lg.setLevel(lvl)
 
         logger.info(
             "Tuning complete: %d total trials in %s",
