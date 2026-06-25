@@ -815,6 +815,19 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         help="Override memory limit %% (0 to disable, default 75)",
     )
 
+    # rules subcommand - evaluate a rules_* config as a decision rule
+    rules_parser = subparsers.add_parser(
+        "rules",
+        help="Evaluate a rules_* config as a decision rule (vote tally by configuration)",
+    )
+    rules_parser.add_argument(
+        "config", type=str, help="Config name or path (e.g., 'rules_combined')"
+    )
+    rules_parser.add_argument(
+        "--memory-limit", type=int, default=None,
+        help="Override memory limit %% (0 to disable, default 75)",
+    )
+
     # model-sweep subcommand - sweep validation.test_months on a model config
     sweep_parser = subparsers.add_parser(
         "model-sweep",
@@ -1435,6 +1448,19 @@ def cmd_model(args: argparse.Namespace) -> int:
 
     print_run_summary(results, name=runner.run_name)
 
+    return 0
+
+
+def cmd_rules(args: argparse.Namespace) -> int:
+    """Evaluate a rules_* config as a decision rule (vote tally by configuration)."""
+    from mvp.model.rule_eval import compute_votes, print_report
+
+    config_path = resolve_config_path(args.config, MODEL_DIR)
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config file not found: {args.config} (tried {config_path})")
+
+    config, resolved, df = compute_votes(config_path)
+    print_report(config_path.stem, config, resolved, df)
     return 0
 
 
@@ -3411,6 +3437,8 @@ def main(args: list[str] | None = None) -> int:
         return cmd_model(parsed)
     elif parsed.command == "model-sweep":
         return cmd_model_sweep(parsed)
+    elif parsed.command == "rules":
+        return cmd_rules(parsed)
     elif parsed.command == "tune":
         return cmd_tune(parsed)
     elif parsed.command == "tune-review":

@@ -1294,8 +1294,9 @@ def get_model(
     Args:
         model_type: Type of model ("xgboost", "logistic", "random_forest").
         params: Model parameters.
-        feature_names: Feature names in training-matrix column order. Only
-            consumed by XGBoost to resolve dict-form `monotone_constraints`.
+        feature_names: Feature names in training-matrix column order. Consumed
+            by XGBoost to resolve dict-form `monotone_constraints`, and by the
+            rule-based model to map each flag to its feature column.
 
     Returns:
         Model wrapper instance.
@@ -1316,5 +1317,8 @@ def get_model(
     elif model_type == "sequence":
         from mvp.model.sequence_model import SequenceModel
         return SequenceModel(params)
+    elif model_type == "rules":
+        from mvp.model.rule_model import RuleBasedModel
+        return RuleBasedModel(params, feature_names=feature_names)
     else:
         raise ValueError(f"Unknown model type: {model_type}")
