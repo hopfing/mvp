@@ -403,8 +403,9 @@ class HyperparamTuner:
                 group=True,
             )
 
-        # MedianPruner kills trials whose fold-k log_loss is worse than the
-        # median of completed trials at the same fold step. warmup=2 means
+        # MedianPruner kills trials whose fold-k tuning objective
+        # (metrics.objective) is worse than the median of completed trials
+        # at the same fold step. warmup=2 means
         # pruning can only fire from fold 2 onward; fold 0 and fold 1
         # metrics are too noisy on tabular CV to drive kills. See
         # scripts/analyze_fold_predictiveness.py for the empirical
@@ -517,8 +518,9 @@ class HyperparamTuner:
     ) -> dict[str, Any]:
         """Run a single param combination through the appropriate runner.
 
-        When `trial` is provided, the underlying runner reports per-fold
-        log_loss and may raise optuna.TrialPruned mid-run.
+        When `trial` is provided, the underlying runner reports the per-fold
+        tuning objective (metrics.objective) and may raise optuna.TrialPruned
+        mid-run.
         """
         config = dict(self.base_config)
         if self.is_iid:

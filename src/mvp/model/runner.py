@@ -440,7 +440,8 @@ class ExperimentRunner:
 
         Args:
             trial: Optional Optuna Trial. When provided, the runner reports
-                each tuning outer-fold's log_loss to the trial via
+                each tuning outer-fold's objective metric (metrics.objective)
+                to the trial via
                 trial.report(step=outer_idx) and consults trial.should_prune()
                 at each outer-fold boundary. If pruning fires, raises
                 optuna.TrialPruned. Only the tuning folds (0..n_tuning-1)
