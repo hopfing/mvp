@@ -1547,16 +1547,35 @@ class FeatureEngine:
 
         # Phase 7: transform features (whole-matrix). Runs last — all the per-row
         # dep columns (opp_style_radar_*, opp_style_conf_*, player_elo_surface_diff)
-        # and raw cols (won, opp_elo) are in df. Each param variant runs and its
-        # keyed output frame merges in with window-suffixed columns.
+        # and raw cols (won, opp_elo) are in df. Each param variant is cache-checked
+        # under the SAME cache spec/key as ensure_cached's Phase 7: on a miss the
+        # transform (whole-matrix self-join) runs and its keyed output frame is
+        # cached; on a hit the cached columns are loaded and joined, so repeat
+        # callers (e.g. per-trial tuning runs) skip the expensive self-join.
+        # Mirrors how Phases 0-6 cache per-row features in this same method.
         for spec in transform_specs:
             _prefix, base_name, _full, params = parse_feature_spec(spec)
             feature_def = self._registry.get(base_name)
+            cache_spec = base_name
+            output_cols = list(feature_def.outputs)
+            if params:
+                param_str = ",".join(f"{k}={v}" for k, v in params.items())
+                cache_spec = f"{base_name}({param_str})"
+                output_cols = [
+                    build_column_name(o, params) for o in feature_def.outputs
+                ]
+            if self._is_cached(cache_spec, cache_key):
+                cached_out = self._load_cached_feature(cache_spec).select(
+                    ["match_uid", "player_id"] + output_cols
+                )
+                df = df.join(cached_out, on=["match_uid", "player_id"], how="left")
+                continue
             out = feature_def.func(df, **params)
             if params:
                 out = out.rename(
                     {o: build_column_name(o, params) for o in feature_def.outputs}
                 )
+            self._cache_feature(cache_spec, out, output_cols, cache_key)
             df = df.join(out, on=["match_uid", "player_id"], how="left")
 
         elapsed = time.perf_counter() - t0
