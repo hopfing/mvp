@@ -946,7 +946,7 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         "--n-startup-trials", type=int, default=None,
         help=(
             "Startup trials for both TPE sampler and MedianPruner — "
-            "trials 0..N-1 are pure-random and never pruned. Default 25. "
+            "trials 0..N-1 are pure-random and never pruned. Default 50. "
             "Sampler value applies only to fresh studies; pruner value "
             "applies on every invocation (pass the same value on resume "
             "to keep pruning behavior consistent)."

@@ -377,17 +377,21 @@ class HyperparamTuner:
 
         # Sampler and pruner share the same startup-trial threshold so the
         # pure-random exploration phase is fully protected from both TPE
-        # modeling and pruning decisions. Default is 25 — wider than
+        # modeling and pruning decisions. Default is 50 — well above
         # Optuna's TPESampler default of 10 — to give TPE a broader
-        # foundation before it commits to a region and to keep early
-        # noisy-fold metrics from feeding pruning decisions.
+        # foundation before it commits to a region. The search space is
+        # ~13-17 dimensions (multivariate + conditional), so a thin random
+        # seed leaves TPE's first "good set" density estimate too sparse;
+        # this is compounded now that the objective (metrics.objective) is
+        # noisier per fold than log_loss. 50 also keeps early noisy-fold
+        # metrics from feeding pruning decisions.
         # CAVEAT: the pruner config is not persisted in the SQLite study.
         # Resuming a study constructs a fresh pruner — if the original run
         # used a non-default --n-startup-trials, the resume invocation MUST
         # pass the same value or the new pruner will fire earlier than
         # intended for trials added in that resume session.
         startup_trials = (
-            self.n_startup_trials if self.n_startup_trials is not None else 25
+            self.n_startup_trials if self.n_startup_trials is not None else 50
         )
         # multivariate=True models HP interactions (tree HPs are correlated, so
         # the univariate default leaves signal on the table); group=True lets the
