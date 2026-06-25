@@ -166,3 +166,50 @@ class TestTwoStageFit:
         assert len(built) == 1
         assert built[0].n_rounds == 300 and not built[0].got_eval_set   # fixed-rounds fallback
         assert model is built[0]
+
+
+class TestRealXGBEarlyStopFit:
+    """Exercises the REAL XGBoostModel on the early-stopping path (eval_set +
+    custom feval) — regression for the xgboost 2.1 / sklearn 1.8 `_estimator_type`
+    failure the mock-model tests above don't reach."""
+
+    def test_xgbmodel_fit_with_eval_set_and_feval(self):
+        from mvp.model.models import XGBoostModel
+
+        rng = np.random.RandomState(0)
+        X = rng.randn(200, 4).astype(np.float64)
+        y = (X[:, 0] + 0.3 * rng.randn(200) > 0).astype(int)
+        feval, _ = make_xgb_feval("brier_score")
+
+        m = XGBoostModel({"n_estimators": 50}, feature_names=list("abcd"))
+        m.fit(
+            X[:150], y[:150],
+            eval_set=[(X[150:], y[150:])],
+            early_stopping_rounds=5,
+            eval_metric=feval,
+        )
+        assert m.best_iteration is not None      # early stopping ran
+        assert m.predict_proba(X[:5]).shape == (5,)
+
+    def test_two_stage_fit_end_to_end_real_xgb(self):
+        """Full ES path against real XGBoost: carve -> guard -> Stage 1 (eval_set
+        + feval) -> best_iteration -> Stage 2 refit -> fitted model."""
+        from mvp.model.models import XGBoostModel
+
+        rng = np.random.RandomState(1)
+        n_before, n_watch = 500, 600
+        n = n_before + n_watch
+        X = rng.randn(n, 4).astype(np.float64)
+        y = (X[:, 0] + 0.3 * rng.randn(n) > 0).astype(int)
+        ts = date(2025, 7, 1)
+        dates = _dates_with_watch(n_before, n_watch, ts)
+
+        def factory(rounds):
+            return XGBoostModel({"n_estimators": rounds}, feature_names=list("abcd"))
+
+        model, best = two_stage_fit(
+            factory, X, y, None, dates, ts,
+            EarlyStoppingConfig(patience=5, ceiling=50), metric="brier_score",
+        )
+        assert best is not None                  # watch big enough -> ES ran
+        assert model.predict_proba(X[:5]).shape == (5,)

@@ -270,6 +270,11 @@ class XGBoostModel(BaseModel):
         if eval_metric is not None:
             xgb_params["eval_metric"] = eval_metric
         self._model = xgb.XGBClassifier(**xgb_params)
+        # xgboost 2.1.x reads `self._estimator_type` in _configure_fit (only on
+        # the eval_set / early-stopping path), but sklearn >=1.6 dropped it from
+        # its mixins, so it's undefined → TypeError. XGBClassifier IS a classifier;
+        # set it explicitly. No-op off the early-stopping path.
+        self._model._estimator_type = "classifier"
         fit_kwargs: dict[str, Any] = {"sample_weight": sample_weight}
         if eval_set is not None:
             fit_kwargs["eval_set"] = eval_set
