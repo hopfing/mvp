@@ -37,10 +37,12 @@ _AXES = ["serve", "net", "aggression", "error", "rally"]
 H_DEFAULT = 0.3
 LAMBDA_DEFAULT = 1.0  # ridge on the slope denominator (review F2)
 WINDOW_DAYS_DEFAULT = 1095  # pool window (spec D-POOL)
-# Players per self-join chunk — bounds the transient `pairs` frame so the
-# full-history retrieval stays under the engine memory guard. Within-player, so
-# chunking is exact (no cross-batch pairs).
-_PLAYER_BATCH = 500
+# Players per self-join chunk — bounds the transient `pairs` frame (the
+# pre-filter current×pool cartesian) so the full-history retrieval stays under
+# the engine memory guard. Within-player, so chunking is exact regardless of
+# size (no cross-batch pairs); this is purely a peak-memory knob. Lowered from
+# 500 to keep dev-machine runs clear of the 90% guard.
+_PLAYER_BATCH = 150
 
 
 def _residual() -> pl.Expr:
