@@ -9,13 +9,16 @@ Spec: mvp-docs/specs/2026-06-24-xgboost-early-stopping.md. The two-stage fit
 train) and the runner/tuning wiring consume these primitives.
 """
 
+import logging
 from dataclasses import dataclass
 from datetime import date
-from typing import Callable
+from typing import Any, Callable
 
 import numpy as np
 
 from mvp.model.metrics import metric_direction
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -28,6 +31,7 @@ class EarlyStoppingConfig:
     min_watch_tail: int = 100   # floor on the watch's tail population (§4)
     patience: int = 50          # early_stopping_rounds
     ceiling: int = 3000         # n_estimators ceiling when early stopping owns rounds
+    fallback_rounds: int = 300  # fixed rounds when the watch is too small (§4 fallback)
 
     # The metric is a tail statistic at this upper fraction (beta_tail_score and
     # friends look at the worst-predicted tail); used to estimate the watch's
@@ -154,3 +158,81 @@ def make_xgb_feval_dtrain(
         return name, (-v if maximize else v)
 
     return feval
+
+
+def two_stage_fit(
+    model_factory: Callable[[int], Any],
+    X: np.ndarray,
+    y: np.ndarray,
+    sample_weight: np.ndarray | None,
+    dates: np.ndarray,
+    test_start: date,
+    cfg: EarlyStoppingConfig,
+    metric: str,
+    lambda_over: float | None = None,
+    is_mtl: bool = False,
+) -> tuple[Any, int | None]:
+    """Leakage-safe two-stage early-stopping fit (spec §1-2). Returns
+    ``(fitted_model, best_iteration)``.
+
+    ``model_factory(n_rounds)`` builds a fresh, unfit model trained to exactly
+    ``n_rounds`` boosting rounds. ``y`` / ``sample_weight`` are whatever the
+    model's fit expects (1D for the single-task model, 2D ``y`` for MTL).
+    ``dates`` are the per-row effective_match_date; ``test_start`` the fold's
+    test boundary.
+
+    Stage 1 fits on train-minus-watch with the watch as the early-stop monitor
+    (on ``metric`` via the feval) to find ``best_iteration``; Stage 2 refits on
+    the FULL train at that round count (so the watch data is in the deployed
+    model). If the watch is too small for a stable tail metric, or no improving
+    round is found, falls back to a single fixed-rounds fit — and logs it (§4).
+    """
+    watch = carve_watch(dates, test_start, cfg.watch_months, cfg.gap_days)
+    n_watch = int(watch.sum())
+    ws, we = watch_bounds(test_start, cfg.watch_months, cfg.gap_days)
+
+    if not watch_tail_ok(n_watch, cfg.min_watch_tail, cfg.tail_fraction):
+        logger.warning(
+            "early-stop FALLBACK: watch %s..%s has %d rows (est. tail < floor %d) "
+            "-> fixed %d rounds", ws, we, n_watch, cfg.min_watch_tail,
+            cfg.fallback_rounds,
+        )
+        model = model_factory(cfg.fallback_rounds)
+        model.fit(X, y, sample_weight=sample_weight)
+        return model, None
+
+    sub = ~watch
+    feval = (
+        make_xgb_feval_dtrain(metric, lambda_over) if is_mtl
+        else make_xgb_feval(metric, lambda_over)[0]
+    )
+    w_sub = None if sample_weight is None else sample_weight[sub]
+    m1 = model_factory(cfg.ceiling)
+    m1.fit(
+        X[sub], y[sub], sample_weight=w_sub,
+        eval_set=[(X[watch], y[watch])],
+        early_stopping_rounds=cfg.patience,
+        eval_metric=feval,
+    )
+    best_it = m1.best_iteration
+
+    if best_it is None or int(best_it) < 1:
+        logger.warning(
+            "early-stop FALLBACK: no improving round (best_iteration=%r) on watch "
+            "%s..%s -> keeping the ceiling-trained Stage-1 model", best_it, ws, we,
+        )
+        return m1, (None if best_it is None else int(best_it))
+
+    # Stage 2: refit on FULL train at best_iteration+1 rounds (best_iteration is
+    # 0-indexed -> round count). The watch only set the count; the deployed model
+    # trains on all data (spec §2, MLE-3: no scale-up heuristic).
+    m2 = model_factory(int(best_it) + 1)
+    # No eval_set here, intentionally and REQUIRED: it makes Stage 2 a plain
+    # fixed-rounds fit. Passing one would reactivate the wrapper's default
+    # eval_metric="logloss" as the stopping metric (MLE review finding 1).
+    m2.fit(X, y, sample_weight=sample_weight)
+    logger.info(
+        "early-stop: best_iteration=%d (watch %s..%s, %d rows) -> refit full train",
+        int(best_it), ws, we, n_watch,
+    )
+    return m2, int(best_it)

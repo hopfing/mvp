@@ -34,6 +34,7 @@ from mvp.model.config import (
 )
 from mvp.model.diagnostics import Diagnostics, EnsembleDiagnostics
 from mvp.model.discovery.importance import gain_importance
+from mvp.model.early_stopping import two_stage_fit
 from mvp.model.engine import check_memory, get_feature_columns, make_fs_engine
 from mvp.model.features._score_helpers import (
     sets_lost as _sets_lost,
@@ -1062,7 +1063,38 @@ class ExperimentRunner:
                         per_model_data=per_model_data,
                     )
                 else:
-                    model.fit(X_train, y_train_for_fit, sample_weight=train_weights)
+                    es = self.config.early_stopping
+                    if (
+                        es is not None and es.enabled
+                        and self.config.model.type == "xgboost"
+                    ):
+                        # Two-stage early stopping (sklearn or MTL xgb.train path).
+                        # Stops on metrics.primary (the run's objective), refits on
+                        # full train at best_iteration. FS scorer is NOT this path.
+                        params = self.config.model.params or {}
+
+                        def _es_factory(n_rounds: int):
+                            p = {**params, "n_estimators": n_rounds}
+                            if is_mtl:
+                                tn = [self.config.target] + list(
+                                    self.config.mtl.auxiliary_targets
+                                )
+                                return XGBoostMTLModel(
+                                    params=p, target_names=tn,
+                                    feature_names=feature_cols,
+                                )
+                            return get_model("xgboost", p, feature_names=feature_cols)
+
+                        _ts = test_df["effective_match_date"].min()
+                        model, _best_it = two_stage_fit(
+                            _es_factory, X_train, y_train_for_fit, train_weights,
+                            train_df["effective_match_date"].to_numpy(),
+                            _ts.date() if hasattr(_ts, "date") else _ts,
+                            es, metric=self.config.metrics.primary,
+                            lambda_over=params.get("lambda_over"), is_mtl=is_mtl,
+                        )
+                    else:
+                        model.fit(X_train, y_train_for_fit, sample_weight=train_weights)
 
                 # Predict and evaluate on test
                 is_stacking = (

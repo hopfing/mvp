@@ -5,9 +5,11 @@ from datetime import date
 import numpy as np
 
 from mvp.model.early_stopping import (
+    EarlyStoppingConfig,
     carve_watch,
     make_xgb_feval,
     make_xgb_feval_dtrain,
+    two_stage_fit,
     watch_bounds,
     watch_tail_ok,
 )
@@ -19,6 +21,29 @@ class _MockDMatrix:
 
     def get_label(self):
         return self._labels
+
+
+class _MockESModel:
+    """Records the round count it was built with + whether it got an eval_set;
+    simulates early stopping by reporting best_iteration when monitored."""
+
+    def __init__(self, n_rounds):
+        self.n_rounds = n_rounds
+        self.got_eval_set = False
+        self.best_iteration = None
+
+    def fit(self, X, y, sample_weight=None, eval_set=None,
+            early_stopping_rounds=None, eval_metric=None):
+        self.got_eval_set = eval_set is not None
+        if eval_set is not None:
+            self.best_iteration = 42
+
+
+def _dates_with_watch(n_before, n_watch, test_start):
+    ws, we = watch_bounds(test_start, 2.0, 7)
+    before = [np.datetime64(ws) - np.timedelta64(i + 1, "D") for i in range(n_before)]
+    inwatch = [np.datetime64(ws) + np.timedelta64(i % 30, "D") for i in range(n_watch)]
+    return np.array(before + inwatch, dtype="datetime64[D]")
 
 
 class TestCarveWatch:
@@ -99,3 +124,45 @@ class TestFevalDtrain:
         _, bad_val = feval(flat_predt, y)
         assert name.startswith("es_")
         assert good_val < bad_val
+
+
+class TestTwoStageFit:
+    def test_happy_path_refits_full_train_at_best_iteration(self):
+        ts = date(2025, 7, 1)
+        dates = _dates_with_watch(400, 600, ts)   # 600 watch rows -> guard passes
+        X = np.zeros((1000, 2))
+        y = np.zeros(1000, dtype=int)
+        built: list[_MockESModel] = []
+
+        def factory(n):
+            m = _MockESModel(n)
+            built.append(m)
+            return m
+
+        model, best = two_stage_fit(
+            factory, X, y, None, dates, ts, EarlyStoppingConfig(), "log_loss")
+
+        assert best == 42
+        assert built[0].n_rounds == 3000 and built[0].got_eval_set      # Stage 1: ceiling + watch
+        assert built[1].n_rounds == 43 and not built[1].got_eval_set    # Stage 2: best+1, full train
+        assert model is built[1]
+
+    def test_small_watch_falls_back_to_fixed_rounds(self):
+        ts = date(2025, 7, 1)
+        dates = _dates_with_watch(400, 50, ts)    # 50 watch rows -> guard fails
+        X = np.zeros((450, 2))
+        y = np.zeros(450, dtype=int)
+        built: list[_MockESModel] = []
+
+        def factory(n):
+            m = _MockESModel(n)
+            built.append(m)
+            return m
+
+        model, best = two_stage_fit(
+            factory, X, y, None, dates, ts, EarlyStoppingConfig(), "log_loss")
+
+        assert best is None
+        assert len(built) == 1
+        assert built[0].n_rounds == 300 and not built[0].got_eval_set   # fixed-rounds fallback
+        assert model is built[0]

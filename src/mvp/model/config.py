@@ -314,6 +314,25 @@ class MTLConfig(_StrictModel):
         return v
 
 
+class EarlyStoppingConfig(_StrictModel):
+    """XGBoost early stopping (spec 2026-06-24). Off by default.
+
+    The early-stop metric is NOT set here — it's inherited from
+    ``metrics.primary`` (the run's objective) so it can't silently drift from
+    what the run actually optimizes. ``ceiling`` is the n_estimators ceiling that
+    early stopping selects rounds within.
+    """
+
+    enabled: bool = False
+    watch_months: float = 2.0
+    gap_days: int = 7
+    min_watch_tail: int = 100
+    patience: int = 50
+    ceiling: int = 3000
+    fallback_rounds: int = 300
+    tail_fraction: float = 0.2
+
+
 class ExperimentConfig(_StrictModel):
     """Complete experiment configuration."""
 
@@ -327,6 +346,7 @@ class ExperimentConfig(_StrictModel):
     sample_weight: SampleWeightConfig | None = None
     calibration: CalibrationConfig | None = None
     mtl: MTLConfig | None = None
+    early_stopping: EarlyStoppingConfig | None = None
 
     @model_validator(mode="after")
     def validate_features_required(self) -> "ExperimentConfig":

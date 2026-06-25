@@ -252,6 +252,7 @@ class XGBoostModel(BaseModel):
         sample_weight: np.ndarray | None = None,
         eval_set: list[tuple[np.ndarray, np.ndarray]] | None = None,
         early_stopping_rounds: int | None = 10,
+        eval_metric: Any | None = None,
     ) -> None:
         import xgboost as xgb
 
@@ -262,6 +263,12 @@ class XGBoostModel(BaseModel):
         xgb_params = dict(self.params)
         if self._lambda_over is not None:
             xgb_params["objective"] = _asymmetric_logloss_factory(self._lambda_over)
+        # Custom early-stop eval metric (the run's objective). It REPLACES the
+        # default "logloss" eval so XGB doesn't also run logloss every round
+        # (only the custom metric drives stopping anyway). The feval is built
+        # lower-is-better, so we never set maximize.
+        if eval_metric is not None:
+            xgb_params["eval_metric"] = eval_metric
         self._model = xgb.XGBClassifier(**xgb_params)
         fit_kwargs: dict[str, Any] = {"sample_weight": sample_weight}
         if eval_set is not None:
@@ -270,6 +277,15 @@ class XGBoostModel(BaseModel):
             if early_stopping_rounds is not None:
                 self._model.set_params(early_stopping_rounds=early_stopping_rounds)
         self._model.fit(X, y, **fit_kwargs)
+
+    @property
+    def best_iteration(self) -> int | None:
+        """Best boosting round chosen by early stopping (None if not fit / no
+        early stopping). The two-stage early-stop fit reads this to set the
+        Stage-2 refit's round count."""
+        if self._model is None:
+            return None
+        return getattr(self._model, "best_iteration", None)
 
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
         if self._model is None:
@@ -396,6 +412,7 @@ class XGBoostMTLModel(BaseModel):
         sample_weight: np.ndarray | None = None,
         eval_set: list[tuple[np.ndarray, np.ndarray]] | None = None,
         early_stopping_rounds: int | None = 10,
+        eval_metric: Any | None = None,
     ) -> None:
         import xgboost as xgb
 
@@ -446,15 +463,26 @@ class XGBoostMTLModel(BaseModel):
             "dtrain": dtrain,
             "num_boost_round": self._n_estimators,
             "obj": _mtl_heterogeneous_objective_factory(self.loss_weights),
-            "custom_metric": _mtl_primary_logloss_eval,
+            # Custom early-stop metric (the run's objective) replaces the default
+            # primary-logloss eval; built lower-is-better, so maximize=False.
+            "custom_metric": eval_metric or _mtl_primary_logloss_eval,
         }
         if evals:
             train_kwargs["evals"] = evals
             train_kwargs["verbose_eval"] = False
             if early_stopping_rounds is not None:
                 train_kwargs["early_stopping_rounds"] = early_stopping_rounds
+                train_kwargs["maximize"] = False
 
         self._booster = xgb.train(**train_kwargs)
+
+    @property
+    def best_iteration(self) -> int | None:
+        """Best round chosen by early stopping (None if not fit / no early
+        stopping). Read by the two-stage early-stop fit for the Stage-2 refit."""
+        if self._booster is None:
+            return None
+        return getattr(self._booster, "best_iteration", None)
 
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
         """Return primary head P(win) as a 1D array (BaseModel contract)."""
