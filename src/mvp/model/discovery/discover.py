@@ -505,9 +505,11 @@ class FeatureDiscovery:
             f"(fraction={stab_cfg.subsample_fraction})"
         )
 
-        stab_checkpoint = Path(
-            f"discovery_stability_checkpoint_{self.config_path.stem}.json"
+        stab_checkpoint = (
+            Path("fs_runs")
+            / f"discovery_stability_checkpoint_{self.config_path.stem}.json"
         )
+        stab_checkpoint.parent.mkdir(parents=True, exist_ok=True)
         result = run_stability_selection(
             fast,
             stab_cfg,

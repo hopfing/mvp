@@ -38,6 +38,22 @@ def _fs_history_path(checkpoint_path: Path | None) -> Path | None:
     return checkpoint_path.with_name(f"fs_history_{stem}.jsonl")
 
 
+def _fs_progress_path(checkpoint_path: Path | None) -> Path:
+    """Live human-readable selected-feature list, a sibling of the checkpoint.
+
+    Rewritten each round so it can be ``cat``-ed mid-run. Per-run named (unlike
+    the legacy single shared file) so concurrent runs don't clobber each other.
+    Falls back to the CWD when there's no checkpoint (e.g. unit tests).
+    """
+    if checkpoint_path is None:
+        return Path("discovery_progress.txt")
+    name = checkpoint_path.name
+    prefix = "discovery_checkpoint_"
+    stem = name[len(prefix):] if name.startswith(prefix) else name
+    stem = stem.rsplit(".", 1)[0]
+    return checkpoint_path.with_name(f"discovery_progress_{stem}.txt")
+
+
 def _append_fs_history(path: Path | None, entry: dict[str, Any]) -> None:
     """Append one round's record as a JSON line. Best-effort: never fatal.
 
@@ -213,6 +229,7 @@ class FeatureSelector:
         # Durable per-round score log (append-only, kept after completion).
         # Fresh start wipes any stale log; resume appends to the existing one.
         history_path = _fs_history_path(checkpoint_path)
+        progress_path = _fs_progress_path(checkpoint_path)
         if cp is None and history_path is not None and history_path.exists():
             history_path.unlink()
 
@@ -371,7 +388,7 @@ class FeatureSelector:
             best_metric = best_feature_metric
 
             logger.info("  + %s -> %.4f", best_feature, best_metric)
-            Path("discovery_progress.txt").write_text(
+            progress_path.write_text(
                 "\n".join(f"{i+1}. {f}" for i, f in enumerate(selected))
             )
 

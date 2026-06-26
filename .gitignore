@@ -17,7 +17,10 @@ projections/
 .env
 /scripts/
 
-# Discovery runtime artifacts (resume checkpoints)
+# Discovery runtime artifacts (checkpoints, FS history, progress) — now under fs_runs/
+fs_runs/
+# Legacy root patterns (pre-relocation runs)
 discovery_stability_checkpoint_*.json
-# Durable per-round FS score logs (append-only, kept after run)
+discovery_checkpoint_*.json
+discovery_progress*.txt
 fs_history_*.jsonl

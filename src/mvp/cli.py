@@ -2113,10 +2113,24 @@ def cmd_experiment(args: argparse.Namespace) -> int:
         # callers default to first-of-current-month for cache stability.
         set_fs_cutoff(_date.today())
 
-    # Checkpoint gate: determine checkpoint path from --output name,
-    # then enforce --resume / --fresh rules.
+    # Checkpoint gate: determine checkpoint path from --output name, then enforce
+    # --resume / --fresh rules. State (checkpoint, fs_history, progress) lives
+    # under fs_runs/ to keep the project root clean.
     output_stem = args.output.removesuffix(".yaml")
-    checkpoint_path = Path(f"discovery_checkpoint_{output_stem}.json")
+    fs_runs_dir = Path("fs_runs")
+    fs_runs_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_path = fs_runs_dir / f"discovery_checkpoint_{output_stem}.json"
+    # One-time migration: a pre-relocation run left its checkpoint + FS history at
+    # the project root. Move them into fs_runs/ so resume/fresh behave like a
+    # native run (and the root gets cleaned). Only fires when the new-location
+    # checkpoint is absent and a legacy one exists.
+    legacy_checkpoint = Path(f"discovery_checkpoint_{output_stem}.json")
+    if not checkpoint_path.exists() and legacy_checkpoint.exists():
+        legacy_checkpoint.replace(checkpoint_path)
+        legacy_history = Path(f"fs_history_{output_stem}.jsonl")
+        if legacy_history.exists():
+            legacy_history.replace(fs_runs_dir / f"fs_history_{output_stem}.jsonl")
+        logger.info("Migrated '%s' run state from root into fs_runs/", output_stem)
 
     if checkpoint_path.exists() and not args.resume and not args.fresh:
         from mvp.model.discovery.checkpoint import (
