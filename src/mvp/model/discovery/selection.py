@@ -5,6 +5,7 @@ import json
 import logging
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,9 +20,6 @@ from mvp.model.discovery.checkpoint import (
 )
 
 logger = logging.getLogger(__name__)
-
-# TEMP TIMING (FS throughput diagnosis) — remove after. [total_seconds, n_writes]
-_CKPT_T = [0.0, 0]
 
 
 def _fs_history_path(checkpoint_path: Path | None) -> Path | None:
@@ -85,6 +83,7 @@ class FeatureSelector:
         base_features: list[str] | None = None,
         round1_baseline: float | None = None,
         min_delta: float = 0.0,
+        forward_max_workers: int | None = None,
     ) -> None:
         """Initialize selector.
 
@@ -117,6 +116,10 @@ class FeatureSelector:
         self.base_features = list(base_features) if base_features else []
         self.round1_baseline = round1_baseline
         self.min_delta = min_delta
+        # Candidate-loop parallelism: number of concurrent candidate fits.
+        # None/1 = serial (exact current path). Resolved upstream (discover);
+        # stability forces 1 to avoid nesting under its resample pool.
+        self.forward_max_workers = forward_max_workers
 
     def _is_better(self, new_val: float, old_val: float) -> bool:
         """Check if new value is better than old value."""
@@ -215,12 +218,14 @@ class FeatureSelector:
 
         while remaining and len(selected) < self.max_features:
             round_num = len(selected) + 1
-            best_feature = None
-            best_feature_metric = best_metric
             round_results: list[tuple[str, float]] = []
             scores_this_round: dict[str, float] = {}
 
-            # Seed with any prior scores from the checkpoint for this round
+            # Seed with any prior scores from the checkpoint for this round.
+            # Populate the score set only — the round winner is chosen by a
+            # single deterministic reduction over the full set below, so resume
+            # insertion order (and, under parallelism, completion order) can't
+            # change the pick.
             unevaluated = set(remaining)
             if resumed_round_scores:
                 for feat, score in resumed_round_scores.items():
@@ -228,9 +233,6 @@ class FeatureSelector:
                         continue
                     round_results.append((feat, score))
                     scores_this_round[feat] = score
-                    if self._is_better(score, best_feature_metric):
-                        best_feature = feat
-                        best_feature_metric = score
                 unevaluated -= set(scores_this_round.keys())
                 logger.info(
                     "  Restored %d/%d candidate scores from checkpoint",
@@ -239,48 +241,38 @@ class FeatureSelector:
                 # Prior scores only apply to the first resumed round
                 resumed_round_scores = {}
 
-            feature_iter = tqdm(
-                sorted(unevaluated),
-                desc=f"Round {round_num}/{self.max_features}",
-                leave=False,
-                ncols=120,
-            )
-
-            if best_feature is not None and hasattr(feature_iter, "set_postfix"):
-                feature_iter.set_postfix(
-                    current=f"{best_metric:.4f}",
-                    best=f"{best_feature_metric:.4f}", feat=best_feature,
-                    refresh=False,
-                )
-
+            to_eval = sorted(unevaluated)
+            workers = max(1, self.forward_max_workers or 1)
             eval_count = 0
-            for feature in feature_iter:
-                candidate = selected + [feature]
+            round_t0 = time.perf_counter()
+
+            # Pure worker: returns (feature, metric), or (feature, None) on a
+            # scorer failure — mirroring the serial `continue`-on-exception. It
+            # reads only shared read-only state via self.scorer (which copies
+            # each fold slice before touching it), so concurrent calls are safe.
+            def _eval(feat: str) -> tuple[str, float | None]:
                 try:
-                    metric = self.scorer(candidate)
-                except Exception as e:
-                    logger.warning("Scorer failed for %s: %s", feature, e)
-                    continue
+                    return feat, self.scorer(selected + [feat])
+                except Exception as e:  # noqa: BLE001 — match serial skip-on-error
+                    logger.warning("Scorer failed for %s: %s", feat, e)
+                    return feat, None
 
-                round_results.append((feature, metric))
-                scores_this_round[feature] = metric
-
-                if self._is_better(metric, best_feature_metric):
-                    best_feature = feature
-                    best_feature_metric = metric
-                    if hasattr(feature_iter, "set_postfix"):
-                        feature_iter.set_postfix(
-                            current=f"{best_metric:.4f}",
-                            best=f"{best_feature_metric:.4f}", feat=best_feature,
-                        )
-
+            # All bookkeeping stays on the main thread (no locks needed): record
+            # the score and write the periodic checkpoint while the dict is
+            # quiescent between results. Cadence is "every N completions" — same
+            # crash-loss bound as the old "every N submissions".
+            def _record(feat: str, metric: float | None) -> None:
+                nonlocal eval_count
+                if metric is None:
+                    return
+                round_results.append((feat, metric))
+                scores_this_round[feat] = metric
                 eval_count += 1
                 if (
                     checkpoint_path is not None
                     and checkpoint_interval > 0
                     and eval_count % checkpoint_interval == 0
                 ):
-                    _tc = time.perf_counter()  # TEMP TIMING
                     self._write_checkpoint(
                         checkpoint_path,
                         started_at=started_at,
@@ -291,14 +283,42 @@ class FeatureSelector:
                         total_candidates=len(remaining),
                         scores=scores_this_round,
                     )
-                    _CKPT_T[0] += time.perf_counter() - _tc  # TEMP TIMING
-                    _CKPT_T[1] += 1  # TEMP TIMING
-                    if _CKPT_T[1] % 100 == 0:  # TEMP TIMING
-                        logger.info(
-                            "[FS TIMING] %d checkpoint writes, %.1fs total "
-                            "(%.3fs/write)",
-                            _CKPT_T[1], _CKPT_T[0], _CKPT_T[0] / _CKPT_T[1],
-                        )
+
+            desc = f"Round {round_num}/{self.max_features}"
+            if workers == 1:
+                for feature in tqdm(to_eval, desc=desc, leave=False, ncols=120):
+                    _record(*_eval(feature))
+            else:
+                with ThreadPoolExecutor(max_workers=workers) as ex:
+                    futures = [ex.submit(_eval, f) for f in to_eval]
+                    for fut in tqdm(
+                        as_completed(futures), total=len(futures),
+                        desc=f"{desc} (x{workers})", leave=False, ncols=120,
+                    ):
+                        _record(*fut.result())
+
+            # Deterministic round winner: strict-improvement reduction over the
+            # FULL score set in sorted feature order, seeded at the current
+            # metric. Order-independent, so serial and parallel pick the
+            # identical feature; ties resolve to the earliest-sorted candidate,
+            # and a candidate that merely equals best_metric is not accepted
+            # (preserving the stop-on-no-improvement behavior below).
+            best_feature = None
+            best_feature_metric = best_metric
+            for feat in sorted(scores_this_round):
+                if self._is_better(scores_this_round[feat], best_feature_metric):
+                    best_feature = feat
+                    best_feature_metric = scores_this_round[feat]
+
+            if eval_count:
+                _dt = time.perf_counter() - round_t0
+                logger.info(
+                    "  Round %d: scored %d candidates in %.1fs "
+                    "(%.2f cand/s, %d worker%s)",
+                    round_num, eval_count, _dt,
+                    eval_count / _dt if _dt > 0 else 0.0,
+                    workers, "" if workers == 1 else "s",
+                )
 
             # If no improvement (or improvement < min_delta), stop
             if best_feature is None:

@@ -551,3 +551,73 @@ class TestFeatureSelectorRun:
 
         with pytest.raises(ValueError, match="Unknown selection method"):
             selector.run()
+
+
+class TestCandidateParallelism:
+    """Parallel candidate loop must select identically to the serial path."""
+
+    @staticmethod
+    def _select(scorer, feats, workers, max_features=5):
+        return FeatureSelector(
+            scorer=scorer,
+            all_features=feats,
+            method="forward",
+            direction="minimize",
+            max_features=max_features,
+            forward_max_workers=workers,
+        ).run()
+
+    def test_parallel_matches_serial(self):
+        """Same selection + final metric + per-round rankings, serial vs pooled."""
+        feats = [f"f{i:02d}" for i in range(20)]
+        weights = {f: (i + 1) * 0.01 for i, f in enumerate(feats)}  # f19 best
+
+        def scorer(features):
+            return 1.0 - sum(weights.get(f, 0.0) for f in features)  # lower better
+
+        serial = self._select(scorer, feats, workers=1)
+        pooled = self._select(scorer, feats, workers=8)
+
+        assert serial.selected_features == pooled.selected_features
+        assert serial.final_metric == pooled.final_metric
+        # Per-round rankings identical too (not just the final pick).
+        s_ranks = [h.get("round_ranking") for h in serial.history if "round_ranking" in h]
+        p_ranks = [h.get("round_ranking") for h in pooled.history if "round_ranking" in h]
+        assert s_ranks == p_ranks
+
+    def test_tie_breaks_to_earliest_sorted(self):
+        """An exact metric tie resolves to the earliest-sorted feature, both paths."""
+        feats = ["b_feat", "a_feat", "c_feat"]  # unsorted on purpose
+
+        def scorer(features):
+            s = 1.0
+            if "a_feat" in features:
+                s -= 0.2
+            if "b_feat" in features:  # exact tie with a_feat
+                s -= 0.2
+            if "c_feat" in features:
+                s -= 0.1
+            return s
+
+        for workers in (1, 4):
+            r = self._select(scorer, feats, workers=workers, max_features=1)
+            assert r.selected_features == ["a_feat"]  # earliest in sorted order
+
+    def test_worker_exception_skips_candidate(self):
+        """A scorer failure skips that candidate, mirroring the serial continue."""
+        feats = ["good", "boom", "ok"]
+
+        def scorer(features):
+            if "boom" in features:
+                raise RuntimeError("boom")
+            s = 1.0
+            if "good" in features:
+                s -= 0.3
+            if "ok" in features:
+                s -= 0.1
+            return s
+
+        for workers in (1, 4):
+            r = self._select(scorer, feats, workers=workers, max_features=2)
+            assert "boom" not in r.selected_features
+            assert r.selected_features[0] == "good"

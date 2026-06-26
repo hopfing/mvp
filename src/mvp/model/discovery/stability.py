@@ -289,6 +289,11 @@ def run_stability_selection(
             max_features=max_features,
             base_features=base_features,
             min_delta=min_delta,
+            # Anti-nesting: parallelism lives at the resample layer (this thread
+            # pool). Parallelising the inner candidate loop too would multiply
+            # thread demand (workers_resample x workers_candidate) and
+            # oversubscribe — keep inner selection serial.
+            forward_max_workers=1,
         )
         result = selector.run(verbose=False)
         return {

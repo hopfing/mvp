@@ -868,6 +868,10 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         help="Override n_jobs for parallelism (limits CPU usage)",
     )
     exp_parser.add_argument(
+        "--parallel-candidates", type=int, default=None,
+        help="Concurrent candidate fits in forward selection (None=auto, 1=serial)",
+    )
+    exp_parser.add_argument(
         "--memory-limit", type=int, default=None,
         help="Override memory limit %% (0 to disable, default 75)",
     )
@@ -2164,6 +2168,11 @@ def _cmd_experiment_classification(
         config_path=config_path,
         verbose=args.verbose,
     )
+
+    # CLI override for candidate-loop parallelism (mutate the loaded config
+    # before the run; None leaves the config/auto default in place).
+    if getattr(args, "parallel_candidates", None) is not None:
+        discovery.config.discovery.forward_max_workers = args.parallel_candidates
 
     result = discovery.run(
         checkpoint_path=checkpoint_path,

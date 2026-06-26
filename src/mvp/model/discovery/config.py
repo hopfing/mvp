@@ -126,6 +126,21 @@ class DiscoveryOptions(BaseModel):
     direction: Literal["minimize", "maximize"] | None = None
     importance_threshold: float = 0.05
     min_delta: float = 0.0  # forward selection: minimum absolute improvement to accept a candidate
+    # --- Forward-selection candidate-loop parallelism ---
+    # Candidates within a round are independent fits over the shared read-only
+    # feature matrix; running them on a thread pool (XGBoost releases the GIL, so
+    # threads share X_wide with no per-worker copies) speeds up a single FS run.
+    # Results-invariant — selection is verified thread-deterministic and the round
+    # winner is a sorted-feature-order reduction, so worker count never changes
+    # the selected set — therefore EXCLUDED from any checkpoint fingerprint.
+    #
+    # The run's total thread budget is the existing effective n_jobs
+    # (model.params.n_jobs / --n-jobs / cpu-2 — the same source stability uses);
+    # this knob just splits it into `forward_max_workers` concurrent fits of
+    # `budget // workers` threads each. None = auto (~4 threads/fit); 1 = serial.
+    # Stability forces serial inner (it parallelises resamples; nesting would
+    # oversubscribe).
+    forward_max_workers: int | None = None
     meta_discovery: MetaDiscoveryConfig | None = None
     stability_selection: StabilitySelectionConfig | None = None
     null_importance: NullImportanceConfig | None = None

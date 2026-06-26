@@ -2,6 +2,7 @@
 
 
 import logging
+import os
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -29,6 +30,7 @@ from mvp.model.discovery.sweeps import (
     SweepResult,
     parse_feature_spec,
 )
+from mvp.model.models import get_n_jobs_override
 from mvp.model.registry import get_registry
 
 logger = logging.getLogger(__name__)
@@ -294,13 +296,46 @@ class FeatureDiscovery:
 
         return y_true, pred_0, pred_1, row_keys
 
+    def _resolve_candidate_parallelism(self, method: str) -> tuple[int, int | None]:
+        """Workers (concurrent candidate fits) and per-fit n_jobs for forward FS.
+
+        The run's total thread budget is the existing effective n_jobs
+        (``model.params.n_jobs``, else the ``--n-jobs`` override, else cpu-2) —
+        the same resolution stability uses — capped at cpu. The candidate loop
+        splits that budget into ``workers`` concurrent fits of ``budget //
+        workers`` threads each; auto targets ~4 threads/fit (the xgb knee).
+        Non-forward paths and stability stay serial (stability parallelises at
+        the resample layer; nesting would oversubscribe).
+        """
+        if method != "forward":
+            return 1, None
+        cpu = os.cpu_count() or 4
+        cfg_n_jobs = (self.config.model.params or {}).get("n_jobs")
+        budget = (
+            int(cfg_n_jobs) if cfg_n_jobs
+            else (get_n_jobs_override() or max(1, cpu - 2))
+        )
+        budget = max(1, min(int(budget), cpu))
+        fw = self.config.discovery.forward_max_workers
+        workers = max(1, fw) if fw is not None else max(1, budget // 4)
+        workers = max(1, min(workers, budget))
+        n_jobs = max(1, budget // workers)
+        if workers > 1:
+            self._log(
+                f"Candidate-loop parallelism: {workers} workers x {n_jobs} "
+                f"threads/fit (budget {budget})"
+            )
+        return workers, n_jobs
+
     def _create_fast_scorer(
-        self, all_features: list[str], metric: str | None = None
+        self, all_features: list[str], metric: str | None = None,
+        n_jobs: int | None = None,
     ) -> callable:
         """Create a fast scorer for forward selection.
 
         Precomputes all candidate features into one numpy matrix so each
-        candidate evaluation is just column slicing + model fit.
+        candidate evaluation is just column slicing + model fit. ``n_jobs`` caps
+        the per-fit xgb threads so concurrent candidate fits don't oversubscribe.
         """
         target_metric = metric or self.config.discovery.metric
         fast = FastForwardSelector(
@@ -336,7 +371,7 @@ class FeatureDiscovery:
         else:
             fast.precompute()
 
-        return fast.create_scorer(target_metric)
+        return fast.create_scorer(target_metric, n_jobs=n_jobs)
 
     def _create_scorer(self, metric: str | None = None) -> callable:
         """Create scorer function for selection."""
@@ -571,8 +606,9 @@ class FeatureDiscovery:
         else:
             self._log(f"Starting with {len(all_features)} features from registry...")
 
+        cand_workers, cand_n_jobs = self._resolve_candidate_parallelism(method)
         if method == "forward":
-            scorer = self._create_fast_scorer(all_features)
+            scorer = self._create_fast_scorer(all_features, n_jobs=cand_n_jobs)
         else:
             scorer = self._create_scorer()
         importance_fn = self._create_importance_fn(all_features)
@@ -639,6 +675,7 @@ class FeatureDiscovery:
             base_features=base,
             round1_baseline=round1_baseline,
             min_delta=self.config.discovery.min_delta,
+            forward_max_workers=cand_workers,
         )
 
         result = selector.run(

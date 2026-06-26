@@ -38,10 +38,6 @@ NAN_TOLERANT_MODEL_TYPES = frozenset({"xgboost"})
 
 _WINDOWED_SUFFIX_RE = re.compile(r"^(.+)_(\d+)d$")
 
-# TEMP TIMING (FS throughput diagnosis) — remove after. Cumulative seconds per
-# scorer component across all fold-fits; logged every 1000 fold-fits.
-_FS_T = {"prep": 0.0, "build": 0.0, "fit": 0.0, "predict": 0.0, "n": 0}
-
 
 def _resolve_column_impute(
     col_name: str, registry: FeatureRegistry,
@@ -665,6 +661,7 @@ class FastForwardSelector:
         metric: str,
         folds: list[tuple[np.ndarray, np.ndarray]] | None = None,
         fold_medians: list[np.ndarray] | None = None,
+        n_jobs: int | None = None,
     ) -> Callable[[list[str]], float]:
         """Return a fast scorer function that evaluates feature subsets.
 
@@ -691,6 +688,12 @@ class FastForwardSelector:
         fill_constants = self.fill_constants
         model_type = self.config.model.type
         model_params = self.config.model.params or {}
+        # Per-fit thread cap for candidate-loop parallelism: a fresh dict so the
+        # shared config isn't mutated, spread-last in the model wrapper so it
+        # wins over a config-pinned n_jobs. Output is thread-deterministic on
+        # this XGBoost build (verified), so this changes speed, never selection.
+        if n_jobs is not None:
+            model_params = {**model_params, "n_jobs": int(n_jobs)}
         scale = model_type in ("logistic", "neural_net")
         nan_tolerant = model_type in NAN_TOLERANT_MODEL_TYPES
 
@@ -771,7 +774,6 @@ class FastForwardSelector:
 
             fold_metrics = []
             for fold_idx, (train_idx, test_idx) in enumerate(folds):
-                _t = time.perf_counter()  # TEMP TIMING
                 X_train = X_wide[np.ix_(train_idx, col_indices)].copy()
                 X_test = X_wide[np.ix_(test_idx, col_indices)].copy()
                 y_train, y_test = y[train_idx], y[test_idx]
@@ -803,8 +805,6 @@ class FastForwardSelector:
                         X_train = (X_train - mean) / std
                         X_test = (X_test - mean) / std
 
-                _FS_T["prep"] += time.perf_counter() - _t  # TEMP TIMING
-
                 if use_fast_logistic:
                     model = LogisticRegression(**lr_params)
                     sw = sample_weights[train_idx] if sample_weights is not None else None
@@ -833,18 +833,12 @@ class FastForwardSelector:
                     model.fit(X_train, y_train_2d, **fit_kwargs)
                     y_prob = model.predict_proba(X_test)
                 else:
-                    _t = time.perf_counter()  # TEMP TIMING
                     model = get_model(model_type, model_params, feature_names=col_names)
                     fit_kwargs: dict = {}
                     if sample_weights is not None:
                         fit_kwargs["sample_weight"] = sample_weights[train_idx]
-                    _FS_T["build"] += time.perf_counter() - _t  # TEMP TIMING
-                    _t = time.perf_counter()  # TEMP TIMING
                     model.fit(X_train, y_train, **fit_kwargs)
-                    _FS_T["fit"] += time.perf_counter() - _t  # TEMP TIMING
-                    _t = time.perf_counter()  # TEMP TIMING
                     y_prob = model.predict_proba(X_test)
-                    _FS_T["predict"] += time.perf_counter() - _t  # TEMP TIMING
 
                 # MTL combined: score the full multi-task loss (primary log_loss
                 # + weighted standardized aux MSE). MTL primary and single-task
@@ -857,15 +851,6 @@ class FastForwardSelector:
                     )
                 else:
                     fold_metrics.append(metric_fn(y_test, y_prob))
-
-                _FS_T["n"] += 1  # TEMP TIMING
-                if _FS_T["n"] % 10000 == 0:  # TEMP TIMING
-                    logger.info(
-                        "[FS TIMING] %d fold-fits: prep=%.1fs build=%.1fs "
-                        "fit=%.1fs predict=%.1fs",
-                        _FS_T["n"], _FS_T["prep"], _FS_T["build"],
-                        _FS_T["fit"], _FS_T["predict"],
-                    )
 
             return float(np.mean(fold_metrics))
 
