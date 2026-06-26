@@ -302,17 +302,35 @@ class FeatureSelector:
                     )
 
             desc = f"Round {round_num}/{self.max_features}"
+            # Display-only running best (best score seen as results arrive). Does
+            # NOT drive selection — the authoritative winner is the sorted-order
+            # reduction below — so on a tie it may transiently show whichever tied
+            # feature finished first. Purely the progress bar.
+            disp_best = best_metric
+
+            def _show(bar, feat: str, metric: float | None) -> None:
+                nonlocal disp_best
+                if metric is not None and self._is_better(metric, disp_best):
+                    disp_best = metric
+                    bar.set_postfix(best=f"{metric:.4f}", feat=feat, refresh=False)
+
             if workers == 1:
-                for feature in tqdm(to_eval, desc=desc, leave=False, ncols=120):
-                    _record(*_eval(feature))
+                bar = tqdm(to_eval, desc=desc, leave=False, ncols=120)
+                for feature in bar:
+                    feat, metric = _eval(feature)
+                    _record(feat, metric)
+                    _show(bar, feat, metric)
             else:
                 with ThreadPoolExecutor(max_workers=workers) as ex:
                     futures = [ex.submit(_eval, f) for f in to_eval]
-                    for fut in tqdm(
+                    bar = tqdm(
                         as_completed(futures), total=len(futures),
                         desc=f"{desc} (x{workers})", leave=False, ncols=120,
-                    ):
-                        _record(*fut.result())
+                    )
+                    for fut in bar:
+                        feat, metric = fut.result()
+                        _record(feat, metric)
+                        _show(bar, feat, metric)
 
             # Deterministic round winner: strict-improvement reduction over the
             # FULL score set in sorted feature order, seeded at the current
