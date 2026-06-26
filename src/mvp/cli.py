@@ -2118,19 +2118,27 @@ def cmd_experiment(args: argparse.Namespace) -> int:
     # under fs_runs/ to keep the project root clean.
     output_stem = args.output.removesuffix(".yaml")
     fs_runs_dir = Path("fs_runs")
-    fs_runs_dir.mkdir(parents=True, exist_ok=True)
-    checkpoint_path = fs_runs_dir / f"discovery_checkpoint_{output_stem}.json"
-    # One-time migration: a pre-relocation run left its checkpoint + FS history at
-    # the project root. Move them into fs_runs/ so resume/fresh behave like a
-    # native run (and the root gets cleaned). Only fires when the new-location
-    # checkpoint is absent and a legacy one exists.
-    legacy_checkpoint = Path(f"discovery_checkpoint_{output_stem}.json")
-    if not checkpoint_path.exists() and legacy_checkpoint.exists():
-        legacy_checkpoint.replace(checkpoint_path)
-        legacy_history = Path(f"fs_history_{output_stem}.jsonl")
-        if legacy_history.exists():
-            legacy_history.replace(fs_runs_dir / f"fs_history_{output_stem}.jsonl")
-        logger.info("Migrated '%s' run state from root into fs_runs/", output_stem)
+    # Un-dated per-run working dir, so resume finds the checkpoint at a stable
+    # path (no date in the path while a run can span midnight). On successful
+    # completion the dir is renamed to <YYYYMMDD>_<name>/ (see _stamp_run_dir).
+    run_dir = fs_runs_dir / output_stem
+    run_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_path = run_dir / f"discovery_checkpoint_{output_stem}.json"
+    # One-time migration: move a pre-relocation run's checkpoint + FS history into
+    # the per-run working dir. Covers the project root (original) and a flat
+    # fs_runs/ (interim layout) — whichever still holds a legacy checkpoint.
+    if not checkpoint_path.exists():
+        for legacy_ckpt in (
+            Path(f"discovery_checkpoint_{output_stem}.json"),
+            fs_runs_dir / f"discovery_checkpoint_{output_stem}.json",
+        ):
+            if legacy_ckpt.exists():
+                legacy_ckpt.replace(checkpoint_path)
+                legacy_hist = legacy_ckpt.with_name(f"fs_history_{output_stem}.jsonl")
+                if legacy_hist.exists():
+                    legacy_hist.replace(run_dir / f"fs_history_{output_stem}.jsonl")
+                logger.info("Migrated '%s' run state into %s/", output_stem, run_dir)
+                break
 
     if checkpoint_path.exists() and not args.resume and not args.fresh:
         from mvp.model.discovery.checkpoint import (
@@ -2164,6 +2172,30 @@ def cmd_experiment(args: argparse.Namespace) -> int:
     if _is_projection_discovery(config_path):
         return _cmd_experiment_projection(args, config_path, checkpoint_path)
     return _cmd_experiment_classification(args, config_path, checkpoint_path)
+
+
+def _stamp_run_dir(run_dir: Path) -> None:
+    """Archive a completed run's working dir under its completion date.
+
+    ``fs_runs/<name>/`` -> ``fs_runs/<YYYYMMDD>_<name>/``, suffixing on a same-day
+    name collision so a re-run completing the same day doesn't clobber the first.
+    Best-effort: a failure here must not fail an otherwise-complete run.
+    """
+    from datetime import date as _date
+
+    try:
+        if not run_dir.is_dir():
+            return
+        stamp = _date.today().strftime("%Y%m%d")
+        target = run_dir.with_name(f"{stamp}_{run_dir.name}")
+        n = 2
+        while target.exists():
+            target = run_dir.with_name(f"{stamp}_{run_dir.name}_{n}")
+            n += 1
+        run_dir.rename(target)
+        logger.info("Archived completed run -> %s", target)
+    except OSError as e:
+        logger.warning("Could not stamp run dir %s: %s", run_dir, e)
 
 
 def _cmd_experiment_classification(
@@ -2203,6 +2235,9 @@ def _cmd_experiment_classification(
         # selection finished, so any failure in the tail (sweep / final fit /
         # save) leaves the run resumable instead of orphaned.
         checkpoint_path.unlink(missing_ok=True)
+        # Archive the working dir under its completion date (fs_runs/<name>/ ->
+        # fs_runs/<YYYYMMDD>_<name>/) so re-using a name keeps the old run.
+        _stamp_run_dir(checkpoint_path.parent)
     else:
         print("\nNo features selected - no config saved")
 
