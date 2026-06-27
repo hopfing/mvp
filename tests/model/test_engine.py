@@ -443,6 +443,80 @@ class TestFeatureEngineMirroring:
         assert row_a["player_elo_diff"][0] == 100.0
 
 
+class TestFeatureEngineColumnPruning:
+    """Tests for parquet column pruning (_resolve_source_columns)."""
+
+    def _hybrid_matches(self, tmp_path: Path) -> Path:
+        """Matches parquet carrying raw stat columns only a hybrid feature reads."""
+        df = pl.DataFrame({
+            "match_uid": ["m1", "m1", "m2", "m2"],
+            "player_id": ["A", "B", "A", "B"],
+            "opp_id": ["B", "A", "B", "A"],
+            "effective_match_date": [
+                date(2024, 1, 1), date(2024, 1, 1),
+                date(2024, 1, 5), date(2024, 1, 5),
+            ],
+            "won": [True, False, True, False],
+            "raw_num": [10, 5, 8, 6],
+            "raw_den": [20, 20, 16, 18],
+        })
+        matches_path = tmp_path / "matches.parquet"
+        df.write_parquet(matches_path)
+        return matches_path
+
+    def _register_hybrid(self):
+        """A derived feature (depends_on) whose expr ALSO reads raw columns,
+        mirroring the surf_spec ratios. raw_num/raw_den are referenced ONLY here."""
+        @feature(name="base_rate", params=[], mirror=True)
+        def base_rate() -> pl.Expr:
+            return pl.col("won").cast(pl.Float64)
+
+        @feature(
+            name="hybrid_ratio", params=[], depends_on=["base_rate"],
+            mirror=False, impute=None,
+        )
+        def hybrid_ratio() -> pl.Expr:
+            return (
+                pl.when(pl.col("raw_den") > 0)
+                .then(pl.col("raw_num") / pl.col("raw_den"))
+                .otherwise(None)
+            ) + pl.col("player_base_rate")
+
+    def test_resolve_source_columns_introspects_hybrid_derived(
+        self, tmp_path: Path, isolated_registry
+    ):
+        """Raw columns a derived feature reads directly are not pruned away."""
+        self._register_hybrid()
+        engine = FeatureEngine(
+            matches_path=self._hybrid_matches(tmp_path),
+            cache_dir=tmp_path / "cache",
+        )
+
+        cols = engine._resolve_source_columns(["player_hybrid_ratio"])
+
+        # The raw columns the hybrid reads must be loaded...
+        assert "raw_num" in cols
+        assert "raw_den" in cols
+        # ...while the computed dep column it references is filtered out
+        # (not present in the parquet schema).
+        assert "player_base_rate" not in cols
+
+    def test_compute_hybrid_derived_does_not_crash_on_pruned_load(
+        self, tmp_path: Path, isolated_registry
+    ):
+        """End-to-end: computing a hybrid derived feature whose raw columns no
+        other feature loads succeeds (regression for ColumnNotFoundError)."""
+        self._register_hybrid()
+        engine = FeatureEngine(
+            matches_path=self._hybrid_matches(tmp_path),
+            cache_dir=tmp_path / "cache",
+        )
+
+        result = engine.compute(["player_base_rate", "player_hybrid_ratio"])
+
+        assert "player_hybrid_ratio" in result.columns
+
+
 class TestFeatureEngineCaching:
     """Tests for feature caching functionality."""
 

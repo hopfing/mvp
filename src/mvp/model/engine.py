@@ -780,7 +780,23 @@ class FeatureEngine:
                 needed.update(feature_def.transform_columns)
 
             if feature_def.depends_on:
-                continue  # derived — references computed columns, not source
+                # Most derived features reference only computed columns (filtered
+                # out by the schema intersection below). But "hybrid" derived
+                # features (e.g. the surf_spec ratios) ALSO read raw parquet
+                # columns directly in their expression — introspect best-effort
+                # so those load too. A failure here is non-fatal (skip this one,
+                # don't disable pruning globally). Transforms are df->df and can't
+                # be introspected as an expr; their raw needs already came from
+                # transform_columns above.
+                if not feature_def.transform:
+                    try:
+                        needed.update(feature_def.func(**params).meta.root_names())
+                    except Exception:
+                        logger.debug(
+                            "Could not introspect derived feature %s for raw "
+                            "columns", base_name,
+                        )
+                continue
 
             try:
                 expr = feature_def.func(**params)
