@@ -249,7 +249,7 @@ class ModelSummary:
     bt_me_pos: float | None = None
     bt_avg_me: float | None = None
     # Per (circuit, consensus-bucket) cells: (circuit, cons_key) ->
-    # {roi_o, units_o_all, units_o, n}. Feeds the per-circuit x cons columns.
+    # {roi_o, roi_o_all, units_o_all, units_o, n}. Feeds the per-circuit x cons cols.
     bt_cells: dict = field(default_factory=dict)
 
 
@@ -571,9 +571,15 @@ def _circuit_cons_cells(df: pl.DataFrame) -> dict:
                 )
             if "model_prob" in cols:
                 d = d.filter(pl.col("model_prob") > 0.5)
-            cell = {"roi_o": None, "units_o_all": None, "units_o": None, "n": 0}
+            cell = {"roi_o": None, "roi_o_all": None,
+                    "units_o_all": None, "units_o": None, "n": 0}
             if "pnl_open" in cols and len(d) > 0:
                 cell["units_o_all"] = d["pnl_open"].sum()
+                # ROIo_all over priced bets only — a row with no opening price
+                # isn't a placeable bet, so null pnl_open is out of the denom.
+                n_all = d["pnl_open"].drop_nulls().len()
+                if n_all > 0:
+                    cell["roi_o_all"] = cell["units_o_all"] / n_all
             if "opening_edge" in cols:
                 d = d.filter(pl.col("opening_edge") >= 0)
             n = len(d)
@@ -1142,13 +1148,16 @@ def _version_rows(summaries: list[ModelSummary]) -> list[ModelSummary]:
 
 
 def _bt_cell_fmt(cell: dict | None) -> str:
-    """Format one (circuit, cons) cell as `ROIo% Uo_all Uo>=0` (widths 6/7/7)."""
+    """Format one (circuit, cons) cell: `ROIo Uo>=0 ROIall Uall` — the edge>=0
+    pair then the all-edge pair, each ROI next to the units it describes."""
     cell = cell or {}
-    roi, uall, uo = cell.get("roi_o"), cell.get("units_o_all"), cell.get("units_o")
+    roi, uo = cell.get("roi_o"), cell.get("units_o")
+    roia, uall = cell.get("roi_o_all"), cell.get("units_o_all")
     roi_s = f"{roi*100:+.2f}" if roi is not None else "--"
-    uall_s = f"{uall:+.1f}" if uall is not None else "--"
     uo_s = f"{uo:+.1f}" if uo is not None else "--"
-    return f"{roi_s:>6} {uall_s:>7} {uo_s:>7}"
+    roia_s = f"{roia*100:+.2f}" if roia is not None else "--"
+    uall_s = f"{uall:+.1f}" if uall is not None else "--"
+    return f"{roi_s:>6} {uo_s:>7} {roia_s:>6} {uall_s:>7}"
 
 
 def render_backtest_table(rows: list[ModelSummary]) -> str:
@@ -1166,19 +1175,22 @@ def render_backtest_table(rows: list[ModelSummary]) -> str:
     rows = sorted(
         rows, key=lambda s: -(s.bt_units_o if s.bt_units_o is not None else -1e18)
     )
+    # Fit the Model column to the longest name present (capped at 50) so the
+    # table isn't padded with dead whitespace.
+    name_w = min(50, max([len("Model")] + [len(s.name) for s in rows]))
     lines = [
         "=" * 80,
         "Table 2: Backtest (consensus + model-side, sorted by Uo>=0 desc)",
         "=" * 80,
-        "Per-circuit x cons cells: ROIo% / Uall(=Uo_all) / Uo>=0;  c1.0==1.0, c0.5==<1.0",
+        "Per-circuit x cons cells: ROIo/Uo>=0 (edge>=0) + ROIall/Uall (all edges);  c1.0==1.0, c0.5==<1.0",
     ]
     base_header = (
-        f"{'Model':<50} {'Period':<24} "
+        f"{'Model':<{name_w}} {'Period':<24} "
         f"{'N':>5} {'Hit%':>5} "
-        f"{'ROIo%':>6} {'ROIc%':>6} {'Uo>=0':>7} {'Uo_all':>7} {'Uc':>7} "
+        f"{'ROIo%':>6} {'Uo>=0':>7} {'Uo_all':>7} "
         f"{'CLV+%':>5} {'avgCLV':>6} {'ME+%':>5} {'avgME':>6}"
     )
-    cell_sub = f"{'ROIo':>6} {'Uall':>7} {'Uo>=0':>7}"
+    cell_sub = f"{'ROIo':>6} {'Uo>=0':>7} {'ROIall':>6} {'Uall':>7}"
     group_w = len(cell_sub)
     band = (
         " " * len(base_header) + " | "
@@ -1195,14 +1207,12 @@ def render_backtest_table(rows: list[ModelSummary]) -> str:
             else "(no data)"
         )
         row = (
-            f"{s.name[:50]:<50} {period[:24]:<24} "
+            f"{s.name[:name_w]:<{name_w}} {period[:24]:<24} "
             f"{s.bt_n:>5} "
             f"{(s.bt_hit*100 if s.bt_hit is not None else 0):>5.1f} "
             f"{(s.bt_roi_o*100 if s.bt_roi_o is not None else 0):>+6.2f} "
-            f"{(s.bt_roi_c*100 if s.bt_roi_c is not None else 0):>+6.2f} "
             f"{(s.bt_units_o if s.bt_units_o is not None else 0):>+7.1f} "
             f"{(s.bt_units_o_all if s.bt_units_o_all is not None else 0):>+7.1f} "
-            f"{(s.bt_units_c if s.bt_units_c is not None else 0):>+7.1f} "
             f"{(s.bt_clv_pos*100 if s.bt_clv_pos is not None else 0):>5.1f} "
             f"{(s.bt_avg_clv*100 if s.bt_avg_clv is not None else 0):>+6.2f} "
             f"{(s.bt_me_pos*100 if s.bt_me_pos is not None else 0):>5.1f} "
