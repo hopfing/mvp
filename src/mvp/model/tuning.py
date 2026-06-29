@@ -63,16 +63,15 @@ DEFAULT_SEARCH_SPACES: dict[str, dict[str, dict[str, Any]]] = {
         "colsample_bytree": {"type": "float", "low": 0.5, "high": 1.0},
         "colsample_bylevel": {"type": "float", "low": 0.5, "high": 1.0},
         # tree_method: how splits are searched. hist (default) uses binned
-        # histograms; approx uses quantile sketches; exact evaluates every
-        # split value. All three are kept: narrowing a categorical's choices
-        # breaks Optuna resume of every existing study (it forbids a changing
-        # value space). Measurement also showed dropping a method here is
-        # mistargeted — approx, not exact, is the slowest method, and exact
-        # sometimes carries the best held-out result; a leaner space is a
-        # fresh-study decision, not a retrofit. Placed before the params that
-        # depend on it (colsample_bynode, grow_policy, max_bin) so the
-        # conditional sampler sees its controller first.
-        "tree_method": {"type": "categorical", "choices": ["hist", "approx", "exact"]},
+        # histograms; exact evaluates every split value. approx (quantile
+        # sketches) was dropped after measurement: it was the slowest method
+        # and never reached the best held-out result across the log_ds2412
+        # studies, while exact sometimes does. Narrowing the categorical breaks
+        # Optuna resume of studies created with the 3-choice space, so this is
+        # a deliberate fresh-study line, not a retrofit. Placed before the
+        # params that depend on it (colsample_bynode, grow_policy, max_bin) so
+        # the conditional sampler sees its controller first.
+        "tree_method": {"type": "categorical", "choices": ["hist", "exact"]},
         # colsample_bynode is unsupported under tree_method=exact, so only
         # sample it under hist/approx (the wrapper would otherwise strip it,
         # leaving an inert value in the winning config).
