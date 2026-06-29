@@ -479,16 +479,25 @@ def _summary_from_diagnostics(diag: dict) -> dict:
     }
 
 
-def _extract_confidence(model_name: str, config_path: Path | None = None) -> dict:
+def _extract_confidence(
+    model_name: str,
+    config_path: Path | None = None,
+    fp_dir: Path | None = None,
+) -> dict:
     """Return per-circuit 12mo summary dict.
 
-    Prefers the fp-scoped path when `config_path` is given; falls back to
+    Prefers `fp_dir` (the fingerprint dir the latest diagnostics came from) when
+    given — this keeps sweep-trial rows, surfaced under a parent name via
+    source.txt, reading from their own fp dir rather than the base config's
+    fingerprint. Falls back to the fp-scoped path for `config_path`, then the
     legacy name-scoped path.
     """
     out = {
         "chal_12mo_med": None, "chal_12mo_p25": None, "chal_12mo_p75": None,
         "tour_12mo_med": None, "tour_12mo_p25": None, "tour_12mo_p75": None,
     }
+    if fp_dir is not None and (fp_dir / "validation_results.json").exists():
+        return _confidence_at(fp_dir)
     p: Path | None = None
     if config_path is not None:
         try:
@@ -590,15 +599,23 @@ def _extract_backtest(
     model_name: str,
     train_end: str | _dt.date | None,
     config_path: Path | None = None,
+    fp_dir: Path | None = None,
 ) -> dict:
     """Compute model-eval backtest aggregates: positive bet-time edge, model-side only.
 
-    Prefers the fp-scoped backtest.csv when `config_path` is given; falls back
-    to legacy `B:/backtests/lead/<name>.csv`. Scoped to the post-training
+    Prefers `fp_dir`'s backtest.csv (the fingerprint dir the latest diagnostics
+    came from) when given — this keeps sweep-trial rows, surfaced under a parent
+    name via source.txt, reading their own backtest rather than the base
+    config's fingerprint. Falls back to the fp-scoped path for `config_path`,
+    then legacy `B:/backtests/lead/<name>.csv`. Scoped to the post-training
     window (day after train end -> today).
     """
     p: Path | None = None
-    if config_path is not None:
+    if fp_dir is not None:
+        cand = fp_dir / "backtest.csv"
+        if cand.exists():
+            p = cand
+    if p is None and config_path is not None:
         try:
             cand = fp_backtest_path(config_path)
             if cand.exists():
@@ -646,9 +663,14 @@ def extract_summary(config_path: Path) -> ModelSummary | None:
     latest = max(runs, key=lambda r: r["mtime"])
     diag = latest["diagnostics"]
     diag_summary = _summary_from_diagnostics(diag)
-    conf = _extract_confidence(name, config_path=config_path)
+    # The latest run's diagnostics may come from a sweep-trial fingerprint dir
+    # (matched by a parent-name tag in source.txt), whose fingerprint differs
+    # from the base config's. Source confidence + backtest from that same fp dir
+    # so the headline row's three artifacts agree.
+    fp_dir = latest.get("fp_dir")
+    conf = _extract_confidence(name, config_path=config_path, fp_dir=fp_dir)
     train_end = _load_train_end(config_path)
-    bt = _extract_backtest(name, train_end, config_path=config_path)
+    bt = _extract_backtest(name, train_end, config_path=config_path, fp_dir=fp_dir)
 
     summary = ModelSummary(name=name, config_path=config_path)
     summary.run_id = latest["run_id"]
@@ -1021,17 +1043,22 @@ def render_confidence_table(summaries: list[ModelSummary]) -> str:
     return "\n".join(lines)
 
 
-def _backtest_summary_rows(summaries: list[ModelSummary]) -> list[ModelSummary]:
-    """Backtest-table rows: the latest run per model plus every historical
-    fingerprint-dir version that carries a backtest, labelled `<name> (<run_id>)`.
+def _version_rows(summaries: list[ModelSummary]) -> list[ModelSummary]:
+    """Fully-populated rows for every non-latest fingerprint-dir version of each
+    base config, labelled `<name> (<run_id>)`.
 
-    Latest rows keep their post-training-scoped stats (already on the summary);
-    version rows use whole-CSV stats, matching the cross-axis leader table's
-    B/U axes. mlrun-only versions are skipped — they have no backtest CSV.
+    Each row carries the version's own diagnostics, confidence, and backtest, so
+    the same list expands the static, matrix, and backtest tables uniformly (the
+    backtest table already surfaced versions this way; the static table and
+    matrix now do too). Versions are sweep trials tagged to a parent name in
+    source.txt plus any other historical fp dirs for the config.
+
+    mlrun-only runs are skipped (no fp dir -> no confidence/backtest CSVs). The
+    run whose fp matches the current YAML is skipped — it IS the latest, already
+    present as the base-name row.
     """
     rows: list[ModelSummary] = []
     for s in summaries:
-        rows.append(s)
         try:
             current_fp = fingerprint_for(s.config_path)
         except Exception:
@@ -1044,7 +1071,7 @@ def _backtest_summary_rows(summaries: list[ModelSummary]) -> list[ModelSummary]:
             if r["run_id"] == latest["run_id"]:
                 continue
             if "fp_dir" not in r:
-                continue  # mlrun-only: no backtest CSV
+                continue  # mlrun-only: no confidence/backtest CSV
             if current_fp is not None and r.get("fp") == current_fp:
                 continue  # this version IS the latest; don't double-count
             hist = ModelSummary(
@@ -1052,22 +1079,27 @@ def _backtest_summary_rows(summaries: list[ModelSummary]) -> list[ModelSummary]:
             )
             hist.run_id = r["run_id"]
             hist.run_ts = r["run_ts"]
+            for k, v in _summary_from_diagnostics(r["diagnostics"]).items():
+                setattr(hist, k, v)
+            for k, v in _confidence_at(r["fp_dir"]).items():
+                setattr(hist, k, v)
             for k, v in _fp_backtest_aggregates(r["fp_dir"]).items():
                 setattr(hist, k, v)
             rows.append(hist)
     return rows
 
 
-def render_backtest_table(summaries: list[ModelSummary]) -> str:
+def render_backtest_table(rows: list[ModelSummary]) -> str:
     """Table 2 — Backtest (consensus + model-side, sorted by Uo>=0 desc).
 
-    One row per latest model run plus every historical fingerprint-dir version
-    that carries a backtest, labelled `<name> (<run_id>)`. ``Uo>=0`` adds the
+    Renders the rows it is given (base-name latest rows + `<name> (<run_id>)`
+    version rows, already expanded by the caller). ``Uo>=0`` adds the
     opening_edge>=0 gate; ``Uo_all`` is consensus-side without it. Latest rows
     are scoped to the post-training window; version rows use the whole CSV.
     """
-    rows = _backtest_summary_rows(summaries)
-    rows.sort(key=lambda s: -(s.bt_units_o if s.bt_units_o is not None else -1e18))
+    rows = sorted(
+        rows, key=lambda s: -(s.bt_units_o if s.bt_units_o is not None else -1e18)
+    )
     lines = [
         "=" * 80,
         "Table 2: Backtest (consensus + model-side, sorted by Uo>=0 desc)",
@@ -1350,11 +1382,23 @@ def run_rank(*, force_refresh: bool = False, no_refresh: bool = False) -> str:
             skipped_no_diag.append(cfg.stem)
             continue
         summaries.append(s)
-        # In --no-refresh mode, surface which artifacts are missing per model
+        # In --no-refresh mode, surface which artifacts had no usable data. Read
+        # from what the summary actually loaded (which honors the latest run's
+        # fp dir), not check_freshness — that only knows the base config's
+        # fingerprint path and would mislabel sweep-trial rows as missing.
         if no_refresh:
-            fr = check_freshness(cfg)
-            if fr.missing:
-                missing_partial.append((cfg.stem, fr.missing))
+            miss: list[str] = []
+            if all(
+                v is None for v in (
+                    s.chal_12mo_med, s.chal_12mo_p25, s.chal_12mo_p75,
+                    s.tour_12mo_med, s.tour_12mo_p25, s.tour_12mo_p75,
+                )
+            ):
+                miss.append("confidence")
+            if not s.bt_period_lo:
+                miss.append("backtest")
+            if miss:
+                missing_partial.append((cfg.stem, miss))
 
     sections: list[str] = []
 
@@ -1393,10 +1437,16 @@ def run_rank(*, force_refresh: bool = False, no_refresh: bool = False) -> str:
         sections.append("No models with diagnostics — nothing to rank.")
         return "\n\n".join(sections)
 
+    # Expand each base config's latest row with its non-latest fingerprint-dir
+    # versions (sweep trials etc.), labelled `<name> (<run_id>)`. The leader and
+    # regression views keep the unexpanded summaries — they do their own
+    # historical-best / latest-vs-history walks.
+    expanded = summaries + _version_rows(summaries)
+
     sections.append(render_leader_table(summaries))
-    sections.append(render_static_table(summaries))
-    sections.append(render_backtest_table(summaries))
-    sections.append(render_matrix(summaries))
+    sections.append(render_static_table(expanded))
+    sections.append(render_backtest_table(expanded))
+    sections.append(render_matrix(expanded))
 
     regressions = render_regressions(summaries)
     if regressions:
