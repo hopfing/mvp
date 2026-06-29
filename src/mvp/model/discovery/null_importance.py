@@ -23,7 +23,10 @@ from pathlib import Path
 import numpy as np
 
 from mvp.model.discovery.config import DiscoveryConfig, NullImportanceConfig
-from mvp.model.discovery.fast_selection import FastForwardSelector
+from mvp.model.discovery.fast_selection import (
+    NAN_TOLERANT_MODEL_TYPES,
+    FastForwardSelector,
+)
 from mvp.model.discovery.importance import gain_importance
 from mvp.model.engine import get_feature_columns
 from mvp.model.models import get_model
@@ -31,7 +34,7 @@ from mvp.model.models import get_model
 logger = logging.getLogger(__name__)
 
 # Importance methods exposing gain (feature_importances_); null-importance needs it.
-_GAIN_MODEL_TYPES = frozenset({"xgboost", "random_forest"})
+_GAIN_MODEL_TYPES = frozenset({"xgboost", "lightgbm", "random_forest"})
 
 
 def _screen_fingerprint(
@@ -142,7 +145,10 @@ def _compute_screen(
     except KeyError as e:
         raise ValueError(f"null-importance column lookup failed for {e}")
 
-    nan_tolerant = model_type == "xgboost"
+    # Must match the forward FS scorer's NaN handling (fast_selection.py) so the
+    # null-importance screen evaluates the same model the scorer does — consult
+    # the shared set, not a hardcoded "xgboost".
+    nan_tolerant = model_type in NAN_TOLERANT_MODEL_TYPES
     X = _prepare_matrix(fast, col_indices, nan_tolerant)
     y = fast.y
     params = fast.config.model.params or {}
@@ -224,7 +230,7 @@ def run_null_importance(
     if model_type not in _GAIN_MODEL_TYPES:
         raise ValueError(
             "null-importance is gain-based and requires a tree model "
-            f"(xgboost / random_forest); got {model_type!r}. Disable "
+            f"(xgboost / lightgbm / random_forest); got {model_type!r}. Disable "
             "null_importance for non-tree models."
         )
 

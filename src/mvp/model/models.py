@@ -2,6 +2,7 @@
 
 
 import os
+import warnings
 from abc import ABC, abstractmethod
 from typing import Any
 
@@ -520,6 +521,74 @@ class XGBoostMTLModel(BaseModel):
         raw = self._booster.predict(xgb.DMatrix(X))
         assert self._aux_mean is not None and self._aux_std is not None
         return raw[:, 1:] * self._aux_std + self._aux_mean
+
+
+class LightGBMModel(BaseModel):
+    """LightGBM classifier wrapper.
+
+    Sibling to XGBoostModel: native NaN handling (no imputation — NaN routes to
+    whichever split direction reduces the objective), a 1D positive-class
+    ``predict_proba``, and joblib-picklable for the production artifact path.
+
+    Two LightGBM-specific constructor defaults matter:
+
+    - ``verbose=-1`` silences LightGBM's per-tree logging, which would otherwise
+      emit hundreds of lines per tuning trial.
+    - ``subsample_freq=1`` makes row subsampling actually take effect. LightGBM
+      ignores ``subsample`` unless ``subsample_freq > 0`` (unlike XGBoost, where
+      ``subsample`` is always active), so without this every tuned ``subsample``
+      value would be silently discarded.
+
+    Early stopping is intentionally not wired here: the runner's two-stage ES
+    path gates on ``model.type == "xgboost"``, so LightGBM always trains through
+    the plain fixed-rounds fit.
+    """
+
+    def __init__(
+        self,
+        params: dict[str, Any],
+        feature_names: list[str] | None = None,
+    ) -> None:
+        # feature_names accepted for get_model() signature parity; LightGBM has
+        # no monotone-constraint-by-name path today, so it goes unused.
+        self.params = {
+            "objective": "binary",
+            "n_jobs": _default_n_jobs(),
+            "random_state": 42,
+            "verbose": -1,
+            "subsample_freq": 1,
+            **params,
+        }
+        self._model = None
+
+    def fit(
+        self,
+        X: np.ndarray,
+        y: np.ndarray,
+        sample_weight: np.ndarray | None = None,
+    ) -> None:
+        # Lazy import (mirrors XGBoostModel) so importing this module doesn't
+        # pull in the heavy LightGBM native library at module load.
+        import lightgbm as lgb
+
+        self._model = lgb.LGBMClassifier(**self.params)
+        self._model.fit(X, y, sample_weight=sample_weight)
+
+    def predict_proba(self, X: np.ndarray) -> np.ndarray:
+        if self._model is None:
+            raise RuntimeError("Model not fitted")
+        # LGBMClassifier.predict_proba returns [n, 2]; the BaseModel contract is
+        # a 1D positive-class probability, matching XGBoostModel. LightGBM
+        # auto-names features when fit on a nameless numpy array, so sklearn
+        # warns on every nameless predict — suppress that cosmetic noise so it
+        # doesn't flood FS/tuning logs (predictions are unaffected).
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=".*does not have valid feature names.*",
+                category=UserWarning,
+            )
+            return self._model.predict_proba(X)[:, 1]
 
 
 class LogisticModel(BaseModel):
@@ -1325,7 +1394,8 @@ def get_model(
     """Factory function to get model wrapper.
 
     Args:
-        model_type: Type of model ("xgboost", "logistic", "random_forest").
+        model_type: Type of model ("xgboost", "lightgbm", "logistic",
+            "random_forest").
         params: Model parameters.
         feature_names: Feature names in training-matrix column order. Consumed
             by XGBoost to resolve dict-form `monotone_constraints`, and by the
@@ -1339,6 +1409,8 @@ def get_model(
     """
     if model_type == "xgboost":
         return XGBoostModel(params, feature_names=feature_names)
+    elif model_type == "lightgbm":
+        return LightGBMModel(params, feature_names=feature_names)
     elif model_type == "logistic":
         return LogisticModel(params)
     elif model_type == "random_forest":

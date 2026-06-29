@@ -34,7 +34,7 @@ warnings.filterwarnings("ignore", message="All-NaN slice encountered")
 # Model types that natively accept NaN inputs. impute=None features may only be
 # scored under these; passing NaN to any other model type is an FS contract
 # violation and surfaces as a ValueError at scorer construction time.
-NAN_TOLERANT_MODEL_TYPES = frozenset({"xgboost"})
+NAN_TOLERANT_MODEL_TYPES = frozenset({"xgboost", "lightgbm"})
 
 _WINDOWED_SUFFIX_RE = re.compile(r"^(.+)_(\d+)d$")
 

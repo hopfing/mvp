@@ -166,7 +166,7 @@ class DiscoveryOptions(BaseModel):
 class ModelConfig(BaseModel):
     """Model configuration."""
 
-    type: Literal["xgboost", "logistic", "random_forest", "ensemble", "neural_net"] = "xgboost"
+    type: Literal["xgboost", "lightgbm", "logistic", "random_forest", "ensemble", "neural_net"] = "xgboost"
     params: dict[str, Any] | None = None
 
 
