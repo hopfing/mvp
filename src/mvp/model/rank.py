@@ -74,6 +74,15 @@ SEV_THRESHOLD = 0.0005     # 0.05pp severity regression
 OPTIMAL_THRESHOLD = 3.0    # 3pp Optimal% regression
 LL_THRESHOLD = 0.001       # 0.001 LL regression
 
+# Per (circuit, consensus-bucket) cells appended to the backtest table.
+# cons buckets: "1.0" == consensus 1.0; "0.5" == consensus < 1.0 (only 0.5 today).
+BT_CELL_CONS = (("1.0", "c1.0"), ("0.5", "c0.5"))
+BT_CELL_ORDER = tuple(
+    (circ, cons_key, f"{circ} {disp}")
+    for circ in CIRCUITS
+    for cons_key, disp in BT_CELL_CONS
+)
+
 
 # ---------------------------------------------------------------------------
 # Discovery
@@ -239,6 +248,9 @@ class ModelSummary:
     bt_avg_clv: float | None = None
     bt_me_pos: float | None = None
     bt_avg_me: float | None = None
+    # Per (circuit, consensus-bucket) cells: (circuit, cons_key) ->
+    # {roi_o, units_o_all, units_o, n}. Feeds the per-circuit x cons columns.
+    bt_cells: dict = field(default_factory=dict)
 
 
 def _extract_cells(diag: dict) -> dict[tuple[str, str], tuple[float | None, int | None]]:
@@ -533,7 +545,44 @@ def _empty_backtest_dict() -> dict:
         "bt_units_o_all": None,
         "bt_clv_pos": None, "bt_avg_clv": None,
         "bt_me_pos": None, "bt_avg_me": None,
+        "bt_cells": {},
     }
+
+
+def _circuit_cons_cells(df: pl.DataFrame) -> dict:
+    """Per (circuit, consensus-bucket) backtest cell: ROIo%, Uo_all, Uo>=0.
+
+    Same filter semantics as the pooled stats — model-side (model_prob>0.5),
+    ``units_o_all`` summed pre-edge, ``roi_o``/``units_o`` after opening_edge>=0
+    — but partitioned by circuit and consensus bucket (==1.0 vs <1.0) instead of
+    the pooled consensus==1.0. Keyed by (circuit, cons_key).
+    """
+    cells: dict[tuple[str, str], dict] = {}
+    cols = set(df.columns)
+    for circ in CIRCUITS:
+        for cons_key, _disp in BT_CELL_CONS:
+            d = df
+            if "circuit" in cols:
+                d = d.filter(pl.col("circuit") == circ)
+            if "consensus" in cols:
+                d = d.filter(
+                    pl.col("consensus") == 1.0 if cons_key == "1.0"
+                    else pl.col("consensus") < 1.0
+                )
+            if "model_prob" in cols:
+                d = d.filter(pl.col("model_prob") > 0.5)
+            cell = {"roi_o": None, "units_o_all": None, "units_o": None, "n": 0}
+            if "pnl_open" in cols and len(d) > 0:
+                cell["units_o_all"] = d["pnl_open"].sum()
+            if "opening_edge" in cols:
+                d = d.filter(pl.col("opening_edge") >= 0)
+            n = len(d)
+            cell["n"] = n
+            if n > 0 and "pnl_open" in cols:
+                cell["units_o"] = d["pnl_open"].sum()
+                cell["roi_o"] = cell["units_o"] / n
+            cells[(circ, cons_key)] = cell
+    return cells
 
 
 def _backtest_aggregates(df: pl.DataFrame) -> dict:
@@ -546,6 +595,9 @@ def _backtest_aggregates(df: pl.DataFrame) -> dict:
     latest-run path (date-scoped) and the fp-version path (whole CSV).
     """
     out = _empty_backtest_dict()
+    # Per-circuit x consensus cells use the FULL df (the <1.0 bucket needs the
+    # rows the pooled consensus==1.0 filter below would drop).
+    out["bt_cells"] = _circuit_cons_cells(df)
     if "consensus" in df.columns:
         df = df.filter(pl.col("consensus") == 1.0)
     if "model_prob" in df.columns:
@@ -1089,6 +1141,16 @@ def _version_rows(summaries: list[ModelSummary]) -> list[ModelSummary]:
     return rows
 
 
+def _bt_cell_fmt(cell: dict | None) -> str:
+    """Format one (circuit, cons) cell as `ROIo% Uo_all Uo>=0` (widths 6/7/7)."""
+    cell = cell or {}
+    roi, uall, uo = cell.get("roi_o"), cell.get("units_o_all"), cell.get("units_o")
+    roi_s = f"{roi*100:+.2f}" if roi is not None else "--"
+    uall_s = f"{uall:+.1f}" if uall is not None else "--"
+    uo_s = f"{uo:+.1f}" if uo is not None else "--"
+    return f"{roi_s:>6} {uall_s:>7} {uo_s:>7}"
+
+
 def render_backtest_table(rows: list[ModelSummary]) -> str:
     """Table 2 — Backtest (consensus + model-side, sorted by Uo>=0 desc).
 
@@ -1096,6 +1158,10 @@ def render_backtest_table(rows: list[ModelSummary]) -> str:
     version rows, already expanded by the caller). ``Uo>=0`` adds the
     opening_edge>=0 gate; ``Uo_all`` is consensus-side without it. Latest rows
     are scoped to the post-training window; version rows use the whole CSV.
+
+    Pooled columns are consensus==1.0; the appended per-circuit x consensus
+    cells (ROIo% / Uo_all / Uo>=0) break that out by circuit and by consensus
+    bucket (c1.0 == 1.0, c0.5 == <1.0).
     """
     rows = sorted(
         rows, key=lambda s: -(s.bt_units_o if s.bt_units_o is not None else -1e18)
@@ -1104,13 +1170,22 @@ def render_backtest_table(rows: list[ModelSummary]) -> str:
         "=" * 80,
         "Table 2: Backtest (consensus + model-side, sorted by Uo>=0 desc)",
         "=" * 80,
+        "Per-circuit x cons cells: ROIo% / Uall(=Uo_all) / Uo>=0;  c1.0==1.0, c0.5==<1.0",
     ]
-    header = (
+    base_header = (
         f"{'Model':<50} {'Period':<24} "
         f"{'N':>5} {'Hit%':>5} "
         f"{'ROIo%':>6} {'ROIc%':>6} {'Uo>=0':>7} {'Uo_all':>7} {'Uc':>7} "
         f"{'CLV+%':>5} {'avgCLV':>6} {'ME+%':>5} {'avgME':>6}"
     )
+    cell_sub = f"{'ROIo':>6} {'Uall':>7} {'Uo>=0':>7}"
+    group_w = len(cell_sub)
+    band = (
+        " " * len(base_header) + " | "
+        + " | ".join(disp.center(group_w) for _, _, disp in BT_CELL_ORDER)
+    )
+    header = base_header + " | " + " | ".join(cell_sub for _ in BT_CELL_ORDER)
+    lines.append(band)
     lines.append(header)
     lines.append("-" * len(header))
     for s in rows:
@@ -1119,7 +1194,7 @@ def render_backtest_table(rows: list[ModelSummary]) -> str:
             if s.bt_period_lo and s.bt_period_hi
             else "(no data)"
         )
-        lines.append(
+        row = (
             f"{s.name[:50]:<50} {period[:24]:<24} "
             f"{s.bt_n:>5} "
             f"{(s.bt_hit*100 if s.bt_hit is not None else 0):>5.1f} "
@@ -1133,6 +1208,11 @@ def render_backtest_table(rows: list[ModelSummary]) -> str:
             f"{(s.bt_me_pos*100 if s.bt_me_pos is not None else 0):>5.1f} "
             f"{(s.bt_avg_me*100 if s.bt_avg_me is not None else 0):>+6.2f}"
         )
+        cells = " | ".join(
+            _bt_cell_fmt(s.bt_cells.get((circ, cons_key)))
+            for circ, cons_key, _ in BT_CELL_ORDER
+        )
+        lines.append(row + " | " + cells)
     return "\n".join(lines)
 
 
