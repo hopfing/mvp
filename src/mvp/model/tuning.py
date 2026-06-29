@@ -113,6 +113,40 @@ DEFAULT_SEARCH_SPACES: dict[str, dict[str, dict[str, Any]]] = {
             "condition": {"param": "tree_method", "in": ["hist", "approx"]},
         },
     },
+    "lightgbm": {
+        # num_leaves: the primary capacity control for leaf-wise (best-first)
+        # growth — LightGBM does not grow depth-first, so this, not max_depth,
+        # is the binding tree-shape knob. Ceiling 127 ≈ depth-7; floor 15 avoids
+        # degenerate near-stumps. This is the main overfit guard on the
+        # small-to-medium per-fold n here.
+        "num_leaves": {"type": "int", "low": 15, "high": 127},
+        # max_depth: secondary guard. -1 = unbounded (idiomatic leaf-wise, with
+        # num_leaves the sole shape constraint); the positive options let the
+        # tuner discover whether an added depth bound helps generalization.
+        # Categorical because the int sampler can't express "unbounded".
+        "max_depth": {"type": "categorical", "choices": [-1, 6, 8, 10, 12]},
+        "learning_rate": {"type": "float", "low": 0.01, "high": 0.15, "log": True},
+        "n_estimators": {"type": "int", "low": 100, "high": 1000, "step": 50},
+        # min_child_samples: minimum data points per leaf — the critical
+        # leaf-wise overfit guard on thin folds (challenger slices can be
+        # sparse). LightGBM's default is 20; the range straddles it.
+        "min_child_samples": {"type": "int", "low": 10, "high": 60},
+        # subsample: row-sampling fraction per boosting round. Only takes effect
+        # because LightGBMModel fixes subsample_freq=1 in its constructor —
+        # LightGBM otherwise ignores subsample entirely.
+        "subsample": {"type": "float", "low": 0.5, "high": 1.0},
+        # colsample_bytree: per-tree feature sampling (LightGBM's
+        # feature_fraction). LightGBM has no bynode/bylevel analog.
+        "colsample_bytree": {"type": "float", "low": 0.5, "high": 1.0},
+        "reg_alpha": {"type": "float", "low": 0.0, "high": 1.0},
+        "reg_lambda": {"type": "float", "low": 0.1, "high": 10.0, "log": True},
+        # min_split_gain: minimum loss reduction required to make a split —
+        # LightGBM's analog of XGBoost's gamma.
+        "min_split_gain": {"type": "float", "low": 0.0, "high": 5.0},
+        # scale_pos_weight: near-inert (the target is structurally ~50/50, one
+        # winner per match) but kept for parity with the xgboost space.
+        "scale_pos_weight": {"type": "float", "low": 0.9, "high": 1.1},
+    },
     "logistic": {
         "C": {"type": "float", "low": 0.0001, "high": 10.0, "log": True},
         # l1_ratio spans the full L2 → elasticnet → L1 spectrum: 0.0=pure L2,
