@@ -56,6 +56,16 @@ def _games_margin_per_set() -> pl.Expr:
     return _per_set(_total_games_won() - _total_games_lost())
 
 
+def _games_margin_per_set_won() -> pl.Expr:
+    """Per-set games margin, but only on matches the player won (else null)."""
+    return pl.when(pl.col("won").cast(pl.Int64) == 1).then(_games_margin_per_set()).otherwise(None)
+
+
+def _games_margin_per_set_lost() -> pl.Expr:
+    """Per-set games margin, but only on matches the player lost (else null)."""
+    return pl.when(pl.col("won").cast(pl.Int64) == 0).then(_games_margin_per_set()).otherwise(None)
+
+
 def _games_per_set() -> pl.Expr:
     """Total games per set in this match."""
     return _per_set(_total_games_won() + _total_games_lost())
@@ -128,6 +138,42 @@ def games_margin_per_set(days: int | None = None) -> pl.Expr:
     if days is None:
         return cumulative_mean(_games_margin_per_set(), group_by="player_id")
     return rolling_mean(_games_margin_per_set(), days=days, group_by="player_id")
+
+
+@feature(
+    name="games_margin_per_set_won",
+    params=["days"],
+    description="Avg (games won - lost) per set over the player's WON matches in window",
+    mirror=True,
+    impute=None,
+)
+def games_margin_per_set_won(days: int | None = None) -> pl.Expr:
+    """Dominance in wins: how decisively the player wins, conditioned on winning.
+
+    Conditioning on the outcome keeps this from washing out for ~50% players the
+    way the pooled (win+loss) ``games_margin_per_set`` does — a balanced record
+    no longer cancels positive-margin wins against negative-margin losses.
+    """
+    if days is None:
+        return cumulative_mean(_games_margin_per_set_won(), group_by="player_id")
+    return rolling_mean(_games_margin_per_set_won(), days=days, group_by="player_id")
+
+
+@feature(
+    name="games_margin_per_set_lost",
+    params=["days"],
+    description="Avg (games won - lost) per set over the player's LOST matches in window",
+    mirror=True,
+    impute=None,
+)
+def games_margin_per_set_lost(days: int | None = None) -> pl.Expr:
+    """Competitiveness in losses: how close vs. blown-out the player's losses are
+    (negative; nearer 0 = more competitive). The half of the dominance picture no
+    existing feature captures, and the most discriminating for middle-pack players.
+    """
+    if days is None:
+        return cumulative_mean(_games_margin_per_set_lost(), group_by="player_id")
+    return rolling_mean(_games_margin_per_set_lost(), days=days, group_by="player_id")
 
 
 @feature(
@@ -230,7 +276,8 @@ def blowout_set_pct(days: int | None = None) -> pl.Expr:
 
 for _base in [
     "sets_per_match", "straight_sets_win_pct", "games_won_per_set",
-    "games_lost_per_set", "games_margin_per_set", "games_per_set",
+    "games_lost_per_set", "games_margin_per_set", "games_margin_per_set_won",
+    "games_margin_per_set_lost", "games_per_set",
     "total_games_won", "total_games_lost", "total_games",
     "recent_games_load", "tight_set_pct", "blowout_set_pct",
 ]:

@@ -47,11 +47,35 @@ def pts_return_won_pct(days: int | None = None) -> pl.Expr:
     return ratio_feature("pts_return_pts_won", "pts_return_pts_played", days, k=144.0)
 
 
+@feature(
+    name="dominance_ratio",
+    params=["days"],
+    description="Return points won % / service points lost % (>1 = winning more return pts than conceding on serve)",
+    mirror=True,
+    impute=None,
+)
+def dominance_ratio(days: int | None = None) -> pl.Expr:
+    """Dominance ratio: % return points won / % service points lost.
+
+    A scale-free relative-dominance axis (DR > 1 = dominant). Built from the same
+    EB-shrunk serve/return rates as the standalone pct features, so it inherits
+    their leakage-safe windowing and zero-history null semantics. It packages the
+    serve/return relationship into one monotone axis a depth-limited tree can't
+    cheaply reconstruct from the parts. Null when service-points-lost share is
+    non-positive (shrinkage keeps it well above 0, but the guard is kept) or when
+    either rate has no prior history.
+    """
+    ret = ratio_feature("pts_return_pts_won", "pts_return_pts_played", days, k=144.0)
+    svc = ratio_feature("pts_service_pts_won", "pts_service_pts_played", days, k=82.0)
+    svc_lost = 1.0 - svc
+    return pl.when(svc_lost > 0).then(ret / svc_lost).otherwise(None)
+
+
 # =============================================================================
 # Diff Features (player - opponent, same stat)
 # =============================================================================
 
-for _base in ["pts_total_won_pct", "pts_service_won_pct", "pts_return_won_pct"]:
+for _base in ["pts_total_won_pct", "pts_service_won_pct", "pts_return_won_pct", "dominance_ratio"]:
     register_diff(_base)
 
 for _base in ["pts_total_won_pct", "pts_service_won_pct", "pts_return_won_pct"]:
