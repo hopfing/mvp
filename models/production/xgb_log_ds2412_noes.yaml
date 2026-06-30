@@ -1,0 +1,57 @@
+data:
+  date_range:
+    end: 2025-12-31
+    start: 2020-01-01
+  filters:
+    circuit:
+    - tour
+    - chal
+    draw_type: singles
+features:
+  include:
+  - player_age_diff
+  - player_days_since_surface_diff
+  - player_deciding_set_win_pct_diff(days=90)
+  - player_elo_surface_diff
+  - player_elo_tb_clutch_diff
+  - player_glicko_mu_diff_x_player_sigma
+  - player_glicko_rd_diff
+  - player_height_diff
+  - player_opp_elo_faced_avg_diff
+  - player_opp_elo_faced_avg_diff(days=730)
+  - player_pts_service_won_pct_diff(days=30)
+  - player_pts_total_won_pct_diff(days=365)
+  - player_surface_ace_pct_diff(days=30)
+  - player_surface_losses_vs_opp_rally_type_diff(days=30)
+  - player_surface_pts_return_won_pct_vs_surf_spec_diff(days=730)
+  - player_surface_win_pct_diff
+  - player_svc_rating_diff(days=90)
+  - player_tourn_pts_total_won_pct_diff
+  - player_venue_win_pct_diff(days=730)
+  - player_vs_opp_style_resid_flat_diff
+model:
+  params:
+    colsample_bylevel: 0.5137318613462606
+    colsample_bynode: 0.7150935122064318
+    colsample_bytree: 0.690629050606828
+    gamma: 1.5255854238954873
+    grow_policy: depthwise
+    learning_rate: 0.02125460068146186
+    max_bin: 512
+    max_delta_step: 5
+    max_depth: 4
+    min_child_weight: 15
+    n_estimators: 800
+    n_jobs: 10
+    random_state: 42
+    reg_alpha: 0.13857948890885713
+    reg_lambda: 0.11135832684243471
+    scale_pos_weight: 0.96766477098876
+    subsample: 0.7033980194578915
+    tree_method: hist
+  type: xgboost
+target: won
+validation:
+  test_months: 12
+  train_months: 24
+  type: date_sliding
