@@ -219,3 +219,30 @@ def by_month(df: pl.DataFrame) -> list[tuple[str, dict[str, Any]]]:
         stats["cum_close"] = cum_close
         rows.append((m, stats))
     return rows
+
+
+# Canonical round display order. Mirrors mvp.model.diagnostics.ROUND_ORDER; kept
+# local so this pure-aggregation module doesn't import the sklearn-heavy
+# diagnostics just for a list of strings (the list is already duplicated across
+# report.py / diagnostics.py / confidence by convention).
+_ROUND_ORDER = ["Q1", "Q2", "Q3", "RR", "R128", "R64", "R32", "R16", "QF", "SF", "F"]
+
+
+def by_round(df: pl.DataFrame) -> list[tuple[str, dict[str, Any]]]:
+    """Group by tournament round, ordered Q1..F via `_ROUND_ORDER` with any
+    unrecognized rounds appended last (name order). Returns empty if `round`
+    isn't present."""
+    if "round" not in df.columns:
+        return []
+    order = {r: i for i, r in enumerate(_ROUND_ORDER)}
+    present = sorted(
+        (r for r in df["round"].unique().to_list() if r is not None),
+        key=lambda r: (order.get(r, len(_ROUND_ORDER)), r),
+    )
+    rows: list[tuple[str, dict[str, Any]]] = []
+    for r in present:
+        stats = slice_stats(df.filter(pl.col("round") == r))
+        if stats["n"] == 0:
+            continue
+        rows.append((r, stats))
+    return rows

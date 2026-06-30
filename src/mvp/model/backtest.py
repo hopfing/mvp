@@ -706,6 +706,28 @@ def _kind_subsection(
             _wide_row(label, views.slice_stats(open_sub), views.slice_stats(close_sub))
         )
 
+    # Round slices — same slice for both price sides (the round cut is
+    # price-independent). Picks get two scopes: placed bets (opening_edge > 0)
+    # and all picks, so the gap shows how the edge filter performs per round.
+    # Non-picks get the all-edges view only — opening_edge > 0 on the
+    # opponent side is almost always empty.
+    round_scopes: list[tuple[str, pl.DataFrame]] = []
+    if label_word == "picks" and "opening_edge" in sub.columns:
+        round_scopes.append(
+            ("  (opening_edge > 0)", sub.filter(pl.col("opening_edge") > 0))
+        )
+    round_scopes.append(("  (all edges)", sub))
+    for scope_note, scope_sub in round_scopes:
+        rounds = views.by_round(scope_sub)
+        if not rounds:
+            continue
+        lines.append("")
+        lines.append(f"BY ROUND{scope_note}")
+        lines.append(top)
+        lines.append(bottom)
+        for rnd, stats in rounds:
+            lines.append(_wide_row(rnd, stats, stats))
+
     # Monthly slices — same slice for both sides since the temporal cut
     # is independent of which price we're scoring. For picks, scope to
     # opening_edge > 0 so the cumulative trailer is a meaningful "what
