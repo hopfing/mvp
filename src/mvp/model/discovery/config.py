@@ -35,7 +35,14 @@ class DataConfig(BaseModel):
     """Data selection configuration."""
 
     date_range: DateRange
-    filters: dict[str, Any] | None = None
+    filters: dict[str, Any] | None = None  # Applied to the whole frame (fit + score)
+    # Applied only to the test fold at scoring time: the model still fits on the
+    # full train fold, but the selection metric is computed on this slice. Use to
+    # select features by their value on a sub-population (e.g. close-elo matches)
+    # while keeping the full population in the fit. Mirrors the model runner's
+    # eval_filters. Raw columns are auto-loaded; computed-feature filter columns
+    # must be listed in discovery.features.compute_only.
+    eval_filters: dict[str, Any] | None = None
 
 
 class MetaDiscoveryConfig(BaseModel):

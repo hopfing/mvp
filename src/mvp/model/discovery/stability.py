@@ -75,6 +75,7 @@ def _resample_fingerprint(
             "end": str(config.data.date_range.end),
         },
         "filters": config.data.filters or {},
+        "eval_filters": config.data.eval_filters or {},
         "target": config.target,
         "validation": config.validation.model_dump(),
         "sample_weight": (

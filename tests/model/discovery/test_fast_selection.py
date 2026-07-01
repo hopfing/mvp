@@ -313,6 +313,150 @@ class TestFastForwardSelector:
             assert list(fast_test) == run_test
 
 
+def _write_eval_filter_config(
+    tmp_path: Path, eval_filters: dict | None, name: str = "cfg"
+) -> Path:
+    """Write an XGBoost discovery config, optionally with data.eval_filters."""
+    data: dict = {"date_range": {"start": "2024-01-01", "end": "2024-12-31"}}
+    if eval_filters is not None:
+        data["eval_filters"] = eval_filters
+    config_dict = {
+        "data": data,
+        "model": {"type": "xgboost"},
+        "validation": {
+            "type": "walk_forward",
+            "n_splits": 2,
+            "min_train_size": 50,
+            "test_size": 25,
+        },
+        "discovery": {"metric": "log_loss", "direction": "minimize"},
+    }
+    config_path = tmp_path / f"discovery_{name}.yaml"
+    with open(config_path, "w") as f:
+        yaml.dump(config_dict, f)
+    return config_path
+
+
+class TestEvalFilters:
+    """Tests for data.eval_filters — restricts the SCORING (test) fold to a
+    slice while the model still fits on the full train fold.
+    """
+
+    def test_eval_filters_parsed(self, tmp_path: Path):
+        """eval_filters is parsed onto the discovery DataConfig."""
+        path = _write_eval_filter_config(tmp_path, {"player_rank": {"max": 100}})
+        config = DiscoveryConfig.from_file(path)
+        assert config.data.eval_filters == {"player_rank": {"max": 100}}
+
+    def test_all_rows_matches_baseline(
+        self, sample_matches: Path, tmp_path: Path
+    ):
+        """An eval_filters that passes every row must reproduce the no-filter
+        score exactly (same fit, same test set) and set an all-True mask."""
+        features = ["player_ranking_points_diff"]
+        cache_dir = tmp_path / "cache"
+
+        base_path = _write_eval_filter_config(tmp_path, None, name="base")
+        base = FastForwardSelector(
+            config=DiscoveryConfig.from_file(base_path),
+            all_feature_specs=features,
+            matches_path=sample_matches,
+            cache_dir=cache_dir,
+        )
+        base.precompute()
+        assert base.eval_mask is None
+        base_metric = base.create_scorer("log_loss")(features)
+
+        # ranks are in [1, 200); max: 999 passes all of them.
+        allpass_path = _write_eval_filter_config(
+            tmp_path, {"player_rank": {"max": 999}}, name="allpass"
+        )
+        allpass = FastForwardSelector(
+            config=DiscoveryConfig.from_file(allpass_path),
+            all_feature_specs=features,
+            matches_path=sample_matches,
+            cache_dir=cache_dir,
+        )
+        allpass.precompute()
+        assert allpass.eval_mask is not None
+        assert allpass.eval_mask.all()
+        allpass_metric = allpass.create_scorer("log_loss")(features)
+
+        assert allpass_metric == pytest.approx(base_metric, abs=1e-9)
+
+    def test_subset_restricts_scoring(
+        self, sample_matches: Path, tmp_path: Path
+    ):
+        """A partitioning eval_filters yields a proper-subset mask and a
+        finite score computed on that slice."""
+        features = ["player_ranking_points_diff"]
+        cache_dir = tmp_path / "cache"
+
+        path = _write_eval_filter_config(tmp_path, {"player_rank": {"max": 100}})
+        fast = FastForwardSelector(
+            config=DiscoveryConfig.from_file(path),
+            all_feature_specs=features,
+            matches_path=sample_matches,
+            cache_dir=cache_dir,
+        )
+        fast.precompute()
+
+        assert fast.eval_mask is not None
+        assert fast.eval_mask.shape[0] == fast.X_wide.shape[0]
+        n_kept = int(fast.eval_mask.sum())
+        assert 0 < n_kept < fast.eval_mask.shape[0]
+
+        result = fast.create_scorer("log_loss")(features)
+        assert np.isfinite(result)
+
+    def test_zero_rows_raises(self, sample_matches: Path, tmp_path: Path):
+        """eval_filters matching no rows fails loudly at precompute rather than
+        silently producing an empty evaluation set."""
+        path = _write_eval_filter_config(tmp_path, {"player_rank": {"max": -1}})
+        fast = FastForwardSelector(
+            config=DiscoveryConfig.from_file(path),
+            all_feature_specs=["player_ranking_points_diff"],
+            matches_path=sample_matches,
+            cache_dir=tmp_path / "cache",
+        )
+        with pytest.raises(ValueError, match="eval_filters matched 0 rows"):
+            fast.precompute()
+
+    def test_scorer_consumes_mask(self, sample_matches: Path, tmp_path: Path):
+        """The scorer must actually restrict scoring to eval_mask.
+
+        Toggles the mask on one precomputed selector: an all-True mask must
+        reproduce the no-mask score, and a proper subset must change it. A
+        scorer that built the mask but ignored it in the fold loop would pass
+        the all-True check yet FAIL the subset check — so this is the real
+        proof that scoring happens on the slice, not the full test fold.
+        """
+        features = ["player_ranking_points_diff"]
+        path = _write_eval_filter_config(tmp_path, None, name="consume")
+        fast = FastForwardSelector(
+            config=DiscoveryConfig.from_file(path),
+            all_feature_specs=features,
+            matches_path=sample_matches,
+            cache_dir=tmp_path / "cache",
+        )
+        fast.precompute()
+        n = fast.X_wide.shape[0]
+
+        fast.eval_mask = None
+        s_full = fast.create_scorer("log_loss")(features)
+
+        fast.eval_mask = np.ones(n, dtype=bool)
+        s_all = fast.create_scorer("log_loss")(features)
+
+        fast.eval_mask = np.arange(n) % 2 == 0
+        s_sub = fast.create_scorer("log_loss")(features)
+
+        # All-True mask is a no-op relative to the whole test fold.
+        assert s_all == pytest.approx(s_full, abs=1e-12)
+        # A proper subset scores on a different row set → different metric.
+        assert abs(s_sub - s_full) > 1e-6
+
+
 class TestResolveColumnImpute:
     """Tests for _resolve_column_impute — maps a column name to (strategy, value).
 

@@ -226,6 +226,9 @@ class FastForwardSelector:
         self.y_aux: np.ndarray | None = None
         self.aux_target_names: list[str] | None = None
         self.sample_weights: np.ndarray | None = None
+        # Row-aligned boolean mask over X_wide selecting the eval_filters slice.
+        # None when no eval_filters is set (scoring uses the whole test fold).
+        self.eval_mask: np.ndarray | None = None
         self.col_to_idx: dict[str, int] = {}
         self.folds: list[tuple[np.ndarray, np.ndarray]] = []
         self.circuit: np.ndarray | None = None
@@ -336,10 +339,11 @@ class FastForwardSelector:
                 for col in aux_required.get(aux_name, []):
                     if col not in extra_columns:
                         extra_columns.append(col)
-        if self.config.data.filters:
-            for col in self.config.data.filters:
-                if col not in extra_columns:
-                    extra_columns.append(col)
+        for filt in (self.config.data.filters, self.config.data.eval_filters):
+            if filt:
+                for col in filt:
+                    if col not in extra_columns:
+                        extra_columns.append(col)
 
         # Phase A: ensure all features are cached (memory-bounded batches)
         cache_key = engine.ensure_cached(
@@ -622,6 +626,33 @@ class FastForwardSelector:
             sample_weights = compute_sample_weights(dates, self.config.sample_weight)
         self.sample_weights = sample_weights
 
+        # eval_filters: build a row-aligned mask selecting the scoring slice.
+        # `df` is now aligned to X_wide / the fold index space, so the mask can
+        # be indexed by fold test_idx in the scorer. The fit is unaffected — only
+        # the test fold is restricted before the metric is computed.
+        if self.config.data.eval_filters:
+            idx_col = "_eval_row_idx"
+            surviving = (
+                apply_filters(
+                    df.with_row_index(idx_col), self.config.data.eval_filters
+                )[idx_col].to_numpy()
+            )
+            eval_mask = np.zeros(len(df), dtype=bool)
+            eval_mask[surviving] = True
+            if not eval_mask.any():
+                raise ValueError(
+                    "data.eval_filters matched 0 rows — FS scoring would have "
+                    "no evaluation set. Check the eval_filters spec and that its "
+                    "columns are available (raw columns are auto-loaded; computed "
+                    "features must be in discovery.features.compute_only)."
+                )
+            self.eval_mask = eval_mask
+            logger.info(
+                "eval_filters active: scoring on %d/%d rows (%.1f%%)",
+                int(eval_mask.sum()), len(eval_mask),
+                100.0 * eval_mask.sum() / len(eval_mask),
+            )
+
         val = self.config.validation
         splitter = make_splitter(
             val_type=val.type,
@@ -681,6 +712,7 @@ class FastForwardSelector:
         X_wide = self.X_wide
         y = self.y
         sample_weights = self.sample_weights
+        eval_mask = self.eval_mask
         col_to_idx = self.col_to_idx
         folds = self.folds if folds is None else folds
         fold_medians = self.fold_medians if fold_medians is None else fold_medians
@@ -774,6 +806,13 @@ class FastForwardSelector:
 
             fold_metrics = []
             for fold_idx, (train_idx, test_idx) in enumerate(folds):
+                # eval_filters: restrict the test fold to the scoring slice. The
+                # model still fits on the full train fold; only the metric is
+                # computed on the slice. A fold with no matching rows is skipped.
+                if eval_mask is not None:
+                    test_idx = test_idx[eval_mask[test_idx]]
+                    if test_idx.size == 0:
+                        continue
                 X_train = X_wide[np.ix_(train_idx, col_indices)].copy()
                 X_test = X_wide[np.ix_(test_idx, col_indices)].copy()
                 y_train, y_test = y[train_idx], y[test_idx]
@@ -852,6 +891,9 @@ class FastForwardSelector:
                 else:
                     fold_metrics.append(metric_fn(y_test, y_prob))
 
+            if not fold_metrics:
+                # Every fold's test slice was empty under eval_filters.
+                return float("inf")
             return float(np.mean(fold_metrics))
 
         return scorer
