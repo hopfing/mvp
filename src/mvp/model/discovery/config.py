@@ -110,6 +110,14 @@ class DiscoveryFeaturesConfig(BaseModel):
 
     include: list[str] = []
     exclude: list[str] = []
+    # Exclude whole base families by their (unprefixed, unwindowed) registry
+    # name: each entry drops that feature plus its ``_diff``/``_sum`` siblings and
+    # every player_/opp_/window variant, without listing them individually. Exact
+    # registry-name match (not substring), so ``elo`` won't take out
+    # ``elo_surface``. A name matching no registered feature raises (fail-fast on
+    # typos). Distinct from ``base`` below, which is the forward-selection SEED
+    # set, not an exclusion.
+    exclude_base: list[str] = []
     compute_only: list[str] = []
     base: list[str] = []
     min: int = 5

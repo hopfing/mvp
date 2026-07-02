@@ -3,6 +3,7 @@
 
 import logging
 import os
+import re
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -188,6 +189,31 @@ def get_all_feature_specs(window_sizes: list[int] | None = None) -> list[str]:
                     specs.append(f"{prefix}_{name}")
 
     return specs
+
+
+def spec_base_feature(spec: str) -> str:
+    """Registry feature name underlying an expanded candidate spec.
+
+    Inverse of the expansion in :func:`get_all_feature_specs`: drops the
+    ``(days=..)`` parameter and the ``player_``/``opp_`` side prefix. Match-level
+    features carry no prefix; transform-output specs map back to their transform
+    feature via the registry's output index. Used by base-name exclusion to test
+    whether a spec belongs to an excluded base family.
+    """
+    core = re.sub(r"\(.*\)$", "", spec)
+    registry = get_registry()
+    for prefix in ("player_", "opp_"):
+        if core.startswith(prefix):
+            stripped = core[len(prefix):]
+            try:
+                registry.get(stripped)
+                return stripped
+            except KeyError:
+                pass
+    tf = registry.transform_for_output(core)
+    if tf is not None:
+        return tf.name
+    return core
 
 
 class FeatureDiscovery:
@@ -447,6 +473,31 @@ class FeatureDiscovery:
             excluded = set(feat_cfg.exclude)
             all_features = [f for f in all_features if f not in excluded]
             self._log(f"Excluding {len(excluded)} features: {list(excluded)}")
+
+        if feat_cfg.exclude_base:
+            registered = set(get_registry().list_features())
+            exclude_feats: set[str] = set()
+            for base_name in feat_cfg.exclude_base:
+                family = {
+                    n for n in (base_name, f"{base_name}_diff", f"{base_name}_sum")
+                    if n in registered
+                }
+                if not family:
+                    raise ValueError(
+                        f"exclude_base: '{base_name}' matches no registered feature "
+                        f"(tried '{base_name}', '{base_name}_diff', "
+                        f"'{base_name}_sum'). Check the spelling against the "
+                        "feature registry."
+                    )
+                exclude_feats |= family
+            n_before = len(all_features)
+            all_features = [
+                f for f in all_features if spec_base_feature(f) not in exclude_feats
+            ]
+            self._log(
+                f"exclude_base: dropped {n_before - len(all_features)} specs across "
+                f"{len(exclude_feats)} features from {len(feat_cfg.exclude_base)} base(s)"
+            )
 
         return all_features
 

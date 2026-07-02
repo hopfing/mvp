@@ -6,11 +6,13 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
+import mvp.model.features  # noqa: F401  (populate the feature registry)
 from mvp.model.discovery.config import DiscoveryConfig, DiscoveryOptions
 from mvp.model.discovery.discover import (
     DiscoveryResult,
     FeatureDiscovery,
     get_all_feature_specs,
+    spec_base_feature,
 )
 
 
@@ -388,3 +390,65 @@ class TestFeatureDiscovery:
         # Empty features should return inf
         result = scorer([])
         assert result == float("inf")
+
+
+class TestExcludeBase:
+    """Base-name exclusion from the discovery candidate pool."""
+
+    def _config(self, tmp_path, exclude_base):
+        config_dict = {
+            "data": {"date_range": {"start": "2020-01-01", "end": "2025-12-31"}},
+            "discovery": {"features": {"exclude_base": exclude_base}},
+            "model": {"type": "xgboost"},
+        }
+        path = tmp_path / "cfg.yaml"
+        with open(path, "w") as f:
+            yaml.dump(config_dict, f)
+        return path
+
+    def test_default_empty(self):
+        assert DiscoveryOptions().features.exclude_base == []
+
+    def test_spec_base_feature_player_opp_diff(self):
+        assert spec_base_feature("player_days_since_surface") == "days_since_surface"
+        assert spec_base_feature("opp_days_since_surface") == "days_since_surface"
+        assert (
+            spec_base_feature("player_days_since_surface_diff")
+            == "days_since_surface_diff"
+        )
+
+    def test_spec_base_feature_windowed(self):
+        assert spec_base_feature("player_match_count(days=30)") == "match_count"
+        assert spec_base_feature("opp_match_count(days=365)") == "match_count"
+
+    def test_spec_base_feature_singles_not_confused(self):
+        # exact-name mapping: the _singles sibling is its own base, not the parent
+        assert (
+            spec_base_feature("player_days_since_surface_singles")
+            == "days_since_surface_singles"
+        )
+
+    def test_baseline_pool_contains_family(self, tmp_path):
+        # sanity: without exclusion the family IS in the pool
+        disc = FeatureDiscovery(config_path=self._config(tmp_path, []))
+        pool = disc._build_candidate_pool()
+        assert "player_days_since_surface" in pool
+        assert "player_days_since_surface_diff" in pool
+
+    def test_excludes_whole_family(self, tmp_path):
+        disc = FeatureDiscovery(config_path=self._config(tmp_path, ["days_since_surface"]))
+        pool = disc._build_candidate_pool()
+        # parent family gone: player, opp, and diff variants
+        assert "player_days_since_surface" not in pool
+        assert "opp_days_since_surface" not in pool
+        assert "player_days_since_surface_diff" not in pool
+        # distinct _singles base survives (exact match, no substring bleed)
+        assert "player_days_since_surface_singles" in pool
+        assert "player_days_since_surface_singles_diff" in pool
+
+    def test_unknown_base_raises(self, tmp_path):
+        disc = FeatureDiscovery(
+            config_path=self._config(tmp_path, ["not_a_real_feature"])
+        )
+        with pytest.raises(ValueError, match="matches no registered feature"):
+            disc._build_candidate_pool()
