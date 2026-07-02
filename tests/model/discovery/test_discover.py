@@ -14,6 +14,7 @@ from mvp.model.discovery.discover import (
     get_all_feature_specs,
     spec_base_feature,
 )
+from mvp.model.metrics import default_min_delta
 
 
 def _mtl_cfg(metric="log_loss", select_on=None, extra_discovery=None):
@@ -452,3 +453,27 @@ class TestExcludeBase:
         )
         with pytest.raises(ValueError, match="matches no registered feature"):
             disc._build_candidate_pool()
+
+
+class TestResolvedMinDelta:
+    """discovery.min_delta resolution: None -> metric-scaled default, else override."""
+
+    def test_none_resolves_to_metric_default(self):
+        # Unset (None) uses the metric's scale-appropriate default, and switching
+        # the metric rescales it — log_loss and beta_tail_score differ ~10x.
+        assert DiscoveryOptions(metric="log_loss").resolved_min_delta() == default_min_delta("log_loss")
+        assert DiscoveryOptions(metric="beta_tail_score").resolved_min_delta() == default_min_delta("beta_tail_score")
+        assert (
+            DiscoveryOptions(metric="log_loss").resolved_min_delta()
+            > DiscoveryOptions(metric="beta_tail_score").resolved_min_delta()
+        )
+
+    def test_explicit_override_wins(self):
+        assert DiscoveryOptions(metric="log_loss", min_delta=5e-3).resolved_min_delta() == 5e-3
+
+    def test_zero_override_is_honored_not_treated_as_unset(self):
+        # 0.0 is a real value (accept any improvement), distinct from None.
+        assert DiscoveryOptions(metric="beta_tail_score", min_delta=0.0).resolved_min_delta() == 0.0
+
+    def test_default_is_none(self):
+        assert DiscoveryOptions().min_delta is None

@@ -1,15 +1,19 @@
 """Tests for metrics calculation."""
 
 import numpy as np
+import pytest
 from sklearn.metrics import brier_score_loss
 
 from mvp.model.metrics import (
+    METRIC_MIN_DELTA,
+    OPTIMIZABLE_METRICS,
     compute_beta_tail_score,
     compute_metrics,
     compute_partial_auc_tail,
     compute_restricted_logloss,
     compute_threshold_weighted_brier,
     compute_weighted_concordance,
+    default_min_delta,
 )
 
 
@@ -190,3 +194,23 @@ class TestPartialAucTail:
         y_true = rng.integers(0, 2, size=2000)
         y_prob = rng.uniform(0, 1, size=2000)
         assert abs(compute_partial_auc_tail(y_true, y_prob) - 0.5) < 0.1
+
+
+class TestDefaultMinDelta:
+    """Per-metric FS min_delta defaults (metrics.METRIC_MIN_DELTA)."""
+
+    def test_map_covers_every_optimizable_metric(self):
+        # The import-time assert already enforces this; the test documents the
+        # invariant so a divergence surfaces as a named failure, not an import error.
+        assert set(METRIC_MIN_DELTA) == OPTIMIZABLE_METRICS
+
+    def test_returns_mapped_value(self):
+        assert default_min_delta("beta_tail_score") == METRIC_MIN_DELTA["beta_tail_score"]
+
+    def test_smaller_scale_metric_has_smaller_default(self):
+        # beta_tail_score (~0.077) should be looser-thresholded than log_loss (~0.60).
+        assert default_min_delta("beta_tail_score") < default_min_delta("log_loss")
+
+    def test_unmapped_metric_raises(self):
+        with pytest.raises(ValueError, match="No default min_delta"):
+            default_min_delta("not_a_metric")

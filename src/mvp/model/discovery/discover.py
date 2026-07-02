@@ -569,7 +569,7 @@ class FeatureDiscovery:
             all_features=all_features,
             min_features=feat_cfg.min,
             max_features=feat_cfg.max,
-            min_delta=self.config.discovery.min_delta,
+            min_delta=self.config.discovery.resolved_min_delta(),
             base_features=feat_cfg.base or None,
             checkpoint_path=stab_checkpoint,
         )
@@ -727,7 +727,7 @@ class FeatureDiscovery:
             importance_threshold=self.config.discovery.importance_threshold,
             base_features=base,
             round1_baseline=round1_baseline,
-            min_delta=self.config.discovery.min_delta,
+            min_delta=self.config.discovery.resolved_min_delta(),
             forward_max_workers=cand_workers,
         )
 

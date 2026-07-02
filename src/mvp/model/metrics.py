@@ -46,6 +46,53 @@ OPTIMIZABLE_METRICS = frozenset({
 })
 
 
+# Scale-appropriate default forward-selection min_delta per objective metric.
+# min_delta is an ABSOLUTE improvement threshold, so it has to track each metric's
+# magnitude: the same 1e-4 that is a mild filter on log_loss (~0.60) is ~8x stricter
+# on beta_tail_score (~0.077) and would stop FS far too early. Values are anchored on
+# log_loss = 1e-4 at its ~0.60 scale (ratio ~1.7e-4 per unit of metric) and scaled by
+# each metric's typical magnitude. log_loss / accuracy / roc_auc / beta_tail_score are
+# grounded on observed run values; the rest are derived from each metric's definition
+# and range (see the compute_* docstrings) and are worth a sanity check the first time
+# you actually optimize one. A config's discovery.min_delta overrides this when set;
+# None (the default) resolves to the value here via DiscoveryOptions.resolved_min_delta.
+METRIC_MIN_DELTA: dict[str, float] = {
+    "log_loss": 1e-4,                  # ~0.60   anchor (observed)
+    "asymmetric_logloss": 1e-4,        # ~0.6-0.8 penalized log_loss
+    "restricted_logloss": 5e-5,        # ~0.3-0.6 log_loss on the confident subset
+    "accuracy": 1e-4,                  # ~0.66   (observed; maximize)
+    "roc_auc": 1e-4,                   # ~0.73   (observed; maximize)
+    "weighted_concordance": 5e-5,      # ~0.45   weighted Somers' D (maximize)
+    "partial_auc_tail": 1e-4,          # ~0.6-0.7 standardized partial AUC (maximize)
+    "brier_score": 3e-5,               # ~0.21
+    "threshold_weighted_brier": 2e-5,  # ~0.10   half-Brier on a tail grid
+    "beta_tail_score": 1e-5,           # ~0.077  (observed)
+    "beta_tail_score_sharp": 1e-5,     # ~0.05-0.08 sharper tail beta
+    "error_rate_80plus": 3e-5,         # ~0.15-0.20 error on p>=0.80 calls
+    "calibration_error": 5e-6,         # ~0.01-0.03 mean |gap| over confident buckets
+}
+
+# Fail at import if a new objective metric is added without a min_delta default —
+# mirrors the _make_metric_fn sync guard, so raise-on-unmapped never surprises at
+# run time (the map can only be wrong if it diverges from OPTIMIZABLE_METRICS here).
+assert set(METRIC_MIN_DELTA) == OPTIMIZABLE_METRICS, (
+    "METRIC_MIN_DELTA out of sync with OPTIMIZABLE_METRICS: missing "
+    f"{OPTIMIZABLE_METRICS - set(METRIC_MIN_DELTA)}, extra "
+    f"{set(METRIC_MIN_DELTA) - OPTIMIZABLE_METRICS}"
+)
+
+
+def default_min_delta(metric: str) -> float:
+    """Scale-appropriate default FS min_delta for `metric` (raises if unmapped)."""
+    try:
+        return METRIC_MIN_DELTA[metric]
+    except KeyError:
+        raise ValueError(
+            f"No default min_delta for metric {metric!r}; add it to METRIC_MIN_DELTA "
+            f"in metrics.py. Known: {sorted(METRIC_MIN_DELTA)}"
+        ) from None
+
+
 def _bucket_errors(
     y_true: np.ndarray, y_prob: np.ndarray, signed: bool
 ) -> tuple[list[float], list[int]]:

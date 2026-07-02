@@ -10,7 +10,7 @@ import yaml
 from pydantic import BaseModel, field_validator, model_validator
 
 from mvp.model.config import MTLConfig, SampleWeightConfig
-from mvp.model.metrics import metric_direction
+from mvp.model.metrics import default_min_delta, metric_direction
 
 logger = logging.getLogger(__name__)
 
@@ -140,7 +140,11 @@ class DiscoveryOptions(BaseModel):
     # warned about. See resolved_direction().
     direction: Literal["minimize", "maximize"] | None = None
     importance_threshold: float = 0.05
-    min_delta: float = 0.0  # forward selection: minimum absolute improvement to accept a candidate
+    # Forward selection: minimum absolute improvement to accept a candidate.
+    # None = the metric's scale-appropriate default (metrics.METRIC_MIN_DELTA),
+    # so switching `metric` auto-rescales the threshold; set a float to override.
+    # See resolved_min_delta(). (0.0 is a valid override: accept any improvement.)
+    min_delta: float | None = None
     # --- Forward-selection candidate-loop parallelism ---
     # Candidates within a round are independent fits over the shared read-only
     # feature matrix; running them on a thread pool (XGBoost releases the GIL, so
@@ -176,6 +180,10 @@ class DiscoveryOptions(BaseModel):
     def resolved_direction(self) -> str:
         """FS optimization direction: explicit override, else derived from metric."""
         return self.direction if self.direction is not None else metric_direction(self.metric)
+
+    def resolved_min_delta(self) -> float:
+        """FS min improvement: explicit override, else the metric's scaled default."""
+        return self.min_delta if self.min_delta is not None else default_min_delta(self.metric)
 
 
 class ModelConfig(BaseModel):
