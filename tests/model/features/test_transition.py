@@ -105,6 +105,94 @@ class TestTransitionBaseFeatures:
         assert result["val"][4] == pytest.approx(0.5)
 
 
+def _make_singles_doubles_df() -> pl.DataFrame:
+    """Player A, singles interleaved with same-day/nearby doubles.
+
+    Jan 1  Hard   singles
+    Jan 15 Clay   doubles   <- masks a real Hard->Clay switch for next singles
+    Jan 20 Clay   singles
+    Feb 1  Hard   doubles   <- phantom: sits between two Clay singles
+    Feb 10 Clay   singles
+    """
+    return pl.DataFrame({
+        "player_id": ["A", "A", "A", "A", "A"],
+        "effective_match_date": [
+            date(2024, 1, 1),
+            date(2024, 1, 15),
+            date(2024, 1, 20),
+            date(2024, 2, 1),
+            date(2024, 2, 10),
+        ],
+        "surface": ["Hard", "Clay", "Clay", "Hard", "Clay"],
+        "draw_type": ["singles", "doubles", "singles", "doubles", "singles"],
+        "won": [1, 0, 1, 1, 0],
+        "match_uid": ["m1", "m2", "m3", "m4", "m5"],
+        "round_order": [12, 12, 12, 12, 12],
+        "tournament_start_date": date(2020, 1, 1),
+    }).sort("effective_match_date")
+
+
+class TestSinglesGatedTransition:
+    """days_since_surface_singles and surface_switch_singles exclude doubles."""
+
+    def test_registered_like_parents(self):
+        registry = get_registry()
+        for name in ["days_since_surface_singles", "surface_switch_singles"]:
+            feat = registry.get(name)
+            assert feat.mirror is True
+            assert feat.impute is None
+        for name in ["days_since_surface_singles_diff", "surface_switch_singles_diff"]:
+            feat = registry.get(name)
+            assert feat.mirror is False
+            assert feat.impute is None
+
+    def test_days_since_surface_singles_skips_doubles(self):
+        from mvp.model.features.transition import days_since_surface_singles
+
+        df = _make_singles_doubles_df()
+        result = df.with_columns(days_since_surface_singles().alias("val"))
+        # Row 0 (Jan 1 Hard singles): no prior singles on Hard -> null
+        assert result["val"][0] is None
+        # Row 1 (Jan 15 Clay doubles): no prior singles on Clay -> null
+        assert result["val"][1] is None
+        # Row 2 (Jan 20 Clay singles): no prior SINGLES on Clay (Jan 15 was
+        # doubles) -> null, not 5 days
+        assert result["val"][2] is None
+        # Row 3 (Feb 1 Hard doubles): prior singles on Hard was Jan 1 -> 31 days
+        assert result["val"][3] == pytest.approx(31.0)
+        # Row 4 (Feb 10 Clay singles): prior singles on Clay was Jan 20 -> 21 days
+        assert result["val"][4] == pytest.approx(21.0)
+
+    def test_surface_switch_singles_ignores_doubles(self):
+        from mvp.model.features.transition import surface_switch_singles
+
+        df = _make_singles_doubles_df()
+        result = df.with_columns(surface_switch_singles().alias("val"))
+        # Row 0 (Hard singles): no prior singles -> null
+        assert result["val"][0] is None
+        # Row 1 (Clay doubles): prior singles surface = Hard -> switch = 1
+        assert result["val"][1] == pytest.approx(1.0)
+        # Row 2 (Clay singles): last SINGLES was Hard (Jan 15 doubles ignored)
+        # -> real switch preserved = 1 (base surface_switch would report 0)
+        assert result["val"][2] == pytest.approx(1.0)
+        # Row 3 (Hard doubles): prior singles surface = Clay -> 1
+        assert result["val"][3] == pytest.approx(1.0)
+        # Row 4 (Clay singles): last SINGLES was Clay (Feb 1 doubles ignored)
+        # -> no phantom switch = 0 (base surface_switch would report 1)
+        assert result["val"][4] == pytest.approx(0.0)
+
+    def test_surface_switch_base_is_doubles_contaminated(self):
+        """Contrast: base surface_switch flips both cells the singles version fixes."""
+        from mvp.model.features.transition import surface_switch
+
+        df = _make_singles_doubles_df()
+        result = df.with_columns(surface_switch().alias("val"))
+        # Row 2: doubles Clay (Jan 15) masks the real Hard->Clay switch -> 0
+        assert result["val"][2] == pytest.approx(0.0)
+        # Row 4: doubles Hard (Feb 1) manufactures a phantom switch -> 1
+        assert result["val"][4] == pytest.approx(1.0)
+
+
 class TestTransitionMultiPlayer:
     """Test that features are independent across players."""
 
@@ -193,8 +281,10 @@ class TestTransitionFeatureCount:
         registry = get_registry()
         names = [
             "days_since_surface", "surface_switch", "pct_matches_on_surface",
+            "days_since_surface_singles", "surface_switch_singles",
             "days_since_surface_diff", "surface_switch_diff", "pct_matches_on_surface_diff",
+            "days_since_surface_singles_diff", "surface_switch_singles_diff",
         ]
         for name in names:
             registry.get(name)  # Will raise KeyError if missing
-        assert len(names) == 6
+        assert len(names) == 10

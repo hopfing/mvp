@@ -24,6 +24,27 @@ def days_since_surface() -> pl.Expr:
 
 
 @feature(
+    name="days_since_surface_singles",
+    params=[],
+    description="Days since player last played SINGLES on current surface (doubles excluded)",
+    mirror=True,
+    impute=None,
+)
+def days_since_surface_singles() -> pl.Expr:
+    """Days since this player last played a SINGLES match on the current surface.
+
+    Singles-only sibling to days_since_surface: a same-surface doubles match no
+    longer reads as recent play on that surface. The most recent prior singles
+    date on this surface is carried forward across intervening doubles rows.
+    """
+    singles_date = pl.when(pl.col("draw_type") == "singles").then(pl.col(DATE_COL))
+    prev_singles = (
+        singles_date.shift(1).forward_fill().over(["player_id", "surface"], order_by=[DATE_COL, "tournament_start_date", "round_order", "match_uid"])
+    )
+    return (pl.col(DATE_COL) - prev_singles).dt.total_days().cast(pl.Float64)
+
+
+@feature(
     name="surface_switch",
     params=[],
     description="1 if player changed surfaces since last match, 0 if same",
@@ -34,6 +55,28 @@ def surface_switch() -> pl.Expr:
     """Whether player switched surfaces since their previous match."""
     prev_surface = pl.col("surface").shift(1).over("player_id", order_by=[DATE_COL, "tournament_start_date", "round_order", "match_uid"])
     return (pl.col("surface") != prev_surface).cast(pl.Float64)
+
+
+@feature(
+    name="surface_switch_singles",
+    params=[],
+    description="1 if current surface differs from player's last SINGLES surface, 0 if same (doubles excluded)",
+    mirror=True,
+    impute=None,
+)
+def surface_switch_singles() -> pl.Expr:
+    """Whether player's surface changed since their previous SINGLES match.
+
+    Singles-only sibling to surface_switch: intervening doubles matches no longer
+    mask a real switch or manufacture a phantom one. Compares the current surface
+    to the surface of the player's most recent prior singles match, carried
+    forward across doubles rows.
+    """
+    singles_surface = pl.when(pl.col("draw_type") == "singles").then(pl.col("surface"))
+    prev_singles_surface = (
+        singles_surface.shift(1).forward_fill().over("player_id", order_by=[DATE_COL, "tournament_start_date", "round_order", "match_uid"])
+    )
+    return (pl.col("surface") != prev_singles_surface).cast(pl.Float64)
 
 
 @feature(
@@ -57,5 +100,7 @@ def pct_matches_on_surface(days: int | None = None) -> pl.Expr:
 # --- Derived diff features ---
 
 register_diff("days_since_surface")
+register_diff("days_since_surface_singles")
 register_diff("surface_switch")
+register_diff("surface_switch_singles")
 register_diff("pct_matches_on_surface")
