@@ -25,6 +25,7 @@ from mvp.model.discovery.null_importance import (
     run_null_importance,
 )
 from mvp.model.discovery.selection import FeatureSelector, SelectionResult
+from mvp.model.metrics import fs_display_precision
 from mvp.model.discovery.stability import StabilityResult, run_stability_selection
 from mvp.model.discovery.sweeps import (
     ParameterSweep,
@@ -252,6 +253,15 @@ class FeatureDiscovery:
     def _log(self, msg: str) -> None:
         """Log discovery progress."""
         logger.info(msg)
+
+    def _fmt_metric(self, value: float) -> str:
+        """Format a metric value at the min_delta-scaled display precision.
+
+        Matches the precision FeatureSelector uses in its own FS logging, so the
+        wrapper's step / final readouts resolve to the same number of decimals.
+        """
+        precision = fs_display_precision(self.config.discovery.resolved_min_delta())
+        return f"{value:.{precision}f}"
 
     def _create_temp_config(self, features: list[str]) -> Path:
         """Create temporary experiment config with given features."""
@@ -742,7 +752,7 @@ class FeatureDiscovery:
             if step.get("action") == "add":
                 self._log(
                     f"  Step {step['step']}: Added {step['feature']} "
-                    f"-> {self.config.discovery.metric}={step['metric']:.4f}"
+                    f"-> {self.config.discovery.metric}={self._fmt_metric(step['metric'])}"
                 )
             elif step.get("action") == "stop":
                 self._log(f"  Stopped: {step.get('reason', 'no improvement')}")
@@ -751,7 +761,7 @@ class FeatureDiscovery:
                 if best_cand is not None and best_cand_metric is not None:
                     self._log(
                         f"  Best rejected candidate: {best_cand} "
-                        f"-> {self.config.discovery.metric}={best_cand_metric:.4f}"
+                        f"-> {self.config.discovery.metric}={self._fmt_metric(best_cand_metric)}"
                     )
 
         return result
@@ -874,7 +884,7 @@ class FeatureDiscovery:
         self._log(f"Stability-selected feature set ({len(selected)} features):")
         for f in selected:
             self._log(f"  - {f}  ({stability_result.selection_frequency[f]:.2f})")
-        self._log(f"Final {self.config.discovery.metric}: {final_metric:.4f}")
+        self._log(f"Final {self.config.discovery.metric}: {self._fmt_metric(final_metric)}")
 
         self._last_result = DiscoveryResult(
             selected_features=selected,
@@ -959,7 +969,7 @@ class FeatureDiscovery:
         self._log(f"Feature set ({len(final_features)} features):")
         for f in final_features:
             self._log(f"  - {f}")
-        self._log(f"Final {self.config.discovery.metric}: {final_metric:.4f}")
+        self._log(f"Final {self.config.discovery.metric}: {self._fmt_metric(final_metric)}")
         self._log(f"Total experiments: {self._experiment_count}")
 
         self._last_result = DiscoveryResult(

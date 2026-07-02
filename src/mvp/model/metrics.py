@@ -1,6 +1,8 @@
 """Metrics calculation for experiments."""
 
 
+import math
+
 import numpy as np
 from scipy.special import betainc as _betainc
 from sklearn.metrics import (
@@ -91,6 +93,22 @@ def default_min_delta(metric: str) -> float:
             f"No default min_delta for metric {metric!r}; add it to METRIC_MIN_DELTA "
             f"in metrics.py. Known: {sorted(METRIC_MIN_DELTA)}"
         ) from None
+
+
+def fs_display_precision(min_delta: float) -> int:
+    """Decimals for FS metric readouts, derived from `min_delta`.
+
+    Shows one place past min_delta's leading digit, so a logged metric is
+    resolved just finer than the improvement threshold that governs selection
+    (e.g. min_delta 1e-5 -> 6 decimals; 3e-5 -> 6; 5e-6 -> 7). The metrics are
+    full-precision floats, so these are real digits, not zero padding. Falls
+    back to 4 when no threshold is set (min_delta <= 0). Clamped to [4, 10].
+    """
+    if min_delta <= 0.0:
+        return 4
+    # +1e-9 stabilizes exact powers of ten (log10(1e-5) landing at -5.0000001).
+    place = -math.floor(math.log10(min_delta) + 1e-9)
+    return max(4, min(10, place + 1))
 
 
 def _bucket_errors(

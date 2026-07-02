@@ -18,6 +18,7 @@ from mvp.model.discovery.checkpoint import (
     load_checkpoint,
     save_checkpoint,
 )
+from mvp.model.metrics import fs_display_precision
 
 logger = logging.getLogger(__name__)
 
@@ -132,10 +133,17 @@ class FeatureSelector:
         self.base_features = list(base_features) if base_features else []
         self.round1_baseline = round1_baseline
         self.min_delta = min_delta
+        # Decimals for every metric readout in FS logging, scaled to min_delta so
+        # values are shown just finer than the accept threshold.
+        self._best_precision = fs_display_precision(min_delta)
         # Candidate-loop parallelism: number of concurrent candidate fits.
         # None/1 = serial (exact current path). Resolved upstream (discover);
         # stability forces 1 to avoid nesting under its resample pool.
         self.forward_max_workers = forward_max_workers
+
+    def _fmt_metric(self, value: float) -> str:
+        """Format a metric value at the min_delta-scaled display precision."""
+        return f"{value:.{self._best_precision}f}"
 
     def _is_better(self, new_val: float, old_val: float) -> bool:
         """Check if new value is better than old value."""
@@ -201,9 +209,9 @@ class FeatureSelector:
             first_round_logged = len(cp.completed_rounds) > 0
             logger.info(
                 "Resumed from checkpoint: %d completed rounds "
-                "(current metric=%.4f), %d candidates scored in round %d",
+                "(current metric=%s), %d candidates scored in round %d",
                 len(cp.completed_rounds),
-                best_metric,
+                self._fmt_metric(best_metric),
                 len(resumed_round_scores),
                 cp.current_round,
             )
@@ -312,7 +320,9 @@ class FeatureSelector:
                 nonlocal disp_best
                 if metric is not None and self._is_better(metric, disp_best):
                     disp_best = metric
-                    bar.set_postfix(best=f"{metric:.4f}", feat=feat, refresh=False)
+                    bar.set_postfix(
+                        best=self._fmt_metric(metric), feat=feat, refresh=False
+                    )
 
             if workers == 1:
                 bar = tqdm(to_eval, desc=desc, leave=False, ncols=120)
@@ -365,13 +375,16 @@ class FeatureSelector:
             if best_feature is None or delta < self.min_delta:
                 reason = (
                     "no improvement" if self.min_delta == 0.0
-                    else f"improvement {delta:.6f} < min_delta {self.min_delta:.6f}"
+                    else (
+                        f"improvement {self._fmt_metric(delta)} "
+                        f"< min_delta {self._fmt_metric(self.min_delta)}"
+                    )
                 )
                 logger.info("FS halting: %s", reason)
                 if best_feature is not None:
                     logger.info(
-                        "  best rejected candidate: %s -> %.4f",
-                        best_feature, best_feature_metric,
+                        "  best rejected candidate: %s -> %s",
+                        best_feature, self._fmt_metric(best_feature_metric),
                     )
                 history.append({
                     "step": len(history) + 1,
@@ -405,7 +418,7 @@ class FeatureSelector:
             remaining.remove(best_feature)
             best_metric = best_feature_metric
 
-            logger.info("  + %s -> %.4f", best_feature, best_metric)
+            logger.info("  + %s -> %s", best_feature, self._fmt_metric(best_metric))
             progress_path.write_text(
                 "\n".join(f"{i+1}. {f}" for i, f in enumerate(selected))
             )
@@ -464,12 +477,12 @@ class FeatureSelector:
                 )
                 logger.info("-" * 50)
                 for i, (feat, metric) in enumerate(with_signal, 1):
-                    logger.info("  %3d. %s: %.4f", i, feat, metric)
+                    logger.info("  %3d. %s: %s", i, feat, self._fmt_metric(metric))
                 if n_dropped:
                     if baseline is not None:
                         logger.info(
-                            "  (%d features below baseline %.4f or rejected)",
-                            n_dropped, baseline,
+                            "  (%d features below baseline %s or rejected)",
+                            n_dropped, self._fmt_metric(baseline),
                         )
                     else:
                         logger.info(
