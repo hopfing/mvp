@@ -396,7 +396,7 @@ def _all_fingerprints_for_source(source_name: str) -> list[dict]:
             continue
         mtime = diag_path.stat().st_mtime
         out.append({
-            "run_id": fp_dir_p.name[:8],
+            "run_id": fp_dir_p.name,
             "run_ts": _dt.datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M"),
             "diagnostics": diag,
             "mtime": mtime,
@@ -786,7 +786,7 @@ class LeaderCandidate:
     and so compete on the two calibration axes only.
     """
     name: str  # model name
-    run_id: str  # 8-char identifier (mlrun hash or fp prefix)
+    run_id: str  # full fingerprint for fp-dir entries; 8-char mlrun-hash prefix for mlruns-only orphans
     is_latest: bool
     signed_cal: float | None
     optimal_pct: float | None
@@ -1049,7 +1049,7 @@ def render_static_table(summaries: list[ModelSummary]) -> str:
     rows = sorted(summaries, key=lambda s: -s.optimal_pct)
     lines = ["=" * 80, "Table 1: Static diagnostics (sorted by Optimal% desc)", "=" * 80]
     header = (
-        f"{'Model':<50} {'run_ts':<16} {'id':<8} "
+        f"{'Model':<50} {'run_ts':<16} {'id':<12} "
         f"{'Acc':>6} {'LL':>7} "
         f"{'Sev%':>5} {'SCal%':>6} "
         f"{'UndC%':>6} {'Opt%':>6} {'Brd%':>6} {'Rsk%':>6} {'Dng%':>6} "
@@ -1064,7 +1064,7 @@ def render_static_table(summaries: list[ModelSummary]) -> str:
             fmt = f"+{w}.{prec}f" if sign else f"{w}.{prec}f"
             return f"{x:{fmt}}"
         lines.append(
-            f"{s.name[:50]:<50} {s.run_ts:<16} {s.run_id:<8} "
+            f"{s.name[:50]:<50} {s.run_ts:<16} {s.run_id:<12} "
             f"{f(s.acc, 6)} {f(s.ll, 7)} "
             f"{s.severity*100:>5.2f} {s.signed_cal*100:>+6.2f} "
             f"{s.underc_pct:>5.1f}% {s.optimal_pct:>5.1f}% "

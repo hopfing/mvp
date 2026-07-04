@@ -109,9 +109,11 @@ def find_latest_diagnostics(
     mtime is newer than the latest mlruns artifact (or when no mlruns
     artifact exists for the model).
 
-    Returns (json_path, run_id, run_ts) where run_id is an 8-char identifier
-    (mlrun hash, or `fp:<12hex>` prefix when the fingerprint copy wins) and
-    run_ts is the JSON mtime formatted YYYY-MM-DD HH:MM.
+    Returns (json_path, run_id, run_ts) where run_id is the diagnostics
+    source's directory name — the full fingerprint (the `model_evaluations/<fp>/`
+    dir, e.g. `12f8c0365c6a`) when the fingerprint copy wins, or the mlrun hash
+    otherwise — so it maps directly to the on-disk run. run_ts is the JSON mtime
+    formatted YYYY-MM-DD HH:MM.
     """
     candidates: list[tuple[float, Path, str]] = []
 
@@ -120,7 +122,7 @@ def find_latest_diagnostics(
             fp_diag = fp_diagnostics_path(config_path)
             if fp_diag.exists():
                 mtime = fp_diag.stat().st_mtime
-                fp_id = fp_diag.parent.name[:8]
+                fp_id = fp_diag.parent.name
                 candidates.append((mtime, fp_diag, fp_id))
         except Exception:
             logger.exception("Failed fingerprint lookup for %s", config_path)
@@ -140,7 +142,7 @@ def find_latest_diagnostics(
                 if not json_files:
                     continue
                 json_path = max(json_files, key=lambda p: p.stat().st_mtime)
-                candidates.append((json_path.stat().st_mtime, json_path, run_dir.name[:8]))
+                candidates.append((json_path.stat().st_mtime, json_path, run_dir.name))
 
     if not candidates:
         raise FileNotFoundError(
