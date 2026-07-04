@@ -1118,6 +1118,7 @@ class DiagnosticResults:
     calibration_by_segment: dict[str, Any] | None = None
     error_conditions: dict[str, Any] | None = None
     ensemble: dict[str, Any] | None = None
+    feature_importance: list[dict[str, Any]] | None = None
 
     @property
     def metrics(self) -> dict[str, float]:
@@ -1199,4 +1200,6 @@ class DiagnosticResults:
             data["error_conditions"] = self.error_conditions
         if self.ensemble is not None:
             data["ensemble"] = self.ensemble
+        if self.feature_importance is not None:
+            data["feature_importance"] = self.feature_importance
         return json.dumps(data, indent=2, default=str)

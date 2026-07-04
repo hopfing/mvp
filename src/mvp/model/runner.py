@@ -1670,6 +1670,23 @@ class ExperimentRunner:
                 tuning_predictions, calibration_segments=cal_segments
             )
 
+            # Persist per-feature gain importance (mean/std across folds, full
+            # list sorted by mean gain) into the diagnostics JSON so it survives
+            # past stdout — same aggregation as cli._print_feature_importance.
+            if all_fold_importances:
+                importance_summary: list[dict[str, Any]] = []
+                for feat in feature_cols:
+                    vals = [fi.get(feat, 0.0) for fi in all_fold_importances]
+                    mean_val = sum(vals) / len(vals)
+                    var = sum((v - mean_val) ** 2 for v in vals) / len(vals)
+                    importance_summary.append({
+                        "feature": feat,
+                        "mean_gain": mean_val,
+                        "std_gain": var ** 0.5,
+                    })
+                importance_summary.sort(key=lambda r: r["mean_gain"], reverse=True)
+                diagnostic_results.feature_importance = importance_summary
+
             # Compute ensemble-specific diagnostics (tuning preds only)
             ensemble_diagnostic_results = None
             if is_ensemble and all_per_model_predictions:
