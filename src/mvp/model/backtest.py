@@ -18,6 +18,7 @@ from typing import Any
 
 import polars as pl
 import yaml
+from dateutil.relativedelta import relativedelta
 
 from mvp.common.base_job import get_data_root, get_local_data_root
 from mvp.model import backtest_views as views
@@ -34,6 +35,12 @@ ARTIFACT_ROOT = Path("B:/backtests/lead")
 ODDS_PATH = get_data_root() / "aggregate" / "odds" / "odds.parquet"
 MATCHES_PATH = get_data_root() / "aggregate" / "atptour" / "matches.parquet"
 PRODUCTION_CONFIG_PATH = Path("production.yaml")
+
+# Hard floor on the betting period. The odds parquet holds a few stray,
+# unreliable pre-2026 prices (e.g. a lone 2018 ITF Futures match) that are not a
+# real historical feed; trustworthy live-scraped odds start in 2026. The
+# backtest never scores anything before this date.
+BETTING_START_FLOOR = date(2026, 1, 1)
 
 # Dedicated feature cache, isolated from the shared FS/live cache
 # (get_local_data_root()/features/cache). The backtest runs ProductionPredictor
@@ -111,24 +118,45 @@ def _resolve_voters(override_path: Path | str | None) -> list[dict]:
     return voters
 
 
+def _to_date(v: Any) -> date:
+    """Coerce a date/datetime to date (config + parquet dates vary)."""
+    return v.date() if isinstance(v, datetime) else v
+
+
 def _build_temp_config(
-    config_path: Path, voters: list[dict], artifact_root: Path
+    config_path: Path,
+    voters: list[dict],
+    artifact_root: Path,
+    *,
+    train_cutoff: date,
+    fold_tag: str,
 ) -> dict:
-    """Build a Predictor-shaped config dict pointing at the backtest's artifact paths."""
+    """Build a Predictor-shaped config dict for one backtest fold.
+
+    ``train_cutoff`` is the last training date for this fold — the day before the
+    fold's test window opens. Every model's training end is capped at it so no
+    model can see the test window; each model's own validation block then
+    determines its deploy window inside ``_train_single`` (trailing train_months
+    for date_sliding, full span for date_expanding). Artifacts are tagged per
+    fold so re-runs cache and multi-fold runs don't collide.
+    """
     lead_cfg = ExperimentConfig.from_file(str(config_path))
     train_range = {
         "start": lead_cfg.data.date_range.start.isoformat(),
-        "end": lead_cfg.data.date_range.end.isoformat(),
+        "end": train_cutoff.isoformat(),
     }
     voters_out = []
     voters_dir = artifact_root / "voters"
     for voter in voters:
         voter_config = Path(voter["config"])
-        voter_artifact = voters_dir / f"{voter_config.stem}.joblib"
+        voter_artifact = voters_dir / f"{voter_config.stem}_{fold_tag}.joblib"
         voter_cfg = ExperimentConfig.from_file(str(voter_config))
+        # Cap the voter at the fold cutoff too (never train into the test
+        # window), but honour an earlier configured end if it has one.
+        voter_end = min(_to_date(voter_cfg.data.date_range.end), train_cutoff)
         voter_train_range = {
             "start": voter_cfg.data.date_range.start.isoformat(),
-            "end": voter_cfg.data.date_range.end.isoformat(),
+            "end": voter_end.isoformat(),
         }
         entry = {
             "config": str(voter_config),
@@ -145,7 +173,7 @@ def _build_temp_config(
         "winner": {
             "active": {
                 "config": str(config_path),
-                "artifact": str(artifact_root / "lead.joblib"),
+                "artifact": str(artifact_root / f"lead_{fold_tag}.joblib"),
                 "train_date_range": train_range,
                 "filters": lead_cfg.data.filters or {},
             },
@@ -376,6 +404,86 @@ def _attach_cal_tiers(
     return bets, run_id
 
 
+def _resolve_betting_period(
+    start: date | None,
+    end: date | None,
+) -> tuple[date, date]:
+    """Resolve the [start, end] period the backtest scores bets over.
+
+    Starts at BETTING_START_FLOOR (2026-01-01) — the earliest trustworthy odds —
+    and runs to today-7 (so the tail isn't dominated by not-yet-settled matches).
+    ``--start``/``--end`` override each bound, but an explicit start earlier than
+    the floor is clamped: the backtest never uses pre-2026 prices.
+    """
+    default_end = date.today() - timedelta(days=7)
+    bt_start = start or BETTING_START_FLOOR
+    if bt_start < BETTING_START_FLOOR:
+        logger.warning(
+            "Betting start %s precedes the %s floor (pre-2026 odds are "
+            "unreliable) — clamping to floor",
+            bt_start, BETTING_START_FLOOR,
+        )
+        bt_start = BETTING_START_FLOOR
+    bt_end = end or default_end
+    if bt_start > bt_end:
+        raise ValueError(f"Betting period start {bt_start} after end {bt_end}")
+    return bt_start, bt_end
+
+
+def _schedule_test_windows(
+    lead_cfg: ExperimentConfig, schedule_end: date
+) -> list[tuple[date, date, date]]:
+    """Return (train_cutoff, test_start, test_end_inclusive) per the config's
+    validation schedule, anchored at date_range.start and stepped by test_months,
+    up to schedule_end.
+
+    The geometry matches DateSlidingWindowSplitter / DateExpandingWindowSplitter
+    (anchor floored to the 1st of the start month; first test window opens
+    train_months / initial_train_months after it) so the backtest reads the
+    config the same way FS and the model runner do — the one difference is that a
+    final partial test window is kept here rather than dropped, since that
+    incomplete window is exactly the live period the backtest evaluates.
+    ``train_cutoff`` is test_start - 1 day; capping every model there and letting
+    each model's own validation block drive its deploy window keeps train/test
+    disjoint without duplicating the deploy math.
+    """
+    val = lead_cfg.validation
+    if val is None:
+        raise ValueError("Backtest requires a validation block to derive folds")
+    if not val.test_months:
+        raise ValueError("Backtest requires validation.test_months")
+
+    start = _to_date(lead_cfg.data.date_range.start)
+    anchor = date(start.year, start.month, 1)
+    if val.type == "date_sliding":
+        if not val.train_months:
+            raise ValueError("date_sliding requires train_months")
+        first_test_start = anchor + relativedelta(months=val.train_months)
+    elif val.type == "date_expanding":
+        if not val.initial_train_months:
+            raise ValueError("date_expanding requires initial_train_months")
+        first_test_start = anchor + relativedelta(months=val.initial_train_months)
+    else:
+        raise NotImplementedError(
+            f"Backtest schedule not implemented for validation type "
+            f"'{val.type}' (supported: date_sliding, date_expanding)"
+        )
+
+    windows: list[tuple[date, date, date]] = []
+    i = 0
+    while True:
+        test_start = first_test_start + relativedelta(months=val.test_months * i)
+        if test_start > schedule_end:
+            break
+        test_end_incl = (
+            test_start + relativedelta(months=val.test_months) - timedelta(days=1)
+        )
+        train_cutoff = test_start - timedelta(days=1)
+        windows.append((train_cutoff, test_start, test_end_incl))
+        i += 1
+    return windows
+
+
 def run_backtest(
     config_path: Path | str,
     *,
@@ -384,7 +492,17 @@ def run_backtest(
     end: date | None = None,
     voters_override_path: Path | str | None = None,
 ) -> Path:
-    """Run the lead backtest end-to-end and return the CSV path."""
+    """Run the lead backtest end-to-end and return the CSV path.
+
+    Reads the lead config's ``validation`` block the same way FS and the model
+    runner do: it derives the sliding/expanding fold schedule anchored at
+    date_range.start, then materializes only the fold(s) whose test window
+    overlaps the betting period (where odds exist). Each such fold trains a model
+    capped at the fold's test-window start — so it never sees the test window —
+    and predicts that fold's slice of the betting period. Predictions across
+    folds are concatenated, joined to odds, and settled. Today that's a single
+    fold; the loop covers the multi-fold case if the odds span ever grows.
+    """
     config_path = Path(config_path)
     if not config_path.exists():
         raise FileNotFoundError(f"Lead config not found: {config_path}")
@@ -394,110 +512,153 @@ def run_backtest(
     artifact_root.mkdir(parents=True, exist_ok=True)
     (artifact_root / "voters").mkdir(exist_ok=True)
 
-    temp_config = _build_temp_config(config_path, voters, artifact_root)
+    lead_cfg = ExperimentConfig.from_file(str(config_path))
 
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".yaml", delete=False, encoding="utf-8",
-    ) as f:
-        yaml.safe_dump(temp_config, f)
-        temp_yaml_path = Path(f.name)
+    bt_start, bt_end = _resolve_betting_period(start, end)
+    logger.info("Betting period: %s to %s", bt_start, bt_end)
 
-    try:
-        predictor = ProductionPredictor(
-            production_config_path=temp_yaml_path,
-            cache_dir=BACKTEST_CACHE_DIR,
-            matches_path=_frozen_matches_path(),
+    # Select schedule folds whose test window overlaps the betting period. The
+    # 2026 floor keeps pre-2026 folds out (they also lack the history to train
+    # the config's CV) — their test window clips to empty and is skipped.
+    folds: list[tuple[date, date, date, date]] = []
+    for train_cutoff, test_start, test_end_incl in _schedule_test_windows(
+        lead_cfg, bt_end
+    ):
+        pred_start = max(test_start, bt_start)
+        pred_end = min(test_end_incl, bt_end)
+        if pred_start <= pred_end:
+            folds.append((train_cutoff, test_start, pred_start, pred_end))
+    if not folds:
+        raise RuntimeError(
+            f"No schedule fold overlaps betting period {bt_start}..{bt_end}; "
+            f"check the config's validation block and date_range.start"
         )
+    logger.info(
+        "Materializing %d fold(s): %s",
+        len(folds),
+        "; ".join(
+            f"train<={tc} predict {ps}..{pe}" for tc, _ts, ps, pe in folds
+        ),
+    )
 
-        # Train (or skip if artifact exists)
-        lead_artifact = Path(temp_config["winner"]["active"]["artifact"])
-        if retrain or not lead_artifact.exists():
-            logger.info("Training lead model %s ...", config_path.stem)
-            predictor.train()
-        else:
-            logger.info("Using cached lead artifact %s", lead_artifact)
+    fold_predictions: list[pl.DataFrame] = []
+    last_lead_stem: str | None = None
+    for train_cutoff, test_start, pred_start, pred_end in folds:
+        fold_tag = test_start.isoformat()
+        temp_config = _build_temp_config(
+            config_path, voters, artifact_root,
+            train_cutoff=train_cutoff, fold_tag=fold_tag,
+        )
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".yaml", delete=False, encoding="utf-8",
+        ) as f:
+            yaml.safe_dump(temp_config, f)
+            temp_yaml_path = Path(f.name)
+        try:
+            predictor = ProductionPredictor(
+                production_config_path=temp_yaml_path,
+                cache_dir=BACKTEST_CACHE_DIR,
+                matches_path=_frozen_matches_path(),
+            )
 
-        for voter in temp_config["winner"]["voters"]:
-            voter_artifact = Path(voter["artifact"])
-            if retrain or not voter_artifact.exists():
-                logger.info("Training voter %s ...", voter["name"])
-                predictor._train_single(voter)
+            lead_artifact = Path(temp_config["winner"]["active"]["artifact"])
+            if retrain or not lead_artifact.exists():
+                logger.info(
+                    "Training lead %s for fold %s (train <= %s) ...",
+                    config_path.stem, fold_tag, train_cutoff,
+                )
+                predictor.train()
             else:
-                logger.info("Using cached voter artifact %s", voter_artifact)
+                logger.info("Using cached lead artifact %s", lead_artifact)
 
-        # Determine test window
-        lead_cfg = ExperimentConfig.from_file(str(config_path))
-        if start is None:
-            start = lead_cfg.data.date_range.end + timedelta(days=1)
-        if end is None:
-            # Default 7 days back from today.
-            end = date.today() - timedelta(days=7)
-        if start > end:
-            raise ValueError(f"Backtest start {start} after end {end}")
-        logger.info("Backtest window: %s to %s", start, end)
+            for voter in temp_config["winner"]["voters"]:
+                voter_artifact = Path(voter["artifact"])
+                if retrain or not voter_artifact.exists():
+                    logger.info(
+                        "Training voter %s for fold %s ...", voter["name"], fold_tag
+                    )
+                    predictor._train_single(voter)
+                else:
+                    logger.info("Using cached voter artifact %s", voter_artifact)
 
-        # Inference
-        predictions = predictor.predict(
-            include_settled=True, date_window=(start, end)
-        )
-        if predictions is None or len(predictions) == 0:
-            raise RuntimeError(
-                f"No matches in backtest window {start} to {end}"
+            preds = predictor.predict(
+                include_settled=True, date_window=(pred_start, pred_end)
             )
-        logger.info("Lead predicted %d match rows", len(predictions))
-
-        predictions = predictor.predict_voters(
-            tournament_keys=None,
-            predictions=predictions,
-            include_settled=True,
-        )
-
-        # Build per-side bet rows + odds + outcomes
-        bets = _build_bet_rows(predictions, start, end)
-        bets, run_id = _attach_cal_tiers(
-            bets, config_path.stem, lead_cfg=lead_cfg, config_path=config_path
-        )
-
-        from mvp.common.config_hash import (
-            compute_fingerprint,
-            fingerprint_dir,
-            write_config_snapshot,
-        )
-
-        fp = compute_fingerprint(lead_cfg, config_path=config_path)
-        fp_dir = fingerprint_dir(fp)
-        fp_dir.mkdir(parents=True, exist_ok=True)
-        write_config_snapshot(lead_cfg, fp, config_path=config_path)
-
-        out_path = fp_dir / "backtest.csv"
-        # CSV can't serialize nested list columns; stringify per_sub_probs
-        # for the on-disk output. In-memory `bets` keeps the list for the
-        # summary aggregation that follows.
-        bets_csv = bets
-        if "per_sub_probs" in bets_csv.columns:
-            bets_csv = bets_csv.with_columns(
-                pl.col("per_sub_probs")
-                .list.eval(pl.element().round(6).cast(pl.Utf8))
-                .list.join(",")
-                .alias("per_sub_probs")
+            if preds is None or len(preds) == 0:
+                logger.warning(
+                    "Fold %s: no matches in %s..%s", fold_tag, pred_start, pred_end
+                )
+                continue
+            preds = predictor.predict_voters(
+                tournament_keys=None, predictions=preds, include_settled=True,
             )
-        bets_csv.write_csv(out_path)
-        logger.info("Wrote %d bet rows to %s", len(bets), out_path)
+            fold_predictions.append(preds)
+            logger.info("Fold %s predicted %d match rows", fold_tag, len(preds))
+        finally:
+            temp_yaml_path.unlink(missing_ok=True)
 
-        # Print + save summary
-        summary_text = _format_summary(
-            bets,
-            config_stem=config_path.stem,
-            window=(start, end),
-            csv_path=out_path,
-            diag_run_id=run_id,
+    if not fold_predictions:
+        raise RuntimeError(
+            f"No matches predicted across betting period {bt_start}..{bt_end}"
         )
-        print(summary_text)
-        (fp_dir / "backtest_summary.txt").write_text(summary_text, encoding="utf-8")
+    predictions = (
+        fold_predictions[0]
+        if len(fold_predictions) == 1
+        else pl.concat(fold_predictions, how="diagonal_relaxed")
+    )
 
-        return out_path
-    finally:
-        temp_yaml_path.unlink(missing_ok=True)
+    # Preserve the cal_tiers sidecar fallback (_load_tier_lookup looks for a
+    # fixed `lead_cal_tiers.json`): expose the most-recent fold's fold-tagged
+    # sidecar under that name. The fp-scoped diagnostics.json remains preferred.
+    if last_lead_stem is not None:
+        fold_sidecar = artifact_root / f"{last_lead_stem}_cal_tiers.json"
+        if fold_sidecar.exists():
+            shutil.copy2(fold_sidecar, artifact_root / "lead_cal_tiers.json")
+
+    # Build per-side bet rows + odds + outcomes
+    bets = _build_bet_rows(predictions, bt_start, bt_end)
+    bets, run_id = _attach_cal_tiers(
+        bets, config_path.stem, lead_cfg=lead_cfg, config_path=config_path
+    )
+
+    from mvp.common.config_hash import (
+        compute_fingerprint,
+        fingerprint_dir,
+        write_config_snapshot,
+    )
+
+    fp = compute_fingerprint(lead_cfg, config_path=config_path)
+    fp_dir = fingerprint_dir(fp)
+    fp_dir.mkdir(parents=True, exist_ok=True)
+    write_config_snapshot(lead_cfg, fp, config_path=config_path)
+
+    out_path = fp_dir / "backtest.csv"
+    # CSV can't serialize nested list columns; stringify per_sub_probs
+    # for the on-disk output. In-memory `bets` keeps the list for the
+    # summary aggregation that follows.
+    bets_csv = bets
+    if "per_sub_probs" in bets_csv.columns:
+        bets_csv = bets_csv.with_columns(
+            pl.col("per_sub_probs")
+            .list.eval(pl.element().round(6).cast(pl.Utf8))
+            .list.join(",")
+            .alias("per_sub_probs")
+        )
+    bets_csv.write_csv(out_path)
+    logger.info("Wrote %d bet rows to %s", len(bets), out_path)
+
+    # Print + save summary
+    summary_text = _format_summary(
+        bets,
+        config_stem=config_path.stem,
+        window=(bt_start, bt_end),
+        csv_path=out_path,
+        diag_run_id=run_id,
+    )
+    print(summary_text)
+    (fp_dir / "backtest_summary.txt").write_text(summary_text, encoding="utf-8")
+
+    return out_path
 
 
 # --- Summary formatting -----------------------------------------------------
