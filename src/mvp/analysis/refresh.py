@@ -46,6 +46,7 @@ def refresh_analysis_data(
         compute_book_odds,
         compute_cross_book_odds,
         compute_first_live_anchor,
+        compute_open_close_odds,
         compute_opening_odds,
         compute_threshold_odds_all,
         save_book_odds,
@@ -97,6 +98,14 @@ def refresh_analysis_data(
     # Layer 2: Cross-book summary
     print("Computing cross-book odds summary...")
     cross_book = compute_cross_book_odds(book_odds_list)
+    # best_opening_odds / best_closing_odds are computed time-aligned from raw
+    # snapshots (fixes the per-book first/last time skew) and joined in, so every
+    # consumer reads accurate open/close under the existing column names.
+    if len(cross_book) > 0 and len(all_snapshots) > 0:
+        open_close = compute_open_close_odds(all_snapshots)
+        cross_book = cross_book.join(
+            open_close, on=["match_uid", "player_id"], how="left"
+        )
     if len(cross_book) > 0:
         save_cross_book_odds(cross_book)
     print(f"Cross-book odds: {len(cross_book)} matches")

@@ -109,7 +109,6 @@ def compute_cross_book_odds(book_odds_list: list[pl.DataFrame]) -> pl.DataFrame:
     results = []
     for (uid, pid), group in prematch_only.group_by(["match_uid", "player_id"]):
         closing = group["closing_odds"].drop_nulls()
-        opening = group["opening_odds"].drop_nulls()
         max_odds = group["max_odds"].drop_nulls()
         min_odds = group["min_odds"].drop_nulls()
 
@@ -120,10 +119,12 @@ def compute_cross_book_odds(book_odds_list: list[pl.DataFrame]) -> pl.DataFrame:
             "match_uid": uid,
             "player_id": pid,
             "n_books": len(group),
-            "best_closing_odds": _val(closing, closing.max),
+            # best_opening_odds / best_closing_odds are computed time-aligned in
+            # compute_open_close_odds (joined in refresh) — the per-book first/last
+            # max here was time-skewed. worst/avg closing stay per-book-last for
+            # now; only dataset CLV consumes them, re-alignment is a follow-up.
             "worst_closing_odds": _val(closing, closing.min),
             "avg_closing_odds": _val(closing, closing.mean),
-            "best_opening_odds": _val(opening, opening.max),
             "best_intraday_odds": _val(max_odds, max_odds.max),
             "worst_intraday_odds": _val(min_odds, min_odds.min),
         })
@@ -132,6 +133,70 @@ def compute_cross_book_odds(book_odds_list: list[pl.DataFrame]) -> pl.DataFrame:
         return _empty_cross_book()
 
     return pl.DataFrame(results)
+
+
+def compute_open_close_odds(snapshots: pl.DataFrame) -> pl.DataFrame:
+    """Time-aligned best-across-book opening and closing odds per (match, player).
+
+    Fixes the time-skew in the per-book first/last aggregation: books post their
+    first (and last) snapshot hours apart, so maxing each book's first — or last —
+    blends prices from different moments. Both points here are read at a single
+    real instant across books, via 15-min buckets:
+
+      best_opening_odds  max across books at the EARLIEST bucket with any quote
+                         (the first price on the board; usually one book).
+      best_closing_odds  max across books at the LAST bucket with any quote — the
+                         last common moment before the off (a book that stopped
+                         earlier simply isn't in that bucket).
+
+    Args:
+        snapshots: Resolved snapshots (match_uid, book, player_id, odds,
+            fetched_at, event_status).
+
+    Returns:
+        One row per (match_uid, player_id) with best_opening_odds/best_closing_odds;
+        an empty typed frame if there are no prematch snapshots.
+    """
+    if len(snapshots) == 0:
+        return _empty_open_close()
+    id_col = "player_id" if "player_id" in snapshots.columns else "side"
+    pm = snapshots.filter(
+        (pl.col("event_status") == "NOT_STARTED") & pl.col("odds").is_not_null()
+    )
+    if len(pm) == 0:
+        return _empty_open_close()
+
+    key = ["match_uid", id_col]
+
+    # Bucket fetches to 15-min rounds; one price per (match, player, round, book)
+    # = that book's last quote in the round. Then per round take the best (max)
+    # price across the books present.
+    rounds = (
+        pm.with_columns(pl.col("fetched_at").dt.truncate("15m").alias("_rnd"))
+        .sort("fetched_at")
+        .group_by(key + ["_rnd", "book"], maintain_order=True)
+        .agg(pl.col("odds").last().alias("odds"))
+        .group_by(key + ["_rnd"])
+        .agg(pl.col("odds").max().alias("_best"))
+        .sort("_rnd")
+    )
+    # First bucket = open, last bucket = close — symmetric, each a single instant.
+    out = rounds.group_by(key, maintain_order=True).agg(
+        pl.col("_best").first().alias("best_opening_odds"),
+        pl.col("_best").last().alias("best_closing_odds"),
+    )
+    if id_col != "player_id":
+        out = out.rename({id_col: "player_id"})
+    return out
+
+
+def _empty_open_close() -> pl.DataFrame:
+    return pl.DataFrame(schema={
+        "match_uid": pl.Utf8,
+        "player_id": pl.Utf8,
+        "best_opening_odds": pl.Float64,
+        "best_closing_odds": pl.Float64,
+    })
 
 
 def compute_threshold_odds(
@@ -515,10 +580,8 @@ def _empty_cross_book() -> pl.DataFrame:
         "match_uid": pl.Utf8,
         "player_id": pl.Utf8,
         "n_books": pl.Int64,
-        "best_closing_odds": pl.Float64,
         "worst_closing_odds": pl.Float64,
         "avg_closing_odds": pl.Float64,
-        "best_opening_odds": pl.Float64,
         "best_intraday_odds": pl.Float64,
         "worst_intraday_odds": pl.Float64,
     })

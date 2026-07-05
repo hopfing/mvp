@@ -316,21 +316,22 @@ def _build_bet_rows(
     bets = pl.concat([p1_rows, p2_rows]).drop(["p1_win_prob", "p1_id", "p2_id"])
     bets = bets.with_columns((pl.col("model_prob") >= 0.5).alias("is_pick"))
 
-    # Join cross-book odds on (match_uid, player_id)
+    # Join cross-book odds on (match_uid, player_id). best_opening_odds /
+    # best_closing_odds are the time-aligned best-across-book prices written by
+    # the aggregator (compute_open_close_odds); no per-book first/last skew.
     if ODDS_PATH.exists():
-        odds = pl.read_parquet(ODDS_PATH).select(
-            "match_uid",
-            "player_id",
-            "best_opening_odds",
-            "best_closing_odds",
-        )
+        _odds = pl.read_parquet(ODDS_PATH)
+        _want = ["match_uid", "player_id", "best_opening_odds", "best_closing_odds"]
+        odds = _odds.select([c for c in _want if c in _odds.columns])
         bets = bets.join(odds, on=["match_uid", "player_id"], how="left")
     else:
-        logger.warning("No odds parquet at %s — best_*_odds will be null", ODDS_PATH)
-        bets = bets.with_columns(
-            pl.lit(None).cast(pl.Float64).alias("best_opening_odds"),
-            pl.lit(None).cast(pl.Float64).alias("best_closing_odds"),
-        )
+        logger.warning("No odds parquet at %s — odds columns will be null", ODDS_PATH)
+
+    # Backfill missing odds columns (e.g. an odds.parquet written before these
+    # existed) so the expressions below are safe.
+    for _c in ("best_opening_odds", "best_closing_odds"):
+        if _c not in bets.columns:
+            bets = bets.with_columns(pl.lit(None).cast(pl.Float64).alias(_c))
 
     bets = bets.with_columns(
         (1.0 / pl.col("best_opening_odds")).alias("opening_implied"),
