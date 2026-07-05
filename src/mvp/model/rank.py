@@ -1198,7 +1198,7 @@ def render_backtest_table(rows: list[ModelSummary]) -> str:
         f"{'Model':<{name_w}} {'Period':<24} "
         f"{'N':>5} {'Hit%':>5} "
         f"{'ROIo%':>6} {'Uo>=0':>7} {'Uo_all':>7} "
-        f"{'CLV+%':>5} {'avgCLV':>6} {'ROIf%':>6} {'Uf':>7}"
+        f"{'CLV+%':>5} {'avgCLV':>6}"
     )
     cell_sub = f"{'ROIo':>6} {'Uo>=0':>7} {'ROIall':>6} {'Uall':>7}"
     group_w = len(cell_sub)
@@ -1224,9 +1224,7 @@ def render_backtest_table(rows: list[ModelSummary]) -> str:
             f"{(s.bt_units_o if s.bt_units_o is not None else 0):>+7.1f} "
             f"{(s.bt_units_o_all if s.bt_units_o_all is not None else 0):>+7.1f} "
             f"{(s.bt_clv_pos*100 if s.bt_clv_pos is not None else 0):>5.1f} "
-            f"{(s.bt_avg_clv*100 if s.bt_avg_clv is not None else 0):>+6.2f} "
-            f"{(s.bt_roi_f*100 if s.bt_roi_f is not None else 0):>+6.2f} "
-            f"{(s.bt_units_f if s.bt_units_f is not None else 0):>+7.1f}"
+            f"{(s.bt_avg_clv*100 if s.bt_avg_clv is not None else 0):>+6.2f}"
         )
         cells = " | ".join(
             _bt_cell_fmt(s.bt_cells.get((circ, cons_key)))
