@@ -859,7 +859,7 @@ def _kind_subsection(
     lines.append(bottom)
     if is_picks:
         lines.append(_wide_row_all("all picks", sub))
-        lines.append(_wide_row_pt("placed (edge>=0)", sub))
+        lines.append(_wide_row_pt("edge>=0", sub))
     else:
         lines.append(_wide_row_all(f"all {label_word}", sub))
 
@@ -911,7 +911,7 @@ def _kind_subsection(
         lines.append(_wide_row_all("ALL", sub))
 
     lines.append("")
-    lines.append("BY EDGE BAND  (all tiers, each point on its own edge)")
+    lines.append("BY EDGE BAND  (all tiers)")
     lines.append(top)
     lines.append(bottom)
     for band_label, lo, hi in _SUMMARY_EDGE_BANDS:
@@ -928,7 +928,7 @@ def _kind_subsection(
     # opponent side is almost always empty.
     round_scopes: list[tuple[str, bool]] = []
     if is_picks:
-        round_scopes.append(("  (edge>=0 per point)", True))
+        round_scopes.append(("  (edge>=0)", True))
     round_scopes.append(("  (all edges)", False))
     rslices = views.round_slices(sub)
     for scope_note, per_point in round_scopes:
@@ -949,7 +949,7 @@ def _kind_subsection(
     mslices = views.month_slices(sub)
     if mslices:
         lines.append("")
-        lines.append("BY MONTH" + ("  (edge>=0 per point)" if is_picks else ""))
+        lines.append("BY MONTH" + ("  (edge>=0)" if is_picks else ""))
         lines.append(top)
         lines.append(bottom)
         cum_open = cum_formed = cum_close = 0.0
