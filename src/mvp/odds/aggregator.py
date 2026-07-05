@@ -135,16 +135,22 @@ def compute_cross_book_odds(book_odds_list: list[pl.DataFrame]) -> pl.DataFrame:
     return pl.DataFrame(results)
 
 
-def compute_open_close_odds(snapshots: pl.DataFrame) -> pl.DataFrame:
-    """Time-aligned best-across-book opening and closing odds per (match, player).
+def compute_open_close_odds(
+    snapshots: pl.DataFrame,
+    min_books_formed: int = 2,
+) -> pl.DataFrame:
+    """Time-aligned best-across-book opening, formed, and closing odds.
 
     Fixes the time-skew in the per-book first/last aggregation: books post their
     first (and last) snapshot hours apart, so maxing each book's first — or last —
-    blends prices from different moments. Both points here are read at a single
-    real instant across books, via 15-min buckets:
+    blends prices from different moments. Each point here is read at a single real
+    instant across books, via 15-min buckets:
 
       best_opening_odds  max across books at the EARLIEST bucket with any quote
                          (the first price on the board; usually one book).
+      formed_odds        max across books at the earliest bucket where
+                         >= ``min_books_formed`` books quote (first shoppable
+                         moment); null when the market never gets that deep.
       best_closing_odds  max across books at the LAST bucket with any quote — the
                          last common moment before the off (a book that stopped
                          earlier simply isn't in that bucket).
@@ -152,10 +158,11 @@ def compute_open_close_odds(snapshots: pl.DataFrame) -> pl.DataFrame:
     Args:
         snapshots: Resolved snapshots (match_uid, book, player_id, odds,
             fetched_at, event_status).
+        min_books_formed: Books required for the market to count as "formed".
 
     Returns:
-        One row per (match_uid, player_id) with best_opening_odds/best_closing_odds;
-        an empty typed frame if there are no prematch snapshots.
+        One row per (match_uid, player_id) with best_opening_odds/formed_odds/
+        best_closing_odds; an empty typed frame if there are no prematch snapshots.
     """
     if len(snapshots) == 0:
         return _empty_open_close()
@@ -169,15 +176,16 @@ def compute_open_close_odds(snapshots: pl.DataFrame) -> pl.DataFrame:
     key = ["match_uid", id_col]
 
     # Bucket fetches to 15-min rounds; one price per (match, player, round, book)
-    # = that book's last quote in the round. Then per round take the best (max)
-    # price across the books present.
+    # = that book's last quote in the round. Then per round take the distinct-book
+    # count and the best (max) price across the books present.
     rounds = (
         pm.with_columns(pl.col("fetched_at").dt.truncate("15m").alias("_rnd"))
         .sort("fetched_at")
         .group_by(key + ["_rnd", "book"], maintain_order=True)
         .agg(pl.col("odds").last().alias("odds"))
         .group_by(key + ["_rnd"])
-        .agg(pl.col("odds").max().alias("_best"))
+        .agg(pl.col("book").n_unique().alias("_n"),
+             pl.col("odds").max().alias("_best"))
         .sort("_rnd")
     )
     # First bucket = open, last bucket = close — symmetric, each a single instant.
@@ -185,6 +193,11 @@ def compute_open_close_odds(snapshots: pl.DataFrame) -> pl.DataFrame:
         pl.col("_best").first().alias("best_opening_odds"),
         pl.col("_best").last().alias("best_closing_odds"),
     )
+    # Formed = first bucket where the market is >= min_books_formed books deep.
+    formed = (rounds.filter(pl.col("_n") >= min_books_formed)
+              .group_by(key, maintain_order=True)
+              .agg(pl.col("_best").first().alias("formed_odds")))
+    out = out.join(formed, on=key, how="left")
     if id_col != "player_id":
         out = out.rename({id_col: "player_id"})
     return out
@@ -195,6 +208,7 @@ def _empty_open_close() -> pl.DataFrame:
         "match_uid": pl.Utf8,
         "player_id": pl.Utf8,
         "best_opening_odds": pl.Float64,
+        "formed_odds": pl.Float64,
         "best_closing_odds": pl.Float64,
     })
 

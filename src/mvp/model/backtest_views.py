@@ -62,6 +62,7 @@ def slice_stats(df: pl.DataFrame) -> dict[str, Any]:
     from the available columns):
       n, hit,
       n_open, pnl_open, roi_open,
+      n_formed, pnl_formed, roi_formed,
       n_close, pnl_close, roi_close,
       clv_pos, avg_clv,
       me_open_pos, avg_me_open,
@@ -74,6 +75,9 @@ def slice_stats(df: pl.DataFrame) -> dict[str, Any]:
         "n_open": 0,
         "pnl_open": None,
         "roi_open": None,
+        "n_formed": 0,
+        "pnl_formed": None,
+        "roi_formed": None,
         "n_close": 0,
         "pnl_close": None,
         "roi_close": None,
@@ -91,7 +95,7 @@ def slice_stats(df: pl.DataFrame) -> dict[str, Any]:
         won = df["won"].drop_nulls()
         out["hit"] = float(won.mean()) if len(won) else None
 
-    for price in ("open", "close"):
+    for price in ("open", "formed", "close"):
         pnl_col = f"pnl_{price}"
         if pnl_col not in df.columns:
             continue
@@ -194,9 +198,11 @@ def by_consensus(df: pl.DataFrame) -> list[tuple[str, dict[str, Any]]]:
     return rows
 
 
-def by_month(df: pl.DataFrame) -> list[tuple[str, dict[str, Any]]]:
-    """Group by YYYY-MM, attaching `cum_open` / `cum_close` running totals
-    to each record's stats dict (in addition to the per-month stats).
+def month_slices(df: pl.DataFrame) -> list[tuple[str, pl.DataFrame]]:
+    """Group by YYYY-MM, returning the (label, sub-DataFrame) for each month in
+    chronological order. Callers that need per-bet-point gating (each of
+    open/formed/close on its own edge) operate on these raw slices; `by_month`
+    is the pre-aggregated wrapper for callers that score one slice per row.
     """
     if "effective_match_date" not in df.columns:
         return []
@@ -206,16 +212,29 @@ def by_month(df: pl.DataFrame) -> list[tuple[str, dict[str, Any]]]:
         pl.col("_month").is_not_null() & (pl.col("_month").str.len_chars() == 7)
     )
     months = sorted(m for m in tagged["_month"].unique().to_list() if m is not None)
+    out: list[tuple[str, pl.DataFrame]] = []
+    for m in months:
+        sub = tagged.filter(pl.col("_month") == m)
+        if len(sub) > 0:
+            out.append((m, sub))
+    return out
+
+
+def by_month(df: pl.DataFrame) -> list[tuple[str, dict[str, Any]]]:
+    """Group by YYYY-MM, attaching `cum_open` / `cum_formed` / `cum_close`
+    running totals to each record's stats dict (in addition to per-month stats).
+    """
     rows: list[tuple[str, dict[str, Any]]] = []
     cum_open = 0.0
+    cum_formed = 0.0
     cum_close = 0.0
-    for m in months:
-        stats = slice_stats(tagged.filter(pl.col("_month") == m))
-        if stats["n"] == 0:
-            continue
+    for m, sub in month_slices(df):
+        stats = slice_stats(sub)
         cum_open += float(stats.get("pnl_open") or 0.0)
+        cum_formed += float(stats.get("pnl_formed") or 0.0)
         cum_close += float(stats.get("pnl_close") or 0.0)
         stats["cum_open"] = cum_open
+        stats["cum_formed"] = cum_formed
         stats["cum_close"] = cum_close
         rows.append((m, stats))
     return rows
@@ -228,10 +247,12 @@ def by_month(df: pl.DataFrame) -> list[tuple[str, dict[str, Any]]]:
 _ROUND_ORDER = ["Q1", "Q2", "Q3", "RR", "R128", "R64", "R32", "R16", "QF", "SF", "F"]
 
 
-def by_round(df: pl.DataFrame) -> list[tuple[str, dict[str, Any]]]:
-    """Group by tournament round, ordered Q1..F via `_ROUND_ORDER` with any
-    unrecognized rounds appended last (name order). Returns empty if `round`
-    isn't present."""
+def round_slices(df: pl.DataFrame) -> list[tuple[str, pl.DataFrame]]:
+    """Group by tournament round, returning (label, sub-DataFrame) ordered
+    Q1..F via `_ROUND_ORDER` with any unrecognized rounds appended last (name
+    order). Returns empty if `round` isn't present. Callers needing per-bet-point
+    gating operate on these raw slices; `by_round` is the aggregated wrapper.
+    """
     if "round" not in df.columns:
         return []
     order = {r: i for i, r in enumerate(_ROUND_ORDER)}
@@ -239,10 +260,16 @@ def by_round(df: pl.DataFrame) -> list[tuple[str, dict[str, Any]]]:
         (r for r in df["round"].unique().to_list() if r is not None),
         key=lambda r: (order.get(r, len(_ROUND_ORDER)), r),
     )
-    rows: list[tuple[str, dict[str, Any]]] = []
+    out: list[tuple[str, pl.DataFrame]] = []
     for r in present:
-        stats = slice_stats(df.filter(pl.col("round") == r))
-        if stats["n"] == 0:
-            continue
-        rows.append((r, stats))
-    return rows
+        sub = df.filter(pl.col("round") == r)
+        if len(sub) > 0:
+            out.append((r, sub))
+    return out
+
+
+def by_round(df: pl.DataFrame) -> list[tuple[str, dict[str, Any]]]:
+    """Group by tournament round, ordered Q1..F via `_ROUND_ORDER` with any
+    unrecognized rounds appended last (name order). Returns empty if `round`
+    isn't present."""
+    return [(r, slice_stats(sub)) for r, sub in round_slices(df)]

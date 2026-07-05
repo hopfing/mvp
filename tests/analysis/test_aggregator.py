@@ -261,6 +261,33 @@ class TestOpenCloseOdds:
         # last bucket (12:00) is DK-only @ 1.85 — NOT BR's stale 3.00
         assert a["best_closing_odds"][0] == pytest.approx(1.85)
 
+    def test_formed_is_first_multibook_bucket(self):
+        from mvp.odds.aggregator import compute_open_close_odds
+
+        a = compute_open_close_odds(_make_open_close_snapshots()).filter(
+            pl.col("player_id") == "A")
+        # first >=2-book bucket is 10:00 -> max(DK 1.90, BR 3.00) = 3.00, distinct
+        # from open (2.00, earliest lone) and close (1.85, last lone)
+        assert a["formed_odds"][0] == pytest.approx(3.00)
+
+    def test_formed_null_when_never_multibook(self):
+        from mvp.odds.aggregator import compute_open_close_odds
+
+        snaps = pl.DataFrame({
+            "match_uid": ["m5", "m5"],
+            "book": ["dk", "dk"],
+            "player_id": ["W", "W"],
+            "odds": [1.50, 1.55],
+            "fetched_at": [
+                datetime(2026, 3, 10, 8, 0, tzinfo=timezone.utc),
+                datetime(2026, 3, 10, 9, 0, tzinfo=timezone.utc),
+            ],
+            "event_status": ["NOT_STARTED", "NOT_STARTED"],
+        })
+        w = compute_open_close_odds(snaps).filter(pl.col("player_id") == "W")
+        assert w["formed_odds"][0] is None
+        assert w["best_opening_odds"][0] == pytest.approx(1.50)
+
     def test_multibook_bucket_takes_max_across_books(self):
         from mvp.odds.aggregator import compute_open_close_odds
 

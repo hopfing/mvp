@@ -321,7 +321,8 @@ def _build_bet_rows(
     # the aggregator (compute_open_close_odds); no per-book first/last skew.
     if ODDS_PATH.exists():
         _odds = pl.read_parquet(ODDS_PATH)
-        _want = ["match_uid", "player_id", "best_opening_odds", "best_closing_odds"]
+        _want = ["match_uid", "player_id",
+                 "best_opening_odds", "formed_odds", "best_closing_odds"]
         odds = _odds.select([c for c in _want if c in _odds.columns])
         bets = bets.join(odds, on=["match_uid", "player_id"], how="left")
     else:
@@ -329,17 +330,21 @@ def _build_bet_rows(
 
     # Backfill missing odds columns (e.g. an odds.parquet written before these
     # existed) so the expressions below are safe.
-    for _c in ("best_opening_odds", "best_closing_odds"):
+    for _c in ("best_opening_odds", "formed_odds", "best_closing_odds"):
         if _c not in bets.columns:
             bets = bets.with_columns(pl.lit(None).cast(pl.Float64).alias(_c))
 
     bets = bets.with_columns(
         (1.0 / pl.col("best_opening_odds")).alias("opening_implied"),
+        (1.0 / pl.col("formed_odds")).alias("formed_implied"),
         (1.0 / pl.col("best_closing_odds")).alias("closing_implied"),
     ).with_columns(
         (pl.col("model_prob") - pl.col("opening_implied")).alias("opening_edge"),
+        (pl.col("model_prob") - pl.col("formed_implied")).alias("formed_edge"),
         (pl.col("model_prob") - pl.col("closing_implied")).alias("closing_edge"),
+        # CLV = how much the close beat this entry point's price.
         (pl.col("closing_implied") - pl.col("opening_implied")).alias("clv"),
+        (pl.col("closing_implied") - pl.col("formed_implied")).alias("clv_formed"),
     )
 
     # Settle outcomes — `won` is per-(match_uid, player_id) in matches.parquet
@@ -360,6 +365,15 @@ def _build_bet_rows(
             .then(pl.lit(-1.0))
             .otherwise(None)
         ).alias("pnl_open"),
+        (
+            pl.when(pl.col("formed_odds").is_null())
+            .then(None)
+            .when(pl.col("won") == 1)
+            .then(pl.col("formed_odds") - 1.0)
+            .when(pl.col("won") == 0)
+            .then(pl.lit(-1.0))
+            .otherwise(None)
+        ).alias("pnl_formed"),
         (
             pl.when(pl.col("best_closing_odds").is_null())
             .then(None)
@@ -682,83 +696,68 @@ _SUMMARY_TIER_ORDER: tuple[str, ...] = (
 
 
 _LABEL_W = 16
-_OPEN_W = 71
-_CLOSE_W = 52
+_OPEN_W = 52
+_FORMED_W = 33
+_CLOSE_W = 33
 
 
 def _render_open_side(stats: dict) -> str:
-    """Render the OPEN cell: n / hit% / ROI / units / CLV+% / avg CLV / ME+% / avg ME.
+    """Render the OPEN cell: n / hit% / ROI / units / CLV+% / avg CLV.
 
-    n_open (priced subset size) is the row count contributing to ROI.
+    Stats come from the opening_edge>=0 subset — the bets actually placed at
+    open. n_open (priced subset size) is the row count contributing to ROI.
     """
     n_p = stats.get("n_open", 0)
     if n_p == 0:
-        return (
-            f"{0:>6}  {'-':>6}  {'-':>7}  {'-':>8}  "
-            f"{'-':>6}  {'-':>9}  {'-':>6}  {'-':>9}"
-        )
+        return f"{0:>6}  {'-':>6}  {'-':>7}  {'-':>8}  {'-':>6}  {'-':>9}"
     hit = stats.get("hit") or 0.0
     pnl = stats.get("pnl_open") or 0.0
     roi = stats.get("roi_open") or 0.0
     clv_win = stats.get("clv_pos") or 0.0
     avg_clv = stats.get("avg_clv") or 0.0
-    me_win = stats.get("me_open_pos") or 0.0
-    avg_me = stats.get("avg_me_open") or 0.0
     return (
         f"{n_p:>6}  {hit:>6.1%}  {roi:>+7.2%}  {pnl:>+7.1f}u  "
-        f"{clv_win:>6.1%}  {avg_clv * 100:>+7.2f}pp  "
-        f"{me_win:>6.1%}  {avg_me * 100:>+7.2f}pp"
+        f"{clv_win:>6.1%}  {avg_clv * 100:>+7.2f}pp"
     )
+
+
+def _render_point_side(stats: dict, price: str) -> str:
+    """Render a FORMED or CLOSE cell: n / hit% / ROI / units.
+
+    `price` is "formed" or "close". CLV is omitted on both — formed-vs-close CLV
+    is a deferred split, and close-vs-close CLV is zero by definition. ME is
+    dropped everywhere: it is the same edge the bet set is already gated on.
+    """
+    n_p = stats.get(f"n_{price}", 0)
+    if n_p == 0:
+        return f"{0:>6}  {'-':>6}  {'-':>7}  {'-':>8}"
+    hit = stats.get("hit") or 0.0
+    pnl = stats.get(f"pnl_{price}") or 0.0
+    roi = stats.get(f"roi_{price}") or 0.0
+    return f"{n_p:>6}  {hit:>6.1%}  {roi:>+7.2%}  {pnl:>+7.1f}u"
+
+
+def _render_formed_side(stats: dict) -> str:
+    return _render_point_side(stats, "formed")
 
 
 def _render_close_side(stats: dict) -> str:
-    """Render the CLOSE cell: n / hit% / ROI / units / ME+% / avg ME.
-
-    CLV is omitted — at the close line, CLV-vs-close is zero by definition.
-    """
-    n_p = stats.get("n_close", 0)
-    if n_p == 0:
-        return (
-            f"{0:>6}  {'-':>6}  {'-':>7}  {'-':>8}  "
-            f"{'-':>6}  {'-':>9}"
-        )
-    hit = stats.get("hit") or 0.0
-    pnl = stats.get("pnl_close") or 0.0
-    roi = stats.get("roi_close") or 0.0
-    me_win = stats.get("me_close_pos") or 0.0
-    avg_me = stats.get("avg_me_close") or 0.0
-    return (
-        f"{n_p:>6}  {hit:>6.1%}  {roi:>+7.2%}  {pnl:>+7.1f}u  "
-        f"{me_win:>6.1%}  {avg_me * 100:>+7.2f}pp"
-    )
+    return _render_point_side(stats, "close")
 
 
 def _wide_header_lines() -> tuple[str, str]:
     open_hdr = "---- OPEN ----".center(_OPEN_W)
-    close_hdr = "---- CLOSE ----".center(_CLOSE_W)
+    formed_hdr = "--- FORMED ---".center(_FORMED_W)
+    close_hdr = "--- CLOSE ---".center(_CLOSE_W)
     open_cols = (
         f"{'n':>6}  {'hit%':>6}  {'ROI':>7}  {'units':>8}  "
-        f"{'CLV+%':>6}  {'avg CLV':>9}  {'ME+%':>6}  {'avg ME':>9}"
+        f"{'CLV+%':>6}  {'avg CLV':>9}"
     )
-    close_cols = (
-        f"{'n':>6}  {'hit%':>6}  {'ROI':>7}  {'units':>8}  "
-        f"{'ME+%':>6}  {'avg ME':>9}"
-    )
+    point_cols = f"{'n':>6}  {'hit%':>6}  {'ROI':>7}  {'units':>8}"
     label_blank = " " * _LABEL_W
-    top = f"  {label_blank}  {open_hdr}    {close_hdr}"
-    bottom = f"  {'label':<{_LABEL_W}}  {open_cols}    {close_cols}"
+    top = f"  {label_blank}  {open_hdr}    {formed_hdr}    {close_hdr}"
+    bottom = f"  {'label':<{_LABEL_W}}  {open_cols}    {point_cols}    {point_cols}"
     return top, bottom
-
-
-def _wide_row(label: str, open_stats: dict, close_stats: dict) -> str:
-    """Render one wide row from pre-computed open/close stats dicts.
-    Pass the same dict twice when both sides come from the same slice.
-    """
-    return (
-        f"  {label:<{_LABEL_W}}  "
-        f"{_render_open_side(open_stats)}    "
-        f"{_render_close_side(close_stats)}"
-    )
 
 
 def _tier_sub(s: pl.DataFrame, tier: str) -> pl.DataFrame:
@@ -776,12 +775,72 @@ def _edge_sign_sub(s: pl.DataFrame, col: str, yes: bool) -> pl.DataFrame:
     return s.filter(pl.col(col) >= 0) if yes else s.filter(pl.col(col) < 0)
 
 
+def _wide_row3(
+    label: str, open_stats: dict, formed_stats: dict, close_stats: dict
+) -> str:
+    """Render one wide row from three pre-computed per-point stats dicts."""
+    return (
+        f"  {label:<{_LABEL_W}}  "
+        f"{_render_open_side(open_stats)}    "
+        f"{_render_formed_side(formed_stats)}    "
+        f"{_render_close_side(close_stats)}"
+    )
+
+
+def _edge_sign_stats(s: pl.DataFrame, col: str, yes: bool = True) -> dict:
+    """slice_stats over the edge>=0 (yes) / edge<0 (no) subset of one edge
+    column. Empty-slice stats when the edge column is absent (pre-formed CSV).
+    """
+    if col not in s.columns:
+        return views.slice_stats(s.head(0))
+    return views.slice_stats(_edge_sign_sub(s, col, yes))
+
+
+def _edge_band_sub(
+    s: pl.DataFrame, col: str, lo: float, hi: float | None
+) -> pl.DataFrame:
+    """Edge-band slice with the summary's `< 0%` (lo == -inf) special case;
+    empty when the edge column is absent."""
+    if col not in s.columns:
+        return s.head(0)
+    if lo == float("-inf"):
+        return s.filter(pl.col(col) < hi)
+    return views.filter_band(s, col, lo, hi)
+
+
+def _wide_row_pt(label: str, s: pl.DataFrame) -> str:
+    """Per-point row: each cell is its OWN bet set — open gated on
+    opening_edge>=0, formed on formed_edge>=0, close on closing_edge>=0 — and
+    settled at its own price. n differs per cell.
+    """
+    return _wide_row3(
+        label,
+        _edge_sign_stats(s, "opening_edge"),
+        _edge_sign_stats(s, "formed_edge"),
+        _edge_sign_stats(s, "closing_edge"),
+    )
+
+
+def _wide_row_all(label: str, s: pl.DataFrame) -> str:
+    """All-edges row: every cell scores all priced rows at that point, no edge
+    gate. Used for the opponent (non-picks) side and `all edges` scopes.
+    """
+    stats = views.slice_stats(s)
+    return _wide_row3(label, stats, stats, stats)
+
+
 def _kind_subsection(
     sub: pl.DataFrame, label_word: str, diag_run_id: str | None
 ) -> list[str]:
-    """Emit HEADLINE / EDGE × TIER / BY EDGE BAND / BY MONTH for one kind
-    (picks or non-picks). All numeric aggregation goes through
+    """Emit HEADLINE / EDGE × TIER / BY EDGE BAND / BY ROUND / BY MONTH for one
+    kind (picks or non-picks). All numeric aggregation goes through
     `backtest_views.slice_stats`; this function owns only layout.
+
+    Each bet point (open / formed / close) is its own strategy: for picks, a
+    cell is gated on that point's own edge>=0 and settled at its own price, so
+    the three cells are independent bet sets with their own n. Non-picks (the
+    opponent side) are shown all-edges — an edge>=0 gate on the wrong side is
+    almost always empty.
     """
     top, bottom = _wide_header_lines()
     n = len(sub)
@@ -792,12 +851,17 @@ def _kind_subsection(
     if len(_tier_sub(sub, "unknown")) > 0:
         tiers_present.append("unknown")
 
-    sub_stats = views.slice_stats(sub)
+    is_picks = label_word == "picks"
+
     lines.append("")
     lines.append("HEADLINE")
     lines.append(top)
     lines.append(bottom)
-    lines.append(_wide_row(f"all {label_word}", sub_stats, sub_stats))
+    if is_picks:
+        lines.append(_wide_row_all("all picks", sub))
+        lines.append(_wide_row_pt("placed (edge>=0)", sub))
+    else:
+        lines.append(_wide_row_all(f"all {label_word}", sub))
 
     lines.append("")
     lines.append(f"EDGE × TIER{diag_suffix}")
@@ -806,119 +870,103 @@ def _kind_subsection(
     for yes_flag, edge_label in [(True, "yes"), (False, "no")]:
         for tier in tiers_present:
             t_sub = _tier_sub(sub, tier)
-            open_stats = views.slice_stats(
-                _edge_sign_sub(t_sub, "opening_edge", yes_flag)
-            )
-            close_stats = views.slice_stats(
-                _edge_sign_sub(t_sub, "closing_edge", yes_flag)
-            )
-            lines.append(_wide_row(f"{edge_label} / {tier}", open_stats, close_stats))
+            lines.append(_wide_row3(
+                f"{edge_label} / {tier}",
+                _edge_sign_stats(t_sub, "opening_edge", yes_flag),
+                _edge_sign_stats(t_sub, "formed_edge", yes_flag),
+                _edge_sign_stats(t_sub, "closing_edge", yes_flag),
+            ))
 
     # Ensemble consensus breakdowns (only when n_agree is present —
     # backtest of single-model configs won't have this column).
-    if "n_agree" in sub.columns:
-        consensus_rows = views.by_consensus(sub)
-        if consensus_rows:
-            lines.append("")
-            lines.append("EDGE × CONSENSUS")
-            lines.append(top)
-            lines.append(bottom)
-            n_subs_max = int(sub["n_agree"].drop_nulls().max())
-            for yes_flag, edge_label in [(True, "yes"), (False, "no")]:
-                for n_agree in range(n_subs_max, 0, -1):
-                    n_disagree = n_subs_max - n_agree
-                    c_sub = sub.filter(pl.col("n_agree") == n_agree)
-                    if len(c_sub) == 0:
-                        continue
-                    open_stats = views.slice_stats(
-                        _edge_sign_sub(c_sub, "opening_edge", yes_flag)
-                    )
-                    close_stats = views.slice_stats(
-                        _edge_sign_sub(c_sub, "closing_edge", yes_flag)
-                    )
-                    lines.append(
-                        _wide_row(
-                            f"{edge_label} / {n_agree}-{n_disagree}",
-                            open_stats,
-                            close_stats,
-                        )
-                    )
+    if "n_agree" in sub.columns and len(sub["n_agree"].drop_nulls()) > 0:
+        n_subs_max = int(sub["n_agree"].drop_nulls().max())
+        lines.append("")
+        lines.append("EDGE × CONSENSUS")
+        lines.append(top)
+        lines.append(bottom)
+        for yes_flag, edge_label in [(True, "yes"), (False, "no")]:
+            for n_agree in range(n_subs_max, 0, -1):
+                n_disagree = n_subs_max - n_agree
+                c_sub = sub.filter(pl.col("n_agree") == n_agree)
+                if len(c_sub) == 0:
+                    continue
+                lines.append(_wide_row3(
+                    f"{edge_label} / {n_agree}-{n_disagree}",
+                    _edge_sign_stats(c_sub, "opening_edge", yes_flag),
+                    _edge_sign_stats(c_sub, "formed_edge", yes_flag),
+                    _edge_sign_stats(c_sub, "closing_edge", yes_flag),
+                ))
 
-            lines.append("")
-            lines.append("BY CONSENSUS  (all edges)")
-            lines.append(top)
-            lines.append(bottom)
-            for label, stats in consensus_rows:
-                lines.append(_wide_row(label, stats, stats))
+        lines.append("")
+        lines.append("BY CONSENSUS  (all edges)")
+        lines.append(top)
+        lines.append(bottom)
+        for n_agree in range(n_subs_max, 0, -1):
+            n_disagree = n_subs_max - n_agree
+            c_sub = sub.filter(pl.col("n_agree") == n_agree)
+            if len(c_sub) == 0:
+                continue
+            lines.append(_wide_row_all(f"{n_agree}-{n_disagree}", c_sub))
+        lines.append(_wide_row_all("ALL", sub))
 
     lines.append("")
-    lines.append("BY EDGE BAND  (all tiers)")
+    lines.append("BY EDGE BAND  (all tiers, each point on its own edge)")
     lines.append(top)
     lines.append(bottom)
-    for label, lo, hi in _SUMMARY_EDGE_BANDS:
-        # Negative-edge band needs a custom lower bound; views.filter_band
-        # handles `hi is None` (upper-open) but not `lo == -inf`.
-        if lo == float("-inf"):
-            open_sub = sub.filter(pl.col("opening_edge") < hi)
-            close_sub = sub.filter(pl.col("closing_edge") < hi)
-        else:
-            open_sub = views.filter_band(sub, "opening_edge", lo, hi)
-            close_sub = views.filter_band(sub, "closing_edge", lo, hi)
-        lines.append(
-            _wide_row(label, views.slice_stats(open_sub), views.slice_stats(close_sub))
-        )
+    for band_label, lo, hi in _SUMMARY_EDGE_BANDS:
+        lines.append(_wide_row3(
+            band_label,
+            views.slice_stats(_edge_band_sub(sub, "opening_edge", lo, hi)),
+            views.slice_stats(_edge_band_sub(sub, "formed_edge", lo, hi)),
+            views.slice_stats(_edge_band_sub(sub, "closing_edge", lo, hi)),
+        ))
 
-    # Round slices — same slice for both price sides (the round cut is
-    # price-independent). Picks get two scopes: placed bets (opening_edge > 0)
-    # and all picks, so the gap shows how the edge filter performs per round.
-    # Non-picks get the all-edges view only — opening_edge > 0 on the
+    # Round slices. Picks get a per-point placed scope (each cell on its own
+    # edge>=0) plus an all-edges scope, so the gap shows how the edge filter
+    # performs per round. Non-picks get all-edges only — an edge>=0 gate on the
     # opponent side is almost always empty.
-    round_scopes: list[tuple[str, pl.DataFrame]] = []
-    if label_word == "picks" and "opening_edge" in sub.columns:
-        round_scopes.append(
-            ("  (opening_edge > 0)", sub.filter(pl.col("opening_edge") > 0))
-        )
-    round_scopes.append(("  (all edges)", sub))
-    for scope_note, scope_sub in round_scopes:
-        rounds = views.by_round(scope_sub)
-        if not rounds:
+    round_scopes: list[tuple[str, bool]] = []
+    if is_picks:
+        round_scopes.append(("  (edge>=0 per point)", True))
+    round_scopes.append(("  (all edges)", False))
+    rslices = views.round_slices(sub)
+    for scope_note, per_point in round_scopes:
+        if not rslices:
             continue
         lines.append("")
         lines.append(f"BY ROUND{scope_note}")
         lines.append(top)
         lines.append(bottom)
-        for rnd, stats in rounds:
-            lines.append(_wide_row(rnd, stats, stats))
+        for rnd, rsub in rslices:
+            lines.append(
+                _wide_row_pt(rnd, rsub) if per_point else _wide_row_all(rnd, rsub)
+            )
 
-    # Monthly slices — same slice for both sides since the temporal cut
-    # is independent of which price we're scoring. For picks, scope to
-    # opening_edge > 0 so the cumulative trailer is a meaningful "what
-    # bankroll would have looked like" number on actually-placed bets.
-    # Non-picks keep the full scope (opening_edge > 0 doesn't make sense
-    # for the opponent-side of a model pick).
-    monthly_input = (
-        sub.filter(pl.col("opening_edge") > 0)
-        if label_word == "picks" and "opening_edge" in sub.columns
-        else sub
-    )
-    monthly = views.by_month(monthly_input)
-    if monthly:
-        scope_note = (
-            "  (opening_edge > 0)" if label_word == "picks" else ""
-        )
+    # Monthly slices. Picks: each point placed on its own edge>=0, with a
+    # per-point cumulative trailer on actually-placed bets. Non-picks: all-edges
+    # (an edge gate on the opponent side doesn't make sense).
+    mslices = views.month_slices(sub)
+    if mslices:
         lines.append("")
-        lines.append(f"BY MONTH{scope_note}")
+        lines.append("BY MONTH" + ("  (edge>=0 per point)" if is_picks else ""))
         lines.append(top)
         lines.append(bottom)
-        for month, stats in monthly:
-            lines.append(_wide_row(month, stats, stats))
-        # Cumulative trailer — open/close running totals at end of window.
-        last_stats = monthly[-1][1]
-        cum_open = last_stats.get("cum_open", 0.0)
-        cum_close = last_stats.get("cum_close", 0.0)
+        cum_open = cum_formed = cum_close = 0.0
+        for month, msub in mslices:
+            if is_picks:
+                o = _edge_sign_stats(msub, "opening_edge")
+                f = _edge_sign_stats(msub, "formed_edge")
+                c = _edge_sign_stats(msub, "closing_edge")
+            else:
+                o = f = c = views.slice_stats(msub)
+            lines.append(_wide_row3(month, o, f, c))
+            cum_open += float(o.get("pnl_open") or 0.0)
+            cum_formed += float(f.get("pnl_formed") or 0.0)
+            cum_close += float(c.get("pnl_close") or 0.0)
         lines.append(
             f"  {'cumulative':<{_LABEL_W}}  open: {cum_open:>+7.1f}u    "
-            f"close: {cum_close:>+7.1f}u"
+            f"formed: {cum_formed:>+7.1f}u    close: {cum_close:>+7.1f}u"
         )
 
     return lines

@@ -80,13 +80,17 @@ def fp_diagnostics_path(config_path: Path) -> Path:
 _BACKTEST_NUMERIC_COLS: dict[str, type] = {
     "model_prob": pl.Float64,
     "opening_edge": pl.Float64,
+    "formed_edge": pl.Float64,
     "closing_edge": pl.Float64,
     "clv": pl.Float64,
+    "clv_formed": pl.Float64,
     "won": pl.Boolean,
     "pnl_open": pl.Float64,
+    "pnl_formed": pl.Float64,
     "pnl_close": pl.Float64,
-    "open_odds": pl.Float64,
-    "close_odds": pl.Float64,
+    "best_opening_odds": pl.Float64,
+    "formed_odds": pl.Float64,
+    "best_closing_odds": pl.Float64,
 }
 
 

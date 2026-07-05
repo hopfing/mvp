@@ -240,14 +240,14 @@ class ModelSummary:
     bt_n: int = 0
     bt_hit: float | None = None
     bt_roi_o: float | None = None
+    bt_roi_f: float | None = None
     bt_roi_c: float | None = None
     bt_units_o: float | None = None
+    bt_units_f: float | None = None
     bt_units_c: float | None = None
     bt_units_o_all: float | None = None  # consensus=1.0, no edge filter (vs bt_units_o which is edge>=0)
     bt_clv_pos: float | None = None
     bt_avg_clv: float | None = None
-    bt_me_pos: float | None = None
-    bt_avg_me: float | None = None
     # Per (circuit, consensus-bucket) cells: (circuit, cons_key) ->
     # {roi_o, roi_o_all, units_o_all, units_o, n}. Feeds the per-circuit x cons cols.
     bt_cells: dict = field(default_factory=dict)
@@ -540,11 +540,10 @@ def _empty_backtest_dict() -> dict:
     """Default (all-missing) backtest aggregate dict shape used on ModelSummary."""
     return {
         "bt_period_lo": "", "bt_period_hi": "", "bt_n": 0,
-        "bt_hit": None, "bt_roi_o": None, "bt_roi_c": None,
-        "bt_units_o": None, "bt_units_c": None,
+        "bt_hit": None, "bt_roi_o": None, "bt_roi_f": None, "bt_roi_c": None,
+        "bt_units_o": None, "bt_units_f": None, "bt_units_c": None,
         "bt_units_o_all": None,
         "bt_clv_pos": None, "bt_avg_clv": None,
-        "bt_me_pos": None, "bt_avg_me": None,
         "bt_cells": {},
     }
 
@@ -596,9 +595,11 @@ def _backtest_aggregates(df: pl.DataFrame) -> dict:
     per-row backtest df.
 
     Filters: consensus==1.0 (lead+voter agree) and model-side (model_prob>0.5).
-    ``bt_units_o_all`` is the consensus-side net units BEFORE the edge gate (the
-    "all" lens); every other stat adds the opening_edge>=0 gate. Shared by the
-    latest-run path (date-scoped) and the fp-version path (whole CSV).
+    Each bet point (open/formed/close) is then gated on ITS OWN edge>=0 and
+    settled at its own price, so ROIo/ROIf/ROIc are three independent strategies
+    with their own bet sets. ``bt_units_o_all`` is consensus-side net units at
+    open BEFORE any edge gate; ``bt_n``/hit/CLV are read off the placed
+    (opening-edge) set. Shared by the latest-run and fp-version paths.
     """
     out = _empty_backtest_dict()
     # Per-circuit x consensus cells use the FULL df (the <1.0 bucket needs the
@@ -608,33 +609,42 @@ def _backtest_aggregates(df: pl.DataFrame) -> dict:
         df = df.filter(pl.col("consensus") == 1.0)
     if "model_prob" in df.columns:
         df = df.filter(pl.col("model_prob") > 0.5)
+    # Consensus-side units at open before any edge gate (the "all" lens).
     if "pnl_open" in df.columns:
         out["bt_units_o_all"] = df["pnl_open"].sum()
-    if "opening_edge" in df.columns:
-        df = df.filter(pl.col("opening_edge") >= 0)
 
-    n = len(df)
-    if n == 0:
+    # Each bet point is its own strategy: select on THAT point's edge>=0 and
+    # settle at THAT point's price. n differs per point — you only place a bet
+    # at a point when it actually has edge there.
+    def _pt(edge_col: str, pnl_col: str) -> tuple[float | None, float | None, int]:
+        if edge_col not in df.columns or pnl_col not in df.columns:
+            return None, None, 0
+        sub = df.filter(pl.col(edge_col) >= 0)
+        k = len(sub)
+        if k == 0:
+            return None, None, 0
+        u = sub[pnl_col].sum()
+        return u / k, u, k
+
+    out["bt_roi_o"], out["bt_units_o"], n_o = _pt("opening_edge", "pnl_open")
+    out["bt_roi_f"], out["bt_units_f"], _ = _pt("formed_edge", "pnl_formed")
+    out["bt_roi_c"], out["bt_units_c"], _ = _pt("closing_edge", "pnl_close")
+
+    if n_o == 0:
         return out
+    out["bt_n"] = n_o
 
-    out["bt_n"] = n
-    if "effective_match_date" in df.columns:
-        out["bt_period_lo"] = str(df["effective_match_date"].min())[:10]
-        out["bt_period_hi"] = str(df["effective_match_date"].max())[:10]
-    if "won" in df.columns:
-        out["bt_hit"] = df["won"].mean()
-    if "pnl_open" in df.columns:
-        out["bt_units_o"] = df["pnl_open"].sum()
-        out["bt_roi_o"] = out["bt_units_o"] / n
-    if "pnl_close" in df.columns:
-        out["bt_units_c"] = df["pnl_close"].sum()
-        out["bt_roi_c"] = out["bt_units_c"] / n
-    if "clv" in df.columns:
-        out["bt_clv_pos"] = (df["clv"] > 0).mean()
-        out["bt_avg_clv"] = df["clv"].mean()
-    if "closing_edge" in df.columns:
-        out["bt_me_pos"] = (df["closing_edge"] > 0).mean()
-        out["bt_avg_me"] = df["closing_edge"].mean()
+    # Hit, period, and CLV come off the placed (opening-edge) bets — the ones you
+    # actually put down; CLV is line movement on those.
+    placed = df.filter(pl.col("opening_edge") >= 0)
+    if "effective_match_date" in placed.columns:
+        out["bt_period_lo"] = str(placed["effective_match_date"].min())[:10]
+        out["bt_period_hi"] = str(placed["effective_match_date"].max())[:10]
+    if "won" in placed.columns:
+        out["bt_hit"] = placed["won"].mean()
+    if "clv" in placed.columns:
+        out["bt_clv_pos"] = (placed["clv"] > 0).mean()
+        out["bt_avg_clv"] = placed["clv"].mean()
     return out
 
 
@@ -1188,7 +1198,7 @@ def render_backtest_table(rows: list[ModelSummary]) -> str:
         f"{'Model':<{name_w}} {'Period':<24} "
         f"{'N':>5} {'Hit%':>5} "
         f"{'ROIo%':>6} {'Uo>=0':>7} {'Uo_all':>7} "
-        f"{'CLV+%':>5} {'avgCLV':>6} {'ME+%':>5} {'avgME':>6}"
+        f"{'CLV+%':>5} {'avgCLV':>6} {'ROIf%':>6} {'Uf':>7}"
     )
     cell_sub = f"{'ROIo':>6} {'Uo>=0':>7} {'ROIall':>6} {'Uall':>7}"
     group_w = len(cell_sub)
@@ -1215,8 +1225,8 @@ def render_backtest_table(rows: list[ModelSummary]) -> str:
             f"{(s.bt_units_o_all if s.bt_units_o_all is not None else 0):>+7.1f} "
             f"{(s.bt_clv_pos*100 if s.bt_clv_pos is not None else 0):>5.1f} "
             f"{(s.bt_avg_clv*100 if s.bt_avg_clv is not None else 0):>+6.2f} "
-            f"{(s.bt_me_pos*100 if s.bt_me_pos is not None else 0):>5.1f} "
-            f"{(s.bt_avg_me*100 if s.bt_avg_me is not None else 0):>+6.2f}"
+            f"{(s.bt_roi_f*100 if s.bt_roi_f is not None else 0):>+6.2f} "
+            f"{(s.bt_units_f if s.bt_units_f is not None else 0):>+7.1f}"
         )
         cells = " | ".join(
             _bt_cell_fmt(s.bt_cells.get((circ, cons_key)))
