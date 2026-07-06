@@ -249,7 +249,7 @@ class ModelSummary:
     bt_clv_pos: float | None = None
     bt_avg_clv: float | None = None
     # Per (circuit, consensus-bucket) cells: (circuit, cons_key) ->
-    # {roi_o, roi_o_all, units_o_all, units_o, n}. Feeds the per-circuit x cons cols.
+    # {roi_o, units_o, roi_f, units_f, n}. Feeds the per-circuit x cons cols.
     bt_cells: dict = field(default_factory=dict)
 
 
@@ -549,12 +549,13 @@ def _empty_backtest_dict() -> dict:
 
 
 def _circuit_cons_cells(df: pl.DataFrame) -> dict:
-    """Per (circuit, consensus-bucket) backtest cell: ROIo%, Uo_all, Uo>=0.
+    """Per (circuit, consensus-bucket) backtest cell: open and formed, edge>=0.
 
     Same filter semantics as the pooled stats — model-side (model_prob>0.5),
-    ``units_o_all`` summed pre-edge, ``roi_o``/``units_o`` after opening_edge>=0
-    — but partitioned by circuit and consensus bucket (==1.0 vs <1.0) instead of
-    the pooled consensus==1.0. Keyed by (circuit, cons_key).
+    then each bet point on its OWN edge>=0 — but partitioned by circuit and
+    consensus bucket (==1.0 vs <1.0) instead of the pooled consensus==1.0.
+    ``roi_o``/``units_o`` are open after opening_edge>=0; ``roi_f``/``units_f``
+    are formed after formed_edge>=0 (its own bet set). Keyed by (circuit, cons_key).
     """
     cells: dict[tuple[str, str], dict] = {}
     cols = set(df.columns)
@@ -570,22 +571,23 @@ def _circuit_cons_cells(df: pl.DataFrame) -> dict:
                 )
             if "model_prob" in cols:
                 d = d.filter(pl.col("model_prob") > 0.5)
-            cell = {"roi_o": None, "roi_o_all": None,
-                    "units_o_all": None, "units_o": None, "n": 0}
-            if "pnl_open" in cols and len(d) > 0:
-                cell["units_o_all"] = d["pnl_open"].sum()
-                # ROIo_all over priced bets only — a row with no opening price
-                # isn't a placeable bet, so null pnl_open is out of the denom.
-                n_all = d["pnl_open"].drop_nulls().len()
-                if n_all > 0:
-                    cell["roi_o_all"] = cell["units_o_all"] / n_all
-            if "opening_edge" in cols:
-                d = d.filter(pl.col("opening_edge") >= 0)
-            n = len(d)
-            cell["n"] = n
-            if n > 0 and "pnl_open" in cols:
-                cell["units_o"] = d["pnl_open"].sum()
-                cell["roi_o"] = cell["units_o"] / n
+            cell = {"roi_o": None, "units_o": None,
+                    "roi_f": None, "units_f": None, "n": 0}
+            # Open bet set: opening_edge>=0, settled at open. n counts placed bets.
+            if "opening_edge" in cols and "pnl_open" in cols:
+                d_o = d.filter(pl.col("opening_edge") >= 0)
+                n_o = len(d_o)
+                cell["n"] = n_o
+                if n_o > 0:
+                    cell["units_o"] = d_o["pnl_open"].sum()
+                    cell["roi_o"] = cell["units_o"] / n_o
+            # Formed bet set: formed_edge>=0, settled at formed (its own set).
+            if "formed_edge" in cols and "pnl_formed" in cols:
+                d_f = d.filter(pl.col("formed_edge") >= 0)
+                n_f = len(d_f)
+                if n_f > 0:
+                    cell["units_f"] = d_f["pnl_formed"].sum()
+                    cell["roi_f"] = cell["units_f"] / n_f
             cells[(circ, cons_key)] = cell
     return cells
 
@@ -1158,16 +1160,16 @@ def _version_rows(summaries: list[ModelSummary]) -> list[ModelSummary]:
 
 
 def _bt_cell_fmt(cell: dict | None) -> str:
-    """Format one (circuit, cons) cell: `ROIo Uo>=0 ROIall Uall` — the edge>=0
-    pair then the all-edge pair, each ROI next to the units it describes."""
+    """Format one (circuit, cons) cell: `ROIo Uo>=0 ROIf Uf` — the open edge>=0
+    pair then the formed edge>=0 pair, each ROI next to the units it describes."""
     cell = cell or {}
     roi, uo = cell.get("roi_o"), cell.get("units_o")
-    roia, uall = cell.get("roi_o_all"), cell.get("units_o_all")
+    roif, uf = cell.get("roi_f"), cell.get("units_f")
     roi_s = f"{roi*100:+.2f}" if roi is not None else "--"
     uo_s = f"{uo:+.1f}" if uo is not None else "--"
-    roia_s = f"{roia*100:+.2f}" if roia is not None else "--"
-    uall_s = f"{uall:+.1f}" if uall is not None else "--"
-    return f"{roi_s:>6} {uo_s:>7} {roia_s:>6} {uall_s:>7}"
+    roif_s = f"{roif*100:+.2f}" if roif is not None else "--"
+    uf_s = f"{uf:+.1f}" if uf is not None else "--"
+    return f"{roi_s:>6} {uo_s:>7} {roif_s:>6} {uf_s:>7}"
 
 
 def render_backtest_table(rows: list[ModelSummary]) -> str:
@@ -1179,7 +1181,7 @@ def render_backtest_table(rows: list[ModelSummary]) -> str:
     are scoped to the post-training window; version rows use the whole CSV.
 
     Pooled columns are consensus==1.0; the appended per-circuit x consensus
-    cells (ROIo% / Uo_all / Uo>=0) break that out by circuit and by consensus
+    cells (ROIo / Uo>=0 / ROIf / Uf) break that out by circuit and by consensus
     bucket (c1.0 == 1.0, c0.5 == <1.0).
     """
     rows = sorted(
@@ -1192,7 +1194,7 @@ def render_backtest_table(rows: list[ModelSummary]) -> str:
         "=" * 80,
         "Table 2: Backtest (consensus + model-side, sorted by Uo>=0 desc)",
         "=" * 80,
-        "Per-circuit x cons cells: ROIo/Uo>=0 (edge>=0) + ROIall/Uall (all edges);  c1.0==1.0, c0.5==<1.0",
+        "Per-circuit x cons cells: ROIo/Uo>=0 + ROIf/Uf (both edge>=0);  c1.0==1.0, c0.5==<1.0",
     ]
     base_header = (
         f"{'Model':<{name_w}} {'Period':<24} "
@@ -1200,7 +1202,7 @@ def render_backtest_table(rows: list[ModelSummary]) -> str:
         f"{'ROIo%':>6} {'Uo>=0':>7} {'Uo_all':>7} "
         f"{'CLV+%':>5} {'avgCLV':>6}"
     )
-    cell_sub = f"{'ROIo':>6} {'Uo>=0':>7} {'ROIall':>6} {'Uall':>7}"
+    cell_sub = f"{'ROIo':>6} {'Uo>=0':>7} {'ROIf':>6} {'Uf':>7}"
     group_w = len(cell_sub)
     band = (
         " " * len(base_header) + " | "
