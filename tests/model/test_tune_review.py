@@ -164,6 +164,69 @@ class TestFormatLeaderboard:
         for label in ("LL=", "brier=", "AUC=", "acc=", "cal=", "scal=", "err80="):
             assert label in output
 
+    def test_rows_show_optuna_number_and_seq(self, populated_study):
+        """Each row leads with the crash-immune `seq` position and keeps the
+        canonical Optuna id with the duration at the end. With three clean
+        completed trials the two coincide (trial 0 -> seq 1, etc.)."""
+        lines = format_leaderboard(populated_study, top_n=3)
+        # Best holdout_log_loss is the 2nd-created trial (index 1) -> Optuna id 1,
+        # seq 2. `seq` leads the row; `trial 1` sits with the duration.
+        winner = " ".join(
+            next(l for l in lines if l.strip().startswith("1.")).split()
+        )
+        assert winner.startswith("1. [seq 2] ")
+        assert "trial 1)" in winner
+
+    def test_seq_deinflates_across_incomplete_trials(self, tmp_path):
+        """A failed/zombie trial consumes an Optuna number but not a batch slot,
+        so `seq` skips it while `trial.number` does not. Insert a FAILED trial
+        between two completed ones and assert the later completed trial reports
+        Optuna id 2 but seq 2 (not 3)."""
+        storage = f"sqlite:///{tmp_path / 'gap.db'}"
+        study = optuna.create_study(
+            study_name="gap_review", storage=storage, direction="minimize"
+        )
+
+        def _complete(c, ll):
+            return optuna.trial.create_trial(
+                params={"C": c},
+                distributions={
+                    "C": optuna.distributions.FloatDistribution(0.01, 100.0, log=True)
+                },
+                values=[ll],
+                user_attrs={
+                    "_tuning_mode": "raw",
+                    "log_loss": ll,
+                    "holdout_log_loss": ll,
+                    "duration_s": 5.0,
+                },
+            )
+
+        # Optuna id 0: completed. id 1: failed (consumes a number, no batch slot).
+        # id 2: completed -> should be seq 2.
+        study.add_trial(_complete(0.1, 0.65))
+        study.add_trial(
+            optuna.trial.create_trial(
+                params={"C": 1.0},
+                distributions={
+                    "C": optuna.distributions.FloatDistribution(0.01, 100.0, log=True)
+                },
+                state=optuna.trial.TrialState.FAIL,
+            )
+        )
+        study.add_trial(_complete(10.0, 0.62))
+
+        lines = format_leaderboard(study, sort_by=["log_loss"], top_n=3)
+        output = "\n".join(lines)
+        # Winner is the last completed trial (holdout LL 0.62): Optuna id 2, seq 2.
+        winner = " ".join(
+            next(l for l in lines if l.strip().startswith("1.")).split()
+        )
+        assert winner.startswith("1. [seq 2] ")
+        assert "trial 2)" in winner
+        # Only two terminal trials exist, so no seq 3 is ever assigned.
+        assert "[seq 3]" not in output
+
     def test_legacy_study_is_refused(self, legacy_study):
         """Pre-refactor studies (no `_tuning_mode`) are refused with clear guidance."""
         lines = format_leaderboard(legacy_study, top_n=3)

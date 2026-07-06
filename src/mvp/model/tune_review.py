@@ -132,6 +132,23 @@ def format_leaderboard(
     trials.sort(key=sort_key)
     trials = trials[:top_n]
 
+    # Map each trial's Optuna id (`trial.number`, assigned at creation across
+    # ALL states) to a crash-immune sequence position: its rank among terminal
+    # (complete + pruned) trials in creation order. A failed or zombie trial
+    # consumes an Optuna number but not a `--n-trials` batch slot, so `seq` —
+    # not `trial.number` — is what lines up with the user's batch boundaries.
+    # This matches the header's `Total trials` (complete + pruned) count.
+    _terminal = (optuna.trial.TrialState.COMPLETE, optuna.trial.TrialState.PRUNED)
+    seq_by_number = {
+        t.number: i + 1
+        for i, t in enumerate(
+            sorted(
+                (t for t in study.trials if t.state in _terminal),
+                key=lambda t: t.number,
+            )
+        )
+    }
+
     lines: list[str] = []
     sort_label = ", ".join(sort_by)
     lines.append(
@@ -146,6 +163,10 @@ def format_leaderboard(
     for i, trial in enumerate(trials):
         ua = trial.user_attrs
         duration = ua.get("duration_s", 0.0)
+        seq = seq_by_number.get(trial.number)
+        seq_str = f"{seq}" if seq is not None else "?"
+        seq_tag = f"[seq {seq_str}]"
+        trial_id = f"trial {trial.number}"
 
         if is_iid:
             crps_total = ua.get("iid_crps_total_games", float("nan"))
@@ -153,9 +174,9 @@ def format_leaderboard(
             ll = ua.get("log_loss", float("nan"))
             mae = ua.get("mae", float("nan"))
             lines.append(
-                f"  {i + 1:>2}. CRPS_total={crps_total:.4f}"
+                f"  {i + 1:>2}. {seq_tag:<9}  CRPS_total={crps_total:.4f}"
                 f"  CRPS_spread={crps_spread:.4f}"
-                f"  MAE={mae:.4f}  LL={ll:.4f}  ({duration:.0f}s)"
+                f"  MAE={mae:.4f}  LL={ll:.4f}  ({duration:.0f}s · {trial_id})"
             )
             shown = {"iid_crps_total_games", "iid_crps_spread", "mae", "log_loss"}
         elif is_projection:
@@ -165,8 +186,8 @@ def format_leaderboard(
             crps = ua.get("crps")
             crps_str = f"  CRPS={crps:.4f}" if crps is not None else ""
             lines.append(
-                f"  {i + 1:>2}. MAE={mae:.4f}  RMSE={rmse:.4f}"
-                f"  R²={r2:.4f}{crps_str}  ({duration:.0f}s)"
+                f"  {i + 1:>2}. {seq_tag:<9}  MAE={mae:.4f}  RMSE={rmse:.4f}"
+                f"  R²={r2:.4f}{crps_str}  ({duration:.0f}s · {trial_id})"
             )
             shown = {"mae", "rmse", "r_squared", "crps"}
         else:
@@ -186,11 +207,11 @@ def format_leaderboard(
             scal = ua.get("holdout_signed_calibration", float("nan"))
             err80 = ua.get("holdout_error_rate_80plus", float("nan"))
             lines.append(
-                f"  {i + 1:>2}. LL={ll:.4f}  brier={brier:.4f}  "
+                f"  {i + 1:>2}. {seq_tag:<9}  LL={ll:.4f}  brier={brier:.4f}  "
                 f"AUC={auc:.4f}  acc={acc:.4f}  cal={cal * 100:.2f}%  "
                 f"cal_max={cal_max * 100:.2f}%  oc_max={oc_max * 100:.2f}%  "
                 f"scal={scal * 100:+.2f}%  err80={err80 * 100:.1f}%  "
-                f"({duration:.0f}s)"
+                f"({duration:.0f}s · {trial_id})"
             )
             shown = {
                 "holdout_log_loss", "holdout_brier_score", "holdout_roc_auc",
