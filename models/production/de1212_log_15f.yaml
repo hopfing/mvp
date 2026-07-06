@@ -1,0 +1,55 @@
+data:
+  date_range:
+    end: 2025-12-31
+    start: 2021-01-01
+  filters:
+    circuit:
+    - tour
+    - chal
+    draw_type: singles
+features:
+  include:
+  - player_age_diff
+  - player_days_since_surface_singles_diff
+  - player_dominance_ratio_diff(days=365)
+  - player_elo_surface_diff
+  - player_games_margin_per_set_lost_diff(days=90)
+  - player_glicko_rd_diff
+  - player_glicko_zscore_sigma
+  - player_match_count_diff(days=30)
+  - player_matches_vs_surface_specialists_diff(days=730)
+  - player_opp_elo_faced_avg_diff
+  - player_opp_elo_faced_avg_diff(days=730)
+  - player_tourn_history_matches_played_diff
+  - player_tourn_pts_service_lost_per_match_diff
+  - player_vs_opp_style_resid_flat_diff
+  - player_vs_opp_style_resid_flat_diff(days=365)
+metrics:
+    objective:
+        - log_loss
+model:
+  params:
+    colsample_bylevel: 0.6857850982931012
+    colsample_bynode: 0.8468479305088743
+    colsample_bytree: 0.5671460147927443
+    gamma: 1.435372358818209
+    grow_policy: depthwise
+    learning_rate: 0.015732930184591074
+    max_bin: 256
+    max_delta_step: 5
+    max_depth: 5
+    min_child_weight: 20
+    n_estimators: 1000
+    n_jobs: 4
+    random_state: 42
+    reg_alpha: 0.6364779696359752
+    reg_lambda: 1.0742515589430424
+    scale_pos_weight: 0.9833123496027733
+    subsample: 0.7447783581088048
+    tree_method: hist
+  type: xgboost
+target: won
+validation:
+  initial_train_months: 12
+  test_months: 12
+  type: date_expanding
