@@ -149,6 +149,7 @@ def _make_metric_fn(
         compute_asymmetric_logloss,
         compute_beta_tail_score,
         compute_calibration_error,
+        compute_calibration_error_max,
         compute_error_rate_80plus,
         compute_partial_auc_tail,
         compute_restricted_logloss,
@@ -168,6 +169,7 @@ def _make_metric_fn(
         "brier_score": lambda yt, yp: float(brier_score_loss(yt, yp)),
         "roc_auc": lambda yt, yp: float(roc_auc_score(yt, yp)),
         "calibration_error": lambda yt, yp: compute_calibration_error(yt, yp),
+        "calibration_error_max": lambda yt, yp: compute_calibration_error_max(yt, yp),
         "error_rate_80plus": lambda yt, yp: compute_error_rate_80plus(yt, yp),
         "asymmetric_logloss": lambda yt, yp: compute_asymmetric_logloss(yt, yp, **asym_kwargs),
         # Tail-sensitive objectives. beta_tail_score_sharp reuses the a=b=0.25

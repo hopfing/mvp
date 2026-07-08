@@ -42,9 +42,9 @@ def metric_direction(name: str) -> str:
 # Kept in sync with _make_metric_fn by an assertion there.
 OPTIMIZABLE_METRICS = frozenset({
     "log_loss", "accuracy", "brier_score", "roc_auc", "calibration_error",
-    "error_rate_80plus", "asymmetric_logloss", "beta_tail_score",
-    "beta_tail_score_sharp", "threshold_weighted_brier", "restricted_logloss",
-    "weighted_concordance", "partial_auc_tail",
+    "calibration_error_max", "error_rate_80plus", "asymmetric_logloss",
+    "beta_tail_score", "beta_tail_score_sharp", "threshold_weighted_brier",
+    "restricted_logloss", "weighted_concordance", "partial_auc_tail",
 })
 
 
@@ -72,6 +72,7 @@ METRIC_MIN_DELTA: dict[str, float] = {
     "beta_tail_score_sharp": 1e-5,     # ~0.05-0.08 sharper tail beta
     "error_rate_80plus": 3e-5,         # ~0.15-0.20 error on p>=0.80 calls
     "calibration_error": 5e-6,         # ~0.01-0.03 mean |gap| over confident buckets
+    "calibration_error_max": 2e-5,     # ~0.05-0.10 worst-bucket |gap| (sanity-check on first optimize)
 }
 
 # Fail at import if a new objective metric is added without a min_delta default —
