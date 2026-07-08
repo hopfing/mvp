@@ -51,6 +51,49 @@ from mvp.model.splitters import BaseSplitter, make_splitter
 from mvp.model.weighting import compute_sample_weights
 
 
+def _reporting_calibrated_holdout(
+    oof_y_true: np.ndarray,
+    oof_y_prob: np.ndarray,
+    holdout_predictions: list[dict],
+    lambda_over: float | None,
+) -> tuple[dict[str, float] | None, list[dict[str, float]] | None]:
+    """Deployment-frame (global-Platt) metrics for the held-out outer block.
+
+    Fit a global Platt on the tuning-fold OOF (which the held-out block was never
+    part of — leak-free) and apply it to the RAW held-out preds. Platt is low-DoF
+    (2 params), so no nested CV is needed here: nested CV only de-biases the
+    in-sample tuning-fold diagnostics, not a block the calibrator never trained
+    on. A fixed global Platt (rather than the config's calibration block) keeps
+    the number comparable across trials/configs — but it is therefore a
+    CONSERVATIVE (lower-bound) estimate of deployment quality for models whose
+    real miscalibration is segment-structured and would be corrected by a
+    segmented/isotonic deployment calibrator. Read it as a same-yardstick
+    comparison number, not the literal deployment number.
+
+    Reporting-only: never mutates its inputs, and must never abort a tuning run.
+    Returns (None, None) if the calibrator can't be fit (e.g. single-class OOF).
+    """
+    reporting_cal = PlattCalibrator()
+    try:
+        reporting_cal.fit(oof_y_prob, oof_y_true)
+    except ValueError:
+        # e.g. single-class OOF → LogisticRegression can't fit. This is a
+        # reporting extra; skip it rather than crash the whole tuning study.
+        return None, None
+    holdout_y_true = np.concatenate([p["y_true"] for p in holdout_predictions])
+    holdout_y_prob = np.concatenate([p["y_prob"] for p in holdout_predictions])
+    overall = compute_metrics(
+        holdout_y_true, reporting_cal.transform(holdout_y_prob), lambda_over=lambda_over
+    )
+    per_fold = [
+        compute_metrics(
+            p["y_true"], reporting_cal.transform(p["y_prob"]), lambda_over=lambda_over
+        )
+        for p in holdout_predictions
+    ]
+    return overall, per_fold
+
+
 class ExperimentRunner:
     """Runner for executing experiments."""
 
@@ -66,6 +109,7 @@ class ExperimentRunner:
         holdout_folds: int = 0,
         inner_cv_folds: int = 0,
         calibrate: bool = True,
+        report_calibrated_holdout: bool = False,
     ) -> None:
         """Initialize runner.
 
@@ -96,6 +140,13 @@ class ExperimentRunner:
                 not a calibrated objective (calibration scaffolding is a
                 deployment concern, not an HP search concern). Default True
                 preserves existing behavior for `mvp run` and `mvp model`.
+            report_calibrated_holdout: Reporting-only. When True (and
+                `calibrate=False`, i.e. the raw-search tuning path) also emit
+                deployment-frame (global-Platt) metrics for the held-out block as
+                `holdout_metrics_calibrated` / `holdout_fold_metrics_calibrated`,
+                so probability-scale metrics are comparable across trials/configs
+                without changing the raw search objective. See
+                `_reporting_calibrated_holdout`. Default False.
         """
         if holdout_folds < 0:
             raise ValueError(f"holdout_folds must be >= 0, got {holdout_folds}")
@@ -124,6 +175,11 @@ class ExperimentRunner:
         self.holdout_folds = holdout_folds
         self.inner_cv_folds = inner_cv_folds
         self.calibrate = calibrate
+        # Reporting-only: when set (raw-search tuning path, calibrate=False), also
+        # emit deployment-frame (global-Platt) metrics for the held-out block, so
+        # tune-review can show calibrated numbers without touching the raw search
+        # objective. See holdout_metrics_calibrated in run()'s result.
+        self.report_calibrated_holdout = report_calibrated_holdout
 
         self.engine = make_fs_engine(
             matches_path=self.matches_path,
@@ -1652,6 +1708,21 @@ class ExperimentRunner:
                     for p in holdout_predictions
                 ]
 
+            holdout_metrics_calibrated: dict[str, float] | None = None
+            holdout_fold_metrics_calibrated: list[dict[str, float]] | None = None
+            if holdout_predictions and self.report_calibrated_holdout and not self.calibrate:
+                # Deployment-frame outer-block metrics for reporting/comparison
+                # (see _reporting_calibrated_holdout). Reporting-only: leaves the
+                # raw objective and stored preds untouched, and never aborts the run.
+                holdout_metrics_calibrated, holdout_fold_metrics_calibrated = (
+                    _reporting_calibrated_holdout(
+                        combined_y_true_oof,
+                        combined_y_prob_oof,
+                        holdout_predictions,
+                        lambda_over_eval,
+                    )
+                )
+
             # Compute diagnostics on tuning preds only. Tuning preds were
             # calibrated by nested-CV (fold-i-out) calibrators, so segment cal /
             # global cal bins / error conditions are unbiased: every pred was
@@ -1778,6 +1849,10 @@ class ExperimentRunner:
                 if holdout_metrics is not None:
                     logger.log_metrics(
                         {f"holdout_{k}": v for k, v in holdout_metrics.items()}
+                    )
+                if holdout_metrics_calibrated is not None:
+                    logger.log_metrics(
+                        {f"holdout_cal_{k}": v for k, v in holdout_metrics_calibrated.items()}
                     )
                 if calibrator is not None and calibrator.is_fitted:
                     if isinstance(calibrator, SegmentedPlattCalibrator):
@@ -1909,6 +1984,8 @@ class ExperimentRunner:
             "per_model_oof": all_per_model_predictions if is_ensemble else [],
             "holdout_metrics": holdout_metrics,
             "holdout_fold_metrics": holdout_fold_metrics,
+            "holdout_metrics_calibrated": holdout_metrics_calibrated,
+            "holdout_fold_metrics_calibrated": holdout_fold_metrics_calibrated,
             "holdout_fold_meta": holdout_fold_meta if holdout_predictions else None,
             "tuning_fold_indices": tuning_fold_indices,
             "holdout_fold_indices": holdout_fold_indices,

@@ -3,10 +3,11 @@
 import importlib
 from pathlib import Path
 
+import numpy as np
 import polars as pl
 import pytest
 
-from mvp.model.runner import ExperimentRunner
+from mvp.model.runner import ExperimentRunner, _reporting_calibrated_holdout
 
 
 class TestExperimentRunner:
@@ -148,3 +149,39 @@ validation:
         assert 0 <= results["metrics"]["accuracy"] <= 1
         assert results["n_folds"] == 2
         assert "run_id" in results
+
+
+class TestReportingCalibratedHoldout:
+    """Deployment-frame (global-Platt) holdout metrics helper."""
+
+    def test_single_class_oof_returns_none(self):
+        """A single-class tuning OOF can't fit Platt; the reporting extra must
+        return (None, None) rather than raise and abort the whole tuning study."""
+        oof_y_true = np.zeros(50, dtype=int)  # single class → LogisticRegression fails
+        oof_y_prob = np.linspace(0.1, 0.9, 50)
+        holdout = [
+            {"y_true": np.array([0, 1, 0, 1]), "y_prob": np.array([0.3, 0.7, 0.4, 0.6])}
+        ]
+        overall, per_fold = _reporting_calibrated_holdout(
+            oof_y_true, oof_y_prob, holdout, None
+        )
+        assert overall is None
+        assert per_fold is None
+
+    def test_normal_two_class_oof_produces_metrics(self):
+        """Two-class OOF yields calibrated overall + one metric dict per fold."""
+        rng = np.random.default_rng(0)
+        oof_y_true = rng.integers(0, 2, 200)
+        oof_y_prob = np.clip(rng.random(200), 1e-6, 1 - 1e-6)
+        holdout = [
+            {
+                "y_true": rng.integers(0, 2, 40),
+                "y_prob": np.clip(rng.random(40), 1e-6, 1 - 1e-6),
+            }
+            for _ in range(2)
+        ]
+        overall, per_fold = _reporting_calibrated_holdout(
+            oof_y_true, oof_y_prob, holdout, None
+        )
+        assert overall is not None and "log_loss" in overall
+        assert per_fold is not None and len(per_fold) == 2

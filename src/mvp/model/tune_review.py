@@ -36,20 +36,48 @@ def _is_raw_mode_study(trials: list[optuna.trial.FrozenTrial]) -> bool:
     return any(t.user_attrs.get("_tuning_mode") == "raw" for t in trials)
 
 
-def _to_holdout(metric: str) -> str:
-    """Prefix a bare metric name with ``holdout_`` for ranking.
+# Metrics computed purely from sorted scores, so a monotonic (Platt)
+# recalibration leaves them exactly unchanged: holdout_cal_<m> == holdout_<m>.
+# These rank on the raw holdout key. Every other classification metric is
+# probability-scale and ranks on the deployment-frame (calibrated) holdout key
+# when it's available. NB weighted_concordance is deliberately NOT here: it
+# weights pairs by |p-0.5|, which recalibration reshapes, so its calibrated
+# value differs — it ranks on the calibrated key like other prob-scale metrics.
+_CALIBRATION_INVARIANT = frozenset({"roc_auc", "partial_auc_tail"})
 
-    Optuna optimizes against an in-fold measurement during each trial (the
-    only signal available inside the trial); tune-review ranks across
-    completed trials using the holdout measurement (the generalization-
-    honest version of the same metric). The user shouldn't have to think
-    about that split — they pass a metric name, we always rank by the
-    holdout version of it. Already-prefixed names pass through unchanged
-    so power users can override if needed.
+
+def _to_ranked(metric: str, use_cal: bool) -> str:
+    """Map a bare metric name to the user-attr key tune-review ranks on.
+
+    Classification studies from the Phase-2 tuner carry deployment-frame
+    ``holdout_cal_*`` metrics (global Platt fit on the tuning OOF, applied to
+    the held-out block). When ``use_cal`` is set, probability-scale metrics rank
+    on those so the ordering reflects what deployment actually scores.
+    Calibration-invariant ranking metrics — and IID/projection studies, which
+    never fit Platt — rank on the raw ``holdout_*`` key. Already-prefixed names
+    (``holdout_`` or ``holdout_cal_``) pass through unchanged.
     """
-    if metric.startswith("holdout_"):
+    if metric.startswith(("holdout_cal_", "holdout_")):
         return metric
+    if use_cal and metric not in _CALIBRATION_INVARIANT:
+        return f"holdout_cal_{metric}"
     return f"holdout_{metric}"
+
+
+def _fold_spread(ua: dict, metric: str, use_cal: bool) -> str:
+    """Min..max dispersion of ``metric`` across the K outer-block folds, or ""
+    if fewer than two folds carry it. Uses the calibrated per-fold metrics when
+    ``use_cal`` is set, matching the leaderboard's calibrated columns."""
+    key = "holdout_fold_metrics_calibrated" if use_cal else "holdout_fold_metrics"
+    folds = ua.get(key)
+    if not folds:
+        return ""
+    vals = [
+        f[metric] for f in folds if isinstance(f, dict) and f.get(metric) is not None
+    ]
+    if len(vals) < 2:
+        return ""
+    return f"[{min(vals):.4f}..{max(vals):.4f}] over {len(vals)} folds"
 
 
 def format_leaderboard(
@@ -88,20 +116,36 @@ def format_leaderboard(
     is_iid = "iid_crps_total_games" in first_ua
     is_projection = "mae" in first_ua and "log_loss" not in first_ua
 
-    # Default sort: the honest (holdout) metric for this config family.
-    # When the user passes a bare metric name (e.g. `--sort log_loss`), we
-    # auto-prefix it to its holdout version — Optuna optimizes in-fold per
-    # trial, but ranking across completed trials should always use the
-    # holdout measurement of that same metric.
+    # Deployment-frame reporting: classification studies from the Phase-2 tuner
+    # carry `holdout_cal_*` metrics (raw search objective, calibrated held-out
+    # block). We switch the leaderboard to the calibrated view only when EVERY
+    # trial has them. Mixing calibrated and raw rows in one ranking would sort
+    # raw-only trials (pre-Phase-2 in a resumed study, or a trial whose OOF was
+    # single-class so the reporting calibrator couldn't fit) to ±inf and truncate
+    # them out of the top-N — the same silent apples-vs-oranges failure that
+    # `_is_raw_mode_study` refuses. A mixed study shows the raw view with a note
+    # until it's refreshed. Pre-Phase-2 studies (no cal attrs) render raw as before.
+    is_classification = not is_iid and not is_projection
+    n_cal = sum(
+        any(k.startswith("holdout_cal_") for k in t.user_attrs) for t in trials
+    )
+    use_cal = is_classification and n_cal == len(trials) and n_cal > 0
+    cal_mixed = is_classification and 0 < n_cal < len(trials)
+
+    # Default sort: the honest (holdout) metric for this config family. Bare
+    # names (e.g. `--sort log_loss`) are auto-prefixed to the holdout key we
+    # rank on — Optuna optimizes in-fold per trial, but ranking across trials
+    # uses the holdout measurement (calibrated for classification when
+    # available, raw otherwise).
     if sort_by is None:
         if is_iid:
-            sort_by = [_to_holdout("iid_crps_total_games")]
+            sort_by = [_to_ranked("iid_crps_total_games", use_cal)]
         elif is_projection:
-            sort_by = [_to_holdout("mae")]
+            sort_by = [_to_ranked("mae", use_cal)]
         else:
-            sort_by = [_to_holdout("log_loss")]
+            sort_by = [_to_ranked("log_loss", use_cal)]
     else:
-        sort_by = [_to_holdout(m) for m in sort_by]
+        sort_by = [_to_ranked(m, use_cal) for m in sort_by]
 
     # Confirm holdout metrics exist for the requested sort metric(s). Studies
     # tuned with holdout_folds=0 won't have them; the tuner sets holdout_folds to
@@ -120,7 +164,10 @@ def format_leaderboard(
     # so ascending sort puts the best trial first. Holdout-prefixed metrics
     # inherit their underlying metric's direction.
     def _direction_key(m: str) -> str:
-        return m[len("holdout_"):] if m.startswith("holdout_") else m
+        for pre in ("holdout_cal_", "holdout_"):
+            if m.startswith(pre):
+                return m[len(pre):]
+        return m
 
     def sort_key(t: optuna.trial.FrozenTrial) -> tuple:
         return tuple(
@@ -151,13 +198,24 @@ def format_leaderboard(
 
     lines: list[str] = []
     sort_label = ", ".join(sort_by)
-    lines.append(
-        f"TOP {top_n} TRIALS (raw discrimination, sorted by {sort_label})"
-    )
-    lines.append(
-        "Metrics below reflect uncalibrated predictor quality. Calibration "
-        "is applied separately by `mvp model` at training time."
-    )
+    lines.append(f"TOP {top_n} TRIALS (sorted by {sort_label})")
+    if use_cal:
+        lines.append(
+            "Probability metrics are deployment-frame: global Platt fit on the "
+            "tuning OOF, applied to the held-out outer block (AUC is calibration-"
+            "invariant). 'raw LL' is the uncalibrated value, shown for reference."
+        )
+    else:
+        lines.append(
+            "Metrics below reflect uncalibrated predictor quality. Calibration "
+            "is applied separately by `mvp model` at training time."
+        )
+        if cal_mixed:
+            lines.append(
+                f"({n_cal}/{len(trials)} trials carry deployment-frame metrics; "
+                "showing the raw view until all do — resume/refresh the study to "
+                "rank on the calibrated numbers.)"
+            )
     lines.append("=" * 100)
 
     for i, trial in enumerate(trials):
@@ -190,13 +248,46 @@ def format_leaderboard(
                 f"  R²={r2:.4f}{crps_str}  ({duration:.0f}s · {trial_id})"
             )
             shown = {"mae", "rmse", "r_squared", "crps"}
+        elif use_cal:
+            # Classification, deployment-frame view: probability-scale columns
+            # come from the calibrated held-out block; AUC stays raw (invariant).
+            # A second line shows the raw→calibrated log_loss gap (the "looks
+            # better in tuning than it deploys" delta) and the outer-block spread.
+            ll = ua.get("holdout_cal_log_loss", float("nan"))
+            raw_ll = ua.get("holdout_log_loss", float("nan"))
+            brier = ua.get("holdout_cal_brier_score", float("nan"))
+            auc = ua.get("holdout_roc_auc", float("nan"))
+            acc = ua.get("holdout_cal_accuracy", float("nan"))
+            cal = ua.get("holdout_cal_calibration_error", float("nan"))
+            cal_max = ua.get("holdout_cal_calibration_error_max", float("nan"))
+            oc_max = ua.get("holdout_cal_overconfidence_max", float("nan"))
+            scal = ua.get("holdout_cal_signed_calibration", float("nan"))
+            err80 = ua.get("holdout_cal_error_rate_80plus", float("nan"))
+            lines.append(
+                f"  {i + 1:>2}. {seq_tag:<9}  LL={ll:.4f}  brier={brier:.4f}  "
+                f"AUC={auc:.4f}  acc={acc:.4f}  cal={cal * 100:.2f}%  "
+                f"cal_max={cal_max * 100:.2f}%  oc_max={oc_max * 100:.2f}%  "
+                f"scal={scal * 100:+.2f}%  err80={err80 * 100:.1f}%  "
+                f"({duration:.0f}s · {trial_id})"
+            )
+            spread = _fold_spread(ua, "log_loss", use_cal=True)
+            ref = f"      raw LL={raw_ll:.4f} (cal Δ{ll - raw_ll:+.4f})"
+            if spread:
+                ref += f"  ·  outer LL {spread}"
+            lines.append(ref)
+            shown = {
+                "holdout_cal_log_loss", "holdout_cal_brier_score",
+                "holdout_roc_auc", "holdout_cal_accuracy",
+                "holdout_cal_calibration_error", "holdout_cal_calibration_error_max",
+                "holdout_cal_overconfidence_max", "holdout_cal_signed_calibration",
+                "holdout_cal_error_rate_80plus", "holdout_log_loss",
+            }
         else:
-            # Classification leaderboard: one row per trial showing every
-            # standard holdout metric. The user picks a metric NAME — they
-            # don't pick in-fold vs holdout. In-fold is Optuna's internal
-            # signal during a trial; holdout is the ranking signal across
-            # trials. Both live in user_attrs but the leaderboard only
-            # surfaces holdout because that's the selection-relevant view.
+            # Classification, raw view (pre-Phase-2 studies with no calibrated
+            # holdout metrics). One row per trial showing every standard holdout
+            # metric. The user picks a metric NAME — they don't pick in-fold vs
+            # holdout. In-fold is Optuna's internal signal during a trial;
+            # holdout is the ranking signal across trials.
             ll = ua.get("holdout_log_loss", float("nan"))
             brier = ua.get("holdout_brier_score", float("nan"))
             auc = ua.get("holdout_roc_auc", float("nan"))

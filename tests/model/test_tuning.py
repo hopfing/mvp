@@ -371,6 +371,9 @@ validation:
         for trial in tuner.study.trials:
             assert "log_loss" in trial.user_attrs
             assert "calibration_error" in trial.user_attrs
+            # Raw and deployment-frame (global-Platt) outer-block metrics both land.
+            assert "holdout_log_loss" in trial.user_attrs
+            assert "holdout_cal_log_loss" in trial.user_attrs
 
     def test_run_parallel_trials(self, sample_config, sample_matches, tmp_path):
         """parallel_trials=2 runs all trials (1 serial warm-up + fan-out), sets a
@@ -503,7 +506,11 @@ validation:
                 captured.update(kwargs)
 
             def run(self, trial=None):
-                return {"metrics": {"log_loss": 0.6, "calibration_error": 0.02}}
+                return {
+                    "metrics": {"log_loss": 0.6, "calibration_error": 0.02},
+                    "holdout_metrics": {"log_loss": 0.61, "roc_auc": 0.74},
+                    "holdout_metrics_calibrated": {"log_loss": 0.60, "roc_auc": 0.74},
+                }
 
         monkeypatch.setattr("mvp.model.runner.ExperimentRunner", _FakeRunner)
         result = tuner._run_one({"C": 1.0})
@@ -511,7 +518,10 @@ validation:
         assert captured["holdout_folds"] == 3
         assert captured["inner_cv_folds"] == 0
         assert captured["calibrate"] is False
+        assert captured["report_calibrated_holdout"] is True
         assert result["metrics"]["log_loss"] == 0.6
+        # Deployment-frame outer-block metrics propagate through _run_one.
+        assert result["holdout_metrics_calibrated"]["log_loss"] == 0.60
 
     def test_frame_guard_rejects_legacy_study(self, sample_config, tmp_path):
         """A study with prior trials lacking the forward_v2 frame is refused —

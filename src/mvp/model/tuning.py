@@ -642,6 +642,13 @@ class HyperparamTuner:
             for metric_name, metric_value in result["holdout_metrics"].items():
                 trial.set_user_attr(f"holdout_{metric_name}", metric_value)
 
+        # Deployment-frame (global-Platt) outer-block metrics — the honest,
+        # comparison-grade numbers for probability-scale metrics (raw AUC is
+        # calibration-invariant, so the raw holdout already suffices there).
+        if result.get("holdout_metrics_calibrated"):
+            for metric_name, metric_value in result["holdout_metrics_calibrated"].items():
+                trial.set_user_attr(f"holdout_cal_{metric_name}", metric_value)
+
         # Inner CV diagnostics so we can confirm the noise-reduction layer is
         # actually firing (and didn't silently fall back to single-fit per fold).
         if result.get("inner_cv_folds"):
@@ -659,6 +666,11 @@ class HyperparamTuner:
             trial.set_user_attr("fold_metrics", result["fold_metrics"])
         if result.get("holdout_fold_metrics"):
             trial.set_user_attr("holdout_fold_metrics", result["holdout_fold_metrics"])
+        if result.get("holdout_fold_metrics_calibrated"):
+            trial.set_user_attr(
+                "holdout_fold_metrics_calibrated",
+                result["holdout_fold_metrics_calibrated"],
+            )
 
         trial.set_user_attr("duration_s", result["duration_s"])
 
@@ -744,6 +756,7 @@ class HyperparamTuner:
                     holdout_folds=self.outer_folds,
                     inner_cv_folds=0,
                     calibrate=False,
+                    report_calibrated_holdout=True,
                 )
             # IID / projection runners don't currently support pruning;
             # only ExperimentRunner threads `trial` through. Pass it where
@@ -774,6 +787,16 @@ class HyperparamTuner:
                 if result.get("holdout_fold_metrics") is not None
                 else None
             )
+            holdout_metrics_calibrated = (
+                dict(result["holdout_metrics_calibrated"])
+                if result.get("holdout_metrics_calibrated") is not None
+                else None
+            )
+            holdout_fold_metrics_calibrated = (
+                [dict(f) for f in result["holdout_fold_metrics_calibrated"]]
+                if result.get("holdout_fold_metrics_calibrated") is not None
+                else None
+            )
             duration = time.perf_counter() - t0
 
             # Drop large per-trial state (fold predictions, diagnostics, mlflow
@@ -787,10 +810,12 @@ class HyperparamTuner:
                 "params": params,
                 "metrics": metrics,
                 "holdout_metrics": holdout_metrics,
+                "holdout_metrics_calibrated": holdout_metrics_calibrated,
                 "inner_cv_folds": inner_cv_folds_used,
                 "inner_fold_count_per_outer": inner_fold_count_per_outer,
                 "fold_metrics": fold_metrics,
                 "holdout_fold_metrics": holdout_fold_metrics,
+                "holdout_fold_metrics_calibrated": holdout_fold_metrics_calibrated,
                 "duration_s": round(duration, 1),
             }
         finally:
