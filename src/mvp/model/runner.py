@@ -43,7 +43,7 @@ from mvp.model.features._score_helpers import (
     total_games_won as _total_games_won,
 )
 from mvp.model.imputation import apply_imputation, build_imputation, fit_imputation
-from mvp.model.metrics import compute_metrics
+from mvp.model.metrics import compute_metrics, metric_direction
 from mvp.model.mlflow_logger import ExperimentLogger
 from mvp.model.models import EnsembleModel, XGBoostMTLModel, get_model
 from mvp.model.registry import get_registry
@@ -94,6 +94,47 @@ def _reporting_calibrated_holdout(
     return overall, per_fold
 
 
+def _calibrated_objective_metrics(
+    tuning_predictions: list[dict],
+    y_true_oof: np.ndarray,
+    lambda_over: float | None,
+) -> dict[str, float] | None:
+    """Calibrated-frame tuning objective: pooled OOF metrics with each fold
+    calibrated OUT-OF-FOLD.
+
+    For each tuning fold i, fit a global Platt on the OTHER folds' OOF preds and
+    apply it to fold i — so every calibrated pred comes from a fitter that never
+    saw it. This nested/leave-fold-out fit is the guard against the in-sample
+    calibration overfit: HPs cannot game a calibrator that hasn't seen their fold.
+    The calibrated fold preds are pooled and scored the same way the raw objective
+    is (`compute_metrics` on the combined OOF), so raw- and calibrated-frame
+    objective values are directly comparable in aggregation.
+
+    Reporting/objective use only: never mutates its inputs. Returns None if a
+    fold's complement is single-class (Platt can't fit) or there's <2 folds to
+    nest — the caller falls back to the raw objective.
+    """
+    n = len(tuning_predictions)
+    if n < 2:
+        return None
+    cal_probs = []
+    for i in range(n):
+        others_prob = np.concatenate(
+            [tuning_predictions[j]["y_prob"] for j in range(n) if j != i]
+        )
+        others_true = np.concatenate(
+            [tuning_predictions[j]["y_true"] for j in range(n) if j != i]
+        )
+        cal = PlattCalibrator()
+        try:
+            cal.fit(others_prob, others_true)
+        except ValueError:
+            return None
+        cal_probs.append(cal.transform(tuning_predictions[i]["y_prob"]))
+    pooled = np.concatenate(cal_probs)
+    return compute_metrics(y_true_oof, pooled, lambda_over=lambda_over)
+
+
 class ExperimentRunner:
     """Runner for executing experiments."""
 
@@ -110,6 +151,7 @@ class ExperimentRunner:
         inner_cv_folds: int = 0,
         calibrate: bool = True,
         report_calibrated_holdout: bool = False,
+        report_calibrated_objective: bool = False,
     ) -> None:
         """Initialize runner.
 
@@ -147,6 +189,12 @@ class ExperimentRunner:
                 so probability-scale metrics are comparable across trials/configs
                 without changing the raw search objective. See
                 `_reporting_calibrated_holdout`. Default False.
+            report_calibrated_objective: When True (and `calibrate=False`) also
+                compute the calibrated-frame tuning objective — pooled OOF metrics
+                with each fold calibrated out-of-fold — returned as
+                `metrics_calibrated`. The tuner optimizes it for probability-scale
+                objectives (calibrated-frame search); raw `metrics` is untouched.
+                See `_calibrated_objective_metrics`. Default False.
         """
         if holdout_folds < 0:
             raise ValueError(f"holdout_folds must be >= 0, got {holdout_folds}")
@@ -180,6 +228,12 @@ class ExperimentRunner:
         # tune-review can show calibrated numbers without touching the raw search
         # objective. See holdout_metrics_calibrated in run()'s result.
         self.report_calibrated_holdout = report_calibrated_holdout
+        # Calibrated-frame SEARCH (calibrate=False path): when set, also compute a
+        # calibrated-frame tuning objective — pooled OOF metrics with each fold
+        # calibrated out-of-fold (`_calibrated_objective_metrics`) — returned as
+        # `metrics_calibrated`. The tuner optimizes it for probability-scale
+        # objectives; raw `metrics` is untouched. Default False.
+        self.report_calibrated_objective = report_calibrated_objective
 
         self.engine = make_fs_engine(
             matches_path=self.matches_path,
@@ -1280,9 +1334,26 @@ class ExperimentRunner:
                         # ES validator / single-objective pruning both guarantee it).
                         obj = self.config.metrics.objective
                         prune_metric = obj[0] if obj else "log_loss"
-                        outer_val = float(compute_metrics(
+                        fold_metrics = compute_metrics(
                             outer_y_true, outer_y_prob, lambda_over=lambda_over_eval,
-                        ).get(prune_metric, float("nan")))
+                        )
+                        if self.report_calibrated_objective and not self.calibrate:
+                            # Calibrated-frame study: the OOF-calibrated objective
+                            # can't be computed mid-run (later folds aren't in yet),
+                            # and raw log_loss over-penalizes the raw overconfidence
+                            # that the calibrated objective forgives — pruning on it
+                            # would kill exactly the trials calibrated-frame search
+                            # exists to credit. Prune on AUC instead: rank-based
+                            # (identical raw vs calibrated) and the discrimination
+                            # signal that survives calibration; it only prunes weak
+                            # discriminators, never a good-AUC/raw-overconfident trial.
+                            # Orient to the study direction so lower-is-worse matches
+                            # how the objective is reported (minimize obj → -auc).
+                            auc = float(fold_metrics.get("roc_auc", float("nan")))
+                            minimize = metric_direction(prune_metric) == "minimize"
+                            outer_val = -auc if minimize else auc
+                        else:
+                            outer_val = float(fold_metrics.get(prune_metric, float("nan")))
                         if np.isnan(outer_val):
                             # The objective should be in the computed metrics (the
                             # study optimizes it). If not, skip pruning rather than
@@ -1693,6 +1764,15 @@ class ExperimentRunner:
                 # all_metrics already contains per-fold raw metrics from earlier
                 # in run(); no recomputation needed since y_prob was never mutated.
 
+            # Calibrated-frame search objective (calibrate=False path only): pooled
+            # OOF metrics with each tuning fold calibrated out-of-fold. Leak-free
+            # and non-mutating; the tuner optimizes this for prob-scale objectives.
+            metrics_calibrated: dict[str, float] | None = None
+            if self.report_calibrated_objective and not self.calibrate:
+                metrics_calibrated = _calibrated_objective_metrics(
+                    tuning_predictions, combined_y_true_oof, lambda_over_eval
+                )
+
             holdout_metrics: dict[str, float] | None = None
             holdout_fold_metrics: list[dict[str, float]] | None = None
             if holdout_predictions:
@@ -1968,6 +2048,7 @@ class ExperimentRunner:
 
         return {
             "metrics": avg_metrics,
+            "metrics_calibrated": metrics_calibrated,
             "train_metrics": avg_train_metrics,
             "fold_metrics": all_metrics,
             "fold_meta": tuning_fold_meta,

@@ -30,6 +30,16 @@ MAXIMIZE_METRICS = frozenset({
 })
 
 
+# Metrics whose value is invariant to a monotone (Platt) recalibration — computed
+# purely from sorted scores, so holdout_cal_<m> == holdout_<m> exactly. Used to
+# decide the tuning SEARCH frame (raw-frame search is only correct for these;
+# probability-scale metrics must search the calibrated out-of-fold frame) and the
+# tune-review ranking/display frame. NB weighted_concordance is deliberately NOT
+# here: it weights pairs by |p-0.5|, which recalibration reshapes, so its value
+# is not strictly invariant.
+CALIBRATION_INVARIANT_METRICS = frozenset({"roc_auc", "partial_auc_tail"})
+
+
 def metric_direction(name: str) -> str:
     """Return "maximize" or "minimize" for a metric name (default minimize)."""
     return "maximize" if name in MAXIMIZE_METRICS else "minimize"

@@ -7,7 +7,11 @@ import numpy as np
 import polars as pl
 import pytest
 
-from mvp.model.runner import ExperimentRunner, _reporting_calibrated_holdout
+from mvp.model.runner import (
+    ExperimentRunner,
+    _calibrated_objective_metrics,
+    _reporting_calibrated_holdout,
+)
 
 
 class TestExperimentRunner:
@@ -185,3 +189,38 @@ class TestReportingCalibratedHoldout:
         )
         assert overall is not None and "log_loss" in overall
         assert per_fold is not None and len(per_fold) == 2
+
+
+class TestCalibratedObjectiveMetrics:
+    """Calibrated-frame tuning objective (nested out-of-fold Platt)."""
+
+    @staticmethod
+    def _fold(rng, n):
+        return {
+            "y_true": rng.integers(0, 2, n),
+            "y_prob": np.clip(rng.random(n), 1e-6, 1 - 1e-6),
+        }
+
+    def test_two_class_multi_fold_returns_metrics(self):
+        """>=2 two-class folds → pooled OOF-calibrated metric dict."""
+        rng = np.random.default_rng(0)
+        folds = [self._fold(rng, 60) for _ in range(3)]
+        y_true = np.concatenate([f["y_true"] for f in folds])
+        out = _calibrated_objective_metrics(folds, y_true, None)
+        assert out is not None and "log_loss" in out
+
+    def test_single_fold_returns_none(self):
+        """One fold can't be nested (no complement to fit on) → None, not crash."""
+        rng = np.random.default_rng(0)
+        folds = [self._fold(rng, 60)]
+        assert _calibrated_objective_metrics(folds, folds[0]["y_true"], None) is None
+
+    def test_single_class_complement_returns_none(self):
+        """If a fold's complement is single-class the nested Platt can't fit; the
+        objective degrades to None (caller falls back to raw) rather than crashing."""
+        folds = [
+            {"y_true": np.zeros(50, dtype=int), "y_prob": np.linspace(0.1, 0.9, 50)},
+            {"y_true": np.ones(50, dtype=int), "y_prob": np.linspace(0.1, 0.9, 50)},
+        ]
+        y_true = np.concatenate([f["y_true"] for f in folds])
+        assert _calibrated_objective_metrics(folds, y_true, None) is None

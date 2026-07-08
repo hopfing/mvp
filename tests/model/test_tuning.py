@@ -375,6 +375,76 @@ validation:
             assert "holdout_log_loss" in trial.user_attrs
             assert "holdout_cal_log_loss" in trial.user_attrs
 
+    def test_calibrated_frame_search_end_to_end(self, sample_matches, tmp_path):
+        """A prob-scale objective with >=2 tuning folds computes the calibrated
+        objective end-to-end: trials are flagged calibrated-frame and carry the
+        calibrated in-fold metric (cal_*)."""
+        import mlflow
+        mlflow.set_tracking_uri((tmp_path / "mlruns").as_uri())
+        cfg = tmp_path / "cal_e2e.yaml"
+        cfg.write_text(
+            """
+name: cal_e2e
+data:
+  date_range:
+    start: "2024-01-01"
+    end: "2024-12-31"
+features:
+  include:
+    - player_ranking_points_diff
+model:
+  type: logistic
+  params:
+    C: 1.0
+    l1_ratio: 0.0
+metrics:
+  objective:
+    - log_loss
+validation:
+  type: walk_forward
+  n_splits: 3
+  min_train_size: 50
+  test_size: 25
+"""
+        )
+        # 3 folds - 1 holdout = 2 tuning folds → the nested calibrated objective
+        # is computable (needs >=2 folds).
+        tuner = HyperparamTuner(
+            config_path=cfg,
+            matches_path=sample_matches,
+            cache_dir=tmp_path / "cache",
+            state_dir=tmp_path / "tuning",
+            outer_folds=1,
+        )
+        assert tuner.search_calibrated is True
+        tuner.run(n_trials=1)
+        trial = tuner.study.trials[0]
+        assert trial.user_attrs.get("_tuning_mode") == "calibrated"
+        assert "cal_log_loss" in trial.user_attrs
+
+    def test_calibrated_fallback_warns_once(
+        self, sample_config, sample_matches, tmp_path, caplog
+    ):
+        """A calibrated-frame study that can't compute the calibrated objective
+        (here: only 1 tuning fold) warns once and falls back to the raw objective
+        (no cal_* attrs), rather than silently mislabeling itself calibrated."""
+        import logging
+        import mlflow
+        mlflow.set_tracking_uri((tmp_path / "mlruns").as_uri())
+        tuner = HyperparamTuner(
+            config_path=sample_config,
+            matches_path=sample_matches,
+            cache_dir=tmp_path / "cache",
+            state_dir=tmp_path / "tuning",
+            outer_folds=1,  # 2 folds - 1 holdout = 1 tuning fold → can't nest
+        )
+        assert tuner.search_calibrated is True
+        with caplog.at_level(logging.WARNING):
+            tuner.run(n_trials=2)
+        warned = [r for r in caplog.records if "effectively raw" in r.getMessage()]
+        assert len(warned) == 1  # once, not per-trial
+        assert "cal_log_loss" not in tuner.study.trials[0].user_attrs
+
     def test_run_parallel_trials(self, sample_config, sample_matches, tmp_path):
         """parallel_trials=2 runs all trials (1 serial warm-up + fan-out), sets a
         positive per-trial thread split, and does NOT leak the injected n_jobs
@@ -483,7 +553,7 @@ validation:
         )
         assert tuner.outer_folds == 2
         assert tuner.seed == 123
-        assert tuner.study.user_attrs.get("objective_frame") == "forward_v2"
+        assert tuner.study.user_attrs.get("objective_frame") == "forward_cal_v1"
         assert tuner.study.user_attrs.get("outer_folds") == 2
 
     def test_run_one_uses_forward_objective(
@@ -519,9 +589,69 @@ validation:
         assert captured["inner_cv_folds"] == 0
         assert captured["calibrate"] is False
         assert captured["report_calibrated_holdout"] is True
+        # log_loss objective is probability-scale → calibrated-frame search.
+        assert captured["report_calibrated_objective"] is True
         assert result["metrics"]["log_loss"] == 0.6
         # Deployment-frame outer-block metrics propagate through _run_one.
         assert result["holdout_metrics_calibrated"]["log_loss"] == 0.60
+
+    def test_prob_scale_objective_is_calibrated_frame(self, sample_config, tmp_path):
+        """A probability-scale objective (log_loss) searches the calibrated frame."""
+        tuner = HyperparamTuner(
+            config_path=sample_config, state_dir=tmp_path / "tuning", outer_folds=1
+        )
+        assert tuner.search_calibrated is True
+        assert tuner.study.user_attrs.get("objective_frame") == "forward_cal_v1"
+
+    def test_ranking_objective_stays_raw_frame(self, tmp_path):
+        """A pure-ranking objective (roc_auc) is Platt-invariant, so the study
+        searches the raw frame and is stamped forward_v2."""
+        cfg = tmp_path / "rank.yaml"
+        cfg.write_text(
+            """
+name: rank
+data:
+  date_range:
+    start: "2020-01-01"
+    end: "2025-12-31"
+features:
+  include:
+    - player_ranking_points_diff
+model:
+  type: logistic
+  params:
+    C: 1.0
+    l1_ratio: 0.0
+metrics:
+  objective:
+    - roc_auc
+validation:
+  type: date_sliding
+  train_months: 12
+  test_months: 3
+"""
+        )
+        tuner = HyperparamTuner(
+            config_path=cfg, state_dir=tmp_path / "tuning", outer_folds=4
+        )
+        assert tuner.search_calibrated is False
+        assert tuner.study.user_attrs.get("objective_frame") == "forward_v2"
+
+    def test_objective_metric_value_routes_by_frame(self, sample_config, tmp_path):
+        """In a calibrated-frame study, prob-scale metrics read metrics_calibrated,
+        ranking metrics read raw, and a missing calibrated dict falls back to raw."""
+        tuner = HyperparamTuner(
+            config_path=sample_config, state_dir=tmp_path / "tuning", outer_folds=1
+        )
+        assert tuner.search_calibrated is True
+        result = {
+            "metrics": {"log_loss": 0.62, "roc_auc": 0.74},
+            "metrics_calibrated": {"log_loss": 0.60, "roc_auc": 0.99},
+        }
+        assert tuner._objective_metric_value(result, "log_loss") == 0.60  # calibrated
+        assert tuner._objective_metric_value(result, "roc_auc") == 0.74   # raw (invariant)
+        result["metrics_calibrated"] = None
+        assert tuner._objective_metric_value(result, "log_loss") == 0.62  # raw fallback
 
     def test_frame_guard_rejects_legacy_study(self, sample_config, tmp_path):
         """A study with prior trials lacking the forward_v2 frame is refused —
@@ -597,7 +727,7 @@ validation:
             outer_folds=4,
         )
         assert tuner.outer_folds == 4
-        assert tuner.study.user_attrs.get("objective_frame") == "forward_v2"
+        assert tuner.study.user_attrs.get("objective_frame") == "forward_cal_v1"
 
     def test_preflight_covers_date_expanding(self, tmp_path):
         """date_expanding configs (the real de_ family) are preflighted too."""
@@ -641,7 +771,7 @@ validation:
         tuner = HyperparamTuner(
             config_path=cfg, state_dir=tmp_path / "tuning", outer_folds=4
         )
-        assert tuner.study.user_attrs.get("objective_frame") == "forward_v2"
+        assert tuner.study.user_attrs.get("objective_frame") == "forward_cal_v1"
 
     def test_preflight_failure_leaves_no_study(self, tmp_path):
         """A construction rejected by preflight must not create/stamp a study, so a

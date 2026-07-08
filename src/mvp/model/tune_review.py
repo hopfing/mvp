@@ -4,6 +4,7 @@ import logging
 
 import optuna
 
+from mvp.model.metrics import CALIBRATION_INVARIANT_METRICS
 from mvp.model.tuning import _MAXIMIZE_METRICS, _decode_params
 
 logger = logging.getLogger(__name__)
@@ -23,27 +24,18 @@ def _yaml_value(v: object) -> str:
     return str(v)
 
 
-def _is_raw_mode_study(trials: list[optuna.trial.FrozenTrial]) -> bool:
-    """Return True if the study was tuned post-decoupling refactor.
+def _is_new_pipeline_study(trials: list[optuna.trial.FrozenTrial]) -> bool:
+    """Return True if the study was tuned by the post-decoupling-refactor pipeline.
 
-    Raw-mode studies have `_tuning_mode == "raw"` set on every trial by
-    `HyperparamTuner._objective`. Legacy studies (pre-refactor) lack the
-    attr entirely; their metrics are Platt-calibrated and not comparable
-    to raw-mode trials, so `tune-review` refuses to display them.
+    New-pipeline trials carry `_tuning_mode` in {"raw", "calibrated"} — the search
+    frame, set by `HyperparamTuner._objective`. Legacy studies (pre-refactor) lack
+    the attr entirely; their metrics were Platt-calibrated IN-SAMPLE during search
+    (search conflated with calibrator fit) and aren't comparable, so `tune-review`
+    refuses to display them.
     """
-    # Check the most recent completed trial: if a study was started pre-refactor
-    # and resumed post-refactor, segregation is impossible — fail loud.
-    return any(t.user_attrs.get("_tuning_mode") == "raw" for t in trials)
-
-
-# Metrics computed purely from sorted scores, so a monotonic (Platt)
-# recalibration leaves them exactly unchanged: holdout_cal_<m> == holdout_<m>.
-# These rank on the raw holdout key. Every other classification metric is
-# probability-scale and ranks on the deployment-frame (calibrated) holdout key
-# when it's available. NB weighted_concordance is deliberately NOT here: it
-# weights pairs by |p-0.5|, which recalibration reshapes, so its calibrated
-# value differs — it ranks on the calibrated key like other prob-scale metrics.
-_CALIBRATION_INVARIANT = frozenset({"roc_auc", "partial_auc_tail"})
+    return any(
+        t.user_attrs.get("_tuning_mode") in ("raw", "calibrated") for t in trials
+    )
 
 
 def _to_ranked(metric: str, use_cal: bool) -> str:
@@ -59,7 +51,7 @@ def _to_ranked(metric: str, use_cal: bool) -> str:
     """
     if metric.startswith(("holdout_cal_", "holdout_")):
         return metric
-    if use_cal and metric not in _CALIBRATION_INVARIANT:
+    if use_cal and metric not in CALIBRATION_INVARIANT_METRICS:
         return f"holdout_cal_{metric}"
     return f"holdout_{metric}"
 
@@ -101,7 +93,7 @@ def format_leaderboard(
     # fit. The new pipeline tunes raw discrimination and post-hoc calibrates
     # via `mvp model`. Mixing the two would silently rank apples against
     # oranges; force a fresh study instead.
-    if not _is_raw_mode_study(trials):
+    if not _is_new_pipeline_study(trials):
         return [
             "This study was tuned before the calibration-decoupling refactor.",
             "Trial metrics are post-Platt and not comparable to raw-mode tuning.",

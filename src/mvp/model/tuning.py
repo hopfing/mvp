@@ -14,7 +14,10 @@ import yaml
 from optuna.exceptions import ExperimentalWarning
 
 from mvp.common.base_job import get_data_root
-from mvp.model.metrics import MAXIMIZE_METRICS as _MODEL_MAXIMIZE_METRICS
+from mvp.model.metrics import (
+    CALIBRATION_INVARIANT_METRICS,
+    MAXIMIZE_METRICS as _MODEL_MAXIMIZE_METRICS,
+)
 from mvp.model.models import _default_n_jobs
 from mvp.projection.iid.metric_registry import METRICS as _IID_METRICS
 
@@ -27,6 +30,11 @@ _PROJECTION_MODEL_TYPES = {"xgb_regressor", "linear", "ridge"}
 # carry a different value) and are refused for resume — the two objectives are
 # numerically incomparable. Bump this string on any future objective-frame change.
 _OBJECTIVE_FRAME = "forward_v2"
+# Calibrated-frame search: probability-scale objectives search on the calibrated
+# out-of-fold metric, not raw. Numerically distinct from the raw-frame objective,
+# so it carries its own marker and won't resume against a raw-frame study (or vice
+# versa). Bump on any future calibrated-objective-frame change.
+_OBJECTIVE_FRAME_CAL = "forward_cal_v1"
 
 # Maximize metrics: the classification set (single-sourced from metrics.py,
 # includes the tail-sensitive ranking objectives weighted_concordance /
@@ -335,6 +343,8 @@ class HyperparamTuner:
         # Per-trial xgb thread budget when running parallel trials (set in run()
         # when parallel_trials > 1); None = serial, use the config's own n_jobs.
         self._per_trial_n_jobs: int | None = None
+        # One-shot guard for the calibrated-frame fallback warning (below).
+        self._cal_fallback_warned = False
 
         with open(self.config_path) as f:
             self.base_config = yaml.safe_load(f)
@@ -366,11 +376,29 @@ class HyperparamTuner:
         else:
             self.model_type = self.base_config["model"]["type"]
 
-        # Tuning ignores `calibration:` in the config — calibration is a
-        # deployment concern honored by `mvp model`, not an HP search concern.
-        # Co-tuning HPs with Platt produces brittle winners that "game" the
-        # calibrator. Warn the user so they don't expect the block to influence
-        # tuning results.
+        # Search frame. Probability-scale objectives search on the calibrated
+        # out-of-fold metric (raw-frame HPs are not the calibrated optimum); the
+        # pure ranking metrics (roc_auc, partial_auc_tail) are Platt-invariant, so
+        # raw-frame search is exact for them. The in-search calibration is
+        # OUT-OF-FOLD (each fold calibrated by a fitter that never saw it), which
+        # is why it does NOT reintroduce the in-sample calibrator-gaming that keeps
+        # the config's own `calibration:` block out of tuning. Classification only:
+        # IID and projection (regression) tuning have no Platt path.
+        is_projection = self.model_type in _PROJECTION_MODEL_TYPES
+        self.search_calibrated = (
+            (not self.is_iid)
+            and (not is_projection)
+            and any(m not in CALIBRATION_INVARIANT_METRICS for m in self.metrics)
+        )
+        self.objective_frame = (
+            _OBJECTIVE_FRAME_CAL if self.search_calibrated else _OBJECTIVE_FRAME
+        )
+
+        # Tuning ignores the config's `calibration:` block. Calibrated-frame
+        # search (when it runs) uses a fixed global Platt fit OUT-OF-FOLD, not the
+        # config's calibrator — an in-sample fit of a richer calibrator would let
+        # HPs game it. The config's block stays a deployment concern honored by
+        # `mvp model`. Warn so the user doesn't expect it to influence tuning.
         if not self.is_iid and self.base_config.get("calibration"):
             logger.warning(
                 "config has a `calibration:` block — this is IGNORED during "
@@ -513,14 +541,15 @@ class HyperparamTuner:
         if not self.is_iid:
             existing_frame = self.study.user_attrs.get("objective_frame")
             if len(self.study.trials) > 0:
-                if existing_frame != _OBJECTIVE_FRAME:
+                if existing_frame != self.objective_frame:
                     raise ValueError(
                         f"study '{self.config_path.stem}' has "
                         f"{len(self.study.trials)} trial(s) from "
-                        f"objective_frame={existing_frame!r}, not '{_OBJECTIVE_FRAME}'. "
-                        "The forward-aligned objective is not comparable to those "
-                        "trials — use a fresh study (rename the config or delete "
-                        f"{self.db_path})."
+                        f"objective_frame={existing_frame!r}, not "
+                        f"'{self.objective_frame}'. The objective is not comparable "
+                        "across frames (raw- vs calibrated-frame search, or the "
+                        "legacy within-window objective) — use a fresh study "
+                        f"(rename the config or delete {self.db_path})."
                     )
                 prior_outer = self.study.user_attrs.get("outer_folds")
                 if prior_outer != self.outer_folds:
@@ -531,7 +560,7 @@ class HyperparamTuner:
                         "makes trials incomparable — use a fresh study."
                     )
             else:
-                self.study.set_user_attr("objective_frame", _OBJECTIVE_FRAME)
+                self.study.set_user_attr("objective_frame", self.objective_frame)
                 self.study.set_user_attr("outer_folds", self.outer_folds)
 
         if self.pinned_params:
@@ -611,6 +640,21 @@ class HyperparamTuner:
         if len(baseline) == len(self.search_space):
             self.study.enqueue_trial(baseline)
 
+    def _objective_metric_value(self, result: dict, metric: str) -> float:
+        """The objective value for `metric` in this study's search frame.
+
+        Ranking metrics (Platt-invariant) and raw-frame studies use the raw
+        pooled OOF metric. In a calibrated-frame study, probability-scale metrics
+        use the calibrated-frame value (`metrics_calibrated`), falling back to raw
+        if the calibrated objective couldn't be computed (e.g. single-class fold,
+        so `_calibrated_objective_metrics` returned None)."""
+        if metric in CALIBRATION_INVARIANT_METRICS or not self.search_calibrated:
+            return result["metrics"][metric]
+        mc = result.get("metrics_calibrated")
+        if mc is None:
+            return result["metrics"][metric]
+        return mc[metric]
+
     def _objective(self, trial: optuna.Trial) -> float | tuple[float, ...]:
         """Optuna objective: suggest params, run experiment, return metric(s).
 
@@ -625,15 +669,43 @@ class HyperparamTuner:
         # consult the pruner at each tuning-fold boundary.
         result = self._run_one(params, trial=trial)
 
-        # Mark trials as raw-mode so `tune-review` can distinguish post-refactor
-        # studies (raw discrimination) from legacy studies (Platt-calibrated).
-        # IID / projection trials don't go through the Platt path either way,
-        # but flagging uniformly keeps the leaderboard logic simple.
-        trial.set_user_attr("_tuning_mode", "raw")
+        # One-time warning if a calibrated-frame study silently fell back to the
+        # raw objective. The failure is deterministic on the fold split (<2 tuning
+        # folds, or a single-class fold complement), so it fires for every trial,
+        # not inconsistently — but the study would still be stamped calibrated
+        # while effectively searching raw. Surface it rather than mislabel silently.
+        if (
+            self.search_calibrated
+            and not self._cal_fallback_warned
+            and result.get("metrics_calibrated") is None
+        ):
+            logger.warning(
+                "%s: calibrated-frame search requested but the calibrated objective "
+                "could not be computed (needs >=2 tuning folds with two-class "
+                "complements); falling back to the RAW objective for all trials. "
+                "The study is stamped calibrated-frame but is effectively raw — "
+                "widen the tuning span or check fold label balance.",
+                self.config_path.stem,
+            )
+            self._cal_fallback_warned = True
+
+        # Mark trials with their search frame so `tune-review` can (a) distinguish
+        # new-pipeline studies from legacy (in-sample Platt) ones and (b) know
+        # whether the objective was raw or calibrated. IID/projection are always
+        # "raw" (no Platt path).
+        trial.set_user_attr(
+            "_tuning_mode", "calibrated" if self.search_calibrated else "raw"
+        )
 
         # Store all metrics as user attrs for review
         for metric_name, metric_value in result["metrics"].items():
             trial.set_user_attr(metric_name, metric_value)
+
+        # Calibrated-frame in-fold objective metrics (calibrated-frame studies) —
+        # the actual optimization target for probability-scale objectives.
+        if result.get("metrics_calibrated"):
+            for metric_name, metric_value in result["metrics_calibrated"].items():
+                trial.set_user_attr(f"cal_{metric_name}", metric_value)
 
         # Holdout metrics (the search-blind outer block, `outer_folds` trailing
         # forward folds) — used by tune-review to re-rank trials by the honest
@@ -675,8 +747,10 @@ class HyperparamTuner:
         trial.set_user_attr("duration_s", result["duration_s"])
 
         if len(self.metrics) == 1:
-            return result["metrics"][self.metrics[0]]
-        return tuple(result["metrics"][m] for m in self.metrics)
+            return self._objective_metric_value(result, self.metrics[0])
+        return tuple(
+            self._objective_metric_value(result, m) for m in self.metrics
+        )
 
     def _run_one(
         self, params: dict[str, Any], trial: optuna.Trial | None = None,
@@ -757,6 +831,7 @@ class HyperparamTuner:
                     inner_cv_folds=0,
                     calibrate=False,
                     report_calibrated_holdout=True,
+                    report_calibrated_objective=self.search_calibrated,
                 )
             # IID / projection runners don't currently support pruning;
             # only ExperimentRunner threads `trial` through. Pass it where
@@ -766,6 +841,11 @@ class HyperparamTuner:
             else:
                 result = runner.run(trial=trial)
             metrics = dict(result["metrics"])
+            metrics_calibrated = (
+                dict(result["metrics_calibrated"])
+                if result.get("metrics_calibrated") is not None
+                else None
+            )
             holdout_metrics = (
                 dict(result["holdout_metrics"])
                 if result.get("holdout_metrics") is not None
@@ -809,6 +889,7 @@ class HyperparamTuner:
             return {
                 "params": params,
                 "metrics": metrics,
+                "metrics_calibrated": metrics_calibrated,
                 "holdout_metrics": holdout_metrics,
                 "holdout_metrics_calibrated": holdout_metrics_calibrated,
                 "inner_cv_folds": inner_cv_folds_used,

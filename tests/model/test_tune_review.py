@@ -4,6 +4,7 @@ import optuna
 import pytest
 
 from mvp.model.tune_review import (
+    _is_new_pipeline_study,
     _to_ranked,
     format_best_trial,
     format_leaderboard,
@@ -371,6 +372,29 @@ class TestFormatLeaderboard:
         # The raw-only trial (best raw LL 0.62) is ranked and shown, not buried.
         assert "LL=0.6200" in output
         assert "nan" not in output
+
+
+class TestNewPipelineGate:
+    """The legacy-refusal gate accepts both raw- and calibrated-frame studies."""
+
+    @staticmethod
+    def _trial(mode):
+        ua = {"duration_s": 5.0}
+        if mode is not None:
+            ua["_tuning_mode"] = mode
+        return optuna.trial.create_trial(
+            params={}, distributions={}, values=[0.6], user_attrs=ua
+        )
+
+    def test_raw_frame_accepted(self):
+        assert _is_new_pipeline_study([self._trial("raw")]) is True
+
+    def test_calibrated_frame_accepted(self):
+        # A calibrated-frame study is new-pipeline, not legacy — must not be refused.
+        assert _is_new_pipeline_study([self._trial("calibrated")]) is True
+
+    def test_legacy_missing_attr_refused(self):
+        assert _is_new_pipeline_study([self._trial(None)]) is False
 
 
 class TestToRanked:
