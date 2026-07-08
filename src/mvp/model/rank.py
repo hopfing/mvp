@@ -8,7 +8,7 @@ artifacts), refreshes stale models, then prints four artifacts:
   Table 2: Confidence summary (per-circuit 12mo)
   Table 3: Backtest summary (positive bet-time edge, model-side only)
   Calibration matrix
-  Regressed models (when any model regressed on Sev / Optimal% / LL)
+  Regressed models (when any model regressed on CalErr / AUC / LL)
 
 Three sources, no source merging, no composite scores. See spec at
 mvp-docs/specs/2026-05-17-model-evaluation-cli.md.
@@ -70,8 +70,8 @@ MATRIX_SEGMENTS = (
 )
 MATRIX_N_MIN = 100
 
-SEV_THRESHOLD = 0.0005     # 0.05pp severity regression
-OPTIMAL_THRESHOLD = 3.0    # 3pp Optimal% regression
+CAL_ERR_THRESHOLD = 0.002  # +0.2pp calibration-error regression
+AUC_THRESHOLD = 0.005      # 0.5pp AUC drop regression
 LL_THRESHOLD = 0.001       # 0.001 LL regression
 
 # Per (circuit, consensus-bucket) cells appended to the backtest table.
@@ -215,6 +215,7 @@ class ModelSummary:
     ll: float | None = None
     auc: float | None = None
     brier: float | None = None
+    cal_err: float | None = None  # n-weighted circuit-level unsigned calibration error (in-the-small)
     err80: float | None = None
     drift: float | None = None
     severity: float = 0.0
@@ -352,6 +353,11 @@ def _headline_from_diagnostics(diag: dict) -> dict:
         "ll": wavg("log_loss"),
         "auc": wavg("roc_auc"),
         "brier": wavg("brier_score"),
+        # Unsigned in-the-small calibration error, n-weighted across chal+tour
+        # circuit overalls. Each circuit's calibration_error is bucketed by
+        # predicted prob (p>=0.5) with hundreds/bucket, so the estimate is
+        # low-bias — unlike a circuit x round cut where per-bucket n is ~10-30.
+        "cal_err": wavg("calibration_error"),
         "err80": wavg("error_rate_80plus"),
     }
 
@@ -485,6 +491,7 @@ def _summary_from_diagnostics(diag: dict) -> dict:
         "ll": head["ll"],
         "auc": head["auc"],
         "brier": head["brier"],
+        "cal_err": head["cal_err"],
         "err80": head["err80"],
         "drift": drift,
         **breakdown,
@@ -800,8 +807,9 @@ class LeaderCandidate:
     name: str  # model name
     run_id: str  # full fingerprint for fp-dir entries; 8-char mlrun-hash prefix for mlruns-only orphans
     is_latest: bool
-    signed_cal: float | None
-    optimal_pct: float | None
+    cal_err: float | None  # circuit-level unsigned calibration error (in-the-small)
+    auc: float | None  # discrimination guard — pairs with cal_err so a flat model can't win on calibration
+    signed_cal: float | None  # signed direction, shown as SCal% (diagnostic, not an axis)
     bt_clv_pos: float | None  # None when no fp-scoped backtest
     bt_avg_clv: float | None
     bt_units_o: float | None  # net units at open (consensus + edge>=0); None when no fp-scoped backtest
@@ -863,7 +871,7 @@ def _build_leader_candidates(summaries: list[ModelSummary]) -> list[LeaderCandid
     for s in summaries:
         candidates.append(LeaderCandidate(
             name=s.name, run_id=s.run_id, is_latest=True,
-            signed_cal=s.signed_cal, optimal_pct=s.optimal_pct,
+            cal_err=s.cal_err, auc=s.auc, signed_cal=s.signed_cal,
             bt_clv_pos=s.bt_clv_pos, bt_avg_clv=s.bt_avg_clv,
             bt_units_o=s.bt_units_o,
             bt_units_o_all=s.bt_units_o_all,
@@ -888,9 +896,15 @@ def _build_leader_candidates(summaries: list[ModelSummary]) -> list[LeaderCandid
             per_run.append((r, ds))
         if not per_run:
             continue
-        # Best historical on |signed_cal|, Optimal%, CLV+%, and Uo>=0 (fp only)
-        best_cal = min(per_run, key=lambda x: abs(x[1]["signed_cal"]))
-        best_opt = max(per_run, key=lambda x: x[1]["optimal_pct"])
+        # Best historical on CalErr, AUC, CLV+%, and Uo>=0 (fp only)
+        best_cal = min(
+            per_run,
+            key=lambda x: x[1]["cal_err"] if x[1]["cal_err"] is not None else 999.0,
+        )
+        best_auc = max(
+            per_run,
+            key=lambda x: x[1]["auc"] if x[1]["auc"] is not None else -1.0,
+        )
         # CLV and Uo bests are only meaningful for fp-dir entries — precompute
         # backtest stats per fp_run once so neither axis selection nor the
         # construction step re-reads backtest.csv.
@@ -898,7 +912,7 @@ def _build_leader_candidates(summaries: list[ModelSummary]) -> list[LeaderCandid
         fp_stats: dict[str, tuple] = {
             r["run_id"]: _backtest_stats_at(r["fp_dir"]) for r, _ in fp_runs
         }
-        bests: list[tuple[dict, dict]] = [best_cal, best_opt]
+        bests: list[tuple[dict, dict]] = [best_cal, best_auc]
         if fp_runs:
             best_clv = max(
                 fp_runs,
@@ -923,7 +937,7 @@ def _build_leader_candidates(summaries: list[ModelSummary]) -> list[LeaderCandid
                 clv_pos, clv_avg, units_o, units_o_all = fp_stats[r["run_id"]]
             candidates.append(LeaderCandidate(
                 name=s.name, run_id=r["run_id"], is_latest=False,
-                signed_cal=ds["signed_cal"], optimal_pct=ds["optimal_pct"],
+                cal_err=ds["cal_err"], auc=ds["auc"], signed_cal=ds["signed_cal"],
                 bt_clv_pos=clv_pos, bt_avg_clv=clv_avg,
                 bt_units_o=units_o, bt_units_o_all=units_o_all,
             ))
@@ -933,16 +947,17 @@ def _build_leader_candidates(summaries: list[ModelSummary]) -> list[LeaderCandid
 def render_leader_table(summaries: list[ModelSummary]) -> str:
     """Cross-axis leader table.
 
-    Four ranking axes:
-      - C: abs(signed_cal) asc   (calibration magnitude)
-      - O: Optimal% desc         (calibration volume)
+    Four ranking axes — two orthogonal calibration/discrimination axes plus two
+    outcome axes, so nothing floats up on calibration alone:
+      - C: CalErr asc            (reliability — unsigned in-the-small calibration)
+      - D: AUC desc              (discrimination — the flat-model guard)
       - B: CLV+% desc            (market beat rate; fp-scoped backtest only)
-      - U: Uo>=0 desc            (net units booked under bet rule; fp-scoped backtest only)
+      - U: Uo>=0 desc            (net units booked; fp-scoped backtest only)
 
     Latest-run candidates compete on all four axes. Historical-best
     candidates from fingerprint dirs (which carry their own
     validation_results + backtest CSVs) compete on all four axes too.
-    Historical mlrun-only candidates compete on C and O only — they have no
+    Historical mlrun-only candidates compete on C and D only — they have no
     fp-scoped confidence/backtest artifacts.
 
     Models appearing in 2+ axes float to the top. Within the same #-of-axes,
@@ -957,13 +972,13 @@ def render_leader_table(summaries: list[ModelSummary]) -> str:
 
     cal_full = rank_asc(
         candidates,
-        key=lambda c: abs(c.signed_cal),
-        eligible_filter=lambda c: c.signed_cal is not None,
+        key=lambda c: c.cal_err,
+        eligible_filter=lambda c: c.cal_err is not None,
     )
-    opt_full = rank_asc(
+    auc_full = rank_asc(
         candidates,
-        key=lambda c: -c.optimal_pct,
-        eligible_filter=lambda c: c.optimal_pct is not None,
+        key=lambda c: -c.auc,
+        eligible_filter=lambda c: c.auc is not None,
     )
     clv_full = rank_asc(
         candidates,
@@ -979,12 +994,12 @@ def render_leader_table(summaries: list[ModelSummary]) -> str:
     def _cut(n: int) -> int:
         return max(1, round(LEADER_TOP_PCT * n))
 
-    cal_cut, opt_cut, clv_cut, units_cut = (
-        _cut(len(cal_full)), _cut(len(opt_full)),
+    cal_cut, auc_cut, clv_cut, units_cut = (
+        _cut(len(cal_full)), _cut(len(auc_full)),
         _cut(len(clv_full)), _cut(len(units_full)),
     )
     cal_ranked = cal_full[:cal_cut]
-    opt_ranked = opt_full[:opt_cut]
+    auc_ranked = auc_full[:auc_cut]
     clv_ranked = clv_full[:clv_cut]
     units_ranked = units_full[:units_cut]
 
@@ -994,7 +1009,7 @@ def render_leader_table(summaries: list[ModelSummary]) -> str:
     pct_label = f"{LEADER_TOP_PCT*100:.0f}%"
     pool_line = (
         f"  Pool: {len(candidates)} candidates — top {pct_label} per axis "
-        f"(C: {cal_cut} of {len(cal_full)}, O: {opt_cut} of {len(opt_full)}, "
+        f"(C: {cal_cut} of {len(cal_full)}, D: {auc_cut} of {len(auc_full)}, "
         f"B: {clv_cut} of {len(clv_full)}, U: {units_cut} of {len(units_full)})"
     )
 
@@ -1002,8 +1017,8 @@ def render_leader_table(summaries: list[ModelSummary]) -> str:
     axis_ranks: dict[tuple[str, str], dict[str, int]] = {}
     for i, c in enumerate(cal_ranked):
         axis_ranks.setdefault((c.name, c.run_id), {})["C"] = i + 1
-    for i, c in enumerate(opt_ranked):
-        axis_ranks.setdefault((c.name, c.run_id), {})["O"] = i + 1
+    for i, c in enumerate(auc_ranked):
+        axis_ranks.setdefault((c.name, c.run_id), {})["D"] = i + 1
     for i, c in enumerate(clv_ranked):
         axis_ranks.setdefault((c.name, c.run_id), {})["B"] = i + 1
     for i, c in enumerate(units_ranked):
@@ -1033,38 +1048,44 @@ def render_leader_table(summaries: list[ModelSummary]) -> str:
         f"Cross-axis leaders (top {pct_label} per axis; 2+ axes shown)",
         "=" * 80,
         pool_line,
-        "  Axes: C=calibration (abs signed_cal asc), O=Optimal% desc, B=CLV+% desc, U=Uo>=0 desc",
+        "  Axes: C=CalErr asc, D=AUC desc, B=CLV+% desc, U=Uo>=0 desc",
         "  Entries marked `<name> (<run_id>)` are historical bests (latest run regressed).",
-        "  fp-dir historical entries compete on all four axes; mlrun-only entries on C and O only.",
+        "  fp-dir historical entries compete on all four axes; mlrun-only entries on C and D only.",
     ]
     header = (
-        f"  {'Model':<66} {'Axes':>8} {'SCal%':>7} {'Opt%':>6} {'CLV+%':>6} {'avgCLV':>7} {'Uo>=0':>7} {'Uo_all':>8}"
+        f"  {'Model':<66} {'Axes':>8} {'CalErr%':>7} {'AUC':>6} {'SCal%':>7} {'CLV+%':>6} {'avgCLV':>7} {'Uo>=0':>7} {'Uo_all':>8}"
     )
     lines.append(header)
     lines.append("  " + "-" * (len(header) - 2))
     for n_axes, sum_rank, key, ranks, axes_label in rows:
         c = by_key[key]
+        cerr = f"{c.cal_err*100:.2f}" if c.cal_err is not None else "--"
+        auc = f"{c.auc:.4f}" if c.auc is not None else "--"
         scal = f"{c.signed_cal*100:+.2f}" if c.signed_cal is not None else "--"
-        opt = f"{c.optimal_pct:.1f}" if c.optimal_pct is not None else "--"
         clv_pos = f"{c.bt_clv_pos*100:.1f}" if c.bt_clv_pos is not None else "--"
         avg_clv = f"{c.bt_avg_clv*100:+.2f}" if c.bt_avg_clv is not None else "--"
         units_o = f"{c.bt_units_o:+.1f}" if c.bt_units_o is not None else "--"
         units_o_all = f"{c.bt_units_o_all:+.1f}" if c.bt_units_o_all is not None else "--"
         lines.append(
-            f"  {c.label[:66]:<66} {axes_label:>8} {scal:>7} {opt:>6} {clv_pos:>6} {avg_clv:>7} {units_o:>7} {units_o_all:>8}"
+            f"  {c.label[:66]:<66} {axes_label:>8} {cerr:>7} {auc:>6} {scal:>7} {clv_pos:>6} {avg_clv:>7} {units_o:>7} {units_o_all:>8}"
         )
     return "\n".join(lines)
 
 
 def render_static_table(summaries: list[ModelSummary]) -> str:
-    """Table 1 — Static diagnostics. Sorted by Optimal% desc."""
-    rows = sorted(summaries, key=lambda s: -s.optimal_pct)
-    lines = ["=" * 80, "Table 1: Static diagnostics (sorted by Optimal% desc)", "=" * 80]
+    """Table 1 — Static diagnostics. Sorted by CalErr asc (lower = better calibrated).
+
+    CalErr = n-weighted circuit-level unsigned calibration error (in-the-small,
+    bucketed by predicted prob). AUC sits beside it as the discrimination guard
+    so a flat/timid model can't top the table on calibration alone. SCal% is the
+    signed direction (+ under / - over), a diagnostic, not a sort key.
+    """
+    rows = sorted(summaries, key=lambda s: s.cal_err if s.cal_err is not None else 999.0)
+    lines = ["=" * 80, "Table 1: Static diagnostics (sorted by CalErr asc)", "=" * 80]
     header = (
         f"{'Model':<50} {'run_ts':<16} {'id':<12} "
         f"{'Acc':>6} {'LL':>7} "
-        f"{'Sev%':>5} {'SCal%':>6} "
-        f"{'UndC%':>6} {'Opt%':>6} {'Brd%':>6} {'Rsk%':>6} {'Dng%':>6} "
+        f"{'CalErr%':>7} {'AUC':>6} {'Brier':>7} {'SCal%':>6} "
         f"{'Drift':>6} {'Err80%':>6}"
     )
     lines.append(header)
@@ -1078,9 +1099,8 @@ def render_static_table(summaries: list[ModelSummary]) -> str:
         lines.append(
             f"{s.name[:50]:<50} {s.run_ts:<16} {s.run_id:<12} "
             f"{f(s.acc, 6)} {f(s.ll, 7)} "
-            f"{s.severity*100:>5.2f} {s.signed_cal*100:>+6.2f} "
-            f"{s.underc_pct:>5.1f}% {s.optimal_pct:>5.1f}% "
-            f"{s.border_pct:>5.1f}% {s.risky_pct:>5.1f}% {s.danger_pct:>5.1f}% "
+            f"{(s.cal_err*100 if s.cal_err is not None else 0):>7.2f} "
+            f"{f(s.auc, 6)} {f(s.brier, 7)} {s.signed_cal*100:>+6.2f} "
             f"{(s.drift*100 if s.drift is not None else 0):>+6.2f} "
             f"{(s.err80*100 if s.err80 is not None else 0):>5.1f}%"
         )
@@ -1089,7 +1109,7 @@ def render_static_table(summaries: list[ModelSummary]) -> str:
 
 def render_confidence_table(summaries: list[ModelSummary]) -> str:
     """Table 2 — Confidence summary, per-circuit 12mo med/p25/p75."""
-    rows = sorted(summaries, key=lambda s: -s.optimal_pct)
+    rows = sorted(summaries, key=lambda s: s.cal_err if s.cal_err is not None else 999.0)
     lines = ["=" * 80, "Table 2: Confidence summary (12mo rolling, per-circuit, signed pp)", "=" * 80]
     header = (
         f"{'Model':<50} "
@@ -1280,11 +1300,23 @@ def _render_matrix_rows(rows: list[ModelSummary], name_w: int = 50, label_fn=Non
 
 
 def render_matrix(summaries: list[ModelSummary], top_n: int = 40) -> str:
-    """Calibration matrix, top_n by severity (lower = safer first)."""
-    ordered = sorted(summaries, key=lambda s: (s.severity, s.ll if s.ll is not None else 999))
+    """Calibration matrix, top_n by CalErr (lower = better calibrated first).
+
+    The per-cell symbols are SIGNED (direction of miscalibration) — this table
+    is the circuit x round localization of where a model is over/under, a
+    diagnostic. The ranking itself is CalErr (unsigned, circuit-level); ordering
+    here just floats the better-calibrated models up so the matrix reads top-down.
+    """
+    ordered = sorted(
+        summaries,
+        key=lambda s: (
+            s.cal_err if s.cal_err is not None else 999.0,
+            s.ll if s.ll is not None else 999,
+        ),
+    )
     lines = [
         "=" * 80,
-        f"Calibration matrix (latest run per model, top {min(top_n, len(ordered))} by severity, n_min={MATRIX_N_MIN})",
+        f"Calibration matrix (latest run per model, top {min(top_n, len(ordered))} by CalErr, n_min={MATRIX_N_MIN})",
         "=" * 80,
         "Legend: + 0..+2%  . -0.5..0%  , -1..-0.5%  X <-1%  ^ >=+2%  blank: n<n_min",
     ]
@@ -1294,7 +1326,7 @@ def render_matrix(summaries: list[ModelSummary], top_n: int = 40) -> str:
 
 def render_regressions(summaries: list[ModelSummary]) -> str | None:
     """Per-axis regression detection. Compares each model's latest mlrun against
-    its own historical best on Sev%, Optimal%, and LL. Returns None if no
+    its own historical best on CalErr, AUC, and LL. Returns None if no
     regressions.
     """
     regressions: list[tuple[ModelSummary, list[tuple]]] = []
@@ -1310,21 +1342,37 @@ def render_regressions(summaries: list[ModelSummary]) -> str | None:
         latest_run = max(per_run, key=lambda t: t[3])
         latest_id, _, latest_ds, _ = latest_run
 
-        best_sev = min(per_run, key=lambda t: t[2]["severity"])
-        best_opt = max(per_run, key=lambda t: t[2]["optimal_pct"])
+        best_cal = min(
+            per_run,
+            key=lambda t: t[2]["cal_err"] if t[2]["cal_err"] is not None else 999.0,
+        )
+        best_auc = max(
+            per_run,
+            key=lambda t: t[2]["auc"] if t[2]["auc"] is not None else -1.0,
+        )
         best_ll = min(per_run, key=lambda t: t[2]["ll"] if t[2]["ll"] is not None else 999)
 
         axes: list[tuple] = []
-        if best_sev[0] != latest_id and (latest_ds["severity"] - best_sev[2]["severity"]) >= SEV_THRESHOLD:
-            axes.append(("Sev",
-                         f"{latest_ds['severity']*100:.2f}",
-                         f"{best_sev[2]['severity']*100:.2f}",
-                         best_sev))
-        if best_opt[0] != latest_id and (best_opt[2]["optimal_pct"] - latest_ds["optimal_pct"]) >= OPTIMAL_THRESHOLD:
-            axes.append(("Optimal%",
-                         f"{latest_ds['optimal_pct']:.1f}%",
-                         f"{best_opt[2]['optimal_pct']:.1f}%",
-                         best_opt))
+        if (
+            best_cal[0] != latest_id
+            and latest_ds["cal_err"] is not None
+            and best_cal[2]["cal_err"] is not None
+            and (latest_ds["cal_err"] - best_cal[2]["cal_err"]) >= CAL_ERR_THRESHOLD
+        ):
+            axes.append(("CalErr",
+                         f"{latest_ds['cal_err']*100:.2f}%",
+                         f"{best_cal[2]['cal_err']*100:.2f}%",
+                         best_cal))
+        if (
+            best_auc[0] != latest_id
+            and latest_ds["auc"] is not None
+            and best_auc[2]["auc"] is not None
+            and (best_auc[2]["auc"] - latest_ds["auc"]) >= AUC_THRESHOLD
+        ):
+            axes.append(("AUC",
+                         f"{latest_ds['auc']:.4f}",
+                         f"{best_auc[2]['auc']:.4f}",
+                         best_auc))
         if (
             best_ll[0] != latest_id
             and latest_ds["ll"] is not None
@@ -1346,7 +1394,7 @@ def render_regressions(summaries: list[ModelSummary]) -> str | None:
     lines = [
         "=" * 80,
         "Regressed models (latest worse than own historical best on at least one axis)",
-        f"Thresholds: Sev >= {SEV_THRESHOLD*100:.2f}pp | Optimal% drop >= {OPTIMAL_THRESHOLD:.1f}pp | LL >= {LL_THRESHOLD:.4f}",
+        f"Thresholds: CalErr rise >= {CAL_ERR_THRESHOLD*100:.2f}pp | AUC drop >= {AUC_THRESHOLD:.3f} | LL >= {LL_THRESHOLD:.4f}",
         "=" * 80,
     ]
     for s, axes in regressions:
@@ -1355,7 +1403,7 @@ def render_regressions(summaries: list[ModelSummary]) -> str | None:
             lines.append(f"    {axis_name}: {latest_v} now vs {best_v} best ({best_run[0]}, {best_run[1]})")
 
     # Historical-best matrix rows
-    _AXIS_SHORT = {"Sev": "Sev", "Optimal%": "Opt", "LL": "LL"}
+    _AXIS_SHORT = {"CalErr": "Cal", "AUC": "AUC", "LL": "LL"}
     hist_summaries: list[ModelSummary] = []
     for s, axes in regressions:
         by_run: dict[str, tuple[dict, list[str]]] = {}
@@ -1374,6 +1422,7 @@ def render_regressions(summaries: list[ModelSummary]) -> str | None:
             hist.severity = ds["severity"]
             hist.signed_cal = ds["signed_cal"]
             hist.optimal_pct = ds["optimal_pct"]
+            hist.cal_err = ds["cal_err"]
             hist.ll = ds["ll"]
             # Stash for label
             setattr(hist, "_axis_label", "+".join(axis_list))
