@@ -4,6 +4,7 @@ import importlib
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import optuna
 import polars as pl
 import pytest
 
@@ -354,11 +355,14 @@ validation:
         import mlflow
         mlflow.set_tracking_uri((tmp_path / "mlruns").as_uri())
 
+        # outer_folds=1: the synthetic fixture has only 2 folds — this exercises
+        # the run wiring, not the methodology fold floor (which gates real runs).
         tuner = HyperparamTuner(
             config_path=sample_config,
             matches_path=sample_matches,
             cache_dir=tmp_path / "cache",
             state_dir=tmp_path / "tuning",
+            outer_folds=1,
         )
         tuner.run(n_trials=2)
 
@@ -380,6 +384,7 @@ validation:
             matches_path=sample_matches,
             cache_dir=tmp_path / "cache",
             state_dir=tmp_path / "tuning",
+            outer_folds=1,
         )
         tuner.run(n_trials=3, parallel_trials=2)
 
@@ -401,6 +406,7 @@ validation:
             matches_path=sample_matches,
             cache_dir=tmp_path / "cache",
             state_dir=tmp_path / "tuning",
+            outer_folds=1,
         )
         tuner.run(n_trials=1)
 
@@ -417,6 +423,7 @@ validation:
             matches_path=sample_matches,
             cache_dir=tmp_path / "cache",
             state_dir=tmp_path / "tuning",
+            outer_folds=1,
         )
         tuner1 = HyperparamTuner(**kwargs)
         tuner1.run(n_trials=2)
@@ -443,6 +450,7 @@ validation:
             matches_path=sample_matches,
             cache_dir=tmp_path / "cache",
             state_dir=tmp_path / "tuning",
+            outer_folds=1,
         )
         tuner.run(n_trials=2)
 
@@ -450,3 +458,198 @@ validation:
         # Multi-objective trials have multiple values
         for trial in tuner.study.trials:
             assert len(trial.values) == 2
+
+    # --- Forward-aligned objective (v2) ---------------------------------------
+
+    def test_outer_folds_validation(self, sample_config, tmp_path):
+        """outer_folds < 1 is rejected at construction."""
+        with pytest.raises(ValueError, match="outer_folds must be >= 1"):
+            HyperparamTuner(
+                config_path=sample_config,
+                state_dir=tmp_path / "tuning",
+                outer_folds=0,
+            )
+
+    def test_outer_folds_and_seed_stored(self, sample_config, tmp_path):
+        """New knobs are stored and a fresh study is stamped with the frame."""
+        tuner = HyperparamTuner(
+            config_path=sample_config,
+            state_dir=tmp_path / "tuning",
+            outer_folds=2,
+            seed=123,
+        )
+        assert tuner.outer_folds == 2
+        assert tuner.seed == 123
+        assert tuner.study.user_attrs.get("objective_frame") == "forward_v2"
+        assert tuner.study.user_attrs.get("outer_folds") == 2
+
+    def test_run_one_uses_forward_objective(
+        self, sample_config, sample_matches, tmp_path, monkeypatch
+    ):
+        """_run_one builds the classification runner with the forward objective:
+        holdout_folds=outer_folds, inner_cv_folds=0 (no within-window inner CV),
+        calibrate=False."""
+        tuner = HyperparamTuner(
+            config_path=sample_config,
+            matches_path=sample_matches,
+            cache_dir=tmp_path / "cache",
+            state_dir=tmp_path / "tuning",
+            outer_folds=3,
+        )
+        captured: dict = {}
+
+        class _FakeRunner:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+            def run(self, trial=None):
+                return {"metrics": {"log_loss": 0.6, "calibration_error": 0.02}}
+
+        monkeypatch.setattr("mvp.model.runner.ExperimentRunner", _FakeRunner)
+        result = tuner._run_one({"C": 1.0})
+
+        assert captured["holdout_folds"] == 3
+        assert captured["inner_cv_folds"] == 0
+        assert captured["calibrate"] is False
+        assert result["metrics"]["log_loss"] == 0.6
+
+    def test_frame_guard_rejects_legacy_study(self, sample_config, tmp_path):
+        """A study with prior trials lacking the forward_v2 frame is refused —
+        the legacy within-window objective is incomparable to the forward one."""
+        state_dir = tmp_path / "tuning"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        storage = f"sqlite:///{state_dir / 'test_tune.db'}?timeout=30"
+        legacy = optuna.create_study(
+            study_name="test_tune", storage=storage, directions=["minimize"],
+        )
+        legacy.add_trial(
+            optuna.trial.create_trial(
+                params={},
+                distributions={},
+                value=0.6,
+                state=optuna.trial.TrialState.COMPLETE,
+            )
+        )
+        with pytest.raises(ValueError, match="fresh study"):
+            HyperparamTuner(
+                config_path=sample_config,
+                state_dir=state_dir,
+                outer_folds=1,
+            )
+
+    def _date_sliding_config(self, tmp_path, start, end, name):
+        cfg = f"""
+name: {name}
+data:
+  date_range:
+    start: "{start}"
+    end: "{end}"
+features:
+  include:
+    - player_ranking_points_diff
+model:
+  type: logistic
+  params:
+    C: 1.0
+    l1_ratio: 0.0
+metrics:
+  objective:
+    - log_loss
+validation:
+  type: date_sliding
+  train_months: 12
+  test_months: 3
+"""
+        path = tmp_path / f"{name}.yaml"
+        path.write_text(cfg)
+        return path
+
+    def test_preflight_rejects_short_span(self, tmp_path):
+        """A date_sliding span too short to leave >=5 inner folds fails fast."""
+        cfg = self._date_sliding_config(
+            tmp_path, "2024-01-01", "2025-06-30", "short_span"
+        )
+        with pytest.raises(ValueError, match="forward-aligned tune"):
+            HyperparamTuner(
+                config_path=cfg,
+                state_dir=tmp_path / "tuning",
+                outer_folds=4,
+            )
+
+    def test_preflight_allows_long_span(self, tmp_path):
+        """A long date_sliding span passes preflight and stamps the frame."""
+        cfg = self._date_sliding_config(
+            tmp_path, "2020-01-01", "2025-12-31", "long_span"
+        )
+        tuner = HyperparamTuner(
+            config_path=cfg,
+            state_dir=tmp_path / "tuning",
+            outer_folds=4,
+        )
+        assert tuner.outer_folds == 4
+        assert tuner.study.user_attrs.get("objective_frame") == "forward_v2"
+
+    def test_preflight_covers_date_expanding(self, tmp_path):
+        """date_expanding configs (the real de_ family) are preflighted too."""
+        cfg = tmp_path / "de_short.yaml"
+        cfg.write_text(
+            """
+name: de_short
+data:
+  date_range:
+    start: "2024-01-01"
+    end: "2025-06-30"
+features:
+  include:
+    - player_ranking_points_diff
+model:
+  type: logistic
+  params:
+    C: 1.0
+    l1_ratio: 0.0
+metrics:
+  objective:
+    - log_loss
+validation:
+  type: date_expanding
+  initial_train_months: 12
+  test_months: 3
+"""
+        )
+        with pytest.raises(ValueError, match="forward-aligned tune"):
+            HyperparamTuner(
+                config_path=cfg, state_dir=tmp_path / "tuning", outer_folds=4
+            )
+
+    def test_preflight_boundary_passes_with_plus_one(self, tmp_path):
+        """A span the splitter yields as exactly outer_folds + MIN inner folds must
+        pass. 2021-01..2024-03 = 9 folds; without the +1 fold-count correction the
+        estimate is 8 → 4 inner → spurious rejection. Guards the off-by-one."""
+        cfg = self._date_sliding_config(
+            tmp_path, "2021-01-01", "2024-03-31", "boundary"
+        )
+        tuner = HyperparamTuner(
+            config_path=cfg, state_dir=tmp_path / "tuning", outer_folds=4
+        )
+        assert tuner.study.user_attrs.get("objective_frame") == "forward_v2"
+
+    def test_preflight_failure_leaves_no_study(self, tmp_path):
+        """A construction rejected by preflight must not create/stamp a study, so a
+        corrected retry (even with a different outer_folds) isn't falsely rejected
+        by the frame guard."""
+        short = self._date_sliding_config(
+            tmp_path, "2024-01-01", "2025-06-30", "retry"
+        )
+        with pytest.raises(ValueError, match="forward-aligned tune"):
+            HyperparamTuner(
+                config_path=short, state_dir=tmp_path / "tuning", outer_folds=4
+            )
+        # Same config stem (same study db); corrected span + different outer_folds.
+        long = self._date_sliding_config(
+            tmp_path, "2020-01-01", "2025-12-31", "retry"
+        )
+        tuner = HyperparamTuner(
+            config_path=long, state_dir=tmp_path / "tuning", outer_folds=6
+        )
+        assert tuner.outer_folds == 6
+        assert tuner.study.user_attrs.get("outer_folds") == 6

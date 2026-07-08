@@ -916,14 +916,9 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         help="Model config to tune (looks in models/)",
     )
     tune_parser.add_argument(
-        "--strategy", type=str, choices=["grid", "bayesian"], default="grid",
-        help="Search strategy (default: grid)",
-    )
-    tune_parser.add_argument(
         "--metric", type=str, nargs="+", default=None,
-        help="[grid + IID/projection only] Metric(s) to optimize. Classification "
-             "bayesian tuning reads metrics.objective from the config and rejects "
-             "--metric.",
+        help="[IID/projection only] Metric(s) to optimize. Classification tuning "
+             "reads metrics.objective from the config and rejects --metric.",
     )
     tune_parser.add_argument(
         "--memory-limit", type=int, default=None,
@@ -965,6 +960,23 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
             "trial runs serially to warm the feature cache before fan-out. Capped "
             "at 2 (K>=3 needs constant_liar, which conflicts with the TPE "
             "group sampler). K=1 = serial (default)."
+        ),
+    )
+    tune_parser.add_argument(
+        "--outer-folds", type=int, default=4,
+        help=(
+            "[bayesian, classification] Number of trailing forward folds held "
+            "search-blind for selection (the honest outer block). The search runs "
+            "on the remaining inner folds. Default 4 (one surface-rotation year). "
+            "The span must leave >=5 inner folds or tuning refuses to start."
+        ),
+    )
+    tune_parser.add_argument(
+        "--seed", type=int, default=None,
+        help=(
+            "[bayesian] Seed the TPE sampler for reproducible search. Default "
+            "None (non-deterministic). Set it to separate search noise from "
+            "fold noise when checking rerun-stability."
         ),
     )
 
@@ -1280,112 +1292,68 @@ def cmd_tune(args: argparse.Namespace) -> int:
     if args.limit is not None and args.cap is not None:
         raise ValueError("--limit and --cap are mutually exclusive")
 
-    if args.strategy == "grid":
-        from mvp.model.grid_tuning import GridTuner
+    import optuna
 
-        # Grid still takes its objective from --metric (issue #96); default it
-        # locally now that --metric has no global default — mae for projection
-        # regression, log_loss otherwise.
-        grid_metric = args.metric
-        if grid_metric is None:
-            grid_metric = (
-                ["mae"] if _is_projection_discovery(config_path) else ["log_loss"]
-            )
-        tuner = GridTuner(
-            config_path=config_path,
-            param_overrides=param_overrides or None,
-            metric=grid_metric[0],
+    from mvp.model.tuning import HyperparamTuner
+
+    if args.limit is None and args.cap is None:
+        raise ValueError("--limit or --cap is required")
+
+    # Classification: the objective is metrics.objective in the config (one
+    # source shared by tuning, early stopping, and the pruner). Reject --metric
+    # here so it can't silently diverge from the config. IID/projection
+    # legitimately still uses --metric (issue #96).
+    if not _is_projection_discovery(config_path) and args.metric is not None:
+        raise ValueError(
+            "--metric is not accepted for classification tuning; set "
+            "metrics.objective in the config instead (it drives tuning, early "
+            f"stopping, and the pruner together). Got --metric {args.metric}."
         )
 
-        total = tuner._count_combos()
-        already = len(tuner.state.results)
+    tuner = HyperparamTuner(
+        config_path=config_path,
+        param_overrides=param_overrides or None,
+        metrics=args.metric,  # IID uses it (issue #96); classification reads the config
+        n_startup_trials=args.n_startup_trials,
+        outer_folds=args.outer_folds,
+        seed=args.seed,
+    )
 
-        if args.cap is not None:
-            if already >= args.cap:
-                logger.info(
-                    "%s at or above cap (%d completed, cap=%d); nothing to do",
-                    config_path.stem, already, args.cap,
-                )
-                return 0
-            limit = args.cap - already
+    if args.cap is not None:
+        # --cap counts COMPLETE + PRUNED toward the budget: each pruned
+        # trial consumed a trial slot (even if it didn't run to
+        # completion), so we don't auto-schedule a replacement.
+        state_counts = _state_counts(tuner.study)
+        budget_consumed = state_counts["complete"] + state_counts["pruned"]
+        total = len(tuner.study.trials)
+        if budget_consumed >= args.cap:
             logger.info(
-                "Tuning %s (%s): %d in grid, %d done, cap=%d -> running %d more",
-                config_path.stem, tuner.model_type, total, already, args.cap, limit,
+                "%s at or above cap "
+                "(budget=%d [complete=%d, pruned=%d], cap=%d); nothing to do",
+                config_path.stem, budget_consumed,
+                state_counts["complete"], state_counts["pruned"], args.cap,
             )
-        else:
-            limit = args.limit
-            logger.info(
-                "Tuning %s (%s): %d in grid, %d done",
-                config_path.stem, tuner.model_type, total, already,
-            )
-
-        state = tuner.run(limit=limit)
-        logger.info("Results saved to %s", tuner.state_path)
-        logger.info("Total runs: %d", len(state.results))
-
-    else:
-        import optuna
-
-        from mvp.model.tuning import HyperparamTuner
-
-        if args.limit is None and args.cap is None:
-            raise ValueError(
-                "--limit or --cap is required for bayesian strategy"
-            )
-
-        # Classification bayesian: the objective is metrics.objective in the
-        # config (one source shared by tuning, early stopping, and the pruner).
-        # Reject --metric here so it can't silently diverge from the config.
-        # IID/projection legitimately still uses --metric (issue #96).
-        if not _is_projection_discovery(config_path) and args.metric is not None:
-            raise ValueError(
-                "--metric is not accepted for classification bayesian tuning; set "
-                "metrics.objective in the config instead (it drives tuning, early "
-                f"stopping, and the pruner together). Got --metric {args.metric}."
-            )
-
-        tuner = HyperparamTuner(
-            config_path=config_path,
-            param_overrides=param_overrides or None,
-            metrics=args.metric,  # IID uses it (issue #96); classification reads the config
-            n_startup_trials=args.n_startup_trials,
-        )
-
-        if args.cap is not None:
-            # --cap counts COMPLETE + PRUNED toward the budget: each pruned
-            # trial consumed a trial slot (even if it didn't run to
-            # completion), so we don't auto-schedule a replacement.
-            state_counts = _state_counts(tuner.study)
-            budget_consumed = state_counts["complete"] + state_counts["pruned"]
-            total = len(tuner.study.trials)
-            if budget_consumed >= args.cap:
-                logger.info(
-                    "%s at or above cap "
-                    "(budget=%d [complete=%d, pruned=%d], cap=%d); nothing to do",
-                    config_path.stem, budget_consumed,
-                    state_counts["complete"], state_counts["pruned"], args.cap,
-                )
-                return 0
-            n_trials = args.cap - budget_consumed
-            logger.info(
-                "Tuning %s (cap=%d, complete=%d, pruned=%d, "
-                "running/zombie=%d, failed=%d, total=%d) -> running %d more",
-                config_path.stem, args.cap,
-                state_counts["complete"], state_counts["pruned"],
-                state_counts["running"], state_counts["failed"], total, n_trials,
-            )
-        else:
-            n_trials = args.limit
-
-        study = tuner.run(n_trials=n_trials, parallel_trials=args.parallel_trials)
-        logger.info("Results saved to %s", tuner.db_path)
-        end_counts = _state_counts(study)
+            return 0
+        n_trials = args.cap - budget_consumed
         logger.info(
-            "Total trials: %d (complete=%d, pruned=%d, running/zombie=%d, failed=%d)",
-            len(study.trials),
-            end_counts["complete"], end_counts["pruned"],
-            end_counts["running"], end_counts["failed"],
+            "Tuning %s (cap=%d, complete=%d, pruned=%d, "
+            "running/zombie=%d, failed=%d, total=%d) -> running %d more",
+            config_path.stem, args.cap,
+            state_counts["complete"], state_counts["pruned"],
+            state_counts["running"], state_counts["failed"], total, n_trials,
         )
+    else:
+        n_trials = args.limit
+
+    study = tuner.run(n_trials=n_trials, parallel_trials=args.parallel_trials)
+    logger.info("Results saved to %s", tuner.db_path)
+    end_counts = _state_counts(study)
+    logger.info(
+        "Total trials: %d (complete=%d, pruned=%d, running/zombie=%d, failed=%d)",
+        len(study.trials),
+        end_counts["complete"], end_counts["pruned"],
+        end_counts["running"], end_counts["failed"],
+    )
 
     return 0
 

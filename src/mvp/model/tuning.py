@@ -5,6 +5,7 @@ import logging
 import tempfile
 import time
 import warnings
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,12 @@ from mvp.projection.iid.metric_registry import METRICS as _IID_METRICS
 logger = logging.getLogger(__name__)
 
 _PROJECTION_MODEL_TYPES = {"xgb_regressor", "linear", "ridge"}
+
+# Marker stamped on classification studies built under the forward-aligned (v2)
+# objective. Studies from the legacy within-window inner-CV objective lack it (or
+# carry a different value) and are refused for resume — the two objectives are
+# numerically incomparable. Bump this string on any future objective-frame change.
+_OBJECTIVE_FRAME = "forward_v2"
 
 # Maximize metrics: the classification set (single-sourced from metrics.py,
 # includes the tail-sensitive ranking objectives weighted_concordance /
@@ -295,6 +302,10 @@ def _param_combo_str(params: dict[str, Any]) -> str:
 class HyperparamTuner:
     """Bayesian hyperparameter optimization via Optuna TPE."""
 
+    # Forward-aligned selection needs enough inner folds to not be winner's-curse-
+    # exposed; below this the search rests on too few noisy forward folds.
+    _MIN_TUNING_FOLDS = 5
+
     def __init__(
         self,
         config_path: Path | str,
@@ -305,11 +316,22 @@ class HyperparamTuner:
         cache_dir: Path | str | None = None,
         state_dir: Path | str | None = None,
         n_startup_trials: int | None = None,
+        outer_folds: int = 4,
+        seed: int | None = None,
     ) -> None:
         self.config_path = Path(config_path)
         self.matches_path = matches_path
         self.cache_dir = cache_dir
         self.n_startup_trials = n_startup_trials
+        if outer_folds < 1:
+            raise ValueError(f"outer_folds must be >= 1, got {outer_folds}")
+        # Forward-aligned tuning: the objective is the metric over the inner
+        # (tuning) folds' TRUE forward windows; `outer_folds` trailing folds are
+        # held search-blind for selection. The legacy within-window inner-CV
+        # objective is intentionally unreachable — it optimized interpolation, not
+        # forward prediction.
+        self.outer_folds = outer_folds
+        self.seed = seed
         # Per-trial xgb thread budget when running parallel trials (set in run()
         # when parallel_trials > 1); None = serial, use the config's own n_jobs.
         self._per_trial_n_jobs: int | None = None
@@ -318,6 +340,10 @@ class HyperparamTuner:
             self.base_config = yaml.safe_load(f)
 
         self.is_iid = _is_iid_config(self.base_config)
+
+        # Fail fast, before any Optuna storage/study side effects, if the span
+        # can't feed a trustworthy forward-aligned search.
+        self._preflight_fold_check()
 
         # Objective source. CLASSIFICATION: metrics.objective from the config —
         # the single source shared with early stopping + the pruner; no --metric,
@@ -450,6 +476,7 @@ class HyperparamTuner:
                 n_startup_trials=startup_trials,
                 multivariate=True,
                 group=True,
+                seed=self.seed,
             )
 
         # MedianPruner kills trials whose fold-k tuning objective
@@ -459,6 +486,8 @@ class HyperparamTuner:
         # metrics are too noisy on tabular CV to drive kills. See
         # scripts/analyze_fold_predictiveness.py for the empirical
         # validation (zero top-K trials killed at warmup=2 across 50 trials).
+        # NOTE: that validation predates the forward-aligned objective; the
+        # per-fold noise profile differs, so warmup=2 warrants re-validation.
         pruner = optuna.pruners.MedianPruner(
             n_startup_trials=startup_trials,
             n_warmup_steps=2,
@@ -475,11 +504,85 @@ class HyperparamTuner:
             pruner=pruner,
         )
 
+        # Forward-aligned objective marker (classification only). The v2 objective
+        # (forward-OOS over the inner folds) is numerically incomparable to the
+        # legacy within-window inner-CV objective, so a study can't be resumed
+        # across frames — TPE would model a discontinuous surface and the pruner a
+        # scale mismatch. Stamp fresh studies; refuse to resume across a frame or a
+        # changed held-out block. IID/projection tuning doesn't use this machinery.
+        if not self.is_iid:
+            existing_frame = self.study.user_attrs.get("objective_frame")
+            if len(self.study.trials) > 0:
+                if existing_frame != _OBJECTIVE_FRAME:
+                    raise ValueError(
+                        f"study '{self.config_path.stem}' has "
+                        f"{len(self.study.trials)} trial(s) from "
+                        f"objective_frame={existing_frame!r}, not '{_OBJECTIVE_FRAME}'. "
+                        "The forward-aligned objective is not comparable to those "
+                        "trials — use a fresh study (rename the config or delete "
+                        f"{self.db_path})."
+                    )
+                prior_outer = self.study.user_attrs.get("outer_folds")
+                if prior_outer != self.outer_folds:
+                    raise ValueError(
+                        f"study '{self.config_path.stem}' was built with "
+                        f"outer_folds={prior_outer}, but this run requests "
+                        f"{self.outer_folds}. Changing the held-out block mid-study "
+                        "makes trials incomparable — use a fresh study."
+                    )
+            else:
+                self.study.set_user_attr("objective_frame", _OBJECTIVE_FRAME)
+                self.study.set_user_attr("outer_folds", self.outer_folds)
+
         if self.pinned_params:
             self.study.set_user_attr("pinned_params", self.pinned_params)
 
         # Enqueue baseline trial from config params
         self._enqueue_baseline()
+
+    def _preflight_fold_check(self) -> None:
+        """Fail fast (at construction, before any Optuna storage side effects) if a
+        calendar date-window config's span can't feed a trustworthy forward-aligned
+        search. Covers date_sliding and date_expanding — the validation types real
+        classification configs use. Index-based types (walk_forward etc.) derive
+        fold count from the data and are not preflighted; the runner's
+        holdout_folds < n_folds guard only prevents a crash there, it does not
+        enforce the inner-fold minimum."""
+        if self.is_iid:
+            return
+        val = self.base_config.get("validation") or {}
+        val_type = val.get("type")
+        if val_type == "date_sliding":
+            train_months = val.get("train_months")
+        elif val_type == "date_expanding":
+            train_months = val.get("initial_train_months")
+        else:
+            return
+        test_months = val.get("test_months")
+        dr = (self.base_config.get("data") or {}).get("date_range") or {}
+        start, end = dr.get("start"), dr.get("end")
+        if not (train_months and test_months and start and end):
+            return
+        try:
+            s = start if isinstance(start, date) else datetime.strptime(str(start), "%Y-%m-%d").date()
+            e = end if isinstance(end, date) else datetime.strptime(str(end), "%Y-%m-%d").date()
+        except (ValueError, TypeError):
+            return
+        # Month-granularity estimate of the splitter's fold count: the first test
+        # window opens `train_months` after the start, then contiguous `test_months`
+        # windows follow. The +1 matches the splitter's ceil-to-next-month upper
+        # bound (real configs use month-boundary date ranges).
+        span_months = (e.year - s.year) * 12 + (e.month - s.month)
+        n_outer = (span_months + 1 - int(train_months)) // int(test_months)
+        n_inner = n_outer - self.outer_folds
+        if n_inner < self._MIN_TUNING_FOLDS:
+            raise ValueError(
+                f"{self.config_path.stem}: data.date_range spans ~{n_outer} forward "
+                f"fold(s); with outer_folds={self.outer_folds} that leaves ~{n_inner} "
+                f"for the search, below the {self._MIN_TUNING_FOLDS}-fold minimum for a "
+                "trustworthy forward-aligned tune. Widen data.date_range (each added "
+                "year ≈ 4 more folds) or lower --outer-folds."
+            )
 
     def _get_base_params(self) -> dict[str, Any]:
         if self.is_iid:
@@ -532,8 +635,9 @@ class HyperparamTuner:
         for metric_name, metric_value in result["metrics"].items():
             trial.set_user_attr(metric_name, metric_value)
 
-        # Holdout metrics (last-fold OOS check) — used by tune-review to
-        # re-rank trials by the honest metric, not the tuning-set metric.
+        # Holdout metrics (the search-blind outer block, `outer_folds` trailing
+        # forward folds) — used by tune-review to re-rank trials by the honest
+        # metric, not the tuning-set (inner-fold) metric.
         if result.get("holdout_metrics"):
             for metric_name, metric_value in result["holdout_metrics"].items():
                 trial.set_user_attr(f"holdout_{metric_name}", metric_value)
@@ -637,8 +741,8 @@ class HyperparamTuner:
                     cache_dir=self.cache_dir,
                     run_name=f"tune_{self.config_path.stem}",
                     log_to_mlflow=False,
-                    holdout_folds=1,
-                    inner_cv_folds=4,
+                    holdout_folds=self.outer_folds,
+                    inner_cv_folds=0,
                     calibrate=False,
                 )
             # IID / projection runners don't currently support pruning;

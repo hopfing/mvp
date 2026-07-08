@@ -104,8 +104,8 @@ def format_leaderboard(
         sort_by = [_to_holdout(m) for m in sort_by]
 
     # Confirm holdout metrics exist for the requested sort metric(s). Studies
-    # tuned with holdout_folds=0 won't have them; the runner always uses
-    # holdout_folds=1 for tuning, so this catches misconfigured studies only.
+    # tuned with holdout_folds=0 won't have them; the tuner sets holdout_folds to
+    # `outer_folds` (>=1), so this catches misconfigured studies only.
     has_any_holdout = any(
         any(k.startswith("holdout_") for k in t.user_attrs) for t in trials
     )
