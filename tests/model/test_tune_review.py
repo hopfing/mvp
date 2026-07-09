@@ -5,6 +5,7 @@ import pytest
 
 from mvp.model.tune_review import (
     _is_new_pipeline_study,
+    _robust_pick,
     _to_ranked,
     format_best_trial,
     format_leaderboard,
@@ -418,6 +419,102 @@ class TestToRanked:
     def test_already_prefixed_passes_through(self):
         assert _to_ranked("holdout_log_loss", True) == "holdout_log_loss"
         assert _to_ranked("holdout_cal_log_loss", True) == "holdout_cal_log_loss"
+
+
+class TestRobustPick:
+    """1-SE robust pick: stability over a within-noise argmax."""
+
+    @staticmethod
+    def _cal_trial(number_seed, fold_lls):
+        return optuna.trial.create_trial(
+            params={"C": number_seed},
+            distributions={
+                "C": optuna.distributions.FloatDistribution(0.01, 100.0, log=True)
+            },
+            values=[fold_lls[0]],
+            user_attrs={
+                "holdout_fold_metrics_calibrated": [
+                    {"log_loss": v} for v in fold_lls
+                ]
+            },
+        )
+
+    def test_picks_lowest_variance_within_1se(self, tmp_path):
+        """Trial 0 has the best mean but high fold-to-fold variance; trial 1 is
+        slightly worse on mean but zero-variance and inside 1 SE of the best — the
+        stable one wins. (Trials are added to a study so they carry real numbers.)"""
+        storage = f"sqlite:///{tmp_path / 'rp1.db'}"
+        study = optuna.create_study(
+            study_name="rp1", storage=storage, direction="minimize"
+        )
+        study.add_trial(self._cal_trial(0.1, [0.55, 0.64, 0.55, 0.63]))  # 0: hi var
+        study.add_trial(self._cal_trial(1.0, [0.60, 0.60, 0.60, 0.60]))  # 1: stable
+        number, band = _robust_pick(study.trials, "holdout_cal_log_loss")
+        assert number == 1
+        assert band == 2
+
+    def test_none_without_per_fold_metrics(self):
+        t = optuna.trial.create_trial(
+            params={}, distributions={}, values=[0.6], user_attrs={}
+        )
+        assert _robust_pick([t], "holdout_cal_log_loss") == (None, 0)
+
+    def test_maximize_metric_direction(self, tmp_path):
+        """roc_auc is maximize: the stable trial within 1 SE *below* the best mean
+        is the robust pick (direction handled correctly)."""
+        storage = f"sqlite:///{tmp_path / 'rp2.db'}"
+        study = optuna.create_study(
+            study_name="rp2", storage=storage, direction="maximize"
+        )
+
+        def _t(seed, folds):
+            return optuna.trial.create_trial(
+                params={"C": seed},
+                distributions={
+                    "C": optuna.distributions.FloatDistribution(0.01, 100.0, log=True)
+                },
+                values=[folds[0]],
+                user_attrs={"holdout_fold_metrics": [{"roc_auc": v} for v in folds]},
+            )
+
+        study.add_trial(_t(0.1, [0.70, 0.80, 0.70, 0.80]))  # 0: mean .75, high var
+        study.add_trial(_t(1.0, [0.74, 0.74, 0.74, 0.74]))  # 1: mean .74, var 0
+        number, band = _robust_pick(study.trials, "holdout_roc_auc")
+        assert number == 1
+        assert band == 2
+
+    def test_robust_pick_annotates_leaderboard(self, tmp_path):
+        """format_leaderboard flags the 1-SE robust pick when it differs from the
+        argmax and there's a genuine within-1-SE band."""
+        storage = f"sqlite:///{tmp_path / 'robust.db'}"
+        study = optuna.create_study(
+            study_name="robust", storage=storage, direction="minimize"
+        )
+
+        def _t(seed, pooled, folds):
+            return optuna.trial.create_trial(
+                params={"C": seed},
+                distributions={
+                    "C": optuna.distributions.FloatDistribution(0.01, 100.0, log=True)
+                },
+                values=[pooled],
+                user_attrs={
+                    "_tuning_mode": "calibrated",
+                    "log_loss": pooled,
+                    "duration_s": 5.0,
+                    "holdout_cal_log_loss": pooled,
+                    "holdout_cal_roc_auc": 0.73,
+                    "holdout_fold_metrics_calibrated": [
+                        {"log_loss": v} for v in folds
+                    ],
+                },
+            )
+
+        study.add_trial(_t(0.1, 0.592, [0.55, 0.64, 0.55, 0.63]))  # argmax, high var
+        study.add_trial(_t(1.0, 0.600, [0.60, 0.60, 0.60, 0.60]))  # stable, in band
+        output = "\n".join(format_leaderboard(study, top_n=2))
+        assert "1-SE robust pick: trial 1" in output
+        assert "◆ 1-SE robust pick" in output
 
 
 class TestFormatParamImportance:

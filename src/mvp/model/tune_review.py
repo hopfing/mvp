@@ -1,6 +1,7 @@
 """Review Optuna tuning study results."""
 
 import logging
+import statistics
 
 import optuna
 
@@ -70,6 +71,57 @@ def _fold_spread(ua: dict, metric: str, use_cal: bool) -> str:
     if len(vals) < 2:
         return ""
     return f"[{min(vals):.4f}..{max(vals):.4f}] over {len(vals)} folds"
+
+
+def _robust_pick(
+    sorted_trials: list[optuna.trial.FrozenTrial], sort_metric: str
+) -> tuple[int | None, int]:
+    """1-SE rule (anti-winner's-curse): among trials within one cross-fold standard
+    error of the best mean on ``sort_metric``, return the one with the lowest
+    cross-fold variance (most stable across the outer folds), and the size of that
+    within-1-SE band.
+
+    Guards against crowning an argmax that's inside the noise. Returns (None, 0) if
+    per-fold outer-block metrics aren't available (needs >=2 folds). The SE is naive
+    per-fold; folds are correlated, so the band is if anything optimistically narrow
+    — making the pick conservative (close to the argmax), not overreaching.
+    """
+    if sort_metric.startswith("holdout_cal_"):
+        bare = sort_metric[len("holdout_cal_"):]
+        fold_key = "holdout_fold_metrics_calibrated"
+    elif sort_metric.startswith("holdout_"):
+        bare = sort_metric[len("holdout_"):]
+        fold_key = "holdout_fold_metrics"
+    else:
+        return None, 0
+    maximize = bare in _MAXIMIZE_METRICS
+
+    stats: list[tuple[int, float, float, float]] = []  # (number, mean, se, var)
+    for t in sorted_trials:
+        folds = t.user_attrs.get(fold_key)
+        if not folds:
+            continue
+        vals = [
+            f[bare] for f in folds if isinstance(f, dict) and f.get(bare) is not None
+        ]
+        if len(vals) < 2:
+            continue
+        mean = statistics.fmean(vals)
+        var = statistics.variance(vals)
+        se = statistics.stdev(vals) / (len(vals) ** 0.5)
+        stats.append((t.number, mean, se, var))
+    if not stats:
+        return None, 0
+    best = (
+        max(stats, key=lambda s: s[1]) if maximize else min(stats, key=lambda s: s[1])
+    )
+    best_mean, best_se = best[1], best[2]
+    if maximize:
+        band = [s for s in stats if s[1] >= best_mean - best_se]
+    else:
+        band = [s for s in stats if s[1] <= best_mean + best_se]
+    pick = min(band, key=lambda s: s[3])  # lowest cross-fold variance
+    return pick[0], len(band)
 
 
 def format_leaderboard(
@@ -169,6 +221,11 @@ def format_leaderboard(
         )
 
     trials.sort(key=sort_key)
+    # 1-SE robust pick (single-metric sorts): identify it over the full sorted set
+    # before truncation, so it isn't lost to top_n.
+    robust_number, robust_band = (
+        _robust_pick(trials, sort_by[0]) if len(sort_by) == 1 else (None, 0)
+    )
     trials = trials[:top_n]
 
     # Map each trial's Optuna id (`trial.number`, assigned at creation across
@@ -208,6 +265,12 @@ def format_leaderboard(
                 "showing the raw view until all do — resume/refresh the study to "
                 "rank on the calibrated numbers.)"
             )
+    if robust_number is not None and robust_band > 1:
+        lines.append(
+            f"1-SE robust pick: trial {robust_number} — lowest cross-fold variance "
+            f"among the {robust_band} trials within 1 SE of the best mean (marked "
+            "below); the argmax within that band is within noise."
+        )
     lines.append("=" * 100)
 
     for i, trial in enumerate(trials):
@@ -302,6 +365,11 @@ def format_leaderboard(
                 "holdout_calibration_error_max", "holdout_overconfidence_max",
                 "holdout_signed_calibration", "holdout_error_rate_80plus",
             }
+
+        if trial.number == robust_number and robust_band > 1:
+            lines.append(
+                "      ◆ 1-SE robust pick (most stable across the outer folds)"
+            )
 
         extra = [m for m in sort_by if m not in shown]
         if extra:
