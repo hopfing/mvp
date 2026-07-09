@@ -507,21 +507,22 @@ class HyperparamTuner:
                 seed=self.seed,
             )
 
-        # MedianPruner kills trials whose fold-k tuning objective
-        # (metrics.objective) is worse than the median of completed trials
-        # at the same fold step. warmup=2 means
-        # pruning can only fire from fold 2 onward; fold 0 and fold 1
-        # metrics are too noisy on tabular CV to drive kills. See
-        # scripts/analyze_fold_predictiveness.py for the empirical
-        # validation (zero top-K trials killed at warmup=2 across 50 trials).
-        # NOTE: that validation predates the forward-aligned objective; the
-        # per-fold noise profile differs, so warmup=2 warrants re-validation.
-        pruner = optuna.pruners.MedianPruner(
-            n_startup_trials=startup_trials,
-            n_warmup_steps=2,
-            n_min_trials=10,
-            interval_steps=1,
-        )
+        # Pruning DISABLED (2026-07). The tune metric carries no between-trial
+        # signal in the current regime (sep < 1 across every logged axis), so
+        # MedianPruner culls ~20% of trials on a noise ranking of the final
+        # objective — the culled trials never reach the backtest, and the cull
+        # criterion is a betting-irrelevant proxy, so we may be dropping good
+        # bettors sight-unseen. There is no signal-bearing target to validate
+        # the prunes against, so we run the full pool. To re-enable (e.g. once a
+        # metric actually separates trials), swap NopPruner for the MedianPruner
+        # below.
+        pruner = optuna.pruners.NopPruner()
+        # pruner = optuna.pruners.MedianPruner(
+        #     n_startup_trials=startup_trials,
+        #     n_warmup_steps=2,
+        #     n_min_trials=10,
+        #     interval_steps=1,
+        # )
 
         self.study = optuna.create_study(
             study_name=self.config_path.stem,
