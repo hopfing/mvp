@@ -319,8 +319,8 @@ def format_leaderboard(
             scal = ua.get("holdout_cal_signed_calibration", float("nan"))
             err80 = ua.get("holdout_cal_error_rate_80plus", float("nan"))
             lines.append(
-                f"  {i + 1:>2}. {seq_tag:<9}  LL={ll:.4f}  brier={brier:.4f}  "
-                f"AUC={auc:.4f}  acc={acc:.4f}  cal={cal * 100:.2f}%  "
+                f"  {i + 1:>2}. {seq_tag:<9}  LL={ll:.5f}  brier={brier:.5f}  "
+                f"AUC={auc:.5f}  acc={acc:.5f}  cal={cal * 100:.2f}%  "
                 f"cal_max={cal_max * 100:.2f}%  oc_max={oc_max * 100:.2f}%  "
                 f"scal={scal * 100:+.2f}%  err80={err80 * 100:.1f}%  "
                 f"({duration:.0f}s · {trial_id})"
@@ -353,8 +353,8 @@ def format_leaderboard(
             scal = ua.get("holdout_signed_calibration", float("nan"))
             err80 = ua.get("holdout_error_rate_80plus", float("nan"))
             lines.append(
-                f"  {i + 1:>2}. {seq_tag:<9}  LL={ll:.4f}  brier={brier:.4f}  "
-                f"AUC={auc:.4f}  acc={acc:.4f}  cal={cal * 100:.2f}%  "
+                f"  {i + 1:>2}. {seq_tag:<9}  LL={ll:.5f}  brier={brier:.5f}  "
+                f"AUC={auc:.5f}  acc={acc:.5f}  cal={cal * 100:.2f}%  "
                 f"cal_max={cal_max * 100:.2f}%  oc_max={oc_max * 100:.2f}%  "
                 f"scal={scal * 100:+.2f}%  err80={err80 * 100:.1f}%  "
                 f"({duration:.0f}s · {trial_id})"
