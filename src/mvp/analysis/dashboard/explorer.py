@@ -616,7 +616,9 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
 
     # --- Edge band table ---
     st.subheader("By Edge Band")
-    _render_edge_bands(resolved, st)
+    for val, label in circuits:
+        st.markdown(f"**{label}**")
+        _render_edge_bands(circuit_dfs[val], st)
 
     # By Probability Band
     if "prob_band" in resolved.columns:
