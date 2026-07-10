@@ -10,19 +10,45 @@ import polars as pl
 from mvp.model.registry import feature
 
 
+def surface_adj_expr(prefix: str) -> pl.Expr:
+    """Surface-selected Elo adjustment for a player (no base Elo).
+
+    Picks the hard/clay/grass adjustment matching the match surface; 0.0 for
+    any other surface.
+
+    Args:
+        prefix: "player" or "opp"
+    """
+    return (
+        pl.when(pl.col("surface") == "Hard").then(pl.col(f"{prefix}_hard_adj"))
+        .when(pl.col("surface") == "Clay").then(pl.col(f"{prefix}_clay_adj"))
+        .when(pl.col("surface") == "Grass").then(pl.col(f"{prefix}_grass_adj"))
+        .otherwise(0.0)
+    )
+
+
+def indoor_adj_expr(prefix: str) -> pl.Expr:
+    """Indoor Elo adjustment for a player, applied only on indoor matches.
+
+    0.0 on outdoor matches — the indoor adjustment is a venue effect that only
+    bears on indoor play.
+
+    Args:
+        prefix: "player" or "opp"
+    """
+    return (
+        pl.when(pl.col("indoor")).then(pl.col(f"{prefix}_indoor_adj"))
+        .otherwise(0.0)
+    )
+
+
 def surface_elo_expr(prefix: str) -> pl.Expr:
     """Surface-adjusted Elo for a player.
 
     Args:
         prefix: "player" or "opp"
     """
-    return (
-        pl.col(f"{prefix}_elo")
-        + pl.when(pl.col("surface") == "Hard").then(pl.col(f"{prefix}_hard_adj"))
-        .when(pl.col("surface") == "Clay").then(pl.col(f"{prefix}_clay_adj"))
-        .when(pl.col("surface") == "Grass").then(pl.col(f"{prefix}_grass_adj"))
-        .otherwise(0.0)
-    )
+    return pl.col(f"{prefix}_elo") + surface_adj_expr(prefix)
 
 
 # =============================================================================
@@ -46,6 +72,24 @@ def elo() -> pl.Expr:
 )
 def elo_surface() -> pl.Expr:
     return surface_elo_expr("player")
+
+
+@feature(
+    name="elo_indoor",
+    description="Indoor-adjusted Elo (base Elo + indoor adj on indoor matches)",
+    mirror=True,
+)
+def elo_indoor() -> pl.Expr:
+    return pl.col("player_elo") + indoor_adj_expr("player")
+
+
+@feature(
+    name="elo_surface_indoor",
+    description="Surface- and indoor-adjusted Elo (base + surface adj + indoor adj)",
+    mirror=True,
+)
+def elo_surface_indoor() -> pl.Expr:
+    return surface_elo_expr("player") + indoor_adj_expr("player")
 
 
 @feature(
@@ -127,6 +171,15 @@ def grass_adj() -> pl.Expr:
 )
 def indoor_adj() -> pl.Expr:
     return pl.col("player_indoor_adj")
+
+
+@feature(
+    name="surface_adj",
+    description="Surface-selected Elo adjustment (hard/clay/grass by match surface)",
+    mirror=True,
+)
+def surface_adj() -> pl.Expr:
+    return surface_adj_expr("player")
 
 
 @feature(
@@ -311,6 +364,48 @@ def elo_diff() -> pl.Expr:
 def elo_surface_diff() -> pl.Expr:
     """Surface-adjusted Elo difference."""
     return surface_elo_expr("player") - surface_elo_expr("opp")
+
+
+@feature(
+    name="surface_adj_diff",
+    params=[],
+    description="Surface-selected adjustment difference (player - opponent)",
+    mirror=False,
+    impute=None,
+)
+def surface_adj_diff() -> pl.Expr:
+    """Surface-selected adjustment difference."""
+    return surface_adj_expr("player") - surface_adj_expr("opp")
+
+
+@feature(
+    name="elo_indoor_diff",
+    params=[],
+    description="Indoor-adjusted Elo difference (player - opponent)",
+    mirror=False,
+    impute=None,
+)
+def elo_indoor_diff() -> pl.Expr:
+    """Indoor-adjusted Elo difference."""
+    return (
+        (pl.col("player_elo") + indoor_adj_expr("player"))
+        - (pl.col("opp_elo") + indoor_adj_expr("opp"))
+    )
+
+
+@feature(
+    name="elo_surface_indoor_diff",
+    params=[],
+    description="Surface- and indoor-adjusted Elo difference (player - opponent)",
+    mirror=False,
+    impute=None,
+)
+def elo_surface_indoor_diff() -> pl.Expr:
+    """Surface- and indoor-adjusted Elo difference."""
+    return (
+        (surface_elo_expr("player") + indoor_adj_expr("player"))
+        - (surface_elo_expr("opp") + indoor_adj_expr("opp"))
+    )
 
 
 @feature(

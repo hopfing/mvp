@@ -78,6 +78,83 @@ class TestSurfaceEloExpr:
         assert diff_result["diff"].to_list() == manual_result["diff"].to_list()
 
 
+class TestSurfaceAndIndoorComposites:
+    """surface_adj / elo_indoor / elo_surface_indoor helpers, features, diffs."""
+
+    def _df(self, surface: str, indoor: bool) -> pl.DataFrame:
+        return pl.DataFrame({
+            "player_elo": [1500.0],
+            "player_hard_adj": [30.0],
+            "player_clay_adj": [20.0],
+            "player_grass_adj": [10.0],
+            "player_indoor_adj": [40.0],
+            "opp_elo": [1400.0],
+            "opp_hard_adj": [15.0],
+            "opp_clay_adj": [25.0],
+            "opp_grass_adj": [5.0],
+            "opp_indoor_adj": [-10.0],
+            "surface": [surface],
+            "indoor": [indoor],
+        })
+
+    def test_surface_adj_selects_surface(self):
+        from mvp.model.features.elo import surface_adj_expr
+
+        df = self._df("Clay", indoor=False)
+        assert df.select(surface_adj_expr("player").alias("v"))["v"].to_list() == [20.0]
+
+    def test_surface_adj_unknown_surface_zero(self):
+        from mvp.model.features.elo import surface_adj_expr
+
+        df = self._df("Carpet", indoor=False)
+        assert df.select(surface_adj_expr("player").alias("v"))["v"].to_list() == [0.0]
+
+    def test_indoor_adj_zero_outdoor(self):
+        from mvp.model.features.elo import indoor_adj_expr
+
+        df = self._df("Hard", indoor=False)
+        assert df.select(indoor_adj_expr("player").alias("v"))["v"].to_list() == [0.0]
+
+    def test_indoor_adj_applied_indoor(self):
+        from mvp.model.features.elo import indoor_adj_expr
+
+        df = self._df("Hard", indoor=True)
+        assert df.select(indoor_adj_expr("player").alias("v"))["v"].to_list() == [40.0]
+
+    def test_elo_indoor_folds_only_indoors(self):
+        from mvp.model.features.elo import elo_indoor
+
+        out = self._df("Hard", indoor=False).select(elo_indoor().alias("v"))
+        assert out["v"].to_list() == [1500.0]
+        ind = self._df("Hard", indoor=True).select(elo_indoor().alias("v"))
+        assert ind["v"].to_list() == [1540.0]
+
+    def test_elo_surface_indoor_stacks(self):
+        from mvp.model.features.elo import elo_surface_indoor
+
+        # Indoor hard: elo + hard_adj + indoor_adj = 1500 + 30 + 40.
+        ind = self._df("Hard", indoor=True).select(elo_surface_indoor().alias("v"))
+        assert ind["v"].to_list() == [1570.0]
+        # Outdoor clay: elo + clay_adj, no indoor = 1500 + 20.
+        out = self._df("Clay", indoor=False).select(elo_surface_indoor().alias("v"))
+        assert out["v"].to_list() == [1520.0]
+
+    def test_elo_surface_indoor_diff(self):
+        from mvp.model.features.elo import elo_surface_indoor_diff
+
+        # Indoor hard: player (1500+30+40=1570) - opp (1400+15-10=1405) = 165.
+        df = self._df("Hard", indoor=True)
+        assert df.select(elo_surface_indoor_diff().alias("v"))["v"].to_list() == [165.0]
+
+    def test_new_features_registered(self):
+        reg = get_registry()
+        for name in (
+            "surface_adj", "elo_indoor", "elo_surface_indoor",
+            "surface_adj_diff", "elo_indoor_diff", "elo_surface_indoor_diff",
+        ):
+            assert name in reg.list_features()
+
+
 class TestAbsoluteLevelFeatures:
     """Test absolute Elo level features."""
 
