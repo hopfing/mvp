@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import tempfile
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,7 @@ from typing import Any
 import numpy as np
 import polars as pl
 import yaml
+from threadpoolctl import threadpool_limits
 
 from mvp.common.base_job import get_local_data_root
 from mvp.model.discovery.config import DiscoveryConfig
@@ -36,6 +38,13 @@ from mvp.model.models import get_n_jobs_override
 from mvp.model.registry import get_registry
 
 logger = logging.getLogger(__name__)
+
+# Model types whose fit ignores sklearn ``n_jobs`` and instead spends its time in
+# BLAS (e.g. LogisticRegression's default lbfgs solver on a binary target). For
+# these the candidate-loop per-fit thread share is applied as a BLAS thread cap
+# via threadpoolctl, since ``n_jobs`` on the model is a no-op. XGB routes n_jobs
+# through OpenMP, not BLAS, so it is unaffected by the cap.
+_BLAS_THREADED_MODEL_TYPES = {"logistic"}
 
 
 @dataclass
@@ -342,6 +351,11 @@ class FeatureDiscovery:
         workers`` threads each; auto targets ~4 threads/fit (the xgb knee).
         Non-forward paths and stability stay serial (stability parallelises at
         the resample layer; nesting would oversubscribe).
+
+        For XGB the per-fit share is injected as the fit's ``n_jobs`` (OpenMP);
+        for BLAS-threaded models (``_BLAS_THREADED_MODEL_TYPES``, whose fit
+        ignores ``n_jobs``) the caller applies the same share as a BLAS thread
+        cap via threadpoolctl. Either way the effective knobs are identical.
         """
         if method != "forward":
             return 1, None
@@ -741,11 +755,32 @@ class FeatureDiscovery:
             forward_max_workers=cand_workers,
         )
 
-        result = selector.run(
-            verbose=True,
-            checkpoint_path=checkpoint_path,
-            checkpoint_interval=checkpoint_interval,
+        # For BLAS-threaded models (the fit ignores n_jobs), cap each concurrent
+        # candidate fit's BLAS threads to the same per-fit share XGB gets via
+        # n_jobs. Set once around the whole loop, not per-fit: threadpoolctl's
+        # BLAS limit is process-global, so a per-fit context manager would race
+        # on restore between concurrent workers. cand_n_jobs is None for
+        # non-forward paths, which stay uncapped (serial, one fit at a time).
+        blas_managed = (
+            self.config.model.type in _BLAS_THREADED_MODEL_TYPES
+            and cand_n_jobs is not None
         )
+        if blas_managed:
+            self._log(
+                f"BLAS thread cap: {cand_n_jobs} thread(s)/fit x {cand_workers} "
+                f"worker(s) via threadpoolctl (model "
+                f"'{self.config.model.type}' ignores n_jobs)"
+            )
+        blas_cap = (
+            threadpool_limits(limits=cand_n_jobs)
+            if blas_managed else nullcontext()
+        )
+        with blas_cap:
+            result = selector.run(
+                verbose=True,
+                checkpoint_path=checkpoint_path,
+                checkpoint_interval=checkpoint_interval,
+            )
 
         self._log(f"Selected {len(result.selected_features)} features")
         for step in result.history:
