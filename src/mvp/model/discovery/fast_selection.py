@@ -764,6 +764,11 @@ class FastForwardSelector:
         use_fast_logistic = model_type == "logistic"
         if use_fast_logistic:
             lr_params = {"random_state": 42, "max_iter": 1000, **model_params}
+            # n_jobs was injected into model_params as the per-fit thread share
+            # for XGB; on LogisticRegression it is a deprecated no-op (sklearn
+            # 1.8+, removed in 1.10). Discovery applies the share as a BLAS cap
+            # instead (see _BLAS_THREADED_MODEL_TYPES), so strip it here.
+            lr_params.pop("n_jobs", None)
 
         # Build a single-metric function to avoid computing all 6 metrics
         # when we only need one. Pass lambda_over from model params so

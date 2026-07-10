@@ -608,6 +608,11 @@ class LogisticModel(BaseModel):
         # don't trigger the FutureWarning and the inconsistency UserWarning
         # when penalty disagrees with l1_ratio.
         self.params.pop("penalty", None)
+        # sklearn 1.8+ deprecates `n_jobs` on LogisticRegression (no effect on a
+        # binary fit; removed in 1.10). In discovery, n_jobs is the thread-budget
+        # knob (drives candidate-loop workers + the BLAS cap), not an estimator
+        # param, so strip it before it reaches the constructor.
+        self.params.pop("n_jobs", None)
         # Derive solver from l1_ratio when not explicitly set: lbfgs is fast
         # but only handles pure L2 (l1_ratio == 0); saga handles the full
         # L1 / L2 / elasticnet spectrum.
