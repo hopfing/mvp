@@ -273,12 +273,17 @@ def _run_confidence_inline(config_path: Path) -> None:
     _save_validation_json(result, fp_dir / "validation_results.json")
 
 
-def refresh_pipeline(config_path: Path) -> None:
+def refresh_pipeline(config_path: Path, *, skip_confidence: bool = False) -> None:
     """Run the sequential refresh pipeline for a model: model -> confidence -> backtest.
 
     Hard-fails on any stage's failure — no partial state is acceptable. The
     upstream commands themselves write their artifacts on success; this
     function only orchestrates calls and surfaces failures.
+
+    When `skip_confidence` is True, the confidence stage (refresh 2/3) is not
+    run — no validation_results.json / oof.parquet is written. model-rank never
+    displays confidence, and model-report renders Section C as skipped. Saves a
+    full CV retrain + validate per model.
     """
     import contextlib
     import io
@@ -290,8 +295,14 @@ def refresh_pipeline(config_path: Path) -> None:
     runner = ExperimentRunner(config_path=config_path)
     runner.run()
 
-    logger.info("[refresh 2/3] confidence validation: %s", config_path.stem)
-    _run_confidence_inline(config_path)
+    if skip_confidence:
+        logger.info(
+            "[refresh 2/3] confidence validation: SKIPPED (--no-confidence): %s",
+            config_path.stem,
+        )
+    else:
+        logger.info("[refresh 2/3] confidence validation: %s", config_path.stem)
+        _run_confidence_inline(config_path)
 
     logger.info("[refresh 3/3] backtest: %s", config_path.stem)
     # Suppress backtest's stdout summary (still written to the _summary.txt
@@ -302,12 +313,29 @@ def refresh_pipeline(config_path: Path) -> None:
         run_lead_backtest(config_path, retrain=True)
 
 
-def load_artifacts(model_name: str, config_path: Path) -> ModelArtifacts:
-    """Load all three artifacts for a model. Hard-fail if any missing."""
+def load_artifacts(
+    model_name: str, config_path: Path, *, require_confidence: bool = True
+) -> ModelArtifacts:
+    """Load all three artifacts for a model. Hard-fail if any missing.
+
+    When `require_confidence` is False, a missing confidence artifact is
+    tolerated (the confidence stage may have been skipped via --no-confidence):
+    `confidence` is left empty and downstream renderers show it as skipped.
+    """
     diagnostics, run_id, run_ts, diag_path = load_diagnostics(
         model_name, config_path=config_path
     )
-    confidence, conf_path = load_confidence(model_name, config_path=config_path)
+    if require_confidence:
+        confidence, conf_path = load_confidence(model_name, config_path=config_path)
+    else:
+        try:
+            confidence, conf_path = load_confidence(model_name, config_path=config_path)
+        except FileNotFoundError:
+            confidence = {}
+            try:
+                conf_path = fp_confidence_path(config_path)
+            except Exception:
+                conf_path = confidence_path(model_name)
     backtest, bt_path = load_backtest(model_name, config_path=config_path)
     return ModelArtifacts(
         name=model_name,

@@ -215,6 +215,13 @@ def _fmt_pp_cell(x: float | None, width: int = 7) -> str:
 
 
 def format_section_c(art: ModelArtifacts) -> str:
+    if not art.confidence:
+        return "\n".join([
+            "=" * 80,
+            "C. TEMPORAL STABILITY (confidence, 12mo rolling)",
+            "=" * 80,
+            "  Skipped (--no-confidence): confidence stage not run for this report.",
+        ])
     profiles = art.confidence.get("profiles", {})
     lines = ["=" * 80, "C. TEMPORAL STABILITY (confidence, 12mo rolling)", "=" * 80]
 
@@ -499,14 +506,19 @@ def _render_monthly_slices(df: pl.DataFrame, lines: list[str]) -> None:
         )
 
 
-def run_report(config_path: Path, no_refresh: bool = False) -> str:
+def run_report(
+    config_path: Path, no_refresh: bool = False, skip_confidence: bool = False
+) -> str:
     """Refresh artifacts then format the four-section report. Returns the
     formatted report string. Print is the caller's responsibility.
+
+    `skip_confidence` skips the confidence stage on refresh and tolerates a
+    missing confidence artifact; Section C renders as skipped.
     """
     model_name = config_path.stem
     if not no_refresh:
-        refresh_pipeline(config_path)
-    art = load_artifacts(model_name, config_path)
+        refresh_pipeline(config_path, skip_confidence=skip_confidence)
+    art = load_artifacts(model_name, config_path, require_confidence=not skip_confidence)
     cfg = _load_config(config_path)
     sections = [
         format_section_a(art, cfg),

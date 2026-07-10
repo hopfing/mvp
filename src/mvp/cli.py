@@ -1165,6 +1165,12 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         help="Skip the refresh pipeline; read existing artifacts only. Hard-fails if any are missing.",
     )
     mreport_parser.add_argument(
+        "--no-confidence", action="store_true",
+        help="Skip the confidence stage (refresh 2/3): no validation_results.json is written and "
+             "Section C renders as skipped. Diagnostics + backtest still run. Saves a full CV "
+             "retrain + validate.",
+    )
+    mreport_parser.add_argument(
         "--memory-limit", type=int, default=None,
         help="Override memory limit %% (0 to disable, default 75)",
     )
@@ -2752,7 +2758,9 @@ def cmd_model_report(args: argparse.Namespace) -> int:
             f"Config file not found: {args.config} (tried {config_path})"
         )
 
-    report = run_report(config_path, no_refresh=args.no_refresh)
+    report = run_report(
+        config_path, no_refresh=args.no_refresh, skip_confidence=args.no_confidence
+    )
     print(report)
     return 0
 
