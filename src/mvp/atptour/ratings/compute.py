@@ -10,6 +10,7 @@ from mvp.atptour.elo.compute import ELO_COLUMNS
 from mvp.atptour.elo.constants import (
     DEFAULT_ELO,
     DEFAULT_RD,
+    INDOOR_K_MULT,
     REVERSION_RATE,
     SERVE_RETURN_K_MULT,
     SURFACE_K_MULT,
@@ -214,6 +215,7 @@ def compute_all_ratings(df: pl.DataFrame) -> pl.DataFrame:
         player_id = col_player_id[i]
         opp_id = col_opp_id[i]
         surface = col_surface[i]
+        indoor = col_indoor[i]
         round_name = col_round[i]
         tournament_level = col_tournament_level[i]
         match_date = col_match_date[i]
@@ -343,6 +345,27 @@ def compute_all_ratings(df: pl.DataFrame) -> pl.DataFrame:
                 player_rating.grass_adj = new_adj
                 opp_rating.grass_adj = opp_new_adj
 
+        # Update indoor adjustment — additive and opponent-adjusted, the same
+        # mechanic as the surface adjustments, only on indoor matches. Narrow
+        # nesting: indoor_adj uses its own indoor-inclusive effective (base +
+        # surface + pre-match indoor) for its expected score, but that effective
+        # does NOT feed the base-Elo / surface-adj updates above (those stay on
+        # the surface-only snapshot). Both sides snapshot pre-match indoor_adj
+        # before either is reassigned.
+        if indoor:
+            indoor_eff_player = player_effective + player_rating.indoor_adj
+            indoor_eff_opp = opp_effective + opp_rating.indoor_adj
+            new_indoor_adj = update_indoor_adj(
+                player_rating.indoor_adj,
+                indoor_eff_player, indoor_eff_opp, won, k_player * INDOOR_K_MULT,
+            )
+            opp_new_indoor_adj = update_indoor_adj(
+                opp_rating.indoor_adj,
+                indoor_eff_opp, indoor_eff_player, not won, k_opp * INDOOR_K_MULT,
+            )
+            player_rating.indoor_adj = new_indoor_adj
+            opp_rating.indoor_adj = opp_new_indoor_adj
+
         # Update serve/return Elo — two sub-games per match
         # Averaged K keeps serve/return zero-sum
         k_serve = (k_player + k_opp) / 2 * SERVE_RETURN_K_MULT
@@ -454,13 +477,6 @@ def compute_all_ratings(df: pl.DataFrame) -> pl.DataFrame:
             player_rating.tb_clutch
         ) / 3
 
-        # Indoor adjustment
-        indoor = col_indoor[i]
-        if indoor:
-            player_rating.indoor_adj = update_indoor_adj(
-                player_rating.indoor_adj, won
-            )
-
         # --- Opponent style updates (mirror columns) ---
 
         opp_svc_first_serve_pts_won = col_opp_svc_first_serve_pts_won[i]
@@ -530,11 +546,6 @@ def compute_all_ratings(df: pl.DataFrame) -> pl.DataFrame:
             opp_rating.tb_clutch
         ) / 3
 
-        if indoor:
-            opp_rating.indoor_adj = update_indoor_adj(
-                opp_rating.indoor_adj, not won
-            )
-
         # Mean reversion — counteract inflation from player turnover
         # Scaled by RD: uncertain players revert more, established players barely
         for r in (player_rating, opp_rating):
@@ -543,6 +554,7 @@ def compute_all_ratings(df: pl.DataFrame) -> pl.DataFrame:
             r.hard_adj *= 1 - reversion
             r.clay_adj *= 1 - reversion
             r.grass_adj *= 1 - reversion
+            r.indoor_adj *= 1 - reversion
 
         # Update RD (decreases after match)
         player_rating.rd = update_rd(player_rating.rd)

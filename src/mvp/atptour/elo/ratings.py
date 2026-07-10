@@ -11,7 +11,6 @@ from mvp.atptour.elo.constants import (
     FIRST_SERVE_POWER_BASELINE,
     HIGH_RD_K_MULT,
     HIGH_RD_THRESHOLD,
-    INDOOR_EMA_SCALE,
     MAX_RD,
     MIN_RD,
     NEW_PLAYER_K_MULT,
@@ -380,12 +379,29 @@ def update_tb_clutch(
 
 def update_indoor_adj(
     current_adj: float,
+    player_effective_elo: float,
+    opponent_effective_elo: float,
     won: bool,
+    k: float,
 ) -> float:
-    """Update indoor adjustment based on match result.
+    """Calculate new indoor adjustment after an indoor match.
 
-    Uses EMA toward a target based on win/loss outcome.
-    Centered at 0 (not DEFAULT_ELO).
+    Mirrors ``update_surface_adj``: an additive, opponent-adjusted Elo modifier,
+    applied only on indoor matches. The caller supplies pre-match effective Elos
+    (base + surface adj + pre-match indoor adj) and the current indoor
+    adjustment. Centered at 0.
+
+    Args:
+        current_adj: Current indoor adjustment value.
+        player_effective_elo: Player's effective Elo (base + surface + indoor).
+        opponent_effective_elo: Opponent's effective Elo (base + surface + indoor).
+        won: Whether the player won.
+        k: K-factor for this update.
+
+    Returns:
+        New indoor adjustment value.
     """
-    target = INDOOR_EMA_SCALE * (1.0 if won else -1.0)
-    return current_adj + EMA_ALPHA * (target - current_adj)
+    expected = expected_score(player_effective_elo, opponent_effective_elo)
+    outcome = 1.0 if won else 0.0
+
+    return current_adj + k * (outcome - expected)

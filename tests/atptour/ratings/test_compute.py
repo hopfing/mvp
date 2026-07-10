@@ -64,6 +64,48 @@ class TestEloRegression:
             assert col in result.columns, f"Missing column: {col}"
 
 
+class TestIndoorAdjustment:
+    """Reconstructed indoor_adj: additive, opponent-adjusted, indoor-only."""
+
+    @staticmethod
+    def _indoor_df(indoor: bool) -> pl.DataFrame:
+        # A (rank 50) is the stronger seed; plays B (rank 60) twice.
+        return pl.DataFrame({
+            "match_uid": ["m1", "m1", "m2", "m2"],
+            "player_id": ["A", "B", "A", "B"],
+            "opp_id": ["B", "A", "B", "A"],
+            "won": [True, False, True, False],
+            "surface": ["Hard"] * 4,
+            "round": ["R32"] * 4,
+            "round_order": [7] * 4,
+            "tournament_start_date": date(2020, 1, 1),
+            "tournament_level": ["250"] * 4,
+            "effective_match_date": [
+                date(2024, 1, 1), date(2024, 1, 1),
+                date(2024, 2, 1), date(2024, 2, 1),
+            ],
+            "player_rank": [50, 60, 50, 60],
+            "opp_rank": [60, 50, 60, 50],
+            "indoor": [indoor] * 4,
+        })
+
+    def test_indoor_win_moves_adjustment(self):
+        # A wins the indoor m1; recorded pre-m2, A's indoor_adj is positive and
+        # B's (the opponent) is negative.
+        result = compute_all_ratings(self._indoor_df(indoor=True))
+        m2_a = result.filter(
+            (pl.col("player_id") == "A") & (pl.col("match_uid") == "m2")
+        )
+        assert m2_a["player_indoor_adj"][0] > 0.0
+        assert m2_a["opp_indoor_adj"][0] < 0.0
+
+    def test_outdoor_leaves_indoor_adj_zero(self):
+        # No indoor matches → indoor_adj is never updated, stays 0 everywhere.
+        result = compute_all_ratings(self._indoor_df(indoor=False))
+        assert all(v == 0.0 for v in result["player_indoor_adj"].to_list())
+        assert all(v == 0.0 for v in result["opp_indoor_adj"].to_list())
+
+
 class TestGlickoColumnsPresent:
     def test_glicko_columns_in_output(self):
         df = _make_match_df()

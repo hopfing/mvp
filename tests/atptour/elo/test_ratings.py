@@ -762,14 +762,41 @@ class TestUpdateIndoorAdj:
     def test_indoor_win_increases(self):
         from mvp.atptour.elo.ratings import update_indoor_adj
 
-        new_adj = update_indoor_adj(0.0, won=True)
+        # Win vs an equal-strength opponent (expected ~0.5) raises the adjustment.
+        new_adj = update_indoor_adj(0.0, 1500.0, 1500.0, won=True, k=32.0)
         assert new_adj > 0.0
 
     def test_indoor_loss_decreases(self):
         from mvp.atptour.elo.ratings import update_indoor_adj
 
-        new_adj = update_indoor_adj(0.0, won=False)
+        new_adj = update_indoor_adj(0.0, 1500.0, 1500.0, won=False, k=32.0)
         assert new_adj < 0.0
+
+    def test_indoor_opponent_adjusted(self):
+        from mvp.atptour.elo.ratings import update_indoor_adj
+
+        # Beating a stronger opponent is a bigger surprise → bigger increase
+        # than beating a weaker one.
+        beat_stronger = update_indoor_adj(0.0, 1500.0, 1700.0, won=True, k=32.0)
+        beat_weaker = update_indoor_adj(0.0, 1500.0, 1300.0, won=True, k=32.0)
+        assert beat_stronger > beat_weaker > 0.0
+
+    def test_indoor_adj_decelerates(self):
+        from mvp.atptour.elo.ratings import update_indoor_adj
+
+        # In real use the player's effective includes the current adjustment, so
+        # repeated wins drive expected → 1 and each step shrinks — decelerating,
+        # not the unbounded linear growth of a fixed-target update.
+        base, opp = 1500.0, 1500.0
+        first_step = update_indoor_adj(0.0, base, opp, won=True, k=32.0)
+        adj = first_step
+        for _ in range(499):
+            adj = update_indoor_adj(adj, base + adj, opp, won=True, k=32.0)
+        prev = adj
+        adj = update_indoor_adj(adj, base + adj, opp, won=True, k=32.0)
+        last_step = adj - prev
+        assert last_step > 0.0
+        assert last_step < first_step / 10
 
 
 class TestEMAConvergence:
@@ -830,24 +857,6 @@ class TestEMAConvergence:
             elo = update_tb_clutch(elo, 2, 3)
         # Target = 1500 + (0.6667 - 0.50) * 3000 = 2000
         assert abs(elo - 2000.0) < 1.0
-
-    def test_indoor_adj_converges_winner(self):
-        from mvp.atptour.elo.ratings import update_indoor_adj
-
-        adj = 0.0
-        for _ in range(200):
-            adj = update_indoor_adj(adj, won=True)
-        # Target = INDOOR_EMA_SCALE * 1.0 = 500.0
-        assert abs(adj - 500.0) < 0.01
-
-    def test_indoor_adj_converges_loser(self):
-        from mvp.atptour.elo.ratings import update_indoor_adj
-
-        adj = 0.0
-        for _ in range(200):
-            adj = update_indoor_adj(adj, won=False)
-        # Target = INDOOR_EMA_SCALE * -1.0 = -500.0
-        assert abs(adj - (-500.0)) < 0.01
 
     def test_different_match_counts_same_stats_converge(self):
         """Two players with identical stats but different match counts

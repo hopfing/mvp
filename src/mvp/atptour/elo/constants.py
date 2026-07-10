@@ -43,6 +43,9 @@ TOURNAMENT_IMPORTANCE = {
 # Surface K-factor (more stable than overall)
 SURFACE_K_MULT = 0.3
 
+# Indoor venue K-factor (mirrors surface — an opponent-adjusted Elo modifier)
+INDOOR_K_MULT = 0.3
+
 # Serve/Return K-factor
 SERVE_RETURN_K_MULT = 1.0
 
@@ -88,9 +91,6 @@ STYLE_SCALE = 3000.0  # Smaller scale than serve/return (4000)
 
 # EMA smoothing for serve/return Elo and style dimensions
 EMA_ALPHA = 0.10  # Half-life ~7 matches
-
-# Indoor adjustment EMA scale (centered at 0, not DEFAULT_ELO)
-INDOOR_EMA_SCALE = 500.0
 
 # Score normalization for serve/return Elo
 # Maps ±10pp from surface baseline to the full [0,1] range
