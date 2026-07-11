@@ -820,8 +820,14 @@ class FastForwardSelector:
                     test_idx = test_idx[eval_mask[test_idx]]
                     if test_idx.size == 0:
                         continue
-                X_train = X_wide[np.ix_(train_idx, col_indices)].copy()
-                X_test = X_wide[np.ix_(test_idx, col_indices)].copy()
+                # np.ix_ advanced indexing on both axes always returns a freshly
+                # allocated array that owns its data (never a view of X_wide), so
+                # the in-place NaN imputation below cannot leak back into the
+                # shared read-only matrix. No explicit .copy() needed — the gather
+                # is already a private buffer (this also makes concurrent candidate
+                # fits safe; see selection.py / stability.py).
+                X_train = X_wide[np.ix_(train_idx, col_indices)]
+                X_test = X_wide[np.ix_(test_idx, col_indices)]
                 y_train, y_test = y[train_idx], y[test_idx]
 
                 if constant_positions:

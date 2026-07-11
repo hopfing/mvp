@@ -309,8 +309,9 @@ class FeatureSelector:
 
             # Pure worker: returns (feature, metric), or (feature, None) on a
             # scorer failure — mirroring the serial `continue`-on-exception. It
-            # reads only shared read-only state via self.scorer (which copies
-            # each fold slice before touching it), so concurrent calls are safe.
+            # reads only shared read-only state via self.scorer, whose per-fold
+            # np.ix_ gather returns a private copy before any in-place impute, so
+            # concurrent calls never mutate the shared matrix and are safe.
             def _eval(feat: str) -> tuple[str, float | None]:
                 try:
                     return feat, self.scorer(selected + [feat])

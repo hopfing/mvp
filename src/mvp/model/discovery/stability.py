@@ -249,8 +249,8 @@ def run_stability_selection(
     # fits, which release the GIL, so threads — not processes — give real
     # parallelism while still sharing the single precomputed X_wide (no
     # per-worker matrix copies). create_scorer / resample_folds only read frozen
-    # state, and the scorer copies each fold's slice before imputing, so X_wide
-    # is never mutated across threads.
+    # state, and the scorer's per-fold np.ix_ gather returns a private copy before
+    # imputing, so X_wide is never mutated across threads.
     # Resolve the per-fit thread cap the way the model layer does: config
     # model.params n_jobs, else the --n-jobs override. When neither is set the
     # fit falls back to ~all cores (cpu-2), so concurrent fits would
