@@ -101,6 +101,9 @@ class FeatureSelector:
         round1_baseline: float | None = None,
         min_delta: float = 0.0,
         forward_max_workers: int | None = None,
+        round1_exclude: set[str] | None = None,
+        bottom_cut_n: int | None = None,
+        first_cut_round: int = 3,
     ) -> None:
         """Initialize selector.
 
@@ -140,6 +143,16 @@ class FeatureSelector:
         # None/1 = serial (exact current path). Resolved upstream (discover);
         # stability forces 1 to avoid nesting under its resample pool.
         self.forward_max_workers = forward_max_workers
+        # Candidate-pool pruning (default off — every non-forward call site and
+        # any config without a pool_pruning block leaves these off, reproducing
+        # exhaustive selection). round1_exclude: mirror=True specs to skip in the
+        # first forward round; bottom_cut_n / first_cut_round: the per-round
+        # bottom cut. _pruned_features accumulates cut specs and is persisted to
+        # the checkpoint so resume does not resurrect them.
+        self.round1_exclude = set(round1_exclude) if round1_exclude else set()
+        self.bottom_cut_n = bottom_cut_n
+        self.first_cut_round = first_cut_round
+        self._pruned_features: set[str] = set()
 
     def _fmt_metric(self, value: float) -> str:
         """Format a metric value at the min_delta-scaled display precision."""
@@ -192,7 +205,10 @@ class FeatureSelector:
             selected_metrics: list[float] = [
                 r.get("metric", 0.0) for r in cp.completed_rounds
             ]
-            remaining = set(self.all_features) - set(selected)
+            self._pruned_features = set(getattr(cp, "pruned_features", None) or [])
+            remaining = (
+                set(self.all_features) - set(selected) - self._pruned_features
+            )
             best_metric = cp.best_metric
             history: list[dict[str, Any]] = []
             if selected:
@@ -209,15 +225,20 @@ class FeatureSelector:
             first_round_logged = len(cp.completed_rounds) > 0
             logger.info(
                 "Resumed from checkpoint: %d completed rounds "
-                "(current metric=%s), %d candidates scored in round %d",
+                "(current metric=%s), %d candidates scored in round %d, "
+                "%d pruned, %d base features",
                 len(cp.completed_rounds),
                 self._fmt_metric(best_metric),
                 len(resumed_round_scores),
                 cp.current_round,
+                len(self._pruned_features),
+                len(self.base_features),
             )
         else:
             selected = list(self.base_features)
-            remaining = set(self.all_features) - set(selected)
+            remaining = (
+                set(self.all_features) - set(selected) - self._pruned_features
+            )
             history = []
             if selected:
                 best_metric = self.scorer(selected)
@@ -243,18 +264,33 @@ class FeatureSelector:
 
         while remaining and len(selected) < self.max_features:
             round_num = len(selected) + 1
+            # Forward-round index (excludes seed/base features) so pruning gates
+            # behave the same whether or not the run seeds.
+            fwd_round = round_num - len(self.base_features)
             round_results: list[tuple[str, float]] = []
             scores_this_round: dict[str, float] = {}
+
+            # Candidate pool for THIS round. The round-1 mirror filter fires ONLY
+            # on a genuine round 1 (round_num == 1, i.e. nothing selected — an
+            # unseeded run): it scores only mirror=False specs, then the full pool
+            # returns from round 2. A seeded run has no such round 1 — its first
+            # forward round already conditions on the seeds, where the "round-1
+            # winner is always a diff" evidence does not hold — so the filter
+            # never fires there. `remaining` is left untouched, so the skipped
+            # specs are available next round regardless.
+            round_pool = remaining
+            if self.round1_exclude and round_num == 1:
+                round_pool = remaining - self.round1_exclude
 
             # Seed with any prior scores from the checkpoint for this round.
             # Populate the score set only — the round winner is chosen by a
             # single deterministic reduction over the full set below, so resume
             # insertion order (and, under parallelism, completion order) can't
             # change the pick.
-            unevaluated = set(remaining)
+            unevaluated = set(round_pool)
             if resumed_round_scores:
                 for feat, score in resumed_round_scores.items():
-                    if feat not in remaining:
+                    if feat not in round_pool:
                         continue
                     round_results.append((feat, score))
                     scores_this_round[feat] = score
@@ -307,6 +343,7 @@ class FeatureSelector:
                         current_round=round_num,
                         total_candidates=len(remaining),
                         scores=scores_this_round,
+                        pruned_features=sorted(self._pruned_features),
                     )
 
             desc = f"Round {round_num}/{self.max_features}"
@@ -442,6 +479,28 @@ class FeatureSelector:
                 "ranking": sorted_results,
             })
 
+            # Bottom-cut: from the warmup round on, permanently drop the N
+            # worst-scoring survivors of this round. sorted_results is best-first,
+            # so the tail is worst; the winner is already out of `remaining`, so
+            # intersecting with it can never re-admit the winner (base seeds are
+            # never scored, so they can't land here either). Persisted via
+            # _pruned_features so resume does not resurrect them.
+            if self.bottom_cut_n and fwd_round >= self.first_cut_round:
+                n = self.bottom_cut_n
+                bottom = {f for f, _ in sorted_results[-n:]}
+                newly = remaining & bottom
+                # Skip the cut if it would leave fewer than one more cut's worth
+                # of survivors (belt-and-suspenders; FS converges well before the
+                # pool shrinks this far).
+                if newly and len(remaining) - len(newly) >= n:
+                    remaining -= newly
+                    self._pruned_features |= newly
+                    logger.info(
+                        "  bottom-cut (fwd round %d): dropped %d, pool %d -> %d",
+                        fwd_round, len(newly),
+                        len(remaining) + len(newly), len(remaining),
+                    )
+
             # Checkpoint at round boundary (current round advances, scores reset)
             if checkpoint_path is not None:
                 self._write_checkpoint(
@@ -453,6 +512,7 @@ class FeatureSelector:
                     current_round=round_num + 1,
                     total_candidates=len(remaining),
                     scores={},
+                    pruned_features=sorted(self._pruned_features),
                 )
 
             # Log round 1 rankings inline so interrupted runs still surface them
@@ -516,6 +576,7 @@ class FeatureSelector:
         current_round: int,
         total_candidates: int,
         scores: dict[str, float],
+        pruned_features: list[str] | None = None,
     ) -> None:
         """Write current selection state to checkpoint file."""
         run_name = path.stem
@@ -538,6 +599,7 @@ class FeatureSelector:
             best_metric=best_metric,
             direction=self.direction,
             max_features=self.max_features,
+            pruned_features=list(pruned_features or []),
         )
         save_checkpoint(path, cp)
 

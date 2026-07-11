@@ -226,6 +226,16 @@ def spec_base_feature(spec: str) -> str:
     return core
 
 
+def _spec_is_mirror_true(spec: str, registry: Any) -> bool:
+    """Whether a candidate spec expands from a mirror=True feature (a raw
+    player_/opp_ pair). Used by the round-1 mirror filter. Unknown bases (no
+    registry match) are treated as not-mirror so they are never dropped."""
+    try:
+        return registry.get(spec_base_feature(spec)).mirror is True
+    except KeyError:
+        return False
+
+
 class FeatureDiscovery:
     """Orchestrates automated feature discovery.
 
@@ -745,6 +755,38 @@ class FeatureDiscovery:
                 )
                 direction = "minimize"
 
+        # Candidate-pool pruning (default off — a config with no pool_pruning
+        # block leaves round1_exclude empty and bottom_cut_n None, so selection
+        # is exhaustive). Only the single forward-selection path threads these;
+        # stability / projection selectors construct FeatureSelector without
+        # them and stay full-pool via the off defaults.
+        pruning = self.config.discovery.pool_pruning
+        round1_exclude: set[str] = set()
+        if pruning.round1_mirror_filter:
+            if base:
+                # Seeded run: there is no genuine round 1, so the filter would
+                # never fire. Leave round1_exclude empty and say so, rather than
+                # silently no-op.
+                self._log(
+                    f"round-1 mirror filter is set but this run seeds {len(base)} "
+                    "base features — it only applies to a genuine round 1 "
+                    "(unseeded), so it will NOT fire here"
+                )
+            else:
+                reg = get_registry()
+                round1_exclude = {
+                    f for f in all_features if _spec_is_mirror_true(f, reg)
+                }
+                self._log(
+                    f"round-1 mirror filter: excluding {len(round1_exclude)}/"
+                    f"{len(all_features)} mirror=True specs from round 1"
+                )
+        if pruning.bottom_cut_n:
+            self._log(
+                f"bottom-cut: dropping worst {pruning.bottom_cut_n} survivors/round "
+                f"from forward round {pruning.first_cut_round} on"
+            )
+
         selector = FeatureSelector(
             scorer=scorer,
             all_features=all_features,
@@ -758,6 +800,9 @@ class FeatureDiscovery:
             round1_baseline=round1_baseline,
             min_delta=self.config.discovery.resolved_min_delta(),
             forward_max_workers=cand_workers,
+            round1_exclude=round1_exclude,
+            bottom_cut_n=pruning.bottom_cut_n,
+            first_cut_round=pruning.first_cut_round,
         )
 
         # For BLAS-threaded models (the fit ignores n_jobs), cap each concurrent

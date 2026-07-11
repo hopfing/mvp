@@ -130,6 +130,31 @@ class DiscoveryFeaturesConfig(BaseModel):
     paramed_only: bool = False  # When True, restrict candidate pool to features that take a `days` param
 
 
+class PoolPruningConfig(BaseModel):
+    """Forward-selection candidate-pool pruning. All-off by default: omitting
+    this block (or leaving the knobs off) reproduces the exhaustive full-pool
+    forward selection — the clean re-baseline path.
+
+    round1_mirror_filter applies ONLY to a genuine round 1 (nothing selected —
+    an unseeded run); it never fires on a seeded run. The bottom-cut gates on the
+    forward-round index (round number minus the number of seed/base features), so
+    its warmup is measured in forward picks regardless of seeding.
+    """
+
+    # Round 1 only (a genuine first round with nothing selected, i.e. an unseeded
+    # run): score only mirror=False candidates (drops the raw player_/opp_ pairs;
+    # keeps every diff/sum/matchup/z-score, incl. all elo/glicko diffs), then the
+    # full pool returns from round 2. Never fires on a seeded run — it has no
+    # such round 1 — so it is a no-op alongside a non-empty features.base.
+    round1_mirror_filter: bool = False
+    # From `first_cut_round` on, permanently drop the N worst-scoring survivors
+    # after each round. None disables the cut.
+    bottom_cut_n: int | None = None
+    # Forward rounds below this never trigger a cut (warmup). 3 = the first two
+    # forward rounds are exempt; the first cut is on forward round 3's ranking.
+    first_cut_round: int = 3
+
+
 class DiscoveryOptions(BaseModel):
     """Discovery-specific options."""
 
@@ -168,6 +193,7 @@ class DiscoveryOptions(BaseModel):
     stability_selection: StabilitySelectionConfig | None = None
     null_importance: NullImportanceConfig | None = None
     features: DiscoveryFeaturesConfig = DiscoveryFeaturesConfig()
+    pool_pruning: PoolPruningConfig = PoolPruningConfig()
 
     @model_validator(mode="after")
     def _warn_direction_mismatch(self) -> "DiscoveryOptions":

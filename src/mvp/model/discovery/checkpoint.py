@@ -2,7 +2,7 @@
 
 import json
 import os
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -21,6 +21,10 @@ class SelectionCheckpoint:
     best_metric: float                     # best metric after last completed round
     direction: str                         # "minimize" or "maximize"
     max_features: int                      # max rounds
+    # Candidates permanently dropped by bottom-cut pruning (empty when pruning
+    # is off). Restored on resume so cut features are not resurrected. Defaulted
+    # for back-compat with checkpoints written before pruning existed.
+    pruned_features: list[str] = field(default_factory=list)
 
 
 def save_checkpoint(path: Path, cp: SelectionCheckpoint) -> None:
