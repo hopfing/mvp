@@ -342,7 +342,7 @@ class DiscoveryConfig(BaseModel):
             features_dict["compute_only"] = self.discovery.features.compute_only
         model_dump = self.model.model_dump(exclude_none=True)
         result: dict[str, Any] = {
-            "data": self.data.model_dump(),
+            "data": self.data.model_dump(exclude_none=True),
             "features": features_dict,
             "model": model_dump,
             "validation": self._ordered_validation_dump(),
