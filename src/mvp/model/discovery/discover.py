@@ -252,6 +252,11 @@ class FeatureDiscovery:
         """
         self.config_path = Path(config_path)
         self.config = DiscoveryConfig.from_file(config_path)
+        # Config-level data.path lets an experiment target a non-default parquet
+        # (e.g. an augmented experiment build) without a CLI flag; an explicit
+        # matches_path arg still wins.
+        if matches_path is None and self.config.data.path:
+            matches_path = self.config.data.path
         self.matches_path = matches_path
         self.cache_dir = cache_dir
         self.mlflow_dir = mlflow_dir

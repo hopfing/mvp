@@ -43,6 +43,10 @@ class DataConfig(BaseModel):
     # eval_filters. Raw columns are auto-loaded; computed-feature filter columns
     # must be listed in discovery.features.compute_only.
     eval_filters: dict[str, Any] | None = None
+    # Optional source-parquet override. None -> the standard aggregate
+    # matches.parquet. Point at an augmented build (e.g. matches_fullnest.parquet
+    # with `_fn` columns) to run an experiment against it without a CLI flag.
+    path: str | None = None
 
 
 class MetaDiscoveryConfig(BaseModel):
