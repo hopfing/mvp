@@ -762,25 +762,17 @@ class FeatureDiscovery:
         # them and stay full-pool via the off defaults.
         pruning = self.config.discovery.pool_pruning
         round1_exclude: set[str] = set()
-        if pruning.round1_mirror_filter:
-            if base:
-                # Seeded run: there is no genuine round 1, so the filter would
-                # never fire. Leave round1_exclude empty and say so, rather than
-                # silently no-op.
-                self._log(
-                    f"round-1 mirror filter is set but this run seeds {len(base)} "
-                    "base features — it only applies to a genuine round 1 "
-                    "(unseeded), so it will NOT fire here"
-                )
-            else:
-                reg = get_registry()
-                round1_exclude = {
-                    f for f in all_features if _spec_is_mirror_true(f, reg)
-                }
-                self._log(
-                    f"round-1 mirror filter: excluding {len(round1_exclude)}/"
-                    f"{len(all_features)} mirror=True specs from round 1"
-                )
+        # Seeded runs have no genuine round 1, so the mirror filter never
+        # applies and round1_exclude stays empty.
+        if pruning.round1_mirror_filter and not base:
+            reg = get_registry()
+            round1_exclude = {
+                f for f in all_features if _spec_is_mirror_true(f, reg)
+            }
+            self._log(
+                f"round-1 mirror filter: excluding {len(round1_exclude)}/"
+                f"{len(all_features)} mirror=True specs from round 1"
+            )
         if pruning.bottom_cut_n:
             self._log(
                 f"bottom-cut: dropping worst {pruning.bottom_cut_n} survivors/round "
