@@ -315,9 +315,6 @@ class FeatureSelector:
 
         while remaining and len(selected) < self.max_features:
             round_num = len(selected) + 1
-            # Forward-round index (excludes seed/base features) so pruning gates
-            # behave the same whether or not the run seeds.
-            fwd_round = round_num - len(self.base_features)
             round_results: list[tuple[str, float]] = []
             scores_this_round: dict[str, float] = {}
 
@@ -537,7 +534,7 @@ class FeatureSelector:
             # intersecting with it can never re-admit the winner (base seeds are
             # never scored, so they can't land here either). Persisted via
             # _pruned_features so resume does not resurrect them.
-            if self.bottom_cut_n and fwd_round >= self.first_cut_round:
+            if self.bottom_cut_n and round_num >= self.first_cut_round:
                 n = self.bottom_cut_n
                 bottom = {f for f, _ in sorted_results[-n:]}
                 newly = remaining & bottom
@@ -548,8 +545,8 @@ class FeatureSelector:
                     remaining -= newly
                     self._pruned_features |= newly
                     logger.info(
-                        "  bottom-cut (fwd round %d): dropped %d, pool %d -> %d",
-                        fwd_round, len(newly),
+                        "  bottom-cut (round %d): dropped %d, pool %d -> %d",
+                        round_num, len(newly),
                         len(remaining) + len(newly), len(remaining),
                     )
                     _record_pruned_round(pruned_path, round_num, list(newly))

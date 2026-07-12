@@ -137,8 +137,8 @@ class PoolPruningConfig(BaseModel):
 
     round1_mirror_filter applies ONLY to a genuine round 1 (nothing selected —
     an unseeded run); it never fires on a seeded run. The bottom-cut gates on the
-    forward-round index (round number minus the number of seed/base features), so
-    its warmup is measured in forward picks regardless of seeding.
+    literal round number, so first_cut_round means exactly that round whether or
+    not the run seeds (a seed occupies round 1 and does not shift the warmup).
     """
 
     # Round 1 only (a genuine first round with nothing selected, i.e. an unseeded
@@ -150,8 +150,9 @@ class PoolPruningConfig(BaseModel):
     # From `first_cut_round` on, permanently drop the N worst-scoring survivors
     # after each round. None disables the cut.
     bottom_cut_n: int | None = None
-    # Forward rounds below this never trigger a cut (warmup). 3 = the first two
-    # forward rounds are exempt; the first cut is on forward round 3's ranking.
+    # Rounds below this never trigger a cut (warmup). Literal round number: 3 =
+    # rounds 1 and 2 are exempt and the first cut is on round 3's ranking, seeded
+    # or not (a seed does not shift it).
     first_cut_round: int = 3
 
 

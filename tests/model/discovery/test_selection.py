@@ -690,6 +690,19 @@ class TestBottomCutPersistence:
         records = json.loads(pruned.read_text())
         assert all(r["round"] != 99 for r in records)
 
+    def test_seed_does_not_shift_first_cut_round(self, scorer, tmp_path):
+        # first_cut_round is the literal round number: a seed occupies round 1
+        # but the first cut still lands on first_cut_round, not one round later.
+        selector = self._selector(
+            scorer, base_features=["a"], bottom_cut_n=1, first_cut_round=2,
+        )
+        cp = tmp_path / "discovery_checkpoint_unit.json"
+        selector.forward_selection(checkpoint_path=cp, verbose=False)
+
+        records = json.loads((tmp_path / "fs_pruned_unit.json").read_text())
+        assert records
+        assert records[0]["round"] == 2  # literal round 2, not 3
+
 
 class TestRecordPrunedRound:
     def test_merges_and_dedupes_by_round(self, tmp_path):
