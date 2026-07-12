@@ -621,3 +621,94 @@ class TestCandidateParallelism:
             r = self._select(scorer, feats, workers=workers, max_features=2)
             assert "boom" not in r.selected_features
             assert r.selected_features[0] == "good"
+
+
+class TestBottomCutPersistence:
+    """Bottom-cut pruned features persist to fs_pruned_<stem>.json."""
+
+    @pytest.fixture
+    def scorer(self):
+        # a>b>c>d improve (lower is better); noise* hurt, so they're the worst
+        # survivors each round and get cut first.
+        def _scorer(features):
+            score = 1.0
+            for f, val in (("a", 0.4), ("b", 0.3), ("c", 0.2), ("d", 0.1)):
+                if f in features:
+                    score -= val
+            for f in ("noise1", "noise2", "noise3"):
+                if f in features:
+                    score += 0.1
+            return score
+
+        return _scorer
+
+    def _selector(self, scorer, **kw):
+        return FeatureSelector(
+            scorer=scorer,
+            all_features=["a", "b", "c", "d", "noise1", "noise2", "noise3"],
+            method="forward",
+            direction="minimize",
+            **kw,
+        )
+
+    def test_writes_fs_pruned_json(self, scorer, tmp_path):
+        selector = self._selector(scorer, bottom_cut_n=1, first_cut_round=1)
+        cp = tmp_path / "discovery_checkpoint_unit.json"
+        result = selector.forward_selection(checkpoint_path=cp, verbose=False)
+
+        pruned = tmp_path / "fs_pruned_unit.json"
+        assert pruned.exists()
+        records = json.loads(pruned.read_text())
+        assert isinstance(records, list) and records
+        # Each record is a round + the features cut that round; rounds ordered.
+        rounds = [r["round"] for r in records]
+        assert rounds == sorted(rounds)
+        cut = {f for r in records for f in r["features"]}
+        # Only the noise features are ever the worst survivors, so only they cut.
+        assert cut and cut <= {"noise1", "noise2", "noise3"}
+        # The flat set on the result matches the union of per-round cuts...
+        assert set(result.pruned_features) == cut
+        # ...and cut features are gone from the final selection.
+        assert cut.isdisjoint(result.selected_features)
+
+    def test_no_file_when_pruning_off(self, scorer, tmp_path):
+        selector = self._selector(scorer)  # bottom_cut_n defaults to None
+        cp = tmp_path / "discovery_checkpoint_unit.json"
+        result = selector.forward_selection(checkpoint_path=cp, verbose=False)
+
+        assert not (tmp_path / "fs_pruned_unit.json").exists()
+        assert result.pruned_features == []
+
+    def test_fresh_run_resets_pruned(self, scorer, tmp_path):
+        pruned = tmp_path / "fs_pruned_unit.json"
+        pruned.write_text('[{"round": 99, "features": ["stale"]}]')
+        selector = self._selector(scorer, bottom_cut_n=1, first_cut_round=1)
+        selector.forward_selection(
+            checkpoint_path=tmp_path / "discovery_checkpoint_unit.json",
+            verbose=False,
+        )
+        records = json.loads(pruned.read_text())
+        assert all(r["round"] != 99 for r in records)
+
+
+class TestRecordPrunedRound:
+    def test_merges_and_dedupes_by_round(self, tmp_path):
+        from mvp.model.discovery.selection import _record_pruned_round
+
+        path = tmp_path / "fs_pruned_unit.json"
+        _record_pruned_round(path, 3, ["f_b", "f_a"])
+        _record_pruned_round(path, 5, ["f_c"])
+        # Re-recording a round replaces it (idempotent when a resume re-runs it).
+        _record_pruned_round(path, 3, ["f_a", "f_b"])
+
+        records = json.loads(path.read_text())
+        assert [r["round"] for r in records] == [3, 5]  # ordered, round 3 not dup'd
+        assert records[0]["features"] == ["f_a", "f_b"]  # sorted within a round
+
+    def test_noop_without_features_or_path(self, tmp_path):
+        from mvp.model.discovery.selection import _record_pruned_round
+
+        path = tmp_path / "fs_pruned_unit.json"
+        _record_pruned_round(path, 1, [])  # nothing cut -> no file created
+        assert not path.exists()
+        _record_pruned_round(None, 1, ["f"])  # no checkpoint path -> no error

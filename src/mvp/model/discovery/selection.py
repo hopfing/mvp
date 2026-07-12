@@ -6,7 +6,7 @@ import logging
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
@@ -70,6 +70,50 @@ def _append_fs_history(path: Path | None, entry: dict[str, Any]) -> None:
         logger.warning("Failed to append FS history to %s: %s", path, e)
 
 
+def _fs_pruned_path(checkpoint_path: Path | None) -> Path | None:
+    """Durable record of bottom-cut pruned features, a sibling of the checkpoint
+    (``fs_pruned_<stem>.json``). Kept after the run completes — unlike the flat
+    ``pruned_features`` on the checkpoint, which is deleted on success — and it
+    preserves which round each feature was cut in.
+    """
+    if checkpoint_path is None:
+        return None
+    name = checkpoint_path.name
+    prefix = "discovery_checkpoint_"
+    stem = name[len(prefix):] if name.startswith(prefix) else name
+    stem = stem.rsplit(".", 1)[0]
+    return checkpoint_path.with_name(f"fs_pruned_{stem}.json")
+
+
+def _record_pruned_round(
+    path: Path | None, round_num: int, features: list[str]
+) -> None:
+    """Fold one round's bottom-cut into the consolidated pruned-features file as
+    a ``{"round", "features"}`` record, rewriting it atomically (temp + replace)
+    so a crash can't corrupt it.
+
+    Written incrementally per cut rather than once at the end so round
+    attribution survives a resume (the checkpoint keeps only the flat set). A
+    record for a round already present is replaced, making a re-recorded round
+    (e.g. a resume that re-runs a round) idempotent. Best-effort: never fatal.
+    """
+    if path is None or not features:
+        return
+    try:
+        records: list[dict[str, Any]] = []
+        if path.exists():
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(loaded, list):
+                records = [r for r in loaded if r.get("round") != round_num]
+        records.append({"round": round_num, "features": sorted(features)})
+        records.sort(key=lambda r: r.get("round", 0))
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(records, indent=2), encoding="utf-8")
+        tmp.replace(path)
+    except (OSError, ValueError) as e:
+        logger.warning("Failed to record pruned features to %s: %s", path, e)
+
+
 @dataclass
 class SelectionResult:
     """Result from feature selection."""
@@ -78,6 +122,9 @@ class SelectionResult:
     excluded_features: list[str]
     history: list[dict[str, Any]]
     final_metric: float
+    # Features permanently dropped by bottom-cut pruning (empty when pruning is
+    # off). Flat set; per-round attribution lives in fs_pruned_<stem>.json.
+    pruned_features: list[str] = field(default_factory=list)
 
 
 class FeatureSelector:
@@ -255,12 +302,16 @@ class FeatureSelector:
                 best_metric = self._worst_value()
                 selected_metrics = []
 
-        # Durable per-round score log (append-only, kept after completion).
-        # Fresh start wipes any stale log; resume appends to the existing one.
+        # Durable per-round score log (append-only, kept after completion) and
+        # the per-round bottom-cut record. Fresh start wipes any stale files;
+        # resume appends to / merges into the existing ones.
         history_path = _fs_history_path(checkpoint_path)
         progress_path = _fs_progress_path(checkpoint_path)
-        if cp is None and history_path is not None and history_path.exists():
-            history_path.unlink()
+        pruned_path = _fs_pruned_path(checkpoint_path)
+        if cp is None:
+            for stale in (history_path, pruned_path):
+                if stale is not None and stale.exists():
+                    stale.unlink()
 
         while remaining and len(selected) < self.max_features:
             round_num = len(selected) + 1
@@ -501,6 +552,7 @@ class FeatureSelector:
                         fwd_round, len(newly),
                         len(remaining) + len(newly), len(remaining),
                     )
+                    _record_pruned_round(pruned_path, round_num, list(newly))
 
             # Checkpoint at round boundary (current round advances, scores reset)
             if checkpoint_path is not None:
@@ -564,6 +616,7 @@ class FeatureSelector:
             excluded_features=list(remaining),
             history=history,
             final_metric=best_metric if best_metric != self._worst_value() else 0.0,
+            pruned_features=sorted(self._pruned_features),
         )
 
     def _write_checkpoint(
