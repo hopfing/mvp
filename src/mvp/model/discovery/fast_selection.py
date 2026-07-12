@@ -14,6 +14,7 @@ from sklearn.linear_model import LogisticRegression
 from mvp.model.config import apply_filters
 from mvp.model.discovery.config import DiscoveryConfig
 from mvp.model.completeness import is_incomplete_match
+from mvp.model.early_stopping import two_stage_fit
 from mvp.model.engine import check_memory, get_feature_columns, make_fs_engine
 from mvp.model.features._score_helpers import (
     sets_lost as _sets_lost,
@@ -744,6 +745,43 @@ class FastForwardSelector:
             [self.config.target, *self.config.mtl.auxiliary_targets]
             if is_mtl else None
         )
+        # Optional per-candidate early stopping (spec 2026-06-24). When enabled,
+        # each candidate fit picks its own tree count via two_stage_fit instead of
+        # the fixed params.n_estimators — removing the tree-count vs feature-count
+        # confound. Restricted to the plain XGBoost path: MTL (custom objective /
+        # vector-leaf) is unsupported, and the leak-safe watch carve assumes
+        # time-ordered folds, so a date splitter is required. row_dates is the
+        # per-row effective_match_date, aligned to X_wide (see precompute()).
+        es_cfg = self.config.model.early_stopping
+        es_enabled = es_cfg is not None and es_cfg.enabled
+        row_dates = self.row_dates
+        if es_enabled:
+            if model_type != "xgboost" or is_mtl:
+                raise ValueError(
+                    "early_stopping is only supported for the plain xgboost FS "
+                    f"path (model.type='xgboost', no mtl); got type={model_type!r}, "
+                    f"mtl={is_mtl}"
+                )
+            if self.config.validation.type not in ("date_sliding", "date_expanding"):
+                raise ValueError(
+                    "early_stopping requires a date splitter (date_sliding / "
+                    "date_expanding) so the watch embargo is time-ordered; got "
+                    f"validation.type={self.config.validation.type!r}"
+                )
+            if row_dates is None:
+                raise ValueError(
+                    "early_stopping needs per-row dates, but row_dates is None "
+                    "(precompute() did not populate it)"
+                )
+        # Per-round ES logging. two_stage_fit's per-fit success line is suppressed
+        # in the hot loop (log_result=False below — it would fire per candidate x
+        # fold, thousands of times); instead we emit one compact
+        # best_iteration-per-fold line the first time each round is scored. The
+        # round number is len(features) (the scorer is called with `selected +
+        # [feat]`), and best_iteration clusters tightly within a round, so one
+        # sample is representative. Under forward_max_workers a couple of workers
+        # may race the membership check and emit a duplicate line — harmless.
+        _logged_es_rounds: set[int] = set()
         # For non-NaN-tolerant models, impute=None features must be filled
         # before the model sees them. Production training for these models
         # applies a median imputer at the wrapper level (models._apply_median_imputer),
@@ -811,8 +849,32 @@ class FastForwardSelector:
                 if constant_positions else None
             )
 
+            # Per-candidate early-stop factory: a fresh xgboost model capped at
+            # n_rounds. Closes over the scorer-local `model_params` (already
+            # n_jobs-capped for candidate-loop parallelism), NOT
+            # self.config.model.params — so concurrent Stage-1/Stage-2 fits under
+            # forward_max_workers don't silently revert to the uncapped default
+            # and oversubscribe. Defined unconditionally; only called when
+            # es_enabled.
+            def _es_factory(n_rounds: int):
+                return get_model(
+                    "xgboost",
+                    {**model_params, "n_estimators": n_rounds},
+                    feature_names=col_names,
+                )
+
             fold_metrics = []
+            es_best_iters: list[int | None] = []
             for fold_idx, (train_idx, test_idx) in enumerate(folds):
+                # ES watch embargo anchors on the fold's TRUE test-window start —
+                # the raw pre-eval_mask test fold — so a restricted eval slice
+                # (e.g. finals-only, whose earliest date can fall later in the
+                # window) can't push the embargo later and under-protect earlier
+                # test rows. Computed here, before eval_mask narrows test_idx below.
+                es_test_start = (
+                    np.asarray(row_dates[test_idx], dtype="datetime64[D]").min().item()
+                    if es_enabled else None
+                )
                 # eval_filters: restrict the test fold to the scoring slice. The
                 # model still fits on the full train fold; only the metric is
                 # computed on the slice. A fold with no matching rows is skipped.
@@ -884,6 +946,32 @@ class FastForwardSelector:
                         fit_kwargs["sample_weight"] = sample_weights[train_idx]
                     model.fit(X_train, y_train_2d, **fit_kwargs)
                     y_prob = model.predict_proba(X_test)
+                elif es_enabled:
+                    # Per-candidate two-stage early stopping: Stage 1 finds
+                    # best_iteration on a leak-safe watch carved from the tail of
+                    # this fold's train slice (embargoed back from es_test_start);
+                    # Stage 2 refits on the full train at that round count. Falls
+                    # back to a fixed-round fit (and logs) when the watch is too
+                    # small — see two_stage_fit. dates must be row-aligned to
+                    # X_train via the SAME train_idx used for the gather.
+                    dates_train = row_dates[train_idx]
+                    assert len(dates_train) == len(X_train), (
+                        "row_dates[train_idx] misaligned with X_train "
+                        f"({len(dates_train)} vs {len(X_train)})"
+                    )
+                    sw = (
+                        sample_weights[train_idx]
+                        if sample_weights is not None else None
+                    )
+                    model, best_it = two_stage_fit(
+                        _es_factory, X_train, y_train, sw,
+                        dates_train, es_test_start, es_cfg,
+                        metric=metric,
+                        lambda_over=model_params.get("lambda_over"),
+                        log_result=False,
+                    )
+                    es_best_iters.append(best_it)
+                    y_prob = model.predict_proba(X_test)
                 else:
                     model = get_model(model_type, model_params, feature_names=col_names)
                     fit_kwargs: dict = {}
@@ -903,6 +991,20 @@ class FastForwardSelector:
                     )
                 else:
                     fold_metrics.append(metric_fn(y_test, y_prob))
+
+            # One compact ES line per round (see _logged_es_rounds above). "fb"
+            # marks a fold that fell back to fixed rounds (its own WARNING also
+            # fired). Duplicate lines under parallelism are tolerated.
+            if es_enabled and es_best_iters:
+                round_num = len(features)
+                if round_num not in _logged_es_rounds:
+                    _logged_es_rounds.add(round_num)
+                    per_fold = ", ".join(
+                        str(b) if b is not None else "fb" for b in es_best_iters
+                    )
+                    logger.info(
+                        "Round %d ES best_iteration/fold: [%s]", round_num, per_fold
+                    )
 
             if not fold_metrics:
                 # Every fold's test slice was empty under eval_filters.

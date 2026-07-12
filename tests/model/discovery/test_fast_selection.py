@@ -1,6 +1,8 @@
 """Tests for fast forward selection."""
 
 import importlib
+import logging
+from datetime import date
 from pathlib import Path
 
 import numpy as np
@@ -727,3 +729,317 @@ class TestMakeSplitter:
         """Should raise ValueError for unknown type."""
         with pytest.raises(ValueError, match="Unknown validation type"):
             make_splitter("unknown_type")
+
+
+@pytest.fixture
+def es_matches(tmp_path: Path) -> Path:
+    """Larger sample so date_sliding folds and a 2-month ES watch have real rows."""
+    n = 2400
+    rng = np.random.RandomState(7)
+    df = pl.DataFrame(
+        {
+            "match_uid": [f"M{i}" for i in range(n)],
+            "player_id": [f"P{i % 20}" for i in range(n)],
+            "opp_id": [f"P{(i + 7) % 20}" for i in range(n)],
+            "effective_match_date": [
+                f"2024-{(i % 12) + 1:02d}-{(i % 28) + 1:02d}" for i in range(n)
+            ],
+            "won": [bool(x) for x in rng.randint(0, 2, n)],
+            "player_rankings_points": rng.randint(100, 2000, n).tolist(),
+            "opp_rankings_points": rng.randint(100, 2000, n).tolist(),
+            "player_rank": rng.randint(1, 200, n).tolist(),
+            "opp_rank": rng.randint(1, 200, n).tolist(),
+            "circuit": ["tour" for _ in range(n)],
+        }
+    ).with_columns(pl.col("effective_match_date").str.to_datetime())
+    path = tmp_path / "es_matches.parquet"
+    df.write_parquet(path)
+    return path
+
+
+@pytest.fixture
+def es_eval_filter_matches(tmp_path: Path) -> Path:
+    """Single date_sliding fold spanning Jul-Aug 2024, where eval_filters
+    (sel>=1) keeps only the LATE (Aug) test rows. The raw test fold opens in
+    early Jul, so a correct es_test_start (raw fold) is earlier than the filtered
+    subset's earliest date — lets a test catch anchoring on the filtered slice."""
+    rng = np.random.RandomState(3)
+    dates: list[str] = []
+    sel: list[int] = []
+    # Train: Jan-Jun 2024, 8 rows/month (sel irrelevant — eval_mask only narrows
+    # the test fold; set 1 so it's not confused with the dropped test rows).
+    for m in range(1, 7):
+        for d in range(8):
+            dates.append(f"2024-{m:02d}-{(d % 27) + 1:02d}")
+            sel.append(1)
+    # Test window (Jul-Aug): early-Jul rows sel=0 (dropped by eval_filters),
+    # late-Aug rows sel=1 (kept). Raw fold start = 2024-07-03.
+    dates += ["2024-07-03"] * 8
+    sel += [0] * 8
+    dates += ["2024-08-20"] * 8
+    sel += [1] * 8
+    n = len(dates)
+    df = pl.DataFrame(
+        {
+            "match_uid": [f"M{i}" for i in range(n)],
+            "player_id": [f"P{i % 8}" for i in range(n)],
+            "opp_id": [f"P{(i + 3) % 8}" for i in range(n)],
+            "effective_match_date": dates,
+            "won": [bool(x) for x in rng.randint(0, 2, n)],
+            "player_rankings_points": rng.randint(100, 2000, n).tolist(),
+            "opp_rankings_points": rng.randint(100, 2000, n).tolist(),
+            "sel": sel,
+            "circuit": ["tour" for _ in range(n)],
+        }
+    ).with_columns(pl.col("effective_match_date").str.to_datetime())
+    path = tmp_path / "es_eval_filter_matches.parquet"
+    df.write_parquet(path)
+    return path
+
+
+def _write_config(tmp_path: Path, name: str, config_dict: dict) -> Path:
+    path = tmp_path / name
+    with open(path, "w") as f:
+        yaml.dump(config_dict, f)
+    return path
+
+
+class TestEarlyStopping:
+    """FS scorer early-stopping path (per-candidate two-stage) + guards."""
+
+    def test_scorer_early_stopping_returns_finite(
+        self, es_matches: Path, tmp_path: Path
+    ):
+        """With ES enabled, the scorer runs two_stage_fit per candidate and
+        still returns a finite metric (proves the ES branch executes)."""
+        config_dict = {
+            "data": {"date_range": {"start": "2024-01-01", "end": "2024-12-31"}},
+            "model": {
+                "type": "xgboost",
+                "params": {"n_estimators": 30, "learning_rate": 0.1},
+                "early_stopping": {
+                    "enabled": True,
+                    "watch_months": 2.0,
+                    "min_watch_tail": 5,
+                    "patience": 10,
+                    "ceiling": 50,
+                    "fallback_rounds": 20,
+                },
+            },
+            "validation": {
+                "type": "date_sliding",
+                "train_months": 6,
+                "test_months": 2,
+            },
+            "discovery": {"metric": "log_loss", "direction": "minimize"},
+        }
+        config = DiscoveryConfig.from_file(
+            _write_config(tmp_path, "es.yaml", config_dict)
+        )
+        fast = FastForwardSelector(
+            config=config,
+            all_feature_specs=["player_ranking_points_diff"],
+            matches_path=es_matches,
+            cache_dir=tmp_path / "cache",
+        )
+        fast.precompute()
+        result = fast.create_scorer("log_loss")(["player_ranking_points_diff"])
+        assert isinstance(result, float)
+        assert np.isfinite(result)
+
+    def test_early_stopping_config_rejects_walk_forward(self, tmp_path: Path):
+        """ES + a non-date splitter is rejected at config load (before compute)."""
+        config_dict = {
+            "data": {"date_range": {"start": "2024-01-01", "end": "2024-12-31"}},
+            "model": {"type": "xgboost", "early_stopping": {"enabled": True}},
+            "validation": {
+                "type": "walk_forward",
+                "n_splits": 2,
+                "min_train_size": 50,
+                "test_size": 25,
+            },
+            "discovery": {"metric": "log_loss", "direction": "minimize"},
+        }
+        with pytest.raises(ValueError, match="date splitter"):
+            DiscoveryConfig.from_file(
+                _write_config(tmp_path, "es_wf.yaml", config_dict)
+            )
+
+    def test_early_stopping_config_rejects_non_xgboost(self, tmp_path: Path):
+        """ES + a non-xgboost model is rejected at config load."""
+        config_dict = {
+            "data": {"date_range": {"start": "2024-01-01", "end": "2024-12-31"}},
+            "model": {"type": "logistic", "early_stopping": {"enabled": True}},
+            "validation": {
+                "type": "date_sliding",
+                "train_months": 6,
+                "test_months": 2,
+            },
+            "discovery": {"metric": "log_loss", "direction": "minimize"},
+        }
+        with pytest.raises(ValueError, match="xgboost"):
+            DiscoveryConfig.from_file(
+                _write_config(tmp_path, "es_lr.yaml", config_dict)
+            )
+
+    def test_early_stopping_config_rejects_stability_selection(self, tmp_path: Path):
+        """ES + stability_selection is rejected at config load (per-resample watch
+        shrinkage would trip the fallback floor inconsistently)."""
+        config_dict = {
+            "data": {"date_range": {"start": "2024-01-01", "end": "2024-12-31"}},
+            "model": {"type": "xgboost", "early_stopping": {"enabled": True}},
+            "validation": {
+                "type": "date_sliding",
+                "train_months": 6,
+                "test_months": 2,
+            },
+            "discovery": {
+                "metric": "log_loss",
+                "direction": "minimize",
+                "stability_selection": {},
+            },
+        }
+        with pytest.raises(ValueError, match="stability_selection"):
+            DiscoveryConfig.from_file(
+                _write_config(tmp_path, "es_stability.yaml", config_dict)
+            )
+
+    def test_early_stopping_test_start_ignores_eval_filter(
+        self, es_eval_filter_matches: Path, tmp_path: Path, monkeypatch
+    ):
+        """The ES watch embargo must anchor on the RAW test fold, not the
+        eval_filters-narrowed subset. eval_filters keeps only Aug rows, but the
+        raw fold opens 2024-07-03, so the test_start handed to two_stage_fit must
+        be that Jul date — else earlier test rows are under-embargoed."""
+        config_dict = {
+            "data": {
+                "date_range": {"start": "2024-01-01", "end": "2024-08-31"},
+                "eval_filters": {"sel": {"min": 1}},
+            },
+            "model": {
+                "type": "xgboost",
+                "params": {"n_estimators": 20},
+                "early_stopping": {"enabled": True, "min_watch_tail": 1},
+            },
+            "validation": {
+                "type": "date_sliding",
+                "train_months": 6,
+                "test_months": 2,
+            },
+            "discovery": {"metric": "log_loss", "direction": "minimize"},
+        }
+        config = DiscoveryConfig.from_file(
+            _write_config(tmp_path, "es_evalfilter.yaml", config_dict)
+        )
+
+        captured: dict = {}
+
+        class _StubModel:
+            def predict_proba(self, X):
+                return np.full(len(X), 0.5)
+
+        def _stub(factory, X, y, sw, dates, test_start, cfg, metric,
+                  lambda_over=None, is_mtl=False, log_result=True):
+            captured["test_start"] = test_start
+            return _StubModel(), 5
+
+        # Patch the name bound in the scorer module (module-level import).
+        monkeypatch.setattr(
+            "mvp.model.discovery.fast_selection.two_stage_fit", _stub
+        )
+
+        fast = FastForwardSelector(
+            config=config,
+            all_feature_specs=["player_ranking_points_diff"],
+            matches_path=es_eval_filter_matches,
+            cache_dir=tmp_path / "cache",
+        )
+        fast.precompute()
+        fast.create_scorer("log_loss")(["player_ranking_points_diff"])
+
+        assert captured["test_start"] == date(2024, 7, 3)
+
+    def test_early_stopping_falls_back_when_watch_too_small(
+        self, es_matches: Path, tmp_path: Path, caplog
+    ):
+        """When the watch tail is below min_watch_tail, the FS path must drive
+        two_stage_fit into the fixed-round fallback (and log it), not silently do
+        real ES — 'returns finite' alone can't tell the two apart."""
+        config_dict = {
+            "data": {"date_range": {"start": "2024-01-01", "end": "2024-12-31"}},
+            "model": {
+                "type": "xgboost",
+                "params": {"n_estimators": 20, "learning_rate": 0.1},
+                "early_stopping": {
+                    "enabled": True,
+                    "min_watch_tail": 100000,  # impossibly high -> always falls back
+                    "fallback_rounds": 15,
+                },
+            },
+            "validation": {
+                "type": "date_sliding",
+                "train_months": 6,
+                "test_months": 2,
+            },
+            "discovery": {"metric": "log_loss", "direction": "minimize"},
+        }
+        config = DiscoveryConfig.from_file(
+            _write_config(tmp_path, "es_fallback.yaml", config_dict)
+        )
+        fast = FastForwardSelector(
+            config=config,
+            all_feature_specs=["player_ranking_points_diff"],
+            matches_path=es_matches,
+            cache_dir=tmp_path / "cache",
+        )
+        fast.precompute()
+        with caplog.at_level(logging.WARNING, logger="mvp.model.early_stopping"):
+            result = fast.create_scorer("log_loss")(["player_ranking_points_diff"])
+        assert np.isfinite(result)
+        assert "FALLBACK" in caplog.text
+
+    def test_early_stopping_logging_is_compact(
+        self, es_matches: Path, tmp_path: Path, caplog
+    ):
+        """The FS path suppresses two_stage_fit's per-fit success line (it fires
+        once per candidate x fold) and instead emits ONE per-round
+        best_iteration summary."""
+        config_dict = {
+            "data": {"date_range": {"start": "2024-01-01", "end": "2024-12-31"}},
+            "model": {
+                "type": "xgboost",
+                "params": {"n_estimators": 30, "learning_rate": 0.1},
+                "early_stopping": {
+                    "enabled": True,
+                    "watch_months": 2.0,
+                    "min_watch_tail": 5,
+                    "patience": 10,
+                    "ceiling": 50,
+                },
+            },
+            "validation": {
+                "type": "date_sliding",
+                "train_months": 6,
+                "test_months": 2,
+            },
+            "discovery": {"metric": "log_loss", "direction": "minimize"},
+        }
+        config = DiscoveryConfig.from_file(
+            _write_config(tmp_path, "es_log.yaml", config_dict)
+        )
+        fast = FastForwardSelector(
+            config=config,
+            all_feature_specs=["player_ranking_points_diff"],
+            matches_path=es_matches,
+            cache_dir=tmp_path / "cache",
+        )
+        fast.precompute()
+        with caplog.at_level(logging.INFO):
+            fast.create_scorer("log_loss")(["player_ranking_points_diff"])
+        # per-fit success line (fires per fold) is suppressed in the FS path
+        assert "-> refit full train" not in caplog.text
+        # exactly one compact per-round summary is emitted instead
+        summaries = [
+            r for r in caplog.records if "ES best_iteration/fold" in r.getMessage()
+        ]
+        assert len(summaries) == 1

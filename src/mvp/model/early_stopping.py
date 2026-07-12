@@ -171,9 +171,15 @@ def two_stage_fit(
     metric: str,
     lambda_over: float | None = None,
     is_mtl: bool = False,
+    log_result: bool = True,
 ) -> tuple[Any, int | None]:
     """Leakage-safe two-stage early-stopping fit (spec §1-2). Returns
     ``(fitted_model, best_iteration)``.
+
+    ``log_result`` gates only the per-fit success INFO line — the fallback
+    warnings always fire. The FS scorer sets it False (it calls this per
+    candidate x fold, thousands of times) and emits a per-round summary instead;
+    the training path leaves it True (a handful of calls).
 
     ``model_factory(n_rounds)`` builds a fresh, unfit model trained to exactly
     ``n_rounds`` boosting rounds. ``y`` / ``sample_weight`` are whatever the
@@ -231,8 +237,9 @@ def two_stage_fit(
     # fixed-rounds fit. Passing one would reactivate the wrapper's default
     # eval_metric="logloss" as the stopping metric (MLE review finding 1).
     m2.fit(X, y, sample_weight=sample_weight)
-    logger.info(
-        "early-stop: best_iteration=%d (watch %s..%s, %d rows) -> refit full train",
-        int(best_it), ws, we, n_watch,
-    )
+    if log_result:
+        logger.info(
+            "early-stop: best_iteration=%d (watch %s..%s, %d rows) -> refit full train",
+            int(best_it), ws, we, n_watch,
+        )
     return m2, int(best_it)
