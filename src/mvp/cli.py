@@ -5,6 +5,7 @@ import argparse
 import json
 import logging
 import os
+import shutil
 import sys
 import time
 import warnings
@@ -16,6 +17,7 @@ warnings.filterwarnings("ignore", message="All-NaN slice encountered")
 warnings.filterwarnings("ignore", category=UserWarning, module="sklearn.utils.parallel")
 
 import polars as pl
+import yaml
 
 from mvp import notify
 from mvp.common.base_job import get_data_root, get_local_data_root
@@ -851,7 +853,13 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         "experiment", help="Run experiment/discovery (looks in experiments/ by default)"
     )
     exp_parser.add_argument(
-        "config", type=str, help="Config name or path (e.g., 'discover' or 'discover.yaml')"
+        "config", type=str, nargs="?", default=None,
+        help=(
+            "Config name or path (e.g., 'discover' or 'discover.yaml'). Required "
+            "for a fresh run. Optional with --resume, which loads the config "
+            "frozen at run start; if given there, it is only compared against "
+            "that snapshot to warn about drift."
+        ),
     )
     exp_parser.add_argument(
         "--output", "-o", type=str, required=True,
@@ -2069,12 +2077,126 @@ def cmd_shap_rank(args: argparse.Namespace) -> int:
     return 0
 
 
+# Top-level config keys that don't affect selection results, so a change to them
+# is not real config drift. `description` is free-text; the worker-count knobs are
+# throughput-only and documented as excluded from the checkpoint fingerprint.
+_DRIFT_IGNORE_TOP = {"description"}
+
+
+def _snapshot_path(run_dir: Path) -> Path:
+    """Deterministic path of a run's frozen config snapshot. Named after the run
+    (``<run>_experiment.yaml``), not the input config, so run dirs are
+    self-identifying and don't collect a dozen identically-named copies — and
+    distinct from the ``models/<run>.yaml`` deliverable."""
+    return run_dir / f"{run_dir.name}_experiment.yaml"
+
+
+def _normalize_config_for_drift(path: Path) -> dict:
+    """Load an experiment YAML as a dict with results-invariant fields stripped,
+    so two configs that differ only in throughput knobs / description compare
+    equal. Best-effort: an unparseable/non-mapping file yields ``{}``."""
+    try:
+        with open(path) as f:
+            data = yaml.safe_load(f)
+    except (OSError, yaml.YAMLError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    data = {k: v for k, v in data.items() if k not in _DRIFT_IGNORE_TOP}
+    disc = data.get("discovery")
+    if isinstance(disc, dict):
+        disc = {k: v for k, v in disc.items() if k != "forward_max_workers"}
+        ss = disc.get("stability_selection")
+        if isinstance(ss, dict):
+            disc["stability_selection"] = {
+                k: v for k, v in ss.items() if k != "max_workers"
+            }
+        data["discovery"] = disc
+    return data
+
+
+def _config_drift(path_a: Path, path_b: Path) -> list[str]:
+    """Top-level config sections that differ between two experiment YAMLs,
+    ignoring results-invariant fields. Empty list means they match."""
+    a = _normalize_config_for_drift(path_a)
+    b = _normalize_config_for_drift(path_b)
+    return sorted(k for k in set(a) | set(b) if a.get(k) != b.get(k))
+
+
+def _resolve_run_config(args: argparse.Namespace, run_dir: Path) -> Path | None:
+    """Pick the config the run should load, or None on a fatal error (message
+    already printed).
+
+    Fresh run: the positional config is required. It is copied verbatim into the
+    run dir (byte-for-byte — key order, comments, and whitespace preserved, not a
+    re-dump) and that copy is what loads, so the exact config is preserved as
+    provenance and for a later --resume.
+
+    --resume: the config comes from the frozen snapshot keyed off --output, not
+    the positional arg (which is optional here). If a config is passed, it is
+    only compared against the snapshot to warn about drift.
+    """
+    snapshot = _snapshot_path(run_dir)
+    if args.resume:
+        if snapshot.exists():
+            if args.config:
+                passed = resolve_config_path(args.config, EXPERIMENT_DIR)
+                if not passed.exists():
+                    logger.warning(
+                        "Passed config %r not found; skipping drift check.",
+                        args.config,
+                    )
+                else:
+                    drift = _config_drift(passed, snapshot)
+                    if drift:
+                        logger.warning(
+                            "Config drift: %s differs from the snapshot this run "
+                            "started with (sections: %s). --resume continues the "
+                            "snapshot; rerun with --fresh to start over with your "
+                            "changes (discards the checkpoint).",
+                            passed, ", ".join(drift),
+                        )
+            return snapshot
+        # Back-compat: the run predates snapshots. Adopt the positional config as
+        # the snapshot so this and every future resume are covered.
+        if not args.config:
+            print(
+                "No config snapshot found for this run and no config given. "
+                "Re-run with the original config as the first argument."
+            )
+            return None
+        src = resolve_config_path(args.config, EXPERIMENT_DIR)
+        if not src.exists():
+            print(f"Config file not found: {args.config} (tried {src})")
+            return None
+        shutil.copyfile(src, snapshot)
+        logger.warning(
+            "No snapshot for this run (started before snapshots existed); "
+            "adopted %s as %s for future resumes.", src, snapshot.name,
+        )
+        return snapshot
+
+    # Fresh run.
+    if not args.config:
+        print(
+            "A config is required for a fresh run (pass it as the first "
+            "argument, e.g. `experiment <config> -o <name>`)."
+        )
+        return None
+    src = resolve_config_path(args.config, EXPERIMENT_DIR)
+    if not src.exists():
+        print(f"Config file not found: {args.config} (tried {src})")
+        return None
+    shutil.copyfile(src, snapshot)  # verbatim byte copy — no key reordering
+    return snapshot
+
+
 def cmd_experiment(args: argparse.Namespace) -> int:
     """Run automated feature discovery."""
-    config_path = resolve_config_path(args.config, EXPERIMENT_DIR)
-    if not config_path.exists():
-        raise FileNotFoundError(f"Config file not found: {args.config} (tried {config_path})")
-
+    # Config resolution is deferred until after the checkpoint gate: on --resume
+    # the run's config comes from the frozen snapshot in the run dir (keyed off
+    # --output), not the positional arg, which is optional there. See
+    # _resolve_run_config.
     if args.refresh:
         from datetime import date as _date
 
@@ -2135,6 +2257,13 @@ def cmd_experiment(args: argparse.Namespace) -> int:
             f"No checkpoint found for '{output_stem}'. "
             "Run without --resume to start fresh."
         )
+        return 1
+
+    # Resolve the config the run loads. A fresh run freezes the positional config
+    # into the run dir and loads that copy; --resume loads the frozen copy and
+    # treats the positional (if any) as a drift check only.
+    config_path = _resolve_run_config(args, run_dir)
+    if config_path is None:
         return 1
 
     if _is_lines_discovery(config_path):
