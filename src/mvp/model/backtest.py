@@ -49,18 +49,18 @@ BETTING_START_FLOOR = date(2026, 1, 1)
 # by the live pipeline). A separate dir keeps the next FS run's cache intact.
 BACKTEST_CACHE_DIR = get_local_data_root() / "features" / "backtest_cache"
 
-# Per-day frozen snapshot of matches.parquet. The live file is rewritten every
-# 15 min by the pipeline, so two backtests minutes apart otherwise refit on
-# different data and aren't comparable. We copy the live file once per day to a
-# scratch path and read from that copy, so every backtest run in the same day
-# sees byte-identical matches — a within-day batch is internally comparable.
+# Per-week frozen snapshot of matches.parquet. The live file is rewritten every
+# 15 min by the pipeline, so two backtests otherwise refit on different data and
+# aren't comparable. We copy the live file once per ISO week to a scratch path
+# and read from that copy, so every backtest run in the same week sees
+# byte-identical matches — a within-week batch is internally comparable.
 FROZEN_MATCHES_PATH = ARTIFACT_ROOT.parent / "frozen" / "matches.parquet"
 _frozen_matches_cache: Path | None = None
 
 
 def _frozen_matches_path() -> Path:
-    """Return today's frozen matches snapshot, refreshing it from the live
-    matches.parquet when missing or stale (mtime from a prior day).
+    """Return this week's frozen matches snapshot, refreshing it from the live
+    matches.parquet when missing or stale (mtime from before the current week).
 
     Memoized per process: the staleness check + copy happen at most once per
     backtest run, and every matches read in that run resolves to one file.
@@ -69,8 +69,9 @@ def _frozen_matches_path() -> Path:
     if _frozen_matches_cache is not None:
         return _frozen_matches_cache
     today = date.today()
+    week_start = today - timedelta(days=today.weekday())  # Monday of the ISO week
     fresh = FROZEN_MATCHES_PATH.exists() and (
-        datetime.fromtimestamp(FROZEN_MATCHES_PATH.stat().st_mtime).date() >= today
+        datetime.fromtimestamp(FROZEN_MATCHES_PATH.stat().st_mtime).date() >= week_start
     )
     if fresh:
         logger.info(
@@ -82,8 +83,8 @@ def _frozen_matches_path() -> Path:
         FROZEN_MATCHES_PATH.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(MATCHES_PATH, FROZEN_MATCHES_PATH)
         logger.info(
-            "Froze matches snapshot for %s: %s -> %s",
-            today, MATCHES_PATH, FROZEN_MATCHES_PATH,
+            "Froze matches snapshot for week of %s: %s -> %s",
+            week_start, MATCHES_PATH, FROZEN_MATCHES_PATH,
         )
     _frozen_matches_cache = FROZEN_MATCHES_PATH
     return FROZEN_MATCHES_PATH
