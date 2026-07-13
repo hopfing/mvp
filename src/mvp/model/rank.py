@@ -43,6 +43,7 @@ from mvp.model.evaluation import (
     fingerprint_for,
     read_backtest_csv,
     refresh_pipeline,
+    wipe_stale_evaluations,
 )
 
 logger = logging.getLogger(__name__)
@@ -1463,6 +1464,11 @@ def orchestrate_refresh(
     stats = RefreshStats()
     if no_refresh:
         return stats
+
+    # First refresh of the week clears prior weeks' evals BEFORE the freshness
+    # pre-pass, so models on an older snapshot are seen as missing and rebuilt
+    # rather than surfaced stale. (--no-refresh returned above: reads never wipe.)
+    wipe_stale_evaluations()
 
     import contextlib
     import io

@@ -19,6 +19,7 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import logging
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -29,6 +30,74 @@ from mvp.common.base_job import get_data_root
 logger = logging.getLogger(__name__)
 
 MLRUNS_DIR = Path("mlruns")
+
+
+# Set once per process by wipe_stale_evaluations(); guards the weekly wipe so a
+# single model-rank / model-report run clears prior weeks' evals at most once.
+_week_wiped = False
+
+
+def wipe_stale_evaluations() -> int:
+    """Clear model-evaluation artifacts left over from prior ISO weeks.
+
+    model-rank compares runs against the weekly frozen-matches snapshot (see
+    mvp.model.backtest._frozen_matches_path). Runs from an earlier week sit on a
+    different snapshot and aren't comparable, so on the first refresh of the week
+    we delete the pre-Monday contents of the three eval dirs — the reset that was
+    previously done by hand each morning:
+
+      - B:/backtests/lead      (ARTIFACT_ROOT; the frozen snapshot is a SIBLING,
+                                B:/backtests/frozen, so it is never touched)
+      - B:/model_evaluations   (fingerprint dirs)
+      - ./mlruns               (mlflow tracking; gitignored)
+
+    Only the contents are removed; the dirs themselves are kept. Top-level
+    entries whose own mtime is >= this week's Monday are preserved, so runs
+    already produced this week (including earlier today) survive. Memoized: at
+    most one wipe per process, so mid-refresh calls after the first are no-ops.
+
+    Returns the number of top-level entries removed.
+    """
+    global _week_wiped
+    if _week_wiped:
+        return 0
+    _week_wiped = True
+
+    from mvp.model.backtest import ARTIFACT_ROOT
+
+    today = _dt.date.today()
+    week_start = today - _dt.timedelta(days=today.weekday())  # Monday of the ISO week
+    cutoff = _dt.datetime(
+        week_start.year, week_start.month, week_start.day
+    ).timestamp()
+
+    targets = [
+        ARTIFACT_ROOT,
+        get_data_root() / "model_evaluations",
+        MLRUNS_DIR,
+    ]
+    removed = 0
+    for root in targets:
+        if not root.exists():
+            continue
+        for child in root.iterdir():
+            try:
+                if child.stat().st_mtime >= cutoff:
+                    continue
+                if child.is_dir():
+                    shutil.rmtree(child, ignore_errors=True)
+                else:
+                    child.unlink(missing_ok=True)
+                removed += 1
+            except OSError:
+                logger.warning(
+                    "Could not remove stale eval entry %s", child, exc_info=True
+                )
+    logger.info(
+        "Weekly eval wipe (week of %s): removed %d stale entr%s from %d dir(s)",
+        week_start, removed, "y" if removed == 1 else "ies", len(targets),
+    )
+    return removed
 
 
 @dataclass
@@ -285,6 +354,11 @@ def refresh_pipeline(config_path: Path, *, skip_confidence: bool = False) -> Non
     displays confidence, and model-report renders Section C as skipped. Saves a
     full CV retrain + validate per model.
     """
+    # Roll the week before writing anything: on the first refresh of the week
+    # this clears prior weeks' evals, so this run's fresh artifacts (written just
+    # below) are never among the deletions.
+    wipe_stale_evaluations()
+
     import contextlib
     import io
 
