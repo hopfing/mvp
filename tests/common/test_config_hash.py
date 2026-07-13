@@ -177,6 +177,21 @@ def test_param_value_change_changes_fingerprint():
     assert compute_fingerprint(_from_dict(base)) != compute_fingerprint(_from_dict(different))
 
 
+def test_n_jobs_does_not_affect_fingerprint():
+    """n_jobs is an operational thread-count, not a modeling param: adding it or
+    changing its value must NOT change the fingerprint, so tuning threads for
+    speed doesn't invalidate the content-addressed artifact cache."""
+    base = _make_base_config_dict()  # no n_jobs
+    with_10 = copy.deepcopy(base)
+    with_10["model"]["params"]["n_jobs"] = 10
+    with_22 = copy.deepcopy(base)
+    with_22["model"]["params"]["n_jobs"] = 22
+    fp_none = compute_fingerprint(_from_dict(base))
+    fp_10 = compute_fingerprint(_from_dict(with_10))
+    fp_22 = compute_fingerprint(_from_dict(with_22))
+    assert fp_none == fp_10 == fp_22
+
+
 def test_fingerprint_length():
     cfg = _from_dict(_make_base_config_dict())
     fp = compute_fingerprint(cfg)

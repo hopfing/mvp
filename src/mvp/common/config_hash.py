@@ -54,11 +54,22 @@ def _canonicalize_features(features_dump: dict | None) -> dict:
     }
 
 
+# Operational params that change only runtime, not the trained model, so they
+# must NOT affect the fingerprint — otherwise tuning the thread count silently
+# invalidates every content-addressed artifact and forces a full recompute.
+_NON_MODELING_PARAMS = frozenset({"n_jobs"})
+
+
 def _canonicalize_params(params: dict | None) -> dict:
-    """Deep-sort dict keys; leaves values as-is."""
+    """Deep-sort dict keys; leaves values as-is. Drops non-modeling operational
+    params (thread count) so they don't enter the fingerprint."""
     if params is None:
         return {}
-    return {k: _deep_sort(params[k]) for k in sorted(params.keys())}
+    return {
+        k: _deep_sort(params[k])
+        for k in sorted(params.keys())
+        if k not in _NON_MODELING_PARAMS
+    }
 
 
 def _deep_sort(obj):
