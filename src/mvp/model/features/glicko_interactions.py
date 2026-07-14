@@ -4,7 +4,7 @@ Engineered interaction features over the (μ, RD, σ) triple, designed to
 surface uncertainty-aware constructions that XGB cannot efficiently
 reconstruct from the independent scalars already in `glicko.py`.
 
-Nine mechanistic categories:
+Ten mechanistic categories:
   1. Per-player ratios/products (mirror=True; auto-generates opp_*)
   2. Pair-level differentials and sums (mirror=False, match_level=True for symmetric)
   3. Joint uncertainty (mirror=False, match_level=True)
@@ -18,10 +18,17 @@ Nine mechanistic categories:
      this codebase's storage convention per glicko_mu test fixture values)
   9. Distribution overlap (Bhattacharyya exact closed-form; Overlap Coefficient
      uses the equal-variance approximation — see docstring on that feature)
+ 10. Form-volatility interactions — LIVE replacements for the dead sigma forms in
+     categories 6-8. Glicko σ is frozen at ~0.06 (single-game rating periods), so
+     every σ-based member above is a constant rescaling of its non-σ part.
+     `form_volatility` (result-dispersion vs the glicko win prob) is the live
+     quantity those forms reach for; each here re-instantiates a dead σ form with it.
 
-All raw-column references are inline — no `depends_on` declarations and no
-references to other registered feature names (those columns don't exist on the
-source DataFrame; the feature function receives raw columns only).
+Categories 1-9 reference only inline raw columns — no `depends_on` declarations and
+no references to other registered feature names (those columns don't exist on the
+source DataFrame; the feature function receives raw columns only). Category 10 is the
+deliberate exception: it depends on the registered `form_volatility` feature (and so
+carries `depends_on` and a `days`-windowed column resolution, like `match_count_max`).
 
 See `mvp-docs/experiments/model-exploration-log.md` H58 for the hypothesis.
 """
@@ -623,3 +630,141 @@ def glicko_overlap_coefficient_rd() -> pl.Expr:
     arg = -abs_mu_diff / (2.0 * half_rd_sq_sum.sqrt())
     # OVL = 2 * Φ(arg), Φ via sigmoid approximation
     return 2.0 / (1.0 + (-PHI_APPROX_COEF * arg).exp())
+
+
+# ============================================================================
+# 10. FORM-VOLATILITY INTERACTIONS — live replacements for the frozen-sigma forms
+# ============================================================================
+# Unlike categories 1-9, these depend on the REGISTERED `form_volatility` feature
+# (result-dispersion vs the glicko win prob) rather than raw glicko columns — so
+# each carries `depends_on=["form_volatility"]` and resolves the window-specific
+# column name (`match_count_max` in form.py is the precedent). The engine
+# propagates the `days` param to the dependency, so requesting the interaction at
+# a window computes form_volatility at that same window.
+#
+# FORMVOL_RIDGE — additive stabilizer for the two divide-by-volatility forms
+# (zscore, diff_over_sum). form_volatility is a sample std that can sit near zero,
+# and dividing by it blows the ratio up. Pinned from the EMPIRICAL denominator
+# distribution (singles, 2024-25, via scripts/probe_formvol_ridge.py): the joint
+# denominator's bulk sits at ~2.2-3.0 with only a thin sub-1.0 tail (near-zero
+# needs BOTH players near-flat, which is rare). At 0.1 the ridge dominates the raw
+# denominator on <0.1% of rows (so >99.9% keep full volatility dependence — no
+# mu_diff/const degeneracy) while shifting the median denominator only ~2-5%, and
+# it floors the literal-zero tail. Larger (>=0.25) starts distorting the sum-form
+# bulk toward that degeneracy; smaller buys a marginally cleaner bulk for a looser
+# tail floor. Not tuned — a numerical stabilizer sized to where form_volatility lives.
+FORMVOL_RIDGE = 0.1
+
+
+def _formvol_cols(days: int | None) -> tuple[str, str]:
+    """(player, opp) form_volatility column names for the requested window."""
+    suffix = "" if days is None else f"_{days}d"
+    return f"player_form_volatility{suffix}", f"opp_form_volatility{suffix}"
+
+
+@feature(
+    name="glicko_shrunk_diff_formvol",
+    params=["days"],
+    depends_on=["form_volatility"],
+    description=(
+        "mu_diff / (1 + fv_p + fv_o) — skill gap shrunk by combined result "
+        "volatility (live analog of glicko_shrunk_diff_sigma)"
+    ),
+    mirror=False,
+    impute=None,
+)
+def glicko_shrunk_diff_formvol(days: int | None = None) -> pl.Expr:
+    pfv, ofv = _formvol_cols(days)
+    mu_diff = pl.col("player_glicko_mu") - pl.col("opp_glicko_mu")
+    # denominator >= 1 whenever non-null → no guard needed (unlike the divide forms)
+    return mu_diff / (1.0 + pl.col(pfv) + pl.col(ofv))
+
+
+@feature(
+    name="glicko_zscore_formvol",
+    params=["days"],
+    depends_on=["form_volatility"],
+    description=(
+        "mu_diff / sqrt(fv_p^2 + fv_o^2 + RIDGE) — separation in result-volatility "
+        "units (live analog of glicko_zscore_sigma)"
+    ),
+    mirror=False,
+    impute=None,
+)
+def glicko_zscore_formvol(days: int | None = None) -> pl.Expr:
+    pfv, ofv = _formvol_cols(days)
+    mu_diff = pl.col("player_glicko_mu") - pl.col("opp_glicko_mu")
+    joint = (pl.col(pfv) ** 2 + pl.col(ofv) ** 2 + FORMVOL_RIDGE).sqrt()
+    return mu_diff / joint
+
+
+@feature(
+    name="glicko_diff_over_formvol_sum",
+    params=["days"],
+    depends_on=["form_volatility"],
+    description=(
+        "mu_diff / (fv_p + fv_o + RIDGE) — L1 volatility-normalized gap "
+        "(live analog of glicko_diff_over_sigma_sum)"
+    ),
+    mirror=False,
+    impute=None,
+)
+def glicko_diff_over_formvol_sum(days: int | None = None) -> pl.Expr:
+    pfv, ofv = _formvol_cols(days)
+    mu_diff = pl.col("player_glicko_mu") - pl.col("opp_glicko_mu")
+    return mu_diff / (pl.col(pfv) + pl.col(ofv) + FORMVOL_RIDGE)
+
+
+@feature(
+    name="glicko_mu_diff_x_player_formvol",
+    params=["days"],
+    depends_on=["form_volatility"],
+    description=(
+        "mu_diff × player form_volatility — skill diff scaled by the player's own "
+        "result volatility (live analog of glicko_mu_diff_x_player_sigma)"
+    ),
+    mirror=False,
+    impute=None,
+)
+def glicko_mu_diff_x_player_formvol(days: int | None = None) -> pl.Expr:
+    pfv, _ = _formvol_cols(days)
+    mu_diff = pl.col("player_glicko_mu") - pl.col("opp_glicko_mu")
+    return mu_diff * pl.col(pfv)
+
+
+@feature(
+    name="glicko_mu_diff_x_opp_formvol",
+    params=["days"],
+    depends_on=["form_volatility"],
+    description=(
+        "mu_diff × opp form_volatility — skill diff scaled by the opponent's "
+        "result volatility (live analog of glicko_mu_diff_x_opp_sigma)"
+    ),
+    mirror=False,
+    impute=None,
+)
+def glicko_mu_diff_x_opp_formvol(days: int | None = None) -> pl.Expr:
+    _, ofv = _formvol_cols(days)
+    mu_diff = pl.col("player_glicko_mu") - pl.col("opp_glicko_mu")
+    return mu_diff * pl.col(ofv)
+
+
+@feature(
+    name="glicko_mu_diff_x_formvol_asymmetry",
+    params=["days"],
+    depends_on=["form_volatility"],
+    description=(
+        "mu_diff × (fv_p - fv_o) — signed product of skill and result-volatility "
+        "asymmetries (live analog of glicko_mu_diff_x_sigma_asymmetry)"
+    ),
+    mirror=False,
+    match_level=True,  # (-a)(-b) = ab → invariant under swap
+    impute=None,
+)
+def glicko_mu_diff_x_formvol_asymmetry(days: int | None = None) -> pl.Expr:
+    pfv, ofv = _formvol_cols(days)
+    mu_diff = pl.col("player_glicko_mu") - pl.col("opp_glicko_mu")
+    # inline subtraction (mirror the sigma analog) rather than depend on the
+    # mirror=False form_volatility_diff — the resolver would request that feature's
+    # nonexistent opp_ prefix. Identical result; no special null handling to drift.
+    return mu_diff * (pl.col(pfv) - pl.col(ofv))

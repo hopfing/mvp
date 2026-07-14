@@ -367,6 +367,133 @@ class TestOverlapCoefficient:
 
 
 # ============================================================================
+# Form-volatility interactions (category 10 — depend on registered form_volatility)
+# ============================================================================
+
+class TestFormVolInteractions:
+    """The six live replacements for the frozen-sigma forms.
+
+    These reference `player_form_volatility` (a registered feature), so the
+    fixtures supply those columns directly — the arithmetic is what's under test;
+    the engine's dependency/window wiring is covered generically in test_engine.
+    """
+
+    @staticmethod
+    def _df_alltime() -> pl.DataFrame:
+        # mu_diff = 100; fv_p = 1.0, fv_o = 0.5
+        return pl.DataFrame({
+            "player_glicko_mu": [1600.0],
+            "opp_glicko_mu": [1500.0],
+            "player_form_volatility": [1.0],
+            "opp_form_volatility": [0.5],
+        })
+
+    @staticmethod
+    def _df_windowed() -> pl.DataFrame:
+        # mu_diff = 100; fv_p = 1.2, fv_o = 0.8 at the 90d window
+        return pl.DataFrame({
+            "player_glicko_mu": [1600.0],
+            "opp_glicko_mu": [1500.0],
+            "player_form_volatility_90d": [1.2],
+            "opp_form_volatility_90d": [0.8],
+        })
+
+    def test_shrunk_diff_formvol(self):
+        from mvp.model.features.glicko_interactions import glicko_shrunk_diff_formvol
+        r = self._df_alltime().select(glicko_shrunk_diff_formvol().alias("v"))
+        assert r["v"][0] == pytest.approx(100.0 / (1.0 + 1.0 + 0.5))  # 40.0
+
+    def test_zscore_formvol(self):
+        from mvp.model.features.glicko_interactions import (
+            glicko_zscore_formvol, FORMVOL_RIDGE,
+        )
+        r = self._df_alltime().select(glicko_zscore_formvol().alias("v"))
+        assert r["v"][0] == pytest.approx(
+            100.0 / math.sqrt(1.0**2 + 0.5**2 + FORMVOL_RIDGE)
+        )
+
+    def test_diff_over_formvol_sum(self):
+        from mvp.model.features.glicko_interactions import (
+            glicko_diff_over_formvol_sum, FORMVOL_RIDGE,
+        )
+        r = self._df_alltime().select(glicko_diff_over_formvol_sum().alias("v"))
+        assert r["v"][0] == pytest.approx(100.0 / (1.0 + 0.5 + FORMVOL_RIDGE))
+
+    def test_mu_diff_x_player_and_opp_distinct(self):
+        """player and opp variants must reference different fv columns."""
+        from mvp.model.features.glicko_interactions import (
+            glicko_mu_diff_x_player_formvol, glicko_mu_diff_x_opp_formvol,
+        )
+        df = self._df_alltime()
+        pv = df.select(glicko_mu_diff_x_player_formvol().alias("v"))["v"][0]
+        ov = df.select(glicko_mu_diff_x_opp_formvol().alias("v"))["v"][0]
+        assert pv == pytest.approx(100.0 * 1.0)   # 100
+        assert ov == pytest.approx(100.0 * 0.5)   # 50
+        assert pv != ov
+
+    def test_formvol_asymmetry(self):
+        from mvp.model.features.glicko_interactions import glicko_mu_diff_x_formvol_asymmetry
+        r = self._df_alltime().select(glicko_mu_diff_x_formvol_asymmetry().alias("v"))
+        assert r["v"][0] == pytest.approx(100.0 * (1.0 - 0.5))  # 50.0
+
+    def test_windowed_column_resolution(self):
+        """days=90 reads the _90d columns, not the unsuffixed ones."""
+        from mvp.model.features.glicko_interactions import glicko_shrunk_diff_formvol
+        r = self._df_windowed().select(glicko_shrunk_diff_formvol(days=90).alias("v"))
+        assert r["v"][0] == pytest.approx(100.0 / (1.0 + 1.2 + 0.8))  # 33.33
+
+    def test_ridge_bounds_near_zero_denominator(self):
+        """fv_p = fv_o = 0 → divide forms stay large but finite (ridge floor)."""
+        from mvp.model.features.glicko_interactions import (
+            glicko_zscore_formvol, glicko_diff_over_formvol_sum, FORMVOL_RIDGE,
+        )
+        df = pl.DataFrame({
+            "player_glicko_mu": [1600.0],
+            "opp_glicko_mu": [1500.0],
+            "player_form_volatility": [0.0],
+            "opp_form_volatility": [0.0],
+        })
+        z = df.select(glicko_zscore_formvol().alias("v"))["v"][0]
+        s = df.select(glicko_diff_over_formvol_sum().alias("v"))["v"][0]
+        assert z == pytest.approx(100.0 / math.sqrt(FORMVOL_RIDGE))
+        assert s == pytest.approx(100.0 / FORMVOL_RIDGE)
+        assert math.isfinite(z) and math.isfinite(s)
+
+    def test_null_formvol_passes_through(self):
+        """impute=None: a null form_volatility yields a null feature, not a value."""
+        from mvp.model.features.glicko_interactions import (
+            glicko_shrunk_diff_formvol, glicko_zscore_formvol,
+        )
+        df = pl.DataFrame({
+            "player_glicko_mu": [1600.0],
+            "opp_glicko_mu": [1500.0],
+            "player_form_volatility": [None],
+            "opp_form_volatility": [0.5],
+        }, schema_overrides={"player_form_volatility": pl.Float64})
+        assert df.select(glicko_shrunk_diff_formvol().alias("v"))["v"][0] is None
+        assert df.select(glicko_zscore_formvol().alias("v"))["v"][0] is None
+
+    def test_metadata(self):
+        reg = get_registry()
+        anti_symmetric = [
+            "glicko_shrunk_diff_formvol", "glicko_zscore_formvol",
+            "glicko_diff_over_formvol_sum",
+            "glicko_mu_diff_x_player_formvol", "glicko_mu_diff_x_opp_formvol",
+        ]
+        for name in anti_symmetric:
+            f = reg.get(name)
+            assert f.mirror is False and f.match_level is False, name
+            assert f.params == ["days"], name
+            assert f.depends_on == ["form_volatility"], name
+            assert f.impute is None, name
+        asym = reg.get("glicko_mu_diff_x_formvol_asymmetry")
+        assert asym.mirror is False and asym.match_level is True   # symmetric
+        assert asym.params == ["days"]
+        assert asym.depends_on == ["form_volatility"]
+        assert asym.impute is None
+
+
+# ============================================================================
 # Registration check
 # ============================================================================
 
@@ -402,6 +529,11 @@ class TestAllH58FeaturesRegistered:
             # Overlap
             "glicko_bhattacharyya_rd", "glicko_bhattacharyya_sigma",
             "glicko_overlap_coefficient_rd",
+            # Form-volatility interactions (category 10)
+            "glicko_shrunk_diff_formvol", "glicko_zscore_formvol",
+            "glicko_diff_over_formvol_sum",
+            "glicko_mu_diff_x_player_formvol", "glicko_mu_diff_x_opp_formvol",
+            "glicko_mu_diff_x_formvol_asymmetry",
         ]
         registered = registry.list_features()
         for name in expected:
