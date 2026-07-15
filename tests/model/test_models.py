@@ -251,6 +251,83 @@ class TestModelTraining:
 
         np.testing.assert_array_almost_equal(probs_before, probs_after)
 
+    def test_center_weighted_logloss_k0_equals_plain_logloss(self):
+        """center_k=0 recovers standard log loss: weight == 1 everywhere, so
+        grad=(p-y) and hess=p(1-p) regardless of the floor value."""
+        from mvp.model.models import _center_weighted_logloss, _sigmoid
+
+        y_true = np.array([0.0, 1.0, 1.0, 0.0])
+        y_pred = np.array([-2.0, -0.5, 0.5, 2.0])  # raw margins (logits)
+        p = _sigmoid(y_pred)
+        grad, hess = _center_weighted_logloss(y_true, y_pred, center_k=0.0, floor=0.1)
+        np.testing.assert_allclose(grad, p - y_true)
+        np.testing.assert_allclose(hess, p * (1.0 - p))
+
+    def test_center_weighted_logloss_downweights_tails(self):
+        """center_k>0 keeps weight 1.0 at p=0.5 and shrinks it toward `floor`
+        at the confident tails; hessian stays strictly positive (XGB needs it)
+        and the weight is label-independent (never amplifies confident-wrong)."""
+        from mvp.model.models import _center_weighted_logloss, _sigmoid
+
+        y_pred = np.array([-4.0, 0.0, 4.0])  # p ~ .018, .5, .982
+        p = _sigmoid(y_pred)
+        grad, hess = _center_weighted_logloss(
+            np.ones(3), y_pred, center_k=2.0, floor=0.1)
+        weight = hess / (p * (1.0 - p))
+        np.testing.assert_allclose(weight[1], 1.0)          # p=0.5 -> weight 1
+        assert weight[0] < 0.2 and weight[2] < 0.2          # tails -> ~floor
+        assert (hess > 0).all()
+        # same y_pred, flipped labels -> identical weight (label-independent)
+        _, hess_flip = _center_weighted_logloss(
+            np.zeros(3), y_pred, center_k=2.0, floor=0.1)
+        np.testing.assert_allclose(hess, hess_flip)
+
+    def test_xgboost_center_weighted_logloss_fit_predict(self, sample_data):
+        """center_weighted_logloss wires end-to-end: fit completes, predict_proba
+        returns valid probabilities, center_k/center_floor are consumed (not
+        passed to XGB), the objective stays a string in self.params for the
+        config snapshot, and predictions differ from the default baseline."""
+        X, y = sample_data
+        baseline = get_model("xgboost", {"max_depth": 3, "n_estimators": 20})
+        cw = get_model("xgboost", {
+            "max_depth": 3, "n_estimators": 20,
+            "objective": "center_weighted_logloss",
+            "center_k": 2.0, "center_floor": 0.1,
+        })
+        baseline.fit(X, y)
+        cw.fit(X, y)
+
+        probs = cw.predict_proba(X)
+        assert probs.shape == (100,)
+        assert all(0 <= p <= 1 for p in probs)
+        # center_k/center_floor consumed before reaching XGB (else it errors)
+        assert "center_k" not in cw.params and "center_floor" not in cw.params
+        # self.params keeps the string objective (config snapshot yaml-dumps it)
+        assert cw.params["objective"] == "center_weighted_logloss"
+        assert not np.allclose(baseline.predict_proba(X), probs), (
+            "center_weighted_logloss predictions identical to default — objective "
+            "callable likely not wired through"
+        )
+
+    def test_xgboost_center_weighted_logloss_pickles(self, sample_data, tmp_path):
+        """Fitted center-weighted model survives a joblib round-trip (the
+        backtest path saves trained models to disk)."""
+        import joblib
+
+        X, y = sample_data
+        model = get_model("xgboost", {
+            "max_depth": 3, "n_estimators": 20,
+            "objective": "center_weighted_logloss", "center_k": 1.5,
+        })
+        model.fit(X, y)
+        probs_before = model.predict_proba(X)
+
+        path = tmp_path / "cw_model.pkl"
+        joblib.dump(model, path)
+        probs_after = joblib.load(path).predict_proba(X)
+
+        np.testing.assert_array_almost_equal(probs_before, probs_after)
+
     def test_logistic_predict_before_fit_raises(self):
         """Calling predict_proba before fit raises RuntimeError."""
         model = get_model("logistic", {})

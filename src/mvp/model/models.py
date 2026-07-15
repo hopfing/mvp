@@ -131,6 +131,40 @@ def _asymmetric_logloss_factory(lambda_over: float):
     return functools.partial(_asymmetric_logloss, lambda_over=lambda_over)
 
 
+def _center_weighted_logloss(
+    y_true: np.ndarray, y_pred: np.ndarray, center_k: float, floor: float
+) -> tuple[np.ndarray, np.ndarray]:
+    """XGB custom objective: log-loss reweighted by how UNCERTAIN the model
+    currently is about each example.
+
+    ``weight = floor + (1 - floor) * (4p(1-p))^center_k`` — equal to 1.0 at
+    p=0.5 and decaying to ``floor`` at the confident tails, so each boosting
+    round spends its gradient on the near-0.5 (close) matches. ``center_k=0``
+    recovers standard log loss (weight == 1 everywhere); the nonzero ``floor``
+    keeps the tails learning so calibration/resolution there isn't starved.
+
+    The weight is a function of p ALONE (label-independent): unlike focal loss it
+    down-weights confident examples whether right or wrong, so it never amplifies
+    confident-wrong outcomes (upsets, which in this domain are mostly irreducible
+    variance). y_pred is the raw margin (logit) under XGB's custom-objective
+    contract. Module-level (not a closure) so functools.partial stays picklable.
+    """
+    p = _sigmoid(y_pred)
+    center = 4.0 * p * (1.0 - p)              # 1.0 at p=0.5, 0.0 at p in {0, 1}
+    weight = floor + (1.0 - floor) * center ** center_k
+    grad = (p - y_true) * weight
+    hess = p * (1.0 - p) * weight
+    return grad, hess
+
+
+def _center_weighted_logloss_factory(center_k: float, floor: float):
+    """Return a picklable callable bound to (center_k, floor) for XGB's `objective=`."""
+    import functools
+    return functools.partial(
+        _center_weighted_logloss, center_k=center_k, floor=floor
+    )
+
+
 def _mtl_heterogeneous_objective(
     predt: np.ndarray,
     dtrain: Any,  # xgb.DMatrix
@@ -224,6 +258,15 @@ class XGBoostModel(BaseModel):
             # dict(resolved) so we don't mutate the caller's params
             resolved = dict(resolved)
             self._lambda_over = float(resolved.pop("lambda_over", 2.0))
+        # center_weighted_logloss: same string-in-snapshot / callable-at-fit
+        # pattern. center_k=0 -> plain log loss; center_floor keeps the
+        # confident tails learning.
+        self._center_k: float | None = None
+        self._center_floor: float = 0.1
+        if resolved.get("objective") == "center_weighted_logloss":
+            resolved = dict(resolved)
+            self._center_k = float(resolved.pop("center_k", 1.0))
+            self._center_floor = float(resolved.pop("center_floor", 0.1))
         # DART-only params have no effect under gbtree and XGBoost warns about
         # them every fit. The tuner samples them unconditionally per trial, so
         # drop them here when the chosen booster isn't dart.
@@ -264,6 +307,10 @@ class XGBoostModel(BaseModel):
         xgb_params = dict(self.params)
         if self._lambda_over is not None:
             xgb_params["objective"] = _asymmetric_logloss_factory(self._lambda_over)
+        if self._center_k is not None:
+            xgb_params["objective"] = _center_weighted_logloss_factory(
+                self._center_k, self._center_floor
+            )
         # Custom early-stop eval metric (the run's objective). It REPLACES the
         # default "logloss" eval so XGB doesn't also run logloss every round
         # (only the custom metric drives stopping anyway). The feval is built
@@ -303,7 +350,8 @@ class XGBoostModel(BaseModel):
         # added _lambda_over to __init__ — old joblibs deserialize without
         # the attribute and must default to the standard-logistic path.
         lambda_over = getattr(self, "_lambda_over", None)
-        if lambda_over is not None:
+        center_k = getattr(self, "_center_k", None)
+        if lambda_over is not None or center_k is not None:
             raw = self._model.predict(X, output_margin=True)
             return _sigmoid(raw)
         return self._model.predict_proba(X)[:, 1]
