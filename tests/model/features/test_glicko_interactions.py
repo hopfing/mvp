@@ -67,13 +67,6 @@ class TestPerPlayerRatios:
 # ============================================================================
 
 class TestPairLevelSums:
-    def test_sigma_sum(self):
-        from mvp.model.features.glicko_interactions import glicko_sigma_sum
-        df = _base_df()
-        result = df.select(glicko_sigma_sum().alias("val"))
-        # 0.05 + 0.06 = 0.11
-        assert result["val"][0] == pytest.approx(0.11)
-
     def test_rd_max(self):
         from mvp.model.features.glicko_interactions import glicko_rd_max
         df = _base_df()
@@ -115,13 +108,6 @@ class TestJointUncertainty:
         result = df.select(glicko_joint_rd().alias("val"))
         # sqrt(100^2 + 120^2) = sqrt(24400) ≈ 156.205
         assert result["val"][0] == pytest.approx(math.sqrt(24400.0))
-
-    def test_joint_sigma(self):
-        from mvp.model.features.glicko_interactions import glicko_joint_sigma
-        df = _base_df()
-        result = df.select(glicko_joint_sigma().alias("val"))
-        # sqrt(0.05^2 + 0.06^2) = sqrt(0.0061) ≈ 0.0781
-        assert result["val"][0] == pytest.approx(math.sqrt(0.0061))
 
     def test_joint_total(self):
         from mvp.model.features.glicko_interactions import glicko_joint_total
@@ -501,33 +487,29 @@ class TestAllH58FeaturesRegistered:
     def test_all_features_in_registry(self):
         registry = get_registry()
         expected = [
-            # Per-player ratios/products
-            "glicko_mu_over_rd", "glicko_mu_over_sigma",
-            "glicko_mu_x_rd", "glicko_mu_x_sigma",
-            "glicko_rd_x_sigma", "glicko_rd_over_sigma",
-            "glicko_log_rd", "glicko_log_sigma",
-            "glicko_precision", "glicko_precision_sigma",
+            # Per-player ratios/products (sigma variants deprecated — frozen sigma)
+            "glicko_mu_over_rd",
+            "glicko_mu_x_rd",
+            "glicko_log_rd",
+            "glicko_precision",
             # Pair-level
-            "glicko_sigma_sum",
             "glicko_rd_max", "glicko_rd_min", "glicko_rd_ratio",
-            "glicko_sigma_max", "glicko_sigma_min", "glicko_sigma_ratio",
-            # Joint uncertainty
-            "glicko_joint_rd", "glicko_joint_sigma", "glicko_joint_total",
+            # Joint uncertainty (RD + RD-plus-sigma _total kept)
+            "glicko_joint_rd", "glicko_joint_total",
             # z-scores
-            "glicko_zscore_rd", "glicko_zscore_sigma", "glicko_zscore_total",
-            "glicko_diff_over_rd_sum", "glicko_diff_over_sigma_sum",
+            "glicko_zscore_rd", "glicko_zscore_total",
+            "glicko_diff_over_rd_sum",
             # TrueSkill
-            "glicko_truesk_pwin_rd", "glicko_truesk_pwin_sigma", "glicko_truesk_pwin_total",
+            "glicko_truesk_pwin_rd", "glicko_truesk_pwin_total",
             # Asymmetric
             "glicko_mu_diff_x_player_rd", "glicko_mu_diff_x_opp_rd",
-            "glicko_mu_diff_x_player_sigma", "glicko_mu_diff_x_opp_sigma",
-            "glicko_mu_diff_x_rd_asymmetry", "glicko_mu_diff_x_sigma_asymmetry",
+            "glicko_mu_diff_x_rd_asymmetry",
             # Shrinkage
-            "glicko_shrunk_diff_rd", "glicko_shrunk_diff_rdsq", "glicko_shrunk_diff_sigma",
+            "glicko_shrunk_diff_rd", "glicko_shrunk_diff_rdsq",
             # Logistic
             "glicko_logistic_diff",
             # Overlap
-            "glicko_bhattacharyya_rd", "glicko_bhattacharyya_sigma",
+            "glicko_bhattacharyya_rd",
             "glicko_overlap_coefficient_rd",
             # Form-volatility interactions (category 10)
             "glicko_shrunk_diff_formvol", "glicko_zscore_formvol",
@@ -543,7 +525,7 @@ class TestAllH58FeaturesRegistered:
         """Per-player features should have mirror=True so engine generates opp_*."""
         registry = get_registry()
         for name in [
-            "glicko_mu_over_rd", "glicko_mu_over_sigma",
+            "glicko_mu_over_rd",
             "glicko_log_rd", "glicko_precision",
         ]:
             feat = registry.get(name)
@@ -554,8 +536,8 @@ class TestAllH58FeaturesRegistered:
         """Symmetric pair-level features should be match_level=True."""
         registry = get_registry()
         for name in [
-            "glicko_sigma_sum", "glicko_rd_max", "glicko_rd_min", "glicko_rd_ratio",
-            "glicko_joint_rd", "glicko_joint_sigma", "glicko_joint_total",
+            "glicko_rd_max", "glicko_rd_min", "glicko_rd_ratio",
+            "glicko_joint_rd", "glicko_joint_total",
             "glicko_bhattacharyya_rd", "glicko_overlap_coefficient_rd",
         ]:
             feat = registry.get(name)
@@ -567,7 +549,7 @@ class TestAllH58FeaturesRegistered:
         registry = get_registry()
         h58_features = [
             "glicko_mu_over_rd", "glicko_log_rd", "glicko_precision",
-            "glicko_sigma_sum", "glicko_rd_ratio", "glicko_joint_rd",
+            "glicko_rd_ratio", "glicko_joint_rd",
             "glicko_zscore_rd", "glicko_truesk_pwin_rd",
             "glicko_mu_diff_x_player_rd", "glicko_shrunk_diff_rd",
             "glicko_logistic_diff", "glicko_bhattacharyya_rd",
@@ -576,3 +558,22 @@ class TestAllH58FeaturesRegistered:
         for name in h58_features:
             feat = registry.get(name)
             assert feat.impute is None, f"{name} should have impute=None"
+
+    def test_deprecated_sigma_features_not_registered(self):
+        """Frozen-sigma features are deregistered (commented out in glicko.py /
+        glicko_interactions.py). Guards against accidental re-registration."""
+        registered = get_registry().list_features()
+        deprecated = [
+            "glicko_sigma", "glicko_sigma_diff",
+            "glicko_mu_over_sigma", "glicko_mu_x_sigma",
+            "glicko_rd_x_sigma", "glicko_rd_over_sigma",
+            "glicko_log_sigma", "glicko_precision_sigma",
+            "glicko_sigma_sum", "glicko_sigma_max", "glicko_sigma_min",
+            "glicko_sigma_ratio", "glicko_joint_sigma", "glicko_zscore_sigma",
+            "glicko_diff_over_sigma_sum", "glicko_truesk_pwin_sigma",
+            "glicko_mu_diff_x_player_sigma", "glicko_mu_diff_x_opp_sigma",
+            "glicko_mu_diff_x_sigma_asymmetry", "glicko_shrunk_diff_sigma",
+            "glicko_bhattacharyya_sigma",
+        ]
+        for name in deprecated:
+            assert name not in registered, f"{name} should be deregistered"

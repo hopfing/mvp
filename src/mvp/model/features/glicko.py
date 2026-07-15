@@ -28,13 +28,15 @@ def glicko_rd() -> pl.Expr:
     return pl.col("player_glicko_rd")
 
 
-@feature(
-    name="glicko_sigma",
-    description="Glicko-2 volatility",
-    mirror=True,
-)
-def glicko_sigma() -> pl.Expr:
-    return pl.col("player_glicko_sigma")
+# DEPRECATED (frozen sigma — constant ~0.06, no signal; raw column kept). See
+# glicko_interactions.py for the deprecation rationale and form_volatility replacement.
+# @feature(
+#     name="glicko_sigma",
+#     description="Glicko-2 volatility",
+#     mirror=True,
+# )
+# def glicko_sigma() -> pl.Expr:
+#     return pl.col("player_glicko_sigma")
 
 
 @feature(
@@ -67,14 +69,15 @@ def glicko_rd_diff() -> pl.Expr:
     return pl.col("player_glicko_rd") - pl.col("opp_glicko_rd")
 
 
-@feature(
-    name="glicko_sigma_diff",
-    description="Glicko-2 volatility difference (erratic vs consistent)",
-    mirror=False,
-    impute=None,
-)
-def glicko_sigma_diff() -> pl.Expr:
-    return pl.col("player_glicko_sigma") - pl.col("opp_glicko_sigma")
+# DEPRECATED (frozen sigma — identically zero, no signal). See glicko_interactions.py.
+# @feature(
+#     name="glicko_sigma_diff",
+#     description="Glicko-2 volatility difference (erratic vs consistent)",
+#     mirror=False,
+#     impute=None,
+# )
+# def glicko_sigma_diff() -> pl.Expr:
+#     return pl.col("player_glicko_sigma") - pl.col("opp_glicko_sigma")
 
 
 @feature(

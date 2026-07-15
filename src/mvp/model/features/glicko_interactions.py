@@ -30,6 +30,13 @@ source DataFrame; the feature function receives raw columns only). Category 10 i
 deliberate exception: it depends on the registered `form_volatility` feature (and so
 carries `depends_on` and a `days`-windowed column resolution, like `match_count_max`).
 
+DEPRECATED — every σ-based feature below is commented out (deregistered). Glicko-2 σ
+is pinned at ~0.06 under single-game rating periods, so each was a constant, an
+identically-zero column, or a constant rescaling of its non-σ part — no signal. They
+are left in place (commented) for reference and superseded by category 10; the raw
+`player_glicko_sigma` column is untouched (the RD+σ `_total` forms still use it). Each
+carries a one-line `# DEPRECATED (frozen sigma):` marker; this paragraph is the why.
+
 See `mvp-docs/experiments/model-exploration-log.md` H58 for the hypothesis.
 """
 
@@ -65,14 +72,15 @@ def glicko_mu_over_rd() -> pl.Expr:
     return pl.col("player_glicko_mu") / pl.col("player_glicko_rd")
 
 
-@feature(
-    name="glicko_mu_over_sigma",
-    description="Glicko mu / sigma — signal-to-volatility per player",
-    mirror=True,
-    impute=None,
-)
-def glicko_mu_over_sigma() -> pl.Expr:
-    return pl.col("player_glicko_mu") / pl.col("player_glicko_sigma")
+# DEPRECATED (frozen sigma): rescaled mu.
+# @feature(
+#     name="glicko_mu_over_sigma",
+#     description="Glicko mu / sigma — signal-to-volatility per player",
+#     mirror=True,
+#     impute=None,
+# )
+# def glicko_mu_over_sigma() -> pl.Expr:
+#     return pl.col("player_glicko_mu") / pl.col("player_glicko_sigma")
 
 
 @feature(
@@ -85,34 +93,37 @@ def glicko_mu_x_rd() -> pl.Expr:
     return pl.col("player_glicko_mu") * pl.col("player_glicko_rd")
 
 
-@feature(
-    name="glicko_mu_x_sigma",
-    description="Glicko mu × sigma — joint magnitude with volatility per player",
-    mirror=True,
-    impute=None,
-)
-def glicko_mu_x_sigma() -> pl.Expr:
-    return pl.col("player_glicko_mu") * pl.col("player_glicko_sigma")
+# DEPRECATED (frozen sigma): rescaled mu.
+# @feature(
+#     name="glicko_mu_x_sigma",
+#     description="Glicko mu × sigma — joint magnitude with volatility per player",
+#     mirror=True,
+#     impute=None,
+# )
+# def glicko_mu_x_sigma() -> pl.Expr:
+#     return pl.col("player_glicko_mu") * pl.col("player_glicko_sigma")
 
 
-@feature(
-    name="glicko_rd_x_sigma",
-    description="Glicko RD × sigma — combined uncertainty score per player",
-    mirror=True,
-    impute=None,
-)
-def glicko_rd_x_sigma() -> pl.Expr:
-    return pl.col("player_glicko_rd") * pl.col("player_glicko_sigma")
+# DEPRECATED (frozen sigma): rescaled rd.
+# @feature(
+#     name="glicko_rd_x_sigma",
+#     description="Glicko RD × sigma — combined uncertainty score per player",
+#     mirror=True,
+#     impute=None,
+# )
+# def glicko_rd_x_sigma() -> pl.Expr:
+#     return pl.col("player_glicko_rd") * pl.col("player_glicko_sigma")
 
 
-@feature(
-    name="glicko_rd_over_sigma",
-    description="Glicko RD / sigma — which uncertainty type dominates per player",
-    mirror=True,
-    impute=None,
-)
-def glicko_rd_over_sigma() -> pl.Expr:
-    return pl.col("player_glicko_rd") / pl.col("player_glicko_sigma")
+# DEPRECATED (frozen sigma): rescaled rd.
+# @feature(
+#     name="glicko_rd_over_sigma",
+#     description="Glicko RD / sigma — which uncertainty type dominates per player",
+#     mirror=True,
+#     impute=None,
+# )
+# def glicko_rd_over_sigma() -> pl.Expr:
+#     return pl.col("player_glicko_rd") / pl.col("player_glicko_sigma")
 
 
 @feature(
@@ -125,14 +136,15 @@ def glicko_log_rd() -> pl.Expr:
     return pl.col("player_glicko_rd").log()
 
 
-@feature(
-    name="glicko_log_sigma",
-    description="log(Glicko sigma) — log-scaled volatility",
-    mirror=True,
-    impute=None,
-)
-def glicko_log_sigma() -> pl.Expr:
-    return pl.col("player_glicko_sigma").log()
+# DEPRECATED (frozen sigma): constant.
+# @feature(
+#     name="glicko_log_sigma",
+#     description="log(Glicko sigma) — log-scaled volatility",
+#     mirror=True,
+#     impute=None,
+# )
+# def glicko_log_sigma() -> pl.Expr:
+#     return pl.col("player_glicko_sigma").log()
 
 
 @feature(
@@ -145,29 +157,31 @@ def glicko_precision() -> pl.Expr:
     return 1.0 / pl.col("player_glicko_rd")
 
 
-@feature(
-    name="glicko_precision_sigma",
-    description="1 / Glicko sigma — inverse volatility per player",
-    mirror=True,
-    impute=None,
-)
-def glicko_precision_sigma() -> pl.Expr:
-    return 1.0 / pl.col("player_glicko_sigma")
+# DEPRECATED (frozen sigma): constant.
+# @feature(
+#     name="glicko_precision_sigma",
+#     description="1 / Glicko sigma — inverse volatility per player",
+#     mirror=True,
+#     impute=None,
+# )
+# def glicko_precision_sigma() -> pl.Expr:
+#     return 1.0 / pl.col("player_glicko_sigma")
 
 
 # ============================================================================
 # 2. PAIR-LEVEL DIFFERENTIALS AND SUMS (symmetric → match_level=True)
 # ============================================================================
 
-@feature(
-    name="glicko_sigma_sum",
-    description="Combined Glicko sigma (total volatility)",
-    mirror=False,
-    match_level=True,
-    impute=None,
-)
-def glicko_sigma_sum() -> pl.Expr:
-    return pl.col("player_glicko_sigma") + pl.col("opp_glicko_sigma")
+# DEPRECATED (frozen sigma): constant.
+# @feature(
+#     name="glicko_sigma_sum",
+#     description="Combined Glicko sigma (total volatility)",
+#     mirror=False,
+#     match_level=True,
+#     impute=None,
+# )
+# def glicko_sigma_sum() -> pl.Expr:
+#     return pl.col("player_glicko_sigma") + pl.col("opp_glicko_sigma")
 
 
 @feature(
@@ -216,47 +230,50 @@ def glicko_rd_ratio() -> pl.Expr:
     return pl.when(min_rd > 0).then(max_rd / min_rd).otherwise(1.0)
 
 
-@feature(
-    name="glicko_sigma_max",
-    description="Max of player and opponent Glicko sigmas",
-    mirror=False,
-    match_level=True,
-    impute=None,
-)
-def glicko_sigma_max() -> pl.Expr:
-    return pl.max_horizontal(
-        pl.col("player_glicko_sigma"), pl.col("opp_glicko_sigma"),
-    )
+# DEPRECATED (frozen sigma): constant.
+# @feature(
+#     name="glicko_sigma_max",
+#     description="Max of player and opponent Glicko sigmas",
+#     mirror=False,
+#     match_level=True,
+#     impute=None,
+# )
+# def glicko_sigma_max() -> pl.Expr:
+#     return pl.max_horizontal(
+#         pl.col("player_glicko_sigma"), pl.col("opp_glicko_sigma"),
+#     )
 
 
-@feature(
-    name="glicko_sigma_min",
-    description="Min of player and opponent Glicko sigmas",
-    mirror=False,
-    match_level=True,
-    impute=None,
-)
-def glicko_sigma_min() -> pl.Expr:
-    return pl.min_horizontal(
-        pl.col("player_glicko_sigma"), pl.col("opp_glicko_sigma"),
-    )
+# DEPRECATED (frozen sigma): constant.
+# @feature(
+#     name="glicko_sigma_min",
+#     description="Min of player and opponent Glicko sigmas",
+#     mirror=False,
+#     match_level=True,
+#     impute=None,
+# )
+# def glicko_sigma_min() -> pl.Expr:
+#     return pl.min_horizontal(
+#         pl.col("player_glicko_sigma"), pl.col("opp_glicko_sigma"),
+#     )
 
 
-@feature(
-    name="glicko_sigma_ratio",
-    description="max(sigma) / min(sigma) — volatility asymmetry magnitude",
-    mirror=False,
-    match_level=True,
-    impute=None,
-)
-def glicko_sigma_ratio() -> pl.Expr:
-    max_s = pl.max_horizontal(
-        pl.col("player_glicko_sigma"), pl.col("opp_glicko_sigma"),
-    )
-    min_s = pl.min_horizontal(
-        pl.col("player_glicko_sigma"), pl.col("opp_glicko_sigma"),
-    )
-    return pl.when(min_s > 0).then(max_s / min_s).otherwise(1.0)
+# DEPRECATED (frozen sigma): constant (=1).
+# @feature(
+#     name="glicko_sigma_ratio",
+#     description="max(sigma) / min(sigma) — volatility asymmetry magnitude",
+#     mirror=False,
+#     match_level=True,
+#     impute=None,
+# )
+# def glicko_sigma_ratio() -> pl.Expr:
+#     max_s = pl.max_horizontal(
+#         pl.col("player_glicko_sigma"), pl.col("opp_glicko_sigma"),
+#     )
+#     min_s = pl.min_horizontal(
+#         pl.col("player_glicko_sigma"), pl.col("opp_glicko_sigma"),
+#     )
+#     return pl.when(min_s > 0).then(max_s / min_s).otherwise(1.0)
 
 
 # ============================================================================
@@ -276,17 +293,18 @@ def glicko_joint_rd() -> pl.Expr:
     ).sqrt()
 
 
-@feature(
-    name="glicko_joint_sigma",
-    description="sqrt(sigma_p^2 + sigma_o^2) — joint volatility",
-    mirror=False,
-    match_level=True,
-    impute=None,
-)
-def glicko_joint_sigma() -> pl.Expr:
-    return (
-        pl.col("player_glicko_sigma") ** 2 + pl.col("opp_glicko_sigma") ** 2
-    ).sqrt()
+# DEPRECATED (frozen sigma): constant.
+# @feature(
+#     name="glicko_joint_sigma",
+#     description="sqrt(sigma_p^2 + sigma_o^2) — joint volatility",
+#     mirror=False,
+#     match_level=True,
+#     impute=None,
+# )
+# def glicko_joint_sigma() -> pl.Expr:
+#     return (
+#         pl.col("player_glicko_sigma") ** 2 + pl.col("opp_glicko_sigma") ** 2
+#     ).sqrt()
 
 
 @feature(
@@ -321,18 +339,19 @@ def glicko_zscore_rd() -> pl.Expr:
     return mu_diff / joint_rd
 
 
-@feature(
-    name="glicko_zscore_sigma",
-    description="mu_diff / sqrt(sigma_p^2 + sigma_o^2) — separation in joint-sigma units",
-    mirror=False,
-    impute=None,
-)
-def glicko_zscore_sigma() -> pl.Expr:
-    mu_diff = pl.col("player_glicko_mu") - pl.col("opp_glicko_mu")
-    joint_s = (
-        pl.col("player_glicko_sigma") ** 2 + pl.col("opp_glicko_sigma") ** 2
-    ).sqrt()
-    return mu_diff / joint_s
+# DEPRECATED (frozen sigma): rescaled mu_diff.
+# @feature(
+#     name="glicko_zscore_sigma",
+#     description="mu_diff / sqrt(sigma_p^2 + sigma_o^2) — separation in joint-sigma units",
+#     mirror=False,
+#     impute=None,
+# )
+# def glicko_zscore_sigma() -> pl.Expr:
+#     mu_diff = pl.col("player_glicko_mu") - pl.col("opp_glicko_mu")
+#     joint_s = (
+#         pl.col("player_glicko_sigma") ** 2 + pl.col("opp_glicko_sigma") ** 2
+#     ).sqrt()
+#     return mu_diff / joint_s
 
 
 @feature(
@@ -362,16 +381,17 @@ def glicko_diff_over_rd_sum() -> pl.Expr:
     return mu_diff / rd_sum
 
 
-@feature(
-    name="glicko_diff_over_sigma_sum",
-    description="mu_diff / (sigma_p + sigma_o) — sigma-based simple inversion",
-    mirror=False,
-    impute=None,
-)
-def glicko_diff_over_sigma_sum() -> pl.Expr:
-    mu_diff = pl.col("player_glicko_mu") - pl.col("opp_glicko_mu")
-    sigma_sum = pl.col("player_glicko_sigma") + pl.col("opp_glicko_sigma")
-    return mu_diff / sigma_sum
+# DEPRECATED (frozen sigma): rescaled mu_diff.
+# @feature(
+#     name="glicko_diff_over_sigma_sum",
+#     description="mu_diff / (sigma_p + sigma_o) — sigma-based simple inversion",
+#     mirror=False,
+#     impute=None,
+# )
+# def glicko_diff_over_sigma_sum() -> pl.Expr:
+#     mu_diff = pl.col("player_glicko_mu") - pl.col("opp_glicko_mu")
+#     sigma_sum = pl.col("player_glicko_sigma") + pl.col("opp_glicko_sigma")
+#     return mu_diff / sigma_sum
 
 
 # ============================================================================
@@ -393,19 +413,20 @@ def glicko_truesk_pwin_rd() -> pl.Expr:
     return 1.0 / (1.0 + (-PHI_APPROX_COEF * z).exp())
 
 
-@feature(
-    name="glicko_truesk_pwin_sigma",
-    description="Φ(zscore_sigma) — TrueSkill-style P(win) on joint sigma",
-    mirror=False,
-    impute=None,
-)
-def glicko_truesk_pwin_sigma() -> pl.Expr:
-    mu_diff = pl.col("player_glicko_mu") - pl.col("opp_glicko_mu")
-    joint_s = (
-        pl.col("player_glicko_sigma") ** 2 + pl.col("opp_glicko_sigma") ** 2
-    ).sqrt()
-    z = mu_diff / joint_s
-    return 1.0 / (1.0 + (-PHI_APPROX_COEF * z).exp())
+# DEPRECATED (frozen sigma): monotone transform of mu_diff.
+# @feature(
+#     name="glicko_truesk_pwin_sigma",
+#     description="Φ(zscore_sigma) — TrueSkill-style P(win) on joint sigma",
+#     mirror=False,
+#     impute=None,
+# )
+# def glicko_truesk_pwin_sigma() -> pl.Expr:
+#     mu_diff = pl.col("player_glicko_mu") - pl.col("opp_glicko_mu")
+#     joint_s = (
+#         pl.col("player_glicko_sigma") ** 2 + pl.col("opp_glicko_sigma") ** 2
+#     ).sqrt()
+#     z = mu_diff / joint_s
+#     return 1.0 / (1.0 + (-PHI_APPROX_COEF * z).exp())
 
 
 @feature(
@@ -454,26 +475,28 @@ def glicko_mu_diff_x_opp_rd() -> pl.Expr:
     return mu_diff * pl.col("opp_glicko_rd")
 
 
-@feature(
-    name="glicko_mu_diff_x_player_sigma",
-    description="mu_diff × player_sigma — skill diff scaled by player volatility",
-    mirror=False,
-    impute=None,
-)
-def glicko_mu_diff_x_player_sigma() -> pl.Expr:
-    mu_diff = pl.col("player_glicko_mu") - pl.col("opp_glicko_mu")
-    return mu_diff * pl.col("player_glicko_sigma")
+# DEPRECATED (frozen sigma): rescaled mu_diff.
+# @feature(
+#     name="glicko_mu_diff_x_player_sigma",
+#     description="mu_diff × player_sigma — skill diff scaled by player volatility",
+#     mirror=False,
+#     impute=None,
+# )
+# def glicko_mu_diff_x_player_sigma() -> pl.Expr:
+#     mu_diff = pl.col("player_glicko_mu") - pl.col("opp_glicko_mu")
+#     return mu_diff * pl.col("player_glicko_sigma")
 
 
-@feature(
-    name="glicko_mu_diff_x_opp_sigma",
-    description="mu_diff × opp_sigma — skill diff scaled by opponent volatility",
-    mirror=False,
-    impute=None,
-)
-def glicko_mu_diff_x_opp_sigma() -> pl.Expr:
-    mu_diff = pl.col("player_glicko_mu") - pl.col("opp_glicko_mu")
-    return mu_diff * pl.col("opp_glicko_sigma")
+# DEPRECATED (frozen sigma): rescaled mu_diff.
+# @feature(
+#     name="glicko_mu_diff_x_opp_sigma",
+#     description="mu_diff × opp_sigma — skill diff scaled by opponent volatility",
+#     mirror=False,
+#     impute=None,
+# )
+# def glicko_mu_diff_x_opp_sigma() -> pl.Expr:
+#     mu_diff = pl.col("player_glicko_mu") - pl.col("opp_glicko_mu")
+#     return mu_diff * pl.col("opp_glicko_sigma")
 
 
 @feature(
@@ -489,17 +512,18 @@ def glicko_mu_diff_x_rd_asymmetry() -> pl.Expr:
     return mu_diff * rd_diff
 
 
-@feature(
-    name="glicko_mu_diff_x_sigma_asymmetry",
-    description="mu_diff × (sigma_p - sigma_o) — signed product of skill and sigma asymmetries",
-    mirror=False,
-    match_level=True,
-    impute=None,
-)
-def glicko_mu_diff_x_sigma_asymmetry() -> pl.Expr:
-    mu_diff = pl.col("player_glicko_mu") - pl.col("opp_glicko_mu")
-    sigma_diff = pl.col("player_glicko_sigma") - pl.col("opp_glicko_sigma")
-    return mu_diff * sigma_diff
+# DEPRECATED (frozen sigma): identically zero.
+# @feature(
+#     name="glicko_mu_diff_x_sigma_asymmetry",
+#     description="mu_diff × (sigma_p - sigma_o) — signed product of skill and sigma asymmetries",
+#     mirror=False,
+#     match_level=True,
+#     impute=None,
+# )
+# def glicko_mu_diff_x_sigma_asymmetry() -> pl.Expr:
+#     mu_diff = pl.col("player_glicko_mu") - pl.col("opp_glicko_mu")
+#     sigma_diff = pl.col("player_glicko_sigma") - pl.col("opp_glicko_sigma")
+#     return mu_diff * sigma_diff
 
 
 # ============================================================================
@@ -532,16 +556,17 @@ def glicko_shrunk_diff_rdsq() -> pl.Expr:
     return mu_diff / (1.0 + rd_sq)
 
 
-@feature(
-    name="glicko_shrunk_diff_sigma",
-    description="mu_diff × 1/(1 + sigma_sum) — shrinkage by joint volatility",
-    mirror=False,
-    impute=None,
-)
-def glicko_shrunk_diff_sigma() -> pl.Expr:
-    mu_diff = pl.col("player_glicko_mu") - pl.col("opp_glicko_mu")
-    sigma_sum = pl.col("player_glicko_sigma") + pl.col("opp_glicko_sigma")
-    return mu_diff / (1.0 + sigma_sum)
+# DEPRECATED (frozen sigma): rescaled mu_diff.
+# @feature(
+#     name="glicko_shrunk_diff_sigma",
+#     description="mu_diff × 1/(1 + sigma_sum) — shrinkage by joint volatility",
+#     mirror=False,
+#     impute=None,
+# )
+# def glicko_shrunk_diff_sigma() -> pl.Expr:
+#     mu_diff = pl.col("player_glicko_mu") - pl.col("opp_glicko_mu")
+#     sigma_sum = pl.col("player_glicko_sigma") + pl.col("opp_glicko_sigma")
+#     return mu_diff / (1.0 + sigma_sum)
 
 
 # ============================================================================
@@ -587,25 +612,26 @@ def glicko_bhattacharyya_rd() -> pl.Expr:
     return coef * exponent.exp()
 
 
-@feature(
-    name="glicko_bhattacharyya_sigma",
-    description=(
-        "Bhattacharyya coefficient using sigma as the distribution width — "
-        "exact closed form for Gaussians"
-    ),
-    mirror=False,
-    match_level=True,
-    impute=None,
-)
-def glicko_bhattacharyya_sigma() -> pl.Expr:
-    mu_p = pl.col("player_glicko_mu")
-    mu_o = pl.col("opp_glicko_mu")
-    s_p = pl.col("player_glicko_sigma")
-    s_o = pl.col("opp_glicko_sigma")
-    s_sq_sum = s_p ** 2 + s_o ** 2
-    coef = (2.0 * s_p * s_o / s_sq_sum).sqrt()
-    exponent = -((mu_p - mu_o) ** 2) / (4.0 * s_sq_sum)
-    return coef * exponent.exp()
+# DEPRECATED (frozen sigma): function of mu_diff only.
+# @feature(
+#     name="glicko_bhattacharyya_sigma",
+#     description=(
+#         "Bhattacharyya coefficient using sigma as the distribution width — "
+#         "exact closed form for Gaussians"
+#     ),
+#     mirror=False,
+#     match_level=True,
+#     impute=None,
+# )
+# def glicko_bhattacharyya_sigma() -> pl.Expr:
+#     mu_p = pl.col("player_glicko_mu")
+#     mu_o = pl.col("opp_glicko_mu")
+#     s_p = pl.col("player_glicko_sigma")
+#     s_o = pl.col("opp_glicko_sigma")
+#     s_sq_sum = s_p ** 2 + s_o ** 2
+#     coef = (2.0 * s_p * s_o / s_sq_sum).sqrt()
+#     exponent = -((mu_p - mu_o) ** 2) / (4.0 * s_sq_sum)
+#     return coef * exponent.exp()
 
 
 @feature(

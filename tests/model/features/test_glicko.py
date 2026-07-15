@@ -54,14 +54,6 @@ class TestGlickoRdDiff:
         assert result["val"][0] == pytest.approx(-20.0)
 
 
-class TestGlickoSigmaDiff:
-    def test_basic(self):
-        from mvp.model.features.glicko import glicko_sigma_diff
-        df = _base_df()
-        result = df.select(glicko_sigma_diff().alias("val"))
-        assert result["val"][0] == pytest.approx(-0.01)
-
-
 class TestGlickoSurfaceRdSum:
     def test_hard(self):
         from mvp.model.features.glicko import glicko_surface_rd_sum
@@ -176,7 +168,7 @@ class TestGlickoFeaturesRegistered:
         expected = [
             "glicko_mu",
             "glicko_diff", "glicko_diff_abs", "glicko_diff_sq",
-            "glicko_rd_sum", "glicko_rd_diff", "glicko_sigma_diff",
+            "glicko_rd_sum", "glicko_rd_diff",
             "glicko_surface_rd_sum", "glicko_diff_x_rd_sum",
             "glicko_rd_x_match_count", "glicko_rd_x_days_since_last_match",
         ]
