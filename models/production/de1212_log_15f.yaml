@@ -15,7 +15,7 @@ features:
   - player_elo_surface_diff
   - player_games_margin_per_set_lost_diff(days=90)
   - player_glicko_rd_diff
-  - player_glicko_zscore_sigma
+  - player_glicko_diff
   - player_match_count_diff(days=30)
   - player_matches_vs_surface_specialists_diff(days=730)
   - player_opp_elo_faced_avg_diff
