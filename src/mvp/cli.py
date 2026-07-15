@@ -1010,8 +1010,12 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
     )
 
     # train subcommand - train production model
-    subparsers.add_parser(
+    train_parser = subparsers.add_parser(
         "train", help="Train (or retrain) the production model from production.yaml"
+    )
+    train_parser.add_argument(
+        "--memory-limit", type=int, default=None,
+        help="Override memory limit %% (0 to disable, default 75)",
     )
 
     # live subcommand

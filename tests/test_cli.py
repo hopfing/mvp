@@ -56,6 +56,14 @@ class TestParseArgs:
 
         args = parse_args(["train"])
         assert args.command == "train"
+        assert args.memory_limit is None  # defaults to no override
+
+    def test_train_memory_limit(self):
+        from mvp.cli import parse_args
+
+        args = parse_args(["train", "--memory-limit", "0"])
+        assert args.command == "train"
+        assert args.memory_limit == 0  # 0 => guard disabled (bypass)
 
     def test_log_level_option(self):
         from mvp.cli import parse_args
