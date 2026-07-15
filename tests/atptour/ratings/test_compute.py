@@ -6,7 +6,15 @@ import polars as pl
 import pytest
 
 from mvp.atptour.elo.compute import ELO_COLUMNS, compute_elo_ratings
-from mvp.atptour.glicko.constants import INITIAL_MU, INITIAL_RD, INITIAL_SIGMA
+from mvp.atptour.elo.ratings import initialize_player
+from mvp.atptour.glicko.constants import (
+    GLICKO_REVERSION_RATE,
+    INITIAL_MU,
+    INITIAL_RD,
+    INITIAL_SIGMA,
+    TAU,
+)
+from mvp.atptour.glicko.ratings import glicko2_update
 from mvp.atptour.ratings.compute import ALL_RATING_COLUMNS, compute_all_ratings
 
 
@@ -156,16 +164,54 @@ class TestGlickoConvergence:
         )["player_glicko_rd"][0]
         assert a_m2 < a_m1
 
-    def test_new_player_starts_at_defaults(self):
+    def test_new_player_seeds_mu_from_rank(self):
+        # Glicko mu is seeded from the rank-based Elo seed (not flat INITIAL_MU),
+        # mirroring Elo; rd/sigma still start at defaults. A enters at rank 10.
         df = _make_match_df()
         result = compute_all_ratings(df)
         a_m1 = result.filter(
             (pl.col("player_id") == "A")
             & (pl.col("match_uid") == "m1")
         )
-        assert a_m1["player_glicko_mu"][0] == INITIAL_MU
+        assert a_m1["player_glicko_mu"][0] == initialize_player(10).elo
+        assert a_m1["player_glicko_mu"][0] != INITIAL_MU
         assert a_m1["player_glicko_rd"][0] == INITIAL_RD
         assert a_m1["player_glicko_sigma"][0] == INITIAL_SIGMA
+
+
+class TestGlickoMeanReversion:
+    """Verify per-match RD-scaled mu reversion toward INITIAL_MU (mirrors Elo's
+    TestMeanReversion). Guards the constant, the anchor, and the RD-scaling."""
+
+    def test_reversion_applied_to_both_players_exactly(self):
+        # m1: A (rank 10) beats B (rank 20); both new, so pre-match rd == INITIAL_RD
+        # (reversion factor 1.0). Each player's post-m1 mu — recorded as their
+        # pre-match mu at their NEXT appearance — must equal glicko2_update()
+        # followed by the RD-scaled reversion toward INITIAL_MU.
+        df = _make_match_df()
+        result = compute_all_ratings(df)
+
+        a_seed = initialize_player(10).elo
+        b_seed = initialize_player(20).elo
+        a_post, _, _ = glicko2_update(
+            a_seed, INITIAL_RD, INITIAL_SIGMA, b_seed, INITIAL_RD, True, TAU)
+        b_post, _, _ = glicko2_update(
+            b_seed, INITIAL_RD, INITIAL_SIGMA, a_seed, INITIAL_RD, False, TAU)
+        factor = INITIAL_RD / INITIAL_RD  # both new -> 1.0
+        a_expected = a_post + GLICKO_REVERSION_RATE * factor * (INITIAL_MU - a_post)
+        b_expected = b_post + GLICKO_REVERSION_RATE * factor * (INITIAL_MU - b_post)
+
+        a_next = result.filter(
+            (pl.col("player_id") == "A") & (pl.col("match_uid") == "m2")
+        )["player_glicko_mu"][0]  # A's next match after m1
+        b_next = result.filter(
+            (pl.col("player_id") == "B") & (pl.col("match_uid") == "m3")
+        )["player_glicko_mu"][0]  # B's next match after m1
+
+        assert a_next == pytest.approx(a_expected, abs=1e-9)
+        assert b_next == pytest.approx(b_expected, abs=1e-9)
+        # reversion must actually move mu (guards against a no-op / zero constant)
+        assert a_next != pytest.approx(a_post, abs=1e-9)
 
 
 class TestGlickoEloIndependence:

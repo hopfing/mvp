@@ -32,7 +32,12 @@ from mvp.atptour.elo.ratings import (
     update_surface_adj,
     update_tb_clutch,
 )
-from mvp.atptour.glicko.constants import TAU
+from mvp.atptour.glicko.constants import (
+    GLICKO_REVERSION_RATE,
+    INITIAL_MU,
+    INITIAL_RD,
+    TAU,
+)
 from mvp.atptour.glicko.ratings import (
     GlickoRating,
     apply_glicko_inactivity,
@@ -225,11 +230,14 @@ def compute_all_ratings(df: pl.DataFrame) -> pl.DataFrame:
         if player_id not in elo_ratings:
             ranking = col_player_rank[i]
             elo_ratings[player_id] = initialize_player(ranking)
-            glicko_ratings[player_id] = GlickoRating()
+            # Seed Glicko mu from the rank-based Elo seed (same Elo-point scale),
+            # not flat INITIAL_MU — flat seeding overrates weak entrants and is a
+            # primary driver of mu inflation.
+            glicko_ratings[player_id] = GlickoRating(mu=elo_ratings[player_id].elo)
         if opp_id not in elo_ratings:
             opp_ranking = col_opp_rank[i]
             elo_ratings[opp_id] = initialize_player(opp_ranking)
-            glicko_ratings[opp_id] = GlickoRating()
+            glicko_ratings[opp_id] = GlickoRating(mu=elo_ratings[opp_id].elo)
 
         player_rating = elo_ratings[player_id]
         opp_rating = elo_ratings[opp_id]
@@ -580,6 +588,16 @@ def compute_all_ratings(df: pl.DataFrame) -> pl.DataFrame:
             pre_o_mu, pre_o_rd, pre_o_sigma,
             pre_p_mu, pre_p_rd, not won, TAU,
         )
+
+        # Mean reversion on mu — counteract the non-conservation of the
+        # phi^2-weighted asymmetric update under heterogeneous RD (see
+        # glicko/ratings.py:165), the same turnover inflation the Elo block
+        # above corrects. RD-scaled by the pre-match RD (uncertain players
+        # revert most, converged players barely); own constant. Applied to the
+        # post-update mu, before the next match's pre-match snapshot — PIT-safe.
+        for g_r, pre_rd in ((glicko_p, pre_p_rd), (glicko_o, pre_o_rd)):
+            g_reversion = GLICKO_REVERSION_RATE * (pre_rd / INITIAL_RD)
+            g_r.mu += g_reversion * (INITIAL_MU - g_r.mu)
 
         # Surface RD decay — playing on a surface reduces uncertainty
         if surface in ("Hard", "Clay", "Grass"):
