@@ -3256,9 +3256,12 @@ def cmd_live(args: argparse.Namespace) -> int:
 
     # --- Stage 2: Winner predictions ---
     target_sections = _get_target_sections()
+    lead_feature_frame = None
     try:
         predictor = ProductionPredictor(target_section="winner")
-        predictions = predictor.predict(tournament_keys=pairs)
+        predictions = predictor.predict(tournament_keys=pairs, include_features=True)
+        # Per-(match_uid, player_id) feature frame for the sheet's diff columns.
+        lead_feature_frame = getattr(predictor, "_feature_frame", None)
 
         if len(predictions) > 0:
             predictions = predictor.predict_voters(pairs, predictions)
@@ -3477,7 +3480,23 @@ def cmd_live(args: argparse.Namespace) -> int:
 
             matches_df = pl.read_parquet(matches_path) if matches_path.exists() else pl.DataFrame()
 
-            prepared = prepare_predictions(predictions)
+            # Enrich sheet rows with the lead's p1-perspective diffs (age,
+            # recent match count), joined by p1_id so they read p1 - p2 like
+            # elo_diff. No-op if the lead model doesn't carry these features.
+            predictions_for_sheet = predictions
+            _diff_cols = ["player_age_diff", "player_match_count_diff_30d"]
+            if lead_feature_frame is not None and all(
+                c in lead_feature_frame.columns for c in _diff_cols
+            ):
+                _diffs = lead_feature_frame.select(
+                    pl.col("match_uid"),
+                    pl.col("player_id").alias("p1_id"),
+                    *[pl.col(c) for c in _diff_cols],
+                )
+                predictions_for_sheet = predictions.join(
+                    _diffs, on=["match_uid", "p1_id"], how="left"
+                )
+            prepared = prepare_predictions(predictions_for_sheet)
             book_odds_for_sheets = {
                 BOOK_DISPLAY_NAMES.get(book.code, book.display_name): all_odds_maps[book.code]
                 for book in BOOK_REGISTRY

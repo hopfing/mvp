@@ -33,6 +33,9 @@ COLUMN_SCHEMA = [
     {"name": "elo_diff", "owner": "formula"},
     {"name": "p1_prob", "owner": "pipeline"},
     {"name": "p2_prob", "owner": "pipeline"},
+    # Context diffs (p1 - p2), pipeline-written from the lead model's features
+    {"name": "age_diff", "owner": "pipeline"},
+    {"name": "mp_diff", "owner": "pipeline"},
     {"name": "prediction", "owner": "pipeline"},
     {"name": "consensus", "owner": "pipeline"},
     # Odds (user-filled or auto-filled from books)
@@ -242,6 +245,15 @@ def prepare_predictions(predictions: pl.DataFrame) -> pl.DataFrame:
             "p2_elo": round(row["p2_elo"]),
             "p1_prob": p1_prob,
             "p2_prob": p2_prob,
+            # p1 - p2 diffs from the lead model's features (null -> blank)
+            "age_diff": (
+                round(row["player_age_diff"], 1)
+                if row.get("player_age_diff") is not None else None
+            ),
+            "mp_diff": (
+                int(round(row["player_match_count_diff_30d"]))
+                if row.get("player_match_count_diff_30d") is not None else None
+            ),
             "prediction": prediction,
             "consensus": row.get("consensus") if row.get("consensus") is not None else "",
             "result": "",

@@ -21,8 +21,8 @@ from mvp.gsheets.base import (
 
 
 class TestColumnSchema:
-    def test_column_schema_has_42_columns(self):
-        assert len(COLUMN_SCHEMA) == 42
+    def test_column_schema_has_44_columns(self):
+        assert len(COLUMN_SCHEMA) == 44
 
     def test_fav_edge_open_precedes_fav_edge(self):
         i = COLUMN_NAMES.index("fav_edge_open")
@@ -399,7 +399,7 @@ class TestMergePredictions:
         })
         result = merge_predictions(existing, new, matches)
         assert list(result.columns) == COLUMN_NAMES
-        assert len(result.columns) == 42
+        assert len(result.columns) == 44
 
     def test_empty_existing_empty_new(self):
         existing = _sheet_df([])
@@ -432,7 +432,7 @@ class TestMergePredictions:
         })
         result = merge_predictions(existing, new, matches)
         assert len(result) == 0
-        assert len(result.columns) == 42
+        assert len(result.columns) == 44
         assert list(result.columns) == COLUMN_NAMES
 
     def test_fav_edge_open_populated_from_opening_odds(self):
