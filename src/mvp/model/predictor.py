@@ -1241,6 +1241,7 @@ class ProductionPredictor:
         *,
         include_settled: bool = False,
         date_window: tuple[Any, Any] | None = None,
+        include_features: bool = False,
     ) -> pl.DataFrame:
         """Generate predictions for pending matches (won is null).
 
@@ -1252,6 +1253,12 @@ class ProductionPredictor:
             date_window: Optional (start_date, end_date) tuple restricting
                 predictions to matches whose effective_match_date falls in
                 [start, end] inclusive. Used by the lead backtest.
+            include_features: If True, stash the per-(match_uid, player_id)
+                feature values (each side in its OWN orientation) on
+                ``self._feature_frame`` before the canonical dedup collapses to
+                one row/match. The lead backtest joins that onto its per-side bet
+                rows so the CSV carries the exact values the model saw for each
+                side. Off for live serving — the returned frame is unchanged.
 
         Returns:
             DataFrame with one row per match, containing prediction columns.
@@ -1278,6 +1285,10 @@ class ProductionPredictor:
         )
         filter_specs = get_filter_feature_specs(self.config["active"].get("filters"))
         extra = compute_only + filter_specs
+        if include_features and config.data.eval_filters:
+            # Backtest wants eval_filters columns available (to carry into the CSV
+            # and restrict the bet set) even when they aren't model features.
+            extra = extra + get_filter_feature_specs(config.data.eval_filters)
         all_specs = feature_specs + [s for s in extra if s not in feature_specs]
         df = engine.compute(all_specs, extra_columns=_PREDICTOR_EXTRA_COLS)
 
@@ -1311,6 +1322,23 @@ class ProductionPredictor:
         if len(pending) == 0:
             logger.warning("No matches to predict")
             return pl.DataFrame()
+
+        # Backtest hook: capture per-(match_uid, player_id) feature values in each
+        # side's OWN orientation, before the canonical dedup below collapses to
+        # one row/match. The lead backtest joins this onto its per-side bet rows,
+        # so the CSV carries the exact values the model saw for that side — no
+        # synthesized/negated values, and correct for any feature type. Live
+        # serving never sets the flag, so this is skipped there.
+        self._feature_frame = None
+        if include_features:
+            feat_cols = [c for c in feature_cols if c in pending.columns]
+            filt_cols = [
+                c for c in (config.data.eval_filters or {})
+                if c in pending.columns and c not in feat_cols
+            ]
+            self._feature_frame = pending.select(
+                ["match_uid", "player_id", *feat_cols, *filt_cols]
+            ).unique(subset=["match_uid", "player_id"], keep="first")
 
         # Extract features and predict
         aux_cols = artifact.get("aux_base_col_names", [])

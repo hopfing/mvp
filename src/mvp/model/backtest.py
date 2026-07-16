@@ -26,7 +26,7 @@ from mvp.model.cal_tiers import (
     classify_cal_tier,
     extract_circuit_round_lookup,
 )
-from mvp.model.config import ExperimentConfig
+from mvp.model.config import ExperimentConfig, apply_filters
 from mvp.model.predictor import ProductionPredictor
 
 logger = logging.getLogger(__name__)
@@ -558,6 +558,7 @@ def run_backtest(
     )
 
     fold_predictions: list[pl.DataFrame] = []
+    fold_feature_frames: list[pl.DataFrame] = []
     last_lead_stem: str | None = None
     for train_cutoff, test_start, pred_start, pred_end in folds:
         fold_tag = test_start.isoformat()
@@ -598,13 +599,19 @@ def run_backtest(
                     logger.info("Using cached voter artifact %s", voter_artifact)
 
             preds = predictor.predict(
-                include_settled=True, date_window=(pred_start, pred_end)
+                include_settled=True, date_window=(pred_start, pred_end),
+                include_features=True,
             )
             if preds is None or len(preds) == 0:
                 logger.warning(
                     "Fold %s: no matches in %s..%s", fold_tag, pred_start, pred_end
                 )
                 continue
+            # Grab the per-side feature frame stashed by predict() for this fold
+            # before predict_voters / the next fold runs.
+            fold_feat = getattr(predictor, "_feature_frame", None)
+            if fold_feat is not None:
+                fold_feature_frames.append(fold_feat)
             preds = predictor.predict_voters(
                 tournament_keys=None, predictions=preds, include_settled=True,
             )
@@ -622,6 +629,13 @@ def run_backtest(
         if len(fold_predictions) == 1
         else pl.concat(fold_predictions, how="diagonal_relaxed")
     )
+    feature_frame = (
+        pl.concat(fold_feature_frames, how="diagonal_relaxed").unique(
+            subset=["match_uid", "player_id"], keep="first"
+        )
+        if fold_feature_frames
+        else None
+    )
 
     # Preserve the cal_tiers sidecar fallback (_load_tier_lookup looks for a
     # fixed `lead_cal_tiers.json`): expose the most-recent fold's fold-tagged
@@ -636,6 +650,35 @@ def run_backtest(
     bets, run_id = _attach_cal_tiers(
         bets, config_path.stem, lead_cfg=lead_cfg, config_path=config_path
     )
+
+    # Carry the exact feature values the model saw into the CSV. Joined on
+    # (match_uid, player_id) so each bet row gets its OWN side's values in that
+    # side's orientation — no synthesized/negated numbers, correct for any
+    # feature type (diff, raw, interaction).
+    if feature_frame is not None:
+        feat_cols = [
+            c for c in feature_frame.columns if c not in ("match_uid", "player_id")
+        ]
+        bets = bets.join(feature_frame, on=["match_uid", "player_id"], how="left")
+        logger.info("Joined %d feature column(s) onto bet rows", len(feat_cols))
+
+    # eval_filters restricts the bet set the same way it restricts the diagnostics
+    # test fold (runner.py), so section D describes the same population as section
+    # B. No-op when unset (prod). Filter columns are present on `bets` as raw meta
+    # (circuit/surface/round/best_of) or joined above (model/eval features).
+    if lead_cfg.data.eval_filters:
+        n_before = len(bets)
+        bets = apply_filters(bets, lead_cfg.data.eval_filters)
+        logger.info(
+            "eval_filters active: backtest restricted to %d/%d bet rows (%.1f%%)",
+            len(bets), n_before,
+            100.0 * len(bets) / n_before if n_before else 0.0,
+        )
+        if len(bets) == 0:
+            raise RuntimeError(
+                "eval_filters matched 0 bet rows — check the filter spec and that "
+                "its columns exist (raw meta, or model/eval features)."
+            )
 
     from mvp.common.config_hash import (
         compute_fingerprint,

@@ -304,6 +304,37 @@ class TestPredictMatches:
         assert np.all(probs >= 0)
         assert np.all(probs <= 1)
 
+    def test_predict_include_features_stashes_per_side_frame(
+        self, production_config, sample_matches, tmp_path
+    ):
+        """include_features stashes a per-(match_uid, player_id) feature frame
+        with each side in its OWN orientation; default path stashes nothing."""
+        from mvp.model.predictor import ProductionPredictor
+
+        predictor = ProductionPredictor(
+            production_config_path=production_config,
+            matches_path=sample_matches,
+            cache_dir=tmp_path / "cache",
+        )
+        predictor.train()
+
+        # Default path leaves no stash.
+        predictor.predict()
+        assert getattr(predictor, "_feature_frame", None) is None
+
+        predictor.predict(include_settled=True, include_features=True)
+        ff = predictor._feature_frame
+        assert ff is not None
+        for col in ("match_uid", "player_id", "player_svc_elo_diff"):
+            assert col in ff.columns
+        # One row per (match_uid, player_id) — i.e. one per side.
+        assert ff.unique(subset=["match_uid", "player_id"]).height == ff.height
+        # Each side carries its OWN value, not one side duplicated onto both.
+        sides = ff.filter(pl.col("match_uid") == "M5").sort("player_id")
+        assert sides.height == 2
+        a, b = sides["player_svc_elo_diff"].to_list()
+        assert a != b
+
     def test_predict_has_required_columns(
         self, production_config, sample_matches, tmp_path
     ):
