@@ -103,6 +103,26 @@ class TestPreparePredictions:
         df = prepare_predictions(_make_predictions(p1_win_prob=0.35, p2_win_prob=0.65))
         assert df["prediction"][0] == "P2"
 
+    def test_context_diffs_orient_to_p1_pick(self):
+        # p1 is the pick -> diffs read p1 - p2 unchanged.
+        df = prepare_predictions(_make_predictions(
+            p1_win_prob=0.65, p2_win_prob=0.35,
+            player_age_diff=-4.2, player_match_count_diff_30d=3.0,
+        ))
+        assert df["prediction"][0] == "P1"
+        assert df["age_diff"][0] == -4.2
+        assert df["mp_diff"][0] == 3
+
+    def test_context_diffs_orient_to_p2_pick(self):
+        # p2 is the pick -> diffs flip to picked - opponent.
+        df = prepare_predictions(_make_predictions(
+            p1_win_prob=0.35, p2_win_prob=0.65,
+            player_age_diff=-4.2, player_match_count_diff_30d=3.0,
+        ))
+        assert df["prediction"][0] == "P2"
+        assert df["age_diff"][0] == 4.2
+        assert df["mp_diff"][0] == -3
+
     def test_timezone_conversion_to_ct(self):
         # 3am UTC on Jan 15 = 9pm CT on Jan 14 (UTC-6 in January)
         df = prepare_predictions(

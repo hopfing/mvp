@@ -33,7 +33,7 @@ COLUMN_SCHEMA = [
     {"name": "elo_diff", "owner": "formula"},
     {"name": "p1_prob", "owner": "pipeline"},
     {"name": "p2_prob", "owner": "pipeline"},
-    # Context diffs (p1 - p2), pipeline-written from the lead model's features
+    # Context diffs (picked - opponent), pipeline-written from the lead model's features
     {"name": "age_diff", "owner": "pipeline"},
     {"name": "mp_diff", "owner": "pipeline"},
     {"name": "prediction", "owner": "pipeline"},
@@ -225,6 +225,9 @@ def prepare_predictions(predictions: pl.DataFrame) -> pl.DataFrame:
         p1_prob = row["p1_win_prob"]
         p2_prob = row["p2_win_prob"]
         prediction = "P1" if p1_prob >= p2_prob else "P2"
+        # Reorient the p1 - p2 context diffs onto the picked player, so they
+        # read picked - opponent regardless of which slot the pick landed in.
+        pick_sign = 1 if prediction == "P1" else -1
 
         predicted_at = row["predicted_at"]
         if isinstance(predicted_at, datetime):
@@ -245,13 +248,13 @@ def prepare_predictions(predictions: pl.DataFrame) -> pl.DataFrame:
             "p2_elo": round(row["p2_elo"]),
             "p1_prob": p1_prob,
             "p2_prob": p2_prob,
-            # p1 - p2 diffs from the lead model's features (null -> blank)
+            # picked - opponent diffs from the lead model's features (null -> blank)
             "age_diff": (
-                round(row["player_age_diff"], 1)
+                round(pick_sign * row["player_age_diff"], 1)
                 if row.get("player_age_diff") is not None else None
             ),
             "mp_diff": (
-                int(round(row["player_match_count_diff_30d"]))
+                int(round(pick_sign * row["player_match_count_diff_30d"]))
                 if row.get("player_match_count_diff_30d") is not None else None
             ),
             "prediction": prediction,
