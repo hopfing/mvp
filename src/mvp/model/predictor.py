@@ -1336,8 +1336,22 @@ class ProductionPredictor:
                 c for c in (config.data.eval_filters or {})
                 if c in pending.columns and c not in feat_cols
             ]
+            # Carry active data.filters feature columns too (e.g. the
+            # anti-symmetric diff feature player_age_diff) so the backtest can
+            # re-apply data.filters on the per-side bet rows. The predict-time
+            # filter above runs on the pre-expansion frame; for a diff feature
+            # the two-sided bet expansion re-adds the filtered-out orientation,
+            # so the filter must also bite post-expansion where each side holds
+            # its own orientation. filter_specs excludes raw match-level cols
+            # (circuit/draw_type) that are already present on the bet rows.
+            data_filt_cols = [
+                c for c in filter_specs
+                if c in pending.columns
+                and c not in feat_cols
+                and c not in filt_cols
+            ]
             self._feature_frame = pending.select(
-                ["match_uid", "player_id", *feat_cols, *filt_cols]
+                ["match_uid", "player_id", *feat_cols, *filt_cols, *data_filt_cols]
             ).unique(subset=["match_uid", "player_id"], keep="first")
 
         # Extract features and predict

@@ -389,6 +389,26 @@ def _build_bet_rows(
     return bets.sort(["effective_match_date", "match_uid", "side"])
 
 
+def _apply_present_filters(
+    bets: pl.DataFrame, filters: dict[str, Any] | None
+) -> pl.DataFrame:
+    """Apply ``filters`` to per-side bet rows over the columns present on ``bets``.
+
+    Filter keys whose column isn't carried onto the bet rows (e.g. ``draw_type``,
+    a match-level attribute already enforced at predict) are skipped rather than
+    raising. Match-level cols that are present (circuit/surface/…) re-filter as a
+    no-op since they were already enforced upstream; anti-symmetric diff-feature
+    cols (player_age_diff) bite here because each bet row holds its own
+    orientation's value, so the excluded side is dropped and not re-added.
+    """
+    if not filters:
+        return bets
+    present = {col: spec for col, spec in filters.items() if col in bets.columns}
+    if not present:
+        return bets
+    return apply_filters(bets, present)
+
+
 def _attach_cal_tiers(
     bets: pl.DataFrame,
     config_stem: str,
@@ -661,6 +681,25 @@ def run_backtest(
         ]
         bets = bets.join(feature_frame, on=["match_uid", "player_id"], how="left")
         logger.info("Joined %d feature column(s) onto bet rows", len(feat_cols))
+
+    # data.filters must also hold on the per-side bet output. It is applied at
+    # predict on the pre-expansion frame (predictor), but for an anti-symmetric
+    # diff feature (e.g. player_age_diff) the two-sided expansion in
+    # _build_bet_rows re-adds the filtered-out orientation, so the filter has to
+    # bite again here where each bet row carries its own side's value.
+    if lead_cfg.data.filters:
+        n_before = len(bets)
+        bets = _apply_present_filters(bets, lead_cfg.data.filters)
+        logger.info(
+            "data.filters applied to bet rows: %d/%d kept (%.1f%%)",
+            len(bets), n_before,
+            100.0 * len(bets) / n_before if n_before else 0.0,
+        )
+        if len(bets) == 0:
+            raise RuntimeError(
+                "data.filters matched 0 bet rows — check the filter spec "
+                "and that its columns are present on the bet rows."
+            )
 
     # eval_filters restricts the bet set the same way it restricts the diagnostics
     # test fold (runner.py), so section D describes the same population as section
