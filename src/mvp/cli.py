@@ -976,7 +976,9 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
             "[bayesian, classification] Number of trailing forward folds held "
             "search-blind for selection (the honest outer block). The search runs "
             "on the remaining inner folds. Default 4 (one surface-rotation year). "
-            "The span must leave >=5 inner folds or tuning refuses to start."
+            "Leaving <5 inner folds warns (thin tune, proceeds); <2 refuses to "
+            "start (the calibrated objective can't be computed). Lower this to free "
+            "inner folds on fold-poor configs."
         ),
     )
     tune_parser.add_argument(

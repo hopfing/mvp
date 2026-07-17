@@ -1,6 +1,7 @@
 """Tests for Optuna-based hyperparameter tuning."""
 
 import importlib
+import logging
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -677,7 +678,7 @@ validation:
                 outer_folds=1,
             )
 
-    def _date_sliding_config(self, tmp_path, start, end, name):
+    def _date_sliding_config(self, tmp_path, start, end, name, test_months=3):
         cfg = f"""
 name: {name}
 data:
@@ -698,7 +699,7 @@ metrics:
 validation:
   type: date_sliding
   train_months: 12
-  test_months: 3
+  test_months: {test_months}
 """
         path = tmp_path / f"{name}.yaml"
         path.write_text(cfg)
@@ -793,3 +794,33 @@ validation:
         )
         assert tuner.outer_folds == 6
         assert tuner.study.user_attrs.get("outer_folds") == 6
+
+    def test_preflight_warns_but_allows_thin_span(self, tmp_path, caplog):
+        """A 12-month stride leaving 2-4 inner folds warns but proceeds — the
+        operator chose the outer_folds split, and a thin forward tune is valid.
+        2021-01..2026-11 at test_months=12 = 4 folds; outer_folds=1 → 3 inner."""
+        cfg = self._date_sliding_config(
+            tmp_path, "2021-01-01", "2026-11-30", "thin_span", test_months=12
+        )
+        with caplog.at_level(logging.WARNING):
+            tuner = HyperparamTuner(
+                config_path=cfg, state_dir=tmp_path / "tuning", outer_folds=1
+            )
+        # Proceeds: study is created and stamped, not rejected.
+        assert tuner.study.user_attrs.get("objective_frame") == "forward_cal_v1"
+        assert any(
+            "trustworthy forward-aligned tune" in r.message and r.levelno == logging.WARNING
+            for r in caplog.records
+        )
+
+    def test_preflight_blocks_below_two_inner(self, tmp_path):
+        """The hard floor is 2 inner folds, not 5: a span leaving exactly 1 inner
+        fold still fails fast (the calibrated objective can't be computed below 2).
+        2021-01..2024-02 at test_months=12 = 2 folds; outer_folds=1 → 1 inner."""
+        cfg = self._date_sliding_config(
+            tmp_path, "2021-01-01", "2024-02-28", "one_inner", test_months=12
+        )
+        with pytest.raises(ValueError, match="at least 2 search folds"):
+            HyperparamTuner(
+                config_path=cfg, state_dir=tmp_path / "tuning", outer_folds=1
+            )

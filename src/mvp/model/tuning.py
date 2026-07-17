@@ -310,9 +310,15 @@ def _param_combo_str(params: dict[str, Any]) -> str:
 class HyperparamTuner:
     """Bayesian hyperparameter optimization via Optuna TPE."""
 
-    # Forward-aligned selection needs enough inner folds to not be winner's-curse-
-    # exposed; below this the search rests on too few noisy forward folds.
+    # Forward-aligned selection is winner's-curse-exposed when the search rests on
+    # too few forward folds. Below _MIN_TUNING_FOLDS we warn but proceed — the
+    # operator chose the outer_folds split, and a 2-4 fold tune is thin but valid.
+    # Below _HARD_MIN_TUNING_FOLDS we hard-stop: with <2 folds the calibrated-frame
+    # objective can't be computed, so the study would silently search raw while
+    # stamped calibrated (see _objective's fallback), which is a correctness bug,
+    # not a judgment call.
     _MIN_TUNING_FOLDS = 5
+    _HARD_MIN_TUNING_FOLDS = 2
 
     def __init__(
         self,
@@ -605,13 +611,26 @@ class HyperparamTuner:
         span_months = (e.year - s.year) * 12 + (e.month - s.month)
         n_outer = (span_months + 1 - int(train_months)) // int(test_months)
         n_inner = n_outer - self.outer_folds
-        if n_inner < self._MIN_TUNING_FOLDS:
+        if n_inner < self._HARD_MIN_TUNING_FOLDS:
             raise ValueError(
                 f"{self.config_path.stem}: data.date_range spans ~{n_outer} forward "
                 f"fold(s); with outer_folds={self.outer_folds} that leaves ~{n_inner} "
-                f"for the search, below the {self._MIN_TUNING_FOLDS}-fold minimum for a "
-                "trustworthy forward-aligned tune. Widen data.date_range (each added "
-                "year ≈ 4 more folds) or lower --outer-folds."
+                f"for the search — a forward-aligned tune needs at least "
+                f"{self._HARD_MIN_TUNING_FOLDS} search folds (below that the "
+                "calibrated-frame objective can't be computed and the study silently "
+                "searches raw). Lower --outer-folds or widen data.date_range."
+            )
+        if n_inner < self._MIN_TUNING_FOLDS:
+            logger.warning(
+                "%s: data.date_range spans ~%d forward fold(s); with outer_folds=%d "
+                "the search rests on ~%d forward fold(s), below the recommended %d for "
+                "a trustworthy forward-aligned tune. Proceeding — treat the resulting "
+                "HPs as thin (few forward folds) and sanity-check them.",
+                self.config_path.stem,
+                n_outer,
+                self.outer_folds,
+                n_inner,
+                self._MIN_TUNING_FOLDS,
             )
 
     def _get_base_params(self) -> dict[str, Any]:
