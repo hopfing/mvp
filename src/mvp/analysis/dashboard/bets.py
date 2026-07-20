@@ -1140,6 +1140,14 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
     ]
     circuit_dfs = {val: bets.filter(pl.col("circuit") == val) for val, _ in circuits}
 
+    if "surface" in bets.columns:
+        st.subheader("By Surface")
+        for val, label in circuits:
+            st.markdown(f"**{label}**")
+            _render_breakdown(
+                circuit_dfs[val], "surface", "Surface", st, all_row=True,
+            )
+
     st.subheader("By Round")
     for val, label in circuits:
         st.markdown(f"**{label}**")
