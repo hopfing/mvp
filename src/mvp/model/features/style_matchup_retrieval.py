@@ -67,12 +67,16 @@ def _form_a_core(
     ``window_days=None`` = alltime pool (all strictly-prior matches); ``N`` =
     the [t_m − N, t_m) pool. The ``t_p < t_m`` leakage guard is independent of it.
     """
-    cur = df.select(
+    # Lazy the join→filter→agg so the streaming engine pipelines it: the
+    # `t_p < t_m` + window filter is applied chunk-by-chunk as the join emits,
+    # so the full within-player cartesian is never materialized (the eager
+    # version built ~ΣN² rows first, then discarded 90%+ — the memory blowup).
+    cur = df.lazy().select(
         _GRP, "opp_id", "match_uid",
         pl.col(_DATE).alias("t_m"),
         *[pl.col(f"opp_style_radar_{k}").alias(f"b_{k}") for k in _AXES],
     )
-    pool = df.select(
+    pool = df.lazy().select(
         _GRP,
         pl.col(_DATE).alias("t_p"),
         *[pl.col(f"opp_style_radar_{k}").alias(f"o_{k}") for k in _AXES],
@@ -123,7 +127,7 @@ def _form_a_core(
             .otherwise(None).alias("mean_pool_conf"),
         # flat control: same ridge, uniform weights (style-blind)
         (pl.col("sr") / (pl.col("npairs") + lam)).alias("feat_a_flat"),
-    )
+    ).collect(engine="streaming")
 
 
 def compute_form_a(
