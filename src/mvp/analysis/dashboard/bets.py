@@ -454,22 +454,122 @@ _KILL_THRESHOLD_ROI = -10.0
 _BET_SIDE_ORDER = ["All", "Model Fav", "Model Dog"]
 
 
-def _render_bet_side_breakdown(bets: pl.DataFrame, st) -> None:
+def _flipped_bets(bets: pl.DataFrame) -> pl.DataFrame:
+    """Bets whose model pick changed between placement and now.
+
+    A flip = the sheet's frozen as-bet pick (``bet_pred_side``) differs from
+    the current live pick (``pred_side``, recomputed from the overwritable
+    predictions.parquet). Returns the matching rows (empty frame if the
+    columns are absent or nothing flipped).
+    """
+    needed = {"bet_pred_side", "pred_side", "bet_side"}
+    if not needed.issubset(bets.columns):
+        return bets.head(0)
+    return bets.filter(
+        pl.col("bet_pred_side").is_in(["P1", "P2"])
+        & pl.col("pred_side").is_in(["P1", "P2"])
+        & (pl.col("bet_pred_side") != pl.col("pred_side"))
+    )
+
+
+def _render_flipped_bets(bets: pl.DataFrame, st) -> None:
+    """Table of bets the model flipped away from after they were placed."""
+    flipped = _flipped_bets(bets)
+    if len(flipped) == 0:
+        return
+
+    flipped = flipped.sort("effective_match_date") if (
+        "effective_match_date" in flipped.columns
+    ) else flipped
+
+    # Aggregate performance of the bets whose pick later flipped — i.e. how the
+    # as-bet pick (which you actually took) held up once the model changed its
+    # mind. W/L/V here are the outcomes of the side you bet.
+    stats = _per_bet_stats(flipped)
+    summary = [
+        f"**{stats['Bets']} flipped bet{'' if stats['Bets'] == 1 else 's'}**",
+        f"{stats['W']}-{stats['L']}-{stats['V']}",
+    ]
+    if stats["Win %"] is not None:
+        summary.append(f"{stats['Win %']:.1f}% win")
+    if stats["P&L"] is not None:
+        summary.append(f"P&L ${stats['P&L']:+,.2f}")
+    if stats["ROI %"] is not None:
+        summary.append(f"ROI {stats['ROI %']:+.1f}%")
+    st.markdown(" · ".join(summary))
+
+    has_names = {"p1_name", "p2_name"}.issubset(flipped.columns)
+
+    def _name(side_col: str) -> pl.Expr:
+        if has_names:
+            return (
+                pl.when(pl.col(side_col) == "P1").then(pl.col("p1_name"))
+                .when(pl.col(side_col) == "P2").then(pl.col("p2_name"))
+                .otherwise(pl.lit("—"))
+            )
+        return pl.col(side_col)
+
+    cols: list[pl.Expr] = []
+    if "effective_match_date" in flipped.columns:
+        cols.append(
+            pl.col("effective_match_date").dt.strftime("%Y-%m-%d").alias("Date")
+        )
+    if "tournament_name" in flipped.columns:
+        cols.append(pl.col("tournament_name").alias("Tournament"))
+    if "round" in flipped.columns:
+        cols.append(pl.col("round").alias("Round"))
+    if has_names:
+        cols.append(
+            (pl.col("p1_name") + pl.lit(" vs ") + pl.col("p2_name")).alias("Matchup")
+        )
+    cols.append(_name("bet_side").alias("Bet"))
+    cols.append(_name("bet_pred_side").alias("Pick at bet"))
+    cols.append(_name("pred_side").alias("Model now"))
+    if "bet_edge" in flipped.columns:
+        cols.append((pl.col("bet_edge") * 100).round(1).alias("Edge % (at bet)"))
+    if "bet_result" in flipped.columns:
+        cols.append(pl.col("bet_result").alias("Result"))
+    if "net" in flipped.columns:
+        cols.append(
+            pl.col("net").cast(pl.Float64, strict=False).round(2).alias("P&L")
+        )
+
+    pdf = flipped.select(cols).to_pandas()
+
+    fmt: dict = {}
+    if "Edge % (at bet)" in pdf.columns:
+        fmt["Edge % (at bet)"] = "{:+.1f}%"
+    if "P&L" in pdf.columns:
+        fmt["P&L"] = "${:+,.2f}"
+
+    subset = [c for c in ("P&L",) if c in pdf.columns]
+    styled = pdf.style.format(fmt, na_rep="—")
+    if subset:
+        styled = styled.applymap(_color_negative, subset=subset)
+    st.dataframe(styled, use_container_width=True, hide_index=True)
+
+
+def _render_bet_side_breakdown(
+    bets: pl.DataFrame, st, pick_col: str = "bet_pick_side",
+) -> None:
     """All / Model Fav / Model Dog breakdown with CLV columns.
 
-    "Model Fav" = bet on the model's predicted winner (bet_side == pred_side).
-    "Model Dog" = bet on the model's predicted loser (bet_side != pred_side).
-    Anchored to the model's call, not market odds.
+    "Model Fav" = bet on the model's pick (bet_side == pick_col).
+    "Model Dog" = bet against the model's pick (bet_side != pick_col).
+    ``pick_col`` is the as-bet pick (``bet_pick_side``), not the live
+    ``pred_side`` — a bet the model later flipped away from stays classified
+    as the Fav/Dog it was when placed. Anchored to the model's call, not
+    market odds.
     """
-    if "pred_side" not in bets.columns or "bet_side" not in bets.columns:
-        st.info("Missing pred_side/bet_side — can't classify bets.")
+    if pick_col not in bets.columns or "bet_side" not in bets.columns:
+        st.info(f"Missing {pick_col}/bet_side — can't classify bets.")
         return
     if len(bets) == 0:
         st.info("No bets in current filter.")
         return
 
     df = bets.with_columns(
-        pl.when(pl.col("bet_side") == pl.col("pred_side"))
+        pl.when(pl.col("bet_side") == pl.col(pick_col))
         .then(pl.lit("Model Fav"))
         .otherwise(pl.lit("Model Dog"))
         .alias("_pick_type")
@@ -770,6 +870,9 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
     # --- Bet edge filter ---
     from mvp.analysis.dataset import derive_bet_edge_cols
     bets = derive_bet_edge_cols(bets)
+    # As-bet model pick (falls back to pred_side pre-rebuild). Fav/Dog and the
+    # cal-tier side splits anchor to this, not the overwritable pred_side.
+    pick_col = "bet_pick_side" if "bet_pick_side" in bets.columns else "pred_side"
     if "bet_edge" in bets.columns:
         edge_vals = bets["bet_edge"].drop_nulls()
         if len(edge_vals) > 0:
@@ -1012,6 +1115,16 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
     )
     st.dataframe(styled, use_container_width=True, hide_index=True)
 
+    # --- Bets the model flipped after placement ---
+    if len(_flipped_bets(bets)) > 0:
+        st.subheader("Model Flipped After Placement")
+        st.caption(
+            "The model's pick moved across 50% between when you bet and now. "
+            "Fav/Dog and edge on this page are anchored to the pick as it "
+            "stood when you bet (the sheet's frozen value), not the current one."
+        )
+        _render_flipped_bets(bets, st)
+
     # --- Performance Breakdowns ---
     round_order = ["Q1", "Q2", "R128", "R64", "R32", "R16", "QF", "SF", "F"]
 
@@ -1034,7 +1147,7 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
     st.subheader("By Bet Side")
     for val, label in circuits:
         st.markdown(f"**{label}**")
-        _render_bet_side_breakdown(circuit_dfs[val], st)
+        _render_bet_side_breakdown(circuit_dfs[val], st, pick_col)
 
     st.subheader("By Book")
     for val, label in circuits:
@@ -1056,11 +1169,11 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
     # *expected* and would mislead if mixed with Model Fav rows. Split by
     # Bet Side within each circuit.
     side_splits: list[tuple[str, pl.Expr]] = [
-        ("Model Fav", pl.col("bet_side") == pl.col("pred_side")),
-        ("Model Dog", pl.col("bet_side") != pl.col("pred_side")),
+        ("Model Fav", pl.col("bet_side") == pl.col(pick_col)),
+        ("Model Dog", pl.col("bet_side") != pl.col(pick_col)),
     ]
 
-    if "pred_side" in bets.columns:
+    if pick_col in bets.columns:
         st.subheader("By Calibration Tier")
         for val, circ_label in circuits:
             for side_label, side_expr in side_splits:

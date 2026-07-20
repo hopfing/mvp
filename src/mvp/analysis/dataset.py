@@ -19,6 +19,12 @@ SHEET_COLUMNS = [
     "p2_pin",
     "fav_edge",
     "dog_edge",
+    # The model's pick as frozen on the sheet when the bet was placed. The
+    # sheet never refreshes this (merge_predictions keeps it write-once), so
+    # it is the honest "as-bet" pick — unlike pred_side, which is recomputed
+    # from predictions.parquet's p1_win_prob that gets overwritten when the
+    # live prediction drifts/flips before the match settles.
+    "prediction",
     "bet_side",
     "bet_odds",
     "stake",
@@ -210,6 +216,11 @@ def _join_sheet_data(ds: pl.DataFrame, sheet_data: pl.DataFrame | None) -> pl.Da
     ]
     if float_casts:
         sheet_subset = sheet_subset.with_columns(float_casts)
+
+    # Rename the sheet's frozen model pick so it can't be confused with the
+    # live pred_side computed downstream from (overwritable) predictions.parquet.
+    if "prediction" in sheet_subset.columns:
+        sheet_subset = sheet_subset.rename({"prediction": "bet_pred_side"})
 
     ds = ds.join(sheet_subset, on="match_uid", how="left")
 
@@ -577,13 +588,22 @@ def _compute_pred_side_metrics(ds: pl.DataFrame) -> pl.DataFrame:
 
 
 def derive_bet_edge_cols(ds: pl.DataFrame) -> pl.DataFrame:
-    """Add ``bet_edge`` and ``bet_edge_open`` columns derived from ``bet_side``.
+    """Add ``bet_pick_side``, ``bet_edge`` and ``bet_edge_open`` columns.
 
-    ``bet_edge``: ``fav_edge`` when ``bet_side == pred_side`` (betting on
+    ``bet_pick_side``: the model's pick as it stood when the bet was placed.
+    Prefers the sheet's frozen ``bet_pred_side`` (write-once, the honest
+    "as-bet" pick) and falls back to the live ``pred_side`` (recomputed from
+    predictions.parquet, which is overwritten when the prediction drifts or
+    flips before the match settles). Anchoring the fav/dog split here — rather
+    than on ``pred_side`` — keeps a bet that the model later flipped away from
+    labelled as the "Model Fav" it was when placed, and stops ``bet_edge``
+    from grabbing the wrong (dog) column.
+
+    ``bet_edge``: ``fav_edge`` when ``bet_side == bet_pick_side`` (betting on
     the model's pick — "Model Fav"), else ``dog_edge`` (betting against the
     model's pick — "Model Dog"). Requires ``fav_edge``, ``dog_edge``,
-    ``pred_side``, ``bet_side``. "Fav"/"Dog" here are anchored to the
-    model's call, not market odds.
+    ``bet_side``, and one of ``bet_pred_side``/``pred_side``. "Fav"/"Dog" here
+    are anchored to the model's call, not market odds.
 
     ``bet_edge_open``: bet-side open edge, ``p<side>_win_prob - 1/best_opening_odds_p<side>``.
     Requires ``bet_side``, ``p1_win_prob``, ``p2_win_prob``,
@@ -595,12 +615,24 @@ def derive_bet_edge_cols(ds: pl.DataFrame) -> pl.DataFrame:
     consume these columns rather than reaching for ``fav_edge``/``dog_edge``
     or ``pred_*`` directly.
     """
-    edge_sources = {"fav_edge", "dog_edge", "pred_side", "bet_side"}
-    if edge_sources.issubset(ds.columns):
+    has_bet_pred = "bet_pred_side" in ds.columns
+    has_pred = "pred_side" in ds.columns
+    if has_bet_pred and has_pred:
+        pick_expr = pl.coalesce(pl.col("bet_pred_side"), pl.col("pred_side"))
+    elif has_bet_pred:
+        pick_expr = pl.col("bet_pred_side")
+    elif has_pred:
+        pick_expr = pl.col("pred_side")
+    else:
+        pick_expr = None
+
+    edge_sources = {"fav_edge", "dog_edge", "bet_side"}
+    if edge_sources.issubset(ds.columns) and pick_expr is not None:
+        ds = ds.with_columns(pick_expr.alias("bet_pick_side"))
         ds = ds.with_columns(
             pl.when(~pl.col("bet_side").is_in(["P1", "P2"]))
             .then(pl.lit(None, dtype=pl.Float64))
-            .when(pl.col("bet_side") == pl.col("pred_side"))
+            .when(pl.col("bet_side") == pl.col("bet_pick_side"))
             .then(pl.col("fav_edge"))
             .otherwise(pl.col("dog_edge"))
             .alias("bet_edge")

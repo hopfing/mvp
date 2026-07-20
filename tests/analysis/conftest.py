@@ -36,6 +36,7 @@ def sample_sheet_data():
     return pl.DataFrame({
         "match_uid": ["m1", "m2", "m3"],
         "circuit": ["CH", "ATP", "CH"],
+        "prediction": ["P1", "P2", ""],
         "p1_odds": ["2.10", "1.80", ""],
         "p2_odds": ["1.75", "2.00", ""],
         "p1_pin": ["2.05", "", ""],

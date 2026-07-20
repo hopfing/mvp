@@ -45,6 +45,24 @@ class TestUnifiedDataset:
         assert m1["bet_side"][0] == "P1"
         assert m1["stake"][0] == "10"
 
+    def test_sheet_prediction_carried_as_bet_pred_side(
+        self, sample_predictions, sample_sheet_data
+    ):
+        """The sheet's frozen `prediction` is joined as `bet_pred_side`."""
+        from mvp.analysis.dataset import build_analysis_dataset
+
+        ds = build_analysis_dataset(
+            predictions=sample_predictions,
+            sheet_data=sample_sheet_data,
+        )
+
+        assert "bet_pred_side" in ds.columns
+        assert "prediction" not in ds.columns
+        m1 = ds.filter(pl.col("match_uid") == "m1")
+        assert m1["bet_pred_side"][0] == "P1"
+        m2 = ds.filter(pl.col("match_uid") == "m2")
+        assert m2["bet_pred_side"][0] == "P2"
+
     def test_circuit_normalization_from_sheet(
         self, sample_predictions, sample_sheet_data
     ):
@@ -346,6 +364,55 @@ class TestBetEdgeDerivation:
         # m3: bet_side=P2 → p2_win_prob - 1/best_opening_odds_p2
         m3 = ds.filter(pl.col("match_uid") == "m3")
         assert m3["bet_edge_open"][0] == pytest.approx(0.70 - 1.0 / 1.40)
+
+    def test_bet_edge_anchors_to_as_bet_pick_over_flipped_pred_side(self):
+        """A bet the model later flipped away from stays a Model Fav.
+
+        bet_pred_side (as-bet pick) = P1 and the bet was on P1, but the live
+        pred_side later flipped to P2. bet_edge must still take fav_edge, and
+        bet_pick_side must reflect the as-bet pick.
+        """
+        from mvp.analysis.dataset import derive_bet_edge_cols
+
+        df = pl.DataFrame({
+            "match_uid": ["m1"],
+            "bet_pred_side": ["P1"],
+            "pred_side": ["P2"],
+            "bet_side": ["P1"],
+            "fav_edge": [0.06],
+            "dog_edge": [-0.05],
+        })
+        ds = derive_bet_edge_cols(df)
+        assert ds["bet_pick_side"][0] == "P1"
+        assert ds["bet_edge"][0] == pytest.approx(0.06)
+
+    def test_bet_pick_side_coalesces_null_bet_pred_to_pred_side(self):
+        """Null as-bet pick falls back to live pred_side row-wise."""
+        from mvp.analysis.dataset import derive_bet_edge_cols
+
+        df = pl.DataFrame({
+            "match_uid": ["m1", "m2"],
+            "bet_pred_side": ["P1", None],
+            "pred_side": ["P2", "P2"],
+            "bet_side": ["P1", "P2"],
+            "fav_edge": [0.06, 0.04],
+            "dog_edge": [-0.05, -0.03],
+        })
+        ds = derive_bet_edge_cols(df)
+        # m1 uses the (present) as-bet pick P1
+        assert ds.filter(pl.col("match_uid") == "m1")["bet_pick_side"][0] == "P1"
+        # m2's as-bet pick is null → falls back to pred_side P2
+        m2 = ds.filter(pl.col("match_uid") == "m2")
+        assert m2["bet_pick_side"][0] == "P2"
+        assert m2["bet_edge"][0] == pytest.approx(0.04)
+
+    def test_bet_pick_side_falls_back_when_only_pred_side(self):
+        """Pre-rebuild datasets (no bet_pred_side) keep the old behavior."""
+        from mvp.analysis.dataset import derive_bet_edge_cols
+
+        ds = derive_bet_edge_cols(self._frame())
+        # _frame has pred_side only; bet_pick_side mirrors it
+        assert ds["bet_pick_side"].to_list() == ["P1", "P1", "P2"]
 
     def test_returns_unchanged_when_edge_sources_missing(self):
         from mvp.analysis.dataset import derive_bet_edge_cols
