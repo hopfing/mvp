@@ -486,17 +486,31 @@ def _render_flipped_bets(bets: pl.DataFrame, st) -> None:
     # as-bet pick (which you actually took) held up once the model changed its
     # mind. W/L/V here are the outcomes of the side you bet.
     stats = _per_bet_stats(flipped)
-    summary = [
-        f"**{stats['Bets']} flipped bet{'' if stats['Bets'] == 1 else 's'}**",
-        f"{stats['W']}-{stats['L']}-{stats['V']}",
-    ]
-    if stats["Win %"] is not None:
-        summary.append(f"{stats['Win %']:.1f}% win")
-    if stats["P&L"] is not None:
-        summary.append(f"P&L ${stats['P&L']:+,.2f}")
-    if stats["ROI %"] is not None:
-        summary.append(f"ROI {stats['ROI %']:+.1f}%")
-    st.markdown(" · ".join(summary))
+    summary_df = pl.DataFrame([{
+        "Bets": stats["Bets"],
+        "W": stats["W"],
+        "L": stats["L"],
+        "V": stats["V"],
+        "Win %": stats["Win %"],
+        "Stake": stats["Stake"],
+        "P&L": stats["P&L"],
+        "ROI %": stats["ROI %"],
+    }])
+    summary_styled = (
+        summary_df.to_pandas()
+        .style
+        .applymap(_color_negative, subset=["P&L", "ROI %"])
+        .format(
+            {
+                "Stake": "${:,.2f}",
+                "P&L": "${:+,.2f}",
+                "Win %": "{:.1f}%",
+                "ROI %": "{:+.1f}%",
+            },
+            na_rep="—",
+        )
+    )
+    st.dataframe(summary_styled, use_container_width=True, hide_index=True)
 
     has_names = {"p1_name", "p2_name"}.issubset(flipped.columns)
 
@@ -1115,16 +1129,6 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
     )
     st.dataframe(styled, use_container_width=True, hide_index=True)
 
-    # --- Bets the model flipped after placement ---
-    if len(_flipped_bets(bets)) > 0:
-        st.subheader("Model Flipped After Placement")
-        st.caption(
-            "The model's pick moved across 50% between when you bet and now. "
-            "Fav/Dog and edge on this page are anchored to the pick as it "
-            "stood when you bet (the sheet's frozen value), not the current one."
-        )
-        _render_flipped_bets(bets, st)
-
     # --- Performance Breakdowns ---
     round_order = ["Q1", "Q2", "R128", "R64", "R32", "R16", "QF", "SF", "F"]
 
@@ -1242,3 +1246,8 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
                 "Cumulative P&L": running,
             })
             st.line_chart(chart_data.to_pandas(), x="Bet #", y="Cumulative P&L")
+
+    # --- Bets the model flipped after placement ---
+    if len(_flipped_bets(bets)) > 0:
+        st.subheader("Model Flipped After Placement")
+        _render_flipped_bets(bets, st)
