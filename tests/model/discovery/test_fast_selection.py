@@ -10,6 +10,7 @@ import polars as pl
 import pytest
 import yaml
 
+from mvp.model.config import ExperimentConfig
 from mvp.model.discovery.config import DiscoveryConfig
 from mvp.model.discovery.fast_selection import FastForwardSelector
 from mvp.model.splitters import make_splitter
@@ -817,14 +818,14 @@ class TestEarlyStopping:
             "model": {
                 "type": "xgboost",
                 "params": {"n_estimators": 30, "learning_rate": 0.1},
-                "early_stopping": {
-                    "enabled": True,
-                    "watch_months": 2.0,
-                    "min_watch_tail": 5,
-                    "patience": 10,
-                    "ceiling": 50,
-                    "fallback_rounds": 20,
-                },
+            },
+            "early_stopping": {
+                "enabled": True,
+                "watch_months": 2.0,
+                "min_watch_tail": 5,
+                "patience": 10,
+                "ceiling": 50,
+                "fallback_rounds": 20,
             },
             "validation": {
                 "type": "date_sliding",
@@ -851,7 +852,8 @@ class TestEarlyStopping:
         """ES + a non-date splitter is rejected at config load (before compute)."""
         config_dict = {
             "data": {"date_range": {"start": "2024-01-01", "end": "2024-12-31"}},
-            "model": {"type": "xgboost", "early_stopping": {"enabled": True}},
+            "model": {"type": "xgboost"},
+            "early_stopping": {"enabled": True},
             "validation": {
                 "type": "walk_forward",
                 "n_splits": 2,
@@ -869,7 +871,8 @@ class TestEarlyStopping:
         """ES + a non-xgboost model is rejected at config load."""
         config_dict = {
             "data": {"date_range": {"start": "2024-01-01", "end": "2024-12-31"}},
-            "model": {"type": "logistic", "early_stopping": {"enabled": True}},
+            "model": {"type": "logistic"},
+            "early_stopping": {"enabled": True},
             "validation": {
                 "type": "date_sliding",
                 "train_months": 6,
@@ -887,7 +890,8 @@ class TestEarlyStopping:
         shrinkage would trip the fallback floor inconsistently)."""
         config_dict = {
             "data": {"date_range": {"start": "2024-01-01", "end": "2024-12-31"}},
-            "model": {"type": "xgboost", "early_stopping": {"enabled": True}},
+            "model": {"type": "xgboost"},
+            "early_stopping": {"enabled": True},
             "validation": {
                 "type": "date_sliding",
                 "train_months": 6,
@@ -904,6 +908,32 @@ class TestEarlyStopping:
                 _write_config(tmp_path, "es_stability.yaml", config_dict)
             )
 
+    def test_early_stopping_survives_experiment_conversion(self, tmp_path: Path):
+        """Regression: to_experiment_config_dict must emit early_stopping at the
+        top level (where ExperimentConfig expects it), not nested under `model`.
+        Nesting it made the discovery -> final-experiment write-back fail with
+        `model.early_stopping: extra_forbidden`."""
+        config_dict = {
+            "data": {"date_range": {"start": "2024-01-01", "end": "2024-12-31"}},
+            "model": {"type": "xgboost", "params": {"max_depth": 5}},
+            "early_stopping": {"enabled": True, "ceiling": 1500},
+            "validation": {
+                "type": "date_expanding",
+                "initial_train_months": 12,
+                "test_months": 2,
+            },
+            "discovery": {"metric": "log_loss", "direction": "minimize"},
+        }
+        config = DiscoveryConfig.from_file(
+            _write_config(tmp_path, "es_convert.yaml", config_dict)
+        )
+        exp_dict = config.to_experiment_config_dict(["player_ranking_points_diff"])
+        assert "early_stopping" in exp_dict           # top-level, sibling of model
+        assert "early_stopping" not in exp_dict["model"]
+        exp = ExperimentConfig.model_validate(exp_dict)  # must not raise
+        assert exp.early_stopping.enabled is True
+        assert exp.early_stopping.ceiling == 1500
+
     def test_early_stopping_test_start_ignores_eval_filter(
         self, es_eval_filter_matches: Path, tmp_path: Path, monkeypatch
     ):
@@ -919,8 +949,8 @@ class TestEarlyStopping:
             "model": {
                 "type": "xgboost",
                 "params": {"n_estimators": 20},
-                "early_stopping": {"enabled": True, "min_watch_tail": 1},
             },
+            "early_stopping": {"enabled": True, "min_watch_tail": 1},
             "validation": {
                 "type": "date_sliding",
                 "train_months": 6,
@@ -970,11 +1000,11 @@ class TestEarlyStopping:
             "model": {
                 "type": "xgboost",
                 "params": {"n_estimators": 20, "learning_rate": 0.1},
-                "early_stopping": {
-                    "enabled": True,
-                    "min_watch_tail": 100000,  # impossibly high -> always falls back
-                    "fallback_rounds": 15,
-                },
+            },
+            "early_stopping": {
+                "enabled": True,
+                "min_watch_tail": 100000,  # impossibly high -> always falls back
+                "fallback_rounds": 15,
             },
             "validation": {
                 "type": "date_sliding",
@@ -1009,13 +1039,13 @@ class TestEarlyStopping:
             "model": {
                 "type": "xgboost",
                 "params": {"n_estimators": 30, "learning_rate": 0.1},
-                "early_stopping": {
-                    "enabled": True,
-                    "watch_months": 2.0,
-                    "min_watch_tail": 5,
-                    "patience": 10,
-                    "ceiling": 50,
-                },
+            },
+            "early_stopping": {
+                "enabled": True,
+                "watch_months": 2.0,
+                "min_watch_tail": 5,
+                "patience": 10,
+                "ceiling": 50,
             },
             "validation": {
                 "type": "date_sliding",

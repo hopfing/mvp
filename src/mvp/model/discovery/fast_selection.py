@@ -752,7 +752,7 @@ class FastForwardSelector:
         # vector-leaf) is unsupported, and the leak-safe watch carve assumes
         # time-ordered folds, so a date splitter is required. row_dates is the
         # per-row effective_match_date, aligned to X_wide (see precompute()).
-        es_cfg = self.config.model.early_stopping
+        es_cfg = self.config.early_stopping
         es_enabled = es_cfg is not None and es_cfg.enabled
         row_dates = self.row_dates
         if es_enabled:

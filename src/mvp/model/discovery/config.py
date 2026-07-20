@@ -222,13 +222,6 @@ class ModelConfig(BaseModel):
 
     type: Literal["xgboost", "lightgbm", "logistic", "random_forest", "ensemble", "neural_net"] = "xgboost"
     params: dict[str, Any] | None = None
-    # Optional XGBoost early stopping for the FS scorer (reuses the training-side
-    # schema, spec 2026-06-24). Off by default -> every existing run is
-    # unchanged. When enabled, each candidate fit chooses its own tree count
-    # (per-candidate two-stage) instead of the fixed params.n_estimators. The
-    # early-stop metric is the discovery `metric`; only the xgboost, non-MTL,
-    # date-splitter path supports it (enforced in FastForwardSelector.create_scorer).
-    early_stopping: EarlyStoppingConfig | None = None
 
 
 class ValidationConfig(BaseModel):
@@ -297,6 +290,12 @@ class DiscoveryConfig(BaseModel):
     validation: ValidationConfig = ValidationConfig()
     sample_weight: SampleWeightConfig | None = None
     mtl: MTLConfig | None = None
+    # Top-level (not under `model`) to match ExperimentConfig: early stopping is a
+    # training procedure spanning model + validation (date splitter for the leak-safe
+    # watch) + metrics.objective (stop metric), not a plain model hyperparameter. For
+    # FS the stop metric is the discovery `metric`; xgboost + date-splitter + non-MTL
+    # + non-stability only (see validate_early_stopping_compatibility).
+    early_stopping: EarlyStoppingConfig | None = None
 
     @model_validator(mode="after")
     def validate_mtl_compatibility(self) -> "DiscoveryConfig":
@@ -349,28 +348,28 @@ class DiscoveryConfig(BaseModel):
         path. Reject unsupported combinations at load time so the user gets a
         clear error before the (expensive) precompute, not mid-run. Mirrors the
         runtime guard in FastForwardSelector.create_scorer."""
-        es = self.model.early_stopping
+        es = self.early_stopping
         if es is None or not es.enabled:
             return self
         if self.model.type != "xgboost":
             raise ValueError(
-                f"model.early_stopping is only supported for model.type='xgboost'; "
+                f"early_stopping is only supported for model.type='xgboost'; "
                 f"got {self.model.type!r}"
             )
         if self.mtl is not None:
             raise ValueError(
-                "model.early_stopping is not supported with MTL (custom "
+                "early_stopping is not supported with MTL (custom "
                 "objective / vector-leaf); run one or the other."
             )
         if self.validation.type not in ("date_sliding", "date_expanding"):
             raise ValueError(
-                "model.early_stopping requires a date splitter (date_sliding / "
+                "early_stopping requires a date splitter (date_sliding / "
                 "date_expanding) so the watch embargo is time-ordered; got "
                 f"validation.type={self.validation.type!r}"
             )
         if self.discovery.stability_selection is not None:
             raise ValueError(
-                "model.early_stopping is not supported with stability_selection: "
+                "early_stopping is not supported with stability_selection: "
                 "per-resample row thinning shrinks the watch tail and would trip "
                 "the fallback floor inconsistently across resamples, adding an "
                 "uncontrolled axis to the selection-frequency signal. Run one or "
@@ -428,4 +427,6 @@ class DiscoveryConfig(BaseModel):
             result["sample_weight"] = self.sample_weight.model_dump()
         if self.mtl is not None:
             result["mtl"] = self.mtl.model_dump()
+        if self.early_stopping is not None:
+            result["early_stopping"] = self.early_stopping.model_dump()
         return result
