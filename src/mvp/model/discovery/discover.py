@@ -5,7 +5,6 @@ import logging
 import os
 import re
 import tempfile
-from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -13,7 +12,6 @@ from typing import Any
 import numpy as np
 import polars as pl
 import yaml
-from threadpoolctl import threadpool_limits
 
 from mvp.common.base_job import get_local_data_root
 from mvp.model.discovery.config import DiscoveryConfig
@@ -34,7 +32,11 @@ from mvp.model.discovery.sweeps import (
     SweepResult,
     parse_feature_spec,
 )
-from mvp.model.models import get_n_jobs_override
+from mvp.model.parallelism import (
+    BLAS_THREADED_MODEL_TYPES,
+    blas_thread_cap,
+    resolve_candidate_parallelism,
+)
 from mvp.model.registry import get_registry
 
 logger = logging.getLogger(__name__)
@@ -44,7 +46,7 @@ logger = logging.getLogger(__name__)
 # these the candidate-loop per-fit thread share is applied as a BLAS thread cap
 # via threadpoolctl, since ``n_jobs`` on the model is a no-op. XGB routes n_jobs
 # through OpenMP, not BLAS, so it is unaffected by the cap.
-_BLAS_THREADED_MODEL_TYPES = {"logistic"}
+_BLAS_THREADED_MODEL_TYPES = BLAS_THREADED_MODEL_TYPES  # shared source of truth
 
 
 @dataclass
@@ -374,21 +376,14 @@ class FeatureDiscovery:
         """
         if method != "forward":
             return 1, None
-        cpu = os.cpu_count() or 4
-        cfg_n_jobs = (self.config.model.params or {}).get("n_jobs")
-        budget = (
-            int(cfg_n_jobs) if cfg_n_jobs
-            else (get_n_jobs_override() or max(1, cpu - 2))
+        workers, n_jobs = resolve_candidate_parallelism(
+            (self.config.model.params or {}).get("n_jobs"),
+            self.config.discovery.forward_max_workers,
         )
-        budget = max(1, min(int(budget), cpu))
-        fw = self.config.discovery.forward_max_workers
-        workers = max(1, fw) if fw is not None else max(1, budget // 4)
-        workers = max(1, min(workers, budget))
-        n_jobs = max(1, budget // workers)
         if workers > 1:
             self._log(
                 f"Candidate-loop parallelism: {workers} workers x {n_jobs} "
-                f"threads/fit (budget {budget})"
+                f"threads/fit"
             )
         return workers, n_jobs
 
@@ -813,10 +808,7 @@ class FeatureDiscovery:
                 f"worker(s) via threadpoolctl (model "
                 f"'{self.config.model.type}' ignores n_jobs)"
             )
-        blas_cap = (
-            threadpool_limits(limits=cand_n_jobs)
-            if blas_managed else nullcontext()
-        )
+        blas_cap = blas_thread_cap(self.config.model.type, cand_n_jobs)
         with blas_cap:
             result = selector.run(
                 verbose=True,
