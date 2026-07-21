@@ -264,7 +264,16 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
                 try:
                     is_diff = not registry.get(base_name).mirror
                 except KeyError:
-                    is_diff = False
+                    # base_name isn't a directly-registered feature — it's a
+                    # transform-output column. A single transform (e.g.
+                    # style_matchup, mirror=False) can emit BOTH a mirror pair
+                    # (player_/opp_vs_opp_style_resid) AND a player-only diff
+                    # (player_vs_opp_style_resid_diff), so the transform's mirror
+                    # flag can't classify the column. Decide per-column by whether
+                    # the opp_ counterpart output exists: present -> mirror pair
+                    # (swap reads opp_); absent -> anti-symmetric diff (swap
+                    # negates the player_ value).
+                    is_diff = registry.transform_for_output("opp_" + base_name) is None
             cols.append(col)
             is_diff_flags.append(is_diff)
         self._match_feature_is_diff = is_diff_flags

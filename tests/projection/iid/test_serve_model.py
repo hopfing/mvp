@@ -380,6 +380,43 @@ def _make_chain_with_stub(
     return chain_model
 
 
+class TestMatchFeatureIsDiff:
+    """_resolve_match_feature_cols must flag anti-symmetric (player-only) diff
+    features so the perspective swap negates rather than reading a nonexistent
+    opp_ column.
+
+    Regression: a single transform (e.g. style_matchup, mirror=False) emits BOTH
+    a mirror pair (player_/opp_vs_opp_style_resid) AND a player-only diff
+    (player_vs_opp_style_resid_diff). The transform's mirror flag alone can't
+    tell them apart; the naive registry.get(base_name) lookup KeyError'd on both
+    and defaulted is_diff=False, so the swap read a nonexistent
+    opp_vs_opp_style_resid_diff column and crashed mid-FS.
+    """
+
+    @pytest.mark.parametrize(
+        "spec, expected_is_diff",
+        [
+            # transform diff, player-only → the exact column that crashed FS
+            ("player_vs_opp_style_resid_diff", True),
+            # transform mirror pair (opp_ counterpart exists) → NOT a diff
+            ("player_vs_opp_style_resid", False),
+            # directly-registered mirror=False diffs
+            ("player_elo_surface_diff", True),
+            ("player_glicko_rd_diff", True),
+            # directly-registered mirror=True feature
+            ("player_win_pct(days=30)", False),
+        ],
+    )
+    def test_is_diff_classification(self, spec, expected_is_diff):
+        model = ScoreStateChainServeModel(
+            model_type="logistic",
+            match_level_features=[spec],
+            point_level_features=[],
+        )
+        model._resolve_match_feature_cols()  # populates _match_feature_is_diff
+        assert model._match_feature_is_diff == [expected_is_diff]
+
+
 class TestScoreStateChainServeModel:
     """Tests for the bridge between trained point-grain score-state classifiers
     and the IID chain's serve-estimator interface.
