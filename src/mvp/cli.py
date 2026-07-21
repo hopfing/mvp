@@ -2498,24 +2498,13 @@ def _cmd_experiment_serve(
         else:
             print(f"  +{r.feature_added:30s} [{r.grain}]  score={r.score:.6f}  Δ={r.delta:+.6f}")
 
-    print("\nFinal metric comparison across model forms:")
-    for ff in result.final_forms:
-        metric_line = ", ".join(f"{k}={v:.4f}" for k, v in ff.metrics.items())
-        print(f"  {ff.form:10s}  {metric_line}")
-
-    # Emit IID projection config using the best-performing form by scorer's metric.
-    best_ff = min(
-        result.final_forms,
-        key=lambda ff: ff.metrics.get(selector.config.metric, float("inf"))
-        if selector.config.metric in ("log_loss", "brier_score")
-        else -ff.metrics.get(selector.config.metric, float("-inf")),
-    )
-    promoted_params = selector.config.model_params.get(best_ff.form, {})
+    # Emit the config with the model that actually drove selection — the search
+    # scoring_model — not a final-fit form comparison (which we don't use).
     emitted = selector.config.to_iid_projection_config_dict(
         selected_match_level=result.selected_match_level,
         selected_point_level=result.selected_point_level,
-        model_type=best_ff.form,
-        model_params=promoted_params,
+        model_type=selector.config.scoring_model.type,
+        model_params=selector.config.scoring_model.params,
     )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)

@@ -31,6 +31,7 @@ from mvp.model.discovery.checkpoint import (
 from mvp.model.engine import (
     FeatureEngine,
     build_column_name,
+    check_memory,
     make_fs_engine,
     parse_feature_spec,
     process_rss_mb,
@@ -39,10 +40,10 @@ from mvp.model.engine import (
 from mvp.model.features._score_helpers import total_games_lost, total_games_won
 from mvp.model.metrics import compute_metrics
 from mvp.model.splitters import make_splitter
+from mvp.model.parallelism import blas_thread_cap, resolve_candidate_parallelism
 from mvp.model.discovery.discover import get_all_feature_specs
 from mvp.projection.iid.config import ServeDiscoveryConfig
 from mvp.projection.iid.metric_registry import (
-    chain_metric_names,
     is_chain_metric,
     is_minimize,
     score_chain,
@@ -78,18 +79,10 @@ class FSRoundResult:
 
 
 @dataclass
-class FinalFormResult:
-    form: str
-    metrics: dict[str, float]
-    coef_summary: dict[str, Any] | None
-
-
-@dataclass
 class DiscoveryResult:
     selected_match_level: list[str]
     selected_point_level: list[str]
     rounds: list[FSRoundResult]
-    final_forms: list[FinalFormResult]
     n_train_rows: int
 
 
@@ -341,8 +334,13 @@ class ServeDiscoverySelector:
             if chain_mode and self.config.n_parallel_candidates > 1:
                 to_score = [(g, c) for g, c in tagged if c not in this_round_scores]
 
+                # Unlike the classification FS (threads/fit auto-derived to ~4),
+                # candidates and per-fit n_jobs are independent knobs here that
+                # multiply — so show both: (candidates x n_jobs).
+                per_fit = self.config.scoring_model.params.get("n_jobs", 1)
                 bar = tqdm(total=len(tagged), initial=len(this_round_scores),
-                           desc=desc, leave=False, ncols=120)
+                           desc=f"{desc} ({self.config.n_parallel_candidates}x{per_fit})",
+                           leave=False, ncols=120)
                 if best_cand is not None and hasattr(bar, "set_postfix"):
                     bar.set_postfix(
                         best=f"{best_new_score:.6f}",
@@ -356,9 +354,22 @@ class ServeDiscoverySelector:
                     pl_feats = list(_pl) if g == "match" else _pl + [c]
                     return g, c, self._score_cv_chain(ml, pl_feats)
 
+                # BLAS thread cap for a logistic scorer (whose fit ignores n_jobs)
+                # so concurrent worker fits don't oversubscribe; no-op for xgboost,
+                # which routes n_jobs through OpenMP. Set once around this round's
+                # executor, not per-fit (process-global BLAS limit would race).
+                _, cap_n_jobs = resolve_candidate_parallelism(
+                    self.config.scoring_model.params.get("n_jobs"),
+                    self.config.n_parallel_candidates,
+                )
                 last_log_t = time.perf_counter()
                 last_log_eval = 0
-                with ThreadPoolExecutor(max_workers=self.config.n_parallel_candidates) as executor:
+                with (
+                    blas_thread_cap(self.config.scoring_model.type, cap_n_jobs),
+                    ThreadPoolExecutor(
+                        max_workers=self.config.n_parallel_candidates
+                    ) as executor,
+                ):
                     futures = {executor.submit(_score_one, gc): gc for gc in to_score}
                     for future in as_completed(futures):
                         grain, cand, score = future.result()
@@ -538,16 +549,7 @@ class ServeDiscoverySelector:
         if self.checkpoint_path and self.checkpoint_path.exists():
             self.checkpoint_path.unlink()
 
-        # Final: train all configured forms on the selected feature set, report metrics.
-        # base_df now contains all selected match features (added permanently during FS).
-        final_forms: list[FinalFormResult] = []
-        for form in self.config.model_forms:
-            params = self.config.model_params.get(form, {})
-            metrics, coefs = self._final_train_eval(base_df, splits, selected_match, selected_point, form, params)
-            final_forms.append(FinalFormResult(form=form, metrics=metrics, coef_summary=coefs))
-            logger.info("Final form %s: %s=%.6f", form, self.config.metric, metrics.get(self.config.metric, float("nan")))
-
-        # Restore log levels silenced around the FS + final-form eval.
+        # Restore log levels silenced around the FS.
         for lg, lvl in prev_levels:
             lg.setLevel(lvl)
 
@@ -555,7 +557,6 @@ class ServeDiscoverySelector:
             selected_match_level=selected_match,
             selected_point_level=selected_point,
             rounds=rounds,
-            final_forms=final_forms,
             n_train_rows=len(base_df),
         )
 
@@ -731,6 +732,9 @@ class ServeDiscoverySelector:
             step_size=val.step_size,
             train_size=val.train_size,
             test_start=getattr(val, "test_start", None),
+            train_months=getattr(val, "train_months", None),
+            initial_train_months=getattr(val, "initial_train_months", None),
+            test_months=getattr(val, "test_months", None),
         )
         splits = list(splitter.split(df))
 
@@ -759,8 +763,6 @@ class ServeDiscoverySelector:
     def _score_cv_chain(
         self, match_level: list[str], point_level: list[str],
     ) -> float:
-        import gc
-
         assert self._match_df is not None and self._fs_match_splits is not None, (
             "_score_cv_chain called before _prepare_match_data"
         )
@@ -783,7 +785,12 @@ class ServeDiscoverySelector:
                 )
 
             scoring_params = dict(self.config.scoring_model.params)
-            if "n_jobs" not in scoring_params:
+            # Per-fit threads are the config's to set. Logistic ignores n_jobs
+            # (sklearn >=1.8 no-op, and injecting it spams FutureWarnings) → never
+            # inject for it. Xgboost honors n_jobs as OpenMP threads → default to 1
+            # when unset so concurrent candidate threads don't oversubscribe; the
+            # validator caps n_parallel_candidates * n_jobs at the cpu count.
+            if self.config.scoring_model.type != "logistic" and "n_jobs" not in scoring_params:
                 scoring_params["n_jobs"] = 1
             model = ScoreStateChainServeModel(
                 model_type=self.config.scoring_model.type,
@@ -810,114 +817,16 @@ class ServeDiscoverySelector:
                     spread_lines=list(self.config.metrics.spread_lines),
                 )
             )
-            # Force release: chain-DP intermediates, predict_state_fn caches on
-            # `model`, and per-fold polars filter copies otherwise rely on
-            # CPython's heuristic GC + the polars/Rust allocator's pool to
-            # release. Explicit del + gc.collect() drops references promptly so
-            # the allocator has the chance to return pages between folds.
+            # Drop refs so CPython's automatic collector reclaims between folds,
+            # and bound memory with the same check_memory() guard the rest of the
+            # codebase uses (classification FS at fast_selection.py:522, the
+            # projection runners per fold) rather than a forced per-fold
+            # gc.collect() — which under n_parallel_candidates > 1 would stall
+            # every worker thread on the GIL. Aborts cleanly if over --memory-limit.
             del model, p_a_fn, p_b_fn, p_a, p_b, dist
             del preloaded_feats, preloaded_pts, train_df, test_df
-            gc.collect()
+            check_memory("serve FS chain scoring")
         return float(np.mean(fold_scores))
-
-    def _final_train_eval(
-        self,
-        df: pl.DataFrame,
-        splits: list[tuple[list[int], list[int]]],
-        match_level: list[str],
-        point_level: list[str],
-        form: str,
-        params: dict[str, Any],
-    ) -> tuple[dict[str, float], dict[str, Any] | None]:
-        if is_chain_metric(self.config.metric):
-            return self._final_train_eval_chain(match_level, point_level, form, params)
-        feature_cols = self._resolve_cols(match_level, point_level)
-        fold_metrics: list[dict[str, float]] = []
-        for train_idx, test_idx in splits:
-            train_df = df[train_idx]
-            test_df = df[test_idx]
-            X_train = train_df.select(feature_cols).to_numpy()
-            y_train = train_df["point_won_by_server"].cast(pl.Int64).to_numpy()
-            X_test = test_df.select(feature_cols).to_numpy()
-            y_test = test_df["point_won_by_server"].cast(pl.Int64).to_numpy()
-            model = build_score_state_model(type_=form, feature_names=feature_cols, params=params)
-            model.fit(X_train, y_train)
-            y_prob = model.predict_proba(X_test)
-            fold_metrics.append(compute_metrics(y_test, y_prob))
-
-        agg: dict[str, float] = {}
-        if fold_metrics:
-            for k in fold_metrics[0]:
-                vals = [m[k] for m in fold_metrics if k in m]
-                agg[k] = float(np.mean(vals))
-
-        # Final fit for coef summary
-        X_full = df.select(feature_cols).to_numpy()
-        y_full = df["point_won_by_server"].cast(pl.Int64).to_numpy()
-        model = build_score_state_model(type_=form, feature_names=feature_cols, params=params)
-        model.fit(X_full, y_full)
-        return agg, model.coef_summary()
-
-    def _final_train_eval_chain(
-        self,
-        match_level: list[str],
-        point_level: list[str],
-        form: str,
-        params: dict[str, Any],
-    ) -> tuple[dict[str, float], dict[str, Any] | None]:
-        """Chain-grain final eval: emits all four chain metrics per fold."""
-        assert self._match_df is not None and self._match_splits is not None, (
-            "_final_train_eval_chain called before _prepare_match_data"
-        )
-        fold_metrics: list[dict[str, float]] = []
-        for train_idx, test_idx in self._match_splits:
-            train_df = self._match_df[train_idx]
-            test_df = self._match_df[test_idx]
-
-            preloaded_feats = None
-            preloaded_pts = None
-            if self._match_features_both_sides is not None and self._preloaded_points is not None:
-                train_uids = set(train_df["match_uid"].to_list())
-                preloaded_feats = self._match_features_both_sides.filter(
-                    pl.col("match_uid").is_in(train_uids)
-                )
-                preloaded_pts = self._preloaded_points.filter(
-                    pl.col("match_uid").is_in(train_uids)
-                )
-
-            model = ScoreStateChainServeModel(
-                model_type=form,
-                match_level_features=list(match_level),
-                point_level_features=list(point_level),
-                params=dict(params),
-                points_path=self.points_path,
-                matches_path=self.matches_path,
-                cache_dir=self.cache_dir,
-                engine=self._engine,
-            )
-            model.fit(train_df, preloaded_match_features=preloaded_feats, preloaded_points=preloaded_pts)
-            p_a_fn, p_b_fn = model.predict_state_fn(test_df)
-            p_a, p_b = model.predict(test_df)
-            best_of = test_df["best_of"].to_numpy().astype(np.int64)
-            dist = match_distribution_from_state_fn(p_a_fn, p_b_fn, p_a, p_b, best_of)
-            y_games_a = test_df["_target_games_a"].to_numpy().astype(np.float64)
-            y_games_b = test_df["_target_games_b"].to_numpy().astype(np.float64)
-            total_lines = list(self.config.metrics.total_lines)
-            spread_lines = list(self.config.metrics.spread_lines)
-            fold_metrics.append({
-                m: score_chain(
-                    m, dist, y_games_a, y_games_b,
-                    total_lines=total_lines,
-                    spread_lines=spread_lines,
-                )
-                for m in chain_metric_names()
-            })
-
-        agg: dict[str, float] = {}
-        if fold_metrics:
-            for k in fold_metrics[0]:
-                agg[k] = float(np.mean([m[k] for m in fold_metrics]))
-        return agg, None
 
     def _resolve_cols(self, match_level: list[str], point_level: list[str]) -> list[str]:
         cols: list[str] = []
@@ -1005,6 +914,9 @@ class ServeDiscoverySelector:
             step_size=val.step_size,
             train_size=val.train_size,
             test_start=getattr(val, "test_start", None),
+            train_months=getattr(val, "train_months", None),
+            initial_train_months=getattr(val, "initial_train_months", None),
+            test_months=getattr(val, "test_months", None),
         )
 
     def _pre_cache_all(
