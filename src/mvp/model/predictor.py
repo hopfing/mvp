@@ -45,7 +45,7 @@ from mvp.model.imputation import apply_imputation, build_imputation, fit_imputat
 from mvp.model.models import EnsembleModel, XGBoostMTLModel, get_model
 from mvp.model.registry import get_registry
 from mvp.model.splitters import make_splitter
-from mvp.model.weighting import compute_sample_weights
+from mvp.model.weighting import sample_weights_from_frame
 
 logger = logging.getLogger(__name__)
 
@@ -429,6 +429,11 @@ class ProductionPredictor:
                 for col in aux_required.get(aux_name, []):
                     if col not in extra_cols_eff:
                         extra_cols_eff.append(col)
+        # Columns referenced by group sample-weighting rules (e.g. `indoor`).
+        if config.sample_weight is not None:
+            for col in config.sample_weight.referenced_columns():
+                if col not in extra_cols_eff:
+                    extra_cols_eff.append(col)
         df = engine.compute(all_specs, extra_columns=extra_cols_eff)
 
         # Apply training filters
@@ -545,9 +550,8 @@ class ProductionPredictor:
         # Compute sample weights if configured
         sample_weights = None
         if config.sample_weight is not None:
-            train_dates = df_deploy["effective_match_date"].to_numpy()
-            sample_weights = compute_sample_weights(
-                train_dates, config.sample_weight
+            sample_weights = sample_weights_from_frame(
+                df_deploy, config.sample_weight
             )
 
         # Train. MTL: dispatch to XGBoostMTLModel directly (model.type stays
@@ -662,9 +666,8 @@ class ProductionPredictor:
 
                 fold_weights = None
                 if config.sample_weight is not None:
-                    train_dates_fold = train_df["effective_match_date"].to_numpy()
-                    fold_weights = compute_sample_weights(
-                        train_dates_fold, config.sample_weight
+                    fold_weights = sample_weights_from_frame(
+                        train_df, config.sample_weight
                     )
 
                 if is_mtl:

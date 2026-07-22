@@ -257,11 +257,69 @@ class MetricsConfig(_StrictModel):
         return v
 
 
-class SampleWeightConfig(_StrictModel):
-    """Sample weighting configuration."""
+class WeightRule(_StrictModel):
+    """One group-weighting rule: rows matching every ``where`` condition get
+    ``weight``.
 
-    type: Literal["recency"] = "recency"
-    half_life_days: int
+    ``where`` maps column -> required value, AND-ed together (e.g.
+    ``{surface: Hard, indoor: false}`` selects outdoor hard-court matches).
+    Rules are evaluated in order; the first matching rule wins, and rows
+    matching no rule get the config's ``default_weight``.
+    """
+
+    where: dict[str, str | bool | int]
+    weight: float
+
+
+class SampleWeightConfig(_StrictModel):
+    """Sample weighting configuration.
+
+    Two modes selected by ``type``:
+
+    - ``recency``: exponential decay by match date. Requires ``half_life_days``.
+    - ``group``: per-row weight from a list of ``rules``. Each rule matches on
+      one or more columns (see :class:`WeightRule`); the first matching rule's
+      ``weight`` applies, else ``default_weight``. A soft partial-pooling dial —
+      e.g. train a Hard+Outdoor slice on the full corpus with a single rule
+      ``where: {surface: Hard, indoor: false}, weight: 1.0`` and
+      ``default_weight`` below 1.0 to downweight (not drop) other cells.
+      Requires a non-empty ``rules`` list.
+    """
+
+    type: Literal["recency", "group"] = "recency"
+    half_life_days: int | None = None
+    rules: list[WeightRule] | None = None
+    default_weight: float = 1.0
+
+    @model_validator(mode="after")
+    def _validate_by_type(self) -> "SampleWeightConfig":
+        if self.type == "recency":
+            if self.half_life_days is None:
+                raise ValueError(
+                    "sample_weight type 'recency' requires half_life_days"
+                )
+        elif self.type == "group":
+            if not self.rules:
+                raise ValueError(
+                    "sample_weight type 'group' requires a non-empty rules list"
+                )
+            for rule in self.rules:
+                if not rule.where:
+                    raise ValueError(
+                        "each group weighting rule requires a non-empty 'where'"
+                    )
+        return self
+
+    def referenced_columns(self) -> list[str]:
+        """Columns the weighting reads from the training frame (group mode)."""
+        if self.type != "group" or not self.rules:
+            return []
+        cols: list[str] = []
+        for rule in self.rules:
+            for col in rule.where:
+                if col not in cols:
+                    cols.append(col)
+        return cols
 
 
 class CalibrationConfig(_StrictModel):

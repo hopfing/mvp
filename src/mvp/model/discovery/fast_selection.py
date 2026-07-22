@@ -347,6 +347,11 @@ class FastForwardSelector:
                 for col in filt:
                     if col not in extra_columns:
                         extra_columns.append(col)
+        # Columns referenced by group sample-weighting rules (e.g. `indoor`).
+        if getattr(self.config, "sample_weight", None) is not None:
+            for col in self.config.sample_weight.referenced_columns():
+                if col not in extra_columns:
+                    extra_columns.append(col)
 
         # Phase A: ensure all features are cached (memory-bounded batches)
         cache_key = engine.ensure_cached(
@@ -622,11 +627,10 @@ class FastForwardSelector:
             if sample_weights is not None:
                 sample_weights = sample_weights[row_mask]
             df = df.filter(pl.Series(row_mask))
-        # Compute recency weights from config if no explicit weights were provided
+        # Compute weights from config if no explicit weights were provided
         if sample_weights is None and getattr(self.config, "sample_weight", None) is not None:
-            from mvp.model.weighting import compute_sample_weights
-            dates = df["effective_match_date"].to_numpy()
-            sample_weights = compute_sample_weights(dates, self.config.sample_weight)
+            from mvp.model.weighting import sample_weights_from_frame
+            sample_weights = sample_weights_from_frame(df, self.config.sample_weight)
         self.sample_weights = sample_weights
 
         # eval_filters: build a row-aligned mask selecting the scoring slice.

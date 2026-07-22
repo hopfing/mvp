@@ -48,7 +48,7 @@ from mvp.model.mlflow_logger import ExperimentLogger
 from mvp.model.models import EnsembleModel, XGBoostMTLModel, get_model
 from mvp.model.registry import get_registry
 from mvp.model.splitters import BaseSplitter, make_splitter
-from mvp.model.weighting import compute_sample_weights
+from mvp.model.weighting import sample_weights_from_frame
 
 
 def _reporting_calibrated_holdout(
@@ -682,6 +682,15 @@ class ExperimentRunner:
                         if col not in runner_columns:
                             runner_columns.append(col)
 
+        # Ensure columns referenced by group sample-weighting rules are loaded
+        # (e.g. `indoor` for a surface+environment weight), for the run-level
+        # config and any per-base-model weight configs.
+        for _sw in [self.config.sample_weight, *(model_sample_weights or [])]:
+            if _sw is not None:
+                for col in _sw.referenced_columns():
+                    if col not in runner_columns:
+                        runner_columns.append(col)
+
         df = self.engine.compute(all_specs, extra_columns=runner_columns)
 
         # Apply additional filters (e.g., draw_type: "singles")
@@ -1064,9 +1073,8 @@ class ExperimentRunner:
                 # Compute sample weights if configured
                 train_weights = None
                 if self.config.sample_weight is not None:
-                    train_dates = train_df["effective_match_date"].to_numpy()
-                    train_weights = compute_sample_weights(
-                        train_dates, self.config.sample_weight
+                    train_weights = sample_weights_from_frame(
+                        train_df, self.config.sample_weight
                     )
 
                 # Build per-model training data for ensemble date/filter/weight differences
@@ -1101,8 +1109,7 @@ class ExperimentRunner:
                             w_cfg = sw_cfg or self.config.sample_weight
                             w_m = None
                             if w_cfg is not None:
-                                model_dates = model_train_df["effective_match_date"].to_numpy()
-                                w_m = compute_sample_weights(model_dates, w_cfg)
+                                w_m = sample_weights_from_frame(model_train_df, w_cfg)
                             per_model_data.append((X_m, y_m, w_m))
                         else:
                             per_model_data.append(None)
