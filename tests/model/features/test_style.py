@@ -620,3 +620,80 @@ class TestBinaryIndicatorImpute:
         reg = get_registry()
         for name in self._INDICATORS:
             assert reg.get(name).impute is None, f"{name} should have impute=None"
+
+
+class TestSurfaceStyleFeatures:
+    """Tier B: surface-conditioned style rolling means + rally-length ratios."""
+
+    _SURFACE = [
+        "surface_style_winner_rate", "surface_style_ue_rate",
+        "surface_style_winner_ue_ratio", "surface_style_forced_error_rate",
+        "surface_style_fh_winner_share", "surface_style_fh_ue_share",
+        "surface_style_fh_winner_rate", "surface_style_bh_winner_rate",
+        "surface_style_ground_stroke_winner_rate", "surface_style_ground_stroke_ue_rate",
+        "surface_style_net_approach_frequency", "surface_style_drop_shot_frequency",
+        "surface_style_drop_shot_effectiveness", "surface_style_passing_frequency",
+        "surface_style_lob_frequency", "surface_style_short_rally_pct",
+        "surface_style_long_rally_pct", "surface_style_short_rally_win_pct",
+        "surface_style_long_rally_win_pct",
+        "surface_style_rally_won_avg_length", "surface_style_rally_lost_avg_length",
+    ]
+
+    def test_all_registered_with_diffs(self):
+        registry = get_registry()
+        for name in self._SURFACE:
+            feat = registry.get(name)
+            assert feat.params == ["days"]
+            assert feat.mirror is True
+            assert feat.impute is None
+            registry.get(f"{name}_diff")
+
+    def test_serve_speed_not_surfaced(self):
+        """Serve speed is a ~surface-invariant physical attribute — not surfaced."""
+        registry = get_registry()
+        for name in ["surface_style_avg_1st_serve_speed", "surface_style_max_1st_serve_speed"]:
+            with pytest.raises(KeyError):
+                registry.get(name)
+
+    def test_winner_rate_within_surface_only(self):
+        # Loop-registered — access via the registry.
+        winner_rate = get_registry().get("surface_style_winner_rate").func
+        df = pl.DataFrame({
+            "player_id": ["P", "P", "P"],
+            "surface": ["Hard", "Clay", "Hard"],
+            "effective_match_date": [date(2024, 1, 1), date(2024, 2, 1), date(2024, 3, 1)],
+            "mb_player_winners": [10, 30, 20],
+            "total_points": [100, 100, 100],
+        }).sort("effective_match_date")
+        vals = df.with_columns(winner_rate(days=365).alias("v"))["v"].to_list()
+        assert vals[0] is None            # first Hard: no prior
+        assert vals[1] is None            # first Clay: no prior
+        assert abs(vals[2] - 0.1) < 1e-9  # prior Hard rate {0.1}; clay 0.3 excluded
+
+    def test_easy_hold_surfaced_others_dropped(self):
+        registry = get_registry()
+        feat = registry.get("surface_easy_hold_pct")
+        assert feat.mirror is True and feat.impute is None
+        registry.get("surface_easy_hold_pct_diff")
+        # difficult_hold (degenerate k) and crucial_pts (no data) were dropped
+        for name in ["surface_difficult_hold_pct", "surface_crucial_pts_win_pct"]:
+            with pytest.raises(KeyError):
+                registry.get(name)
+
+    def test_loop_features_are_distinct(self):
+        """Guard the spec-loop closure binding: each surface variant must use its
+        own per-match expr, not all collapse to the last spec's expr."""
+        reg = get_registry()
+        wr = reg.get("surface_style_winner_rate").func
+        ur = reg.get("surface_style_ue_rate").func
+        df = pl.DataFrame({
+            "player_id": ["P", "P"],
+            "surface": ["Hard", "Hard"],
+            "effective_match_date": [date(2024, 1, 1), date(2024, 2, 1)],
+            "mb_player_winners": [10, 10],
+            "mb_player_ues": [40, 40],
+            "total_points": [100, 100],
+        }).sort("effective_match_date")
+        out = df.with_columns(wr(days=365).alias("wr"), ur(days=365).alias("ur"))
+        assert abs(out["wr"][1] - 0.1) < 1e-9  # winners/total
+        assert abs(out["ur"][1] - 0.4) < 1e-9  # ues/total -> a distinct expr

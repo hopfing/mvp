@@ -50,7 +50,7 @@ class TestStyleHistoryRegistration:
             assert "is_hard_specialist" in feat.depends_on
             assert "is_clay_specialist" in feat.depends_on
             if stat == "winpct":
-                assert feat.impute == 0.5
+                assert feat.impute is None  # no-fabricate: null when no prior
             else:
                 assert feat.impute == 0
 

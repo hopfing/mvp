@@ -14,7 +14,12 @@ mirroring score_depth's ``total_games_won`` / ``total_games_lost``;
 
 import polars as pl
 
-from mvp.model.primitives import cumulative_mean, ratio_feature, rolling_mean
+from mvp.model.primitives import (
+    cumulative_mean,
+    ratio_feature,
+    rolling_mean,
+    surface_ratio_feature,
+)
 from mvp.model.registry import feature, register_diff
 
 _GRP = "player_id"
@@ -85,3 +90,63 @@ def net_points_won_pct(days: int | None = None) -> pl.Expr:
 
 for _base in ["net_points_won", "net_points_lost", "net_points_won_pct"]:
     register_diff(_base)
+
+
+# =============================================================================
+# Surface-conditioned variants (Tier B) — the volume means (no shrinkage k).
+# net_points_won_pct is an aggregate ratio and is handled with the k-shrunk
+# surface ratios (needs a per-family k first), not here.
+# =============================================================================
+
+_SURFACE_GROUP = ["player_id", "surface"]
+
+
+@feature(
+    name="surface_net_points_won",
+    params=["days"],
+    description="Avg net points won per match on current surface (net-play volume)",
+    mirror=True,
+    impute=None,
+)
+def surface_net_points_won(days: int | None = None) -> pl.Expr:
+    expr = pl.col("player_sp_net_points_won").cast(pl.Float64)
+    if days is None:
+        return cumulative_mean(expr, group_by=_SURFACE_GROUP)
+    return rolling_mean(expr, days=days, group_by=_SURFACE_GROUP)
+
+
+@feature(
+    name="surface_net_points_lost",
+    params=["days"],
+    description="Avg net points lost per match on current surface (failed net-play volume)",
+    mirror=True,
+    impute=None,
+)
+def surface_net_points_lost(days: int | None = None) -> pl.Expr:
+    expr = (
+        pl.col("player_sp_net_points_played") - pl.col("player_sp_net_points_won")
+    ).cast(pl.Float64)
+    if days is None:
+        return cumulative_mean(expr, group_by=_SURFACE_GROUP)
+    return rolling_mean(expr, days=days, group_by=_SURFACE_GROUP)
+
+
+register_diff("surface_net_points_won")
+register_diff("surface_net_points_lost")
+
+
+# Net effectiveness proportion, per-surface-shrunk (k from scripts/_eb_shrinkage_k.py).
+@feature(
+    name="surface_net_points_won_pct",
+    params=["days"],
+    description="Net points won / played on current surface (net effectiveness)",
+    mirror=True,
+    impute=None,
+)
+def surface_net_points_won_pct(days: int | None = None) -> pl.Expr:
+    return surface_ratio_feature(
+        "player_sp_net_points_won", "player_sp_net_points_played", days, k=81.0,
+    )
+
+
+register_diff("surface_net_points_won_pct")

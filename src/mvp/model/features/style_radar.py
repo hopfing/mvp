@@ -20,8 +20,8 @@ These are NEW radar inputs; the existing `style.py` features are left untouched
 
 import polars as pl
 
-from mvp.model.primitives import ratio_feature
-from mvp.model.registry import feature
+from mvp.model.primitives import ratio_feature, surface_ratio_feature
+from mvp.model.registry import feature, register_diff
 
 # Radar window: wider than the 365d form window — style is a slow trait and
 # accumulation is what makes coverage comprehensive (spec D-WIN; exp-decay is the
@@ -278,3 +278,59 @@ for _a in _AXES:
     _register_radar(_a)
 for _a in _AXES:
     _register_conf(_a, _SOURCE_PRESENT[_a])
+
+
+# =============================================================================
+# Surface-conditioned raw axes (Tier B)
+# =============================================================================
+# The 4 rate axes are EB proportions -> per-surface-shrunk via surface_ratio_feature
+# with k from scripts/_eb_shrinkage_k.py. rally_lean is a signed net-share (not a
+# proportion), so Beta-Binomial k doesn't apply -> unshrunk like its base, just
+# surface-grouped. The z-axes are NOT surfaced: _loo_z's field-population term is
+# unpartitioned across the whole field, so surface-conditioning it is a restructure,
+# not a group_by add.
+
+_SF = [_GRP, "surface"]
+
+
+def _surface_sp_rate(num_col: str, days: int | None, k: float) -> pl.Expr:
+    num = pl.col(num_col)
+    den = pl.when(num.is_not_null()).then(pl.col("pts_total_pts_played")).otherwise(None)
+    return surface_ratio_feature(num, den, days=_w(days), k=k)
+
+
+@feature(name="surface_style_ace_rate", params=["days"], mirror=True, impute=None,
+         description="A1 serve: aces per service point on current surface")
+def surface_style_ace_rate(days: int | None = None) -> pl.Expr:
+    return surface_ratio_feature("svc_aces", "pts_service_pts_played", days=_w(days), k=78.0)
+
+
+@feature(name="surface_style_net_rate", params=["days"], mirror=True, impute=None,
+         description="A2 net: net approaches per point on current surface")
+def surface_style_net_rate(days: int | None = None) -> pl.Expr:
+    return _surface_sp_rate("player_sp_net_points_played", days, k=60.0)
+
+
+@feature(name="surface_style_sp_winner_rate", params=["days"], mirror=True, impute=None,
+         description="A3 aggression: winners per point on current surface")
+def surface_style_sp_winner_rate(days: int | None = None) -> pl.Expr:
+    return _surface_sp_rate("player_sp_winners", days, k=100.0)
+
+
+@feature(name="surface_style_sp_ue_rate", params=["days"], mirror=True, impute=None,
+         description="A4 error: unforced errors per point on current surface")
+def surface_style_sp_ue_rate(days: int | None = None) -> pl.Expr:
+    return _surface_sp_rate("player_sp_unforced_errors", days, k=31.0)
+
+
+@feature(name="surface_style_rally_lean", params=["days"], mirror=True, impute=None,
+         description="A5 rally: (long-share - short-share) rally lean on current surface")
+def surface_style_rally_lean(days: int | None = None) -> pl.Expr:
+    net_long = pl.col("rally_long_count").cast(pl.Int64) - pl.col("rally_short_count").cast(pl.Int64)
+    return ratio_feature(net_long, "rally_points_with_data", days=_w(days), group_by=_SF)
+
+
+for _base in ["surface_style_ace_rate", "surface_style_net_rate",
+              "surface_style_sp_winner_rate", "surface_style_sp_ue_rate",
+              "surface_style_rally_lean"]:
+    register_diff(_base)

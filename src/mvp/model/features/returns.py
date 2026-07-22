@@ -61,6 +61,25 @@ def ret_rating(days: int | None = None) -> pl.Expr:
     return rolling_mean("ret_return_rating", days=days, group_by="player_id")
 
 
+@feature(
+    name="surface_ret_rating",
+    params=["days"],
+    description="ATP return rating average on current surface (windowed or all-time)",
+    mirror=True,
+    impute=None,
+)
+def surface_ret_rating(days: int | None = None) -> pl.Expr:
+    """ATP composite return rating, averaged over the player's matches on the
+    current surface (A1: mean of a full-coverage feed column, no shrinkage k)."""
+    grp = ["player_id", "surface"]
+    if days is None:
+        return cumulative_mean("ret_return_rating", group_by=grp)
+    return rolling_mean("ret_return_rating", days=days, group_by=grp)
+
+
+register_diff("surface_ret_rating")
+
+
 # =============================================================================
 # Diff Features (player - opponent, same stat)
 # =============================================================================

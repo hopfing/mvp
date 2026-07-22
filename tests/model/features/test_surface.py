@@ -53,6 +53,9 @@ def _make_surface_df() -> pl.DataFrame:
         "pts_service_pts_played": [60, 63, 64, 54],
         "pts_return_pts_won": [20, 25, 23, 29],
         "pts_return_pts_played": [60, 56, 62, 59],
+        # total = service + return
+        "pts_total_pts_won": [60, 58, 70, 56],
+        "pts_total_pts_played": [120, 119, 126, 113],
     }).sort("effective_match_date")
 
 
@@ -191,9 +194,9 @@ class TestSurfaceFeatureCount:
             2       # surface_win_pct, surface_matches
             + 1     # surface_win_pct_diff
             + 2     # surface_quality_win_rate + its diff
-            + 12    # surface-stratified base (7 serve + 3 return + 2 points)
-            + 12    # diffs
-            + 12    # sums
+            + 14    # surface-stratified base (7 serve + 3 return + 3 points + dominance_ratio)
+            + 14    # diffs
+            + 13    # sums (dominance_ratio has none)
             + 8     # matchups
         )
         # Verify all are accessible
@@ -206,7 +209,49 @@ class TestSurfaceFeatureCount:
             "surface_ret_first_serve_win_pct", "surface_ret_second_serve_win_pct",
             "surface_ret_bp_convert_pct",
             "surface_pts_service_won_pct", "surface_pts_return_won_pct",
+            "surface_pts_total_won_pct", "surface_dominance_ratio",
         ]
         for name in all_names:
             registry.get(name)
-        assert expected == 49
+        assert expected == 54
+
+
+class TestSurfaceTierC:
+    """Tier C: surface_pts_total_won_pct + surface_dominance_ratio."""
+
+    def test_registered(self):
+        registry = get_registry()
+        for name in ["surface_pts_total_won_pct", "surface_dominance_ratio"]:
+            feat = registry.get(name)
+            assert feat.params == ["days"]
+            assert feat.mirror is True
+            assert feat.impute is None
+            registry.get(f"{name}_diff")
+        # total gets a sum; dominance_ratio (ratio-of-ratios) does not
+        registry.get("surface_pts_total_won_pct_sum")
+        with pytest.raises(KeyError):
+            registry.get("surface_dominance_ratio_sum")
+
+    def test_pts_total_computes_per_surface(self):
+        from mvp.model.features.surface import surface_pts_total_won_pct
+
+        df = _make_surface_df()
+        vals = df.with_columns(
+            surface_pts_total_won_pct(days=365).alias("v")
+        )["v"].to_list()
+        # Rows ordered Hard, Clay, Hard, Clay.
+        assert vals[0] is None                        # first Hard: no prior Hard
+        assert vals[1] is None                        # first Clay: no prior Clay
+        assert vals[2] is not None and 0.0 < vals[2] < 1.0  # 2nd Hard: 1 prior Hard
+        assert vals[3] is not None and 0.0 < vals[3] < 1.0  # 2nd Clay: 1 prior Clay
+
+    def test_dominance_ratio_computes(self):
+        from mvp.model.features.surface import surface_dominance_ratio
+
+        df = _make_surface_df()
+        vals = df.with_columns(
+            surface_dominance_ratio(days=365).alias("v")
+        )["v"].to_list()
+        assert vals[0] is None and vals[1] is None    # no prior surface history
+        assert vals[2] is not None and vals[2] > 0    # ret% / svc-lost% is positive
+        assert vals[3] is not None and vals[3] > 0

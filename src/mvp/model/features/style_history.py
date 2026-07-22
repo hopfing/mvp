@@ -180,7 +180,7 @@ for _label in UNIVERSAL_LABELS:
         params=["days"], mirror=True, impute=None,
         depends_on=[f"is_{_label}"],
         description=(
-            f"Win pct vs opponents flagged is_{_label} (impute 0.5 when no prior); "
+            f"Win pct vs opponents flagged is_{_label} (null when no prior); "
             "`days` = rolling window, omit for career-cumulative."
         ),
     )(_winpct)
@@ -229,10 +229,10 @@ feature(
 
 feature(
     name="winpct_vs_surface_specialists",
-    params=["days"], mirror=True, impute=0.5,
+    params=["days"], mirror=True, impute=None,
     depends_on=["is_hard_specialist", "is_clay_specialist"],
     description=(
-        "Win pct vs surface specialists in same-surface conditions; impute 0.5 "
+        "Win pct vs surface specialists in same-surface conditions; null "
         "when no prior. `days` = rolling window, omit for career. See "
         "matches_vs_surface_specialists for gating."
     ),

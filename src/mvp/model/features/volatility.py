@@ -82,3 +82,30 @@ def form_volatility(days: int | None = None) -> pl.Expr:
 
 
 register_diff("form_volatility")
+
+
+# --- Surface-conditioned variant (A1) ---
+#
+# Same standardized-residual dispersion, grouped by (player_id, surface): does a
+# player run more erratic on one surface than another? Built on ``won`` + glicko
+# μ (both full-coverage) and a rolling std (no EB shrinkage k), so the split pays
+# only the sample-thinning cost. impute=None matches the base — thin-history
+# surface rows stay null, never fabricated.
+@feature(
+    name="surface_form_volatility",
+    params=["days"],
+    description=(
+        "Rolling std of standardized result residuals vs glicko win prob on the "
+        "current surface (surface-specific erraticism)"
+    ),
+    mirror=True,
+    impute=None,
+)
+def surface_form_volatility(days: int | None = None) -> pl.Expr:
+    resid = _standardized_residual()
+    if days is None:
+        return cumulative_std(resid, group_by=["player_id", "surface"])
+    return rolling_std(resid, days=days, group_by=["player_id", "surface"])
+
+
+register_diff("surface_form_volatility")

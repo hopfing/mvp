@@ -98,6 +98,25 @@ def svc_rating(days: int | None = None) -> pl.Expr:
 
 
 @feature(
+    name="surface_svc_rating",
+    params=["days"],
+    description="ATP serve rating average on current surface (windowed or all-time)",
+    mirror=True,
+    impute=None,
+)
+def surface_svc_rating(days: int | None = None) -> pl.Expr:
+    """ATP composite serve rating, averaged over the player's matches on the
+    current surface (A1: mean of a full-coverage feed column, no shrinkage k)."""
+    grp = ["player_id", "surface"]
+    if days is None:
+        return cumulative_mean("svc_serve_rating", group_by=grp)
+    return rolling_mean("svc_serve_rating", days=days, group_by=grp)
+
+
+register_diff("surface_svc_rating")
+
+
+@feature(
     name="hold_pct",
     params=["days"],
     description="Service games held percentage (windowed or all-time)",

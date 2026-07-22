@@ -132,3 +132,62 @@ def test_registered_metadata():
     assert fdef.mirror is True
     diff = reg.get("form_volatility_diff")
     assert diff.impute is None  # inherits base's no-fabricate impute
+
+
+# --- Surface-conditioned variant (A1) ---
+
+
+def _surface_frame() -> pl.DataFrame:
+    """Player P on two surfaces, mu_diff=0 so E=0.5 and residuals are +/-1.
+
+    Hard: won [T, F, T] -> z=[+1,-1,+1]; Clay: won [T, T, T] -> z=[+1,+1,+1],
+    interleaved on the calendar to exercise the (player, surface) grouping.
+    """
+    rows = [
+        ("h1", "Hard", dt.date(2024, 1, 1), True),
+        ("c1", "Clay", dt.date(2024, 1, 3), True),
+        ("h2", "Hard", dt.date(2024, 1, 8), False),
+        ("c2", "Clay", dt.date(2024, 1, 10), True),
+        ("h3", "Hard", dt.date(2024, 1, 15), True),
+        ("c3", "Clay", dt.date(2024, 1, 17), True),
+    ]
+    return pl.DataFrame(
+        {
+            "match_uid": [r[0] for r in rows],
+            "player_id": ["P"] * len(rows),
+            "surface": [r[1] for r in rows],
+            "effective_match_date": [r[2] for r in rows],
+            "won": [r[3] for r in rows],
+            "round_order": [12] * len(rows),
+            "tournament_start_date": dt.date(2020, 1, 1),
+            "player_glicko_mu": [1500.0] * len(rows),
+            "opp_glicko_mu": [1500.0] * len(rows),
+        }
+    ).sort("effective_match_date")
+
+
+def test_surface_form_volatility_isolated_by_surface():
+    """The Hard window must use only prior Hard residuals, not the interleaved Clay.
+
+    If Clay leaked into h3's window, prior would be {+1,+1,-1,+1} -> std=1.0.
+    The exact sqrt(2)=std({+1,-1}) is the surface-isolation check.
+    """
+    from mvp.model.features.volatility import surface_form_volatility
+
+    df = _surface_frame().with_columns(
+        surface_form_volatility(days=3650).alias("v")
+    )
+    by_uid = dict(zip(df["match_uid"].to_list(), df["v"].to_list()))
+    assert by_uid["h1"] is None   # no prior Hard
+    assert by_uid["h2"] is None   # 1 prior Hard -> std needs >= 2
+    assert by_uid["h3"] == pytest.approx(math.sqrt(2.0), abs=1e-9)  # std({+1,-1}), Clay excluded
+    assert by_uid["c3"] == pytest.approx(0.0, abs=1e-12)            # std({+1,+1}) = 0
+
+
+def test_surface_form_volatility_registered():
+    reg = get_registry()
+    fdef = reg.get("surface_form_volatility")
+    assert fdef.params == ["days"]
+    assert fdef.impute is None
+    assert fdef.mirror is True
+    assert reg.get("surface_form_volatility_diff").impute is None

@@ -430,3 +430,74 @@ class TestCumulativeMean:
         assert result["avg"].to_list() == [None, 10.0, 10.0, 15.0]
 
 
+class TestSurfaceRatioFeature:
+    """surface_ratio_feature shrinks thin strata toward the per-surface pooled
+    rate, not the whole-frame global mean (the m-fix)."""
+
+    def _frame(self) -> pl.DataFrame:
+        # Clay pooled rate = (0+0+1+1)/(2+2+2+2) = 0.25
+        # Global pooled rate = 6/12 = 0.50   (Hard drags it up)
+        return pl.DataFrame(
+            {
+                "player_id": ["Fa", "Fb", "Fc", "Fd", "P", "P"],
+                "surface": ["Clay", "Clay", "Hard", "Hard", "Clay", "Clay"],
+                "effective_match_date": [
+                    date(2024, 1, 1), date(2024, 1, 1),
+                    date(2024, 1, 1), date(2024, 1, 1),
+                    date(2024, 2, 1), date(2024, 3, 1),
+                ],
+                "match_uid": ["fa", "fb", "fc", "fd", "p1", "p2"],
+                "round_order": [12, 12, 12, 12, 12, 12],
+                "tournament_start_date": date(2020, 1, 1),
+                "n": [0, 0, 2, 2, 1, 1],
+                "d": [2, 2, 2, 2, 2, 2],
+            }
+        ).sort("effective_match_date")
+
+    def test_shrinks_toward_surface_mean_not_global(self):
+        from mvp.model.primitives import ratio_feature, surface_ratio_feature
+
+        out = self._frame().with_columns(
+            surface_ratio_feature("n", "d", days=None, k=2.0).alias("surf"),
+            # the pre-fix path: same grouping, but prior m is the global mean
+            ratio_feature(
+                "n", "d", days=None, group_by=["player_id", "surface"], k=2.0
+            ).alias("global_m"),
+        )
+        p = out.filter(pl.col("player_id") == "P").sort("effective_match_date")
+        surf = p["surf"].to_list()
+        glob = p["global_m"].to_list()
+        # P's first clay match: no prior clay history -> null on both paths.
+        assert surf[0] is None and glob[0] is None
+        # P's second clay match: prior = {n=1, d=2}, k=2.
+        #   surface prior m_clay=0.25 -> (1 + 2*0.25)/(2+2) = 0.375
+        #   global  prior m=0.50      -> (1 + 2*0.50)/(2+2) = 0.500
+        assert abs(surf[1] - 0.375) < 1e-9
+        assert abs(glob[1] - 0.5) < 1e-9
+        assert surf[1] < glob[1]  # pulled toward the lower clay mean, not the global
+
+    def test_empty_stratum_falls_back_to_pooled(self):
+        """A surface with no denominator in-frame must not null the other surface."""
+        from mvp.model.primitives import surface_ratio_feature
+
+        # Only Clay has data; Grass never appears. A Clay row must still compute.
+        df = pl.DataFrame(
+            {
+                "player_id": ["P", "P"],
+                "surface": ["Clay", "Clay"],
+                "effective_match_date": [date(2024, 1, 1), date(2024, 2, 1)],
+                "match_uid": ["p1", "p2"],
+                "round_order": [12, 12],
+                "tournament_start_date": date(2020, 1, 1),
+                "n": [1, 1],
+                "d": [2, 2],
+            }
+        ).sort("effective_match_date")
+        out = df.with_columns(
+            surface_ratio_feature("n", "d", days=None, k=2.0).alias("v")
+        )
+        v = out.sort("effective_match_date")["v"].to_list()
+        assert v[0] is None                 # no prior -> null (not fabricated)
+        assert v[1] is not None             # prior exists -> real value, not nulled
+
+

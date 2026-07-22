@@ -7,6 +7,7 @@ from mvp.model.primitives import (
     cumulative_count,
     ratio_feature,
     rolling_count,
+    surface_ratio_feature,
 )
 from mvp.model.registry import feature, register_diff, register_matchup, register_sum
 
@@ -28,7 +29,7 @@ def surface_win_pct(days: int | None = None) -> pl.Expr:
     """
     won = pl.col("won").cast(pl.Int64)
     valid = pl.col("won").is_not_null().cast(pl.Int64)
-    return ratio_feature(won, valid, days, group_by=_SURFACE_GROUP, k=13.0)
+    return surface_ratio_feature(won, valid, days, k=13.0)
 
 
 @feature(
@@ -76,9 +77,9 @@ register_diff("surface_quality_win_rate")
     impute=None,
 )
 def surface_first_serve_win_pct(days: int | None = None) -> pl.Expr:
-    return ratio_feature(
+    return surface_ratio_feature(
         "svc_first_serve_pts_won", "svc_first_serve_pts_played",
-        days, group_by=_SURFACE_GROUP, k=56.0,
+        days, k=56.0,
     )
 
 
@@ -90,9 +91,9 @@ def surface_first_serve_win_pct(days: int | None = None) -> pl.Expr:
     impute=None,
 )
 def surface_second_serve_win_pct(days: int | None = None) -> pl.Expr:
-    return ratio_feature(
+    return surface_ratio_feature(
         "svc_second_serve_pts_won", "svc_second_serve_pts_played",
-        days, group_by=_SURFACE_GROUP, k=114.0,
+        days, k=114.0,
     )
 
 
@@ -104,9 +105,9 @@ def surface_second_serve_win_pct(days: int | None = None) -> pl.Expr:
     impute=None,
 )
 def surface_ace_pct(days: int | None = None) -> pl.Expr:
-    return ratio_feature(
+    return surface_ratio_feature(
         "svc_aces", "svc_first_serve_att",
-        days, group_by=_SURFACE_GROUP, k=77.0,
+        days, k=77.0,
     )
 
 
@@ -118,9 +119,9 @@ def surface_ace_pct(days: int | None = None) -> pl.Expr:
     impute=None,
 )
 def surface_df_pct(days: int | None = None) -> pl.Expr:
-    return ratio_feature(
+    return surface_ratio_feature(
         "svc_double_faults", "svc_first_serve_att",
-        days, group_by=_SURFACE_GROUP, k=80.0,
+        days, k=80.0,
     )
 
 
@@ -132,9 +133,9 @@ def surface_df_pct(days: int | None = None) -> pl.Expr:
     impute=None,
 )
 def surface_bp_save_pct(days: int | None = None) -> pl.Expr:
-    return ratio_feature(
+    return surface_ratio_feature(
         "svc_bp_saved", "svc_bp_faced",
-        days, group_by=_SURFACE_GROUP, k=64.0,
+        days, k=64.0,
     )
 
 
@@ -146,9 +147,9 @@ def surface_bp_save_pct(days: int | None = None) -> pl.Expr:
     impute=None,
 )
 def surface_first_serve_in_pct(days: int | None = None) -> pl.Expr:
-    return ratio_feature(
+    return surface_ratio_feature(
         "svc_first_serve_in", "svc_first_serve_att",
-        days, group_by=_SURFACE_GROUP, k=95.0,
+        days, k=95.0,
     )
 
 
@@ -161,7 +162,7 @@ def surface_first_serve_in_pct(days: int | None = None) -> pl.Expr:
 )
 def surface_hold_pct(days: int | None = None) -> pl.Expr:
     holds = pl.col("svc_games_played") - (pl.col("svc_bp_faced") - pl.col("svc_bp_saved"))
-    return ratio_feature(holds, "svc_games_played", days, group_by=_SURFACE_GROUP, k=12.0)
+    return surface_ratio_feature(holds, "svc_games_played", days, k=12.0)
 
 
 # =============================================================================
@@ -177,9 +178,9 @@ def surface_hold_pct(days: int | None = None) -> pl.Expr:
     impute=None,
 )
 def surface_ret_first_serve_win_pct(days: int | None = None) -> pl.Expr:
-    return ratio_feature(
+    return surface_ratio_feature(
         "ret_first_serve_pts_won", "ret_first_serve_pts_played",
-        days, group_by=_SURFACE_GROUP, k=126.0,
+        days, k=126.0,
     )
 
 
@@ -191,9 +192,9 @@ def surface_ret_first_serve_win_pct(days: int | None = None) -> pl.Expr:
     impute=None,
 )
 def surface_ret_second_serve_win_pct(days: int | None = None) -> pl.Expr:
-    return ratio_feature(
+    return surface_ratio_feature(
         "ret_second_serve_pts_won", "ret_second_serve_pts_played",
-        days, group_by=_SURFACE_GROUP, k=137.0,
+        days, k=137.0,
     )
 
 
@@ -205,9 +206,9 @@ def surface_ret_second_serve_win_pct(days: int | None = None) -> pl.Expr:
     impute=None,
 )
 def surface_ret_bp_convert_pct(days: int | None = None) -> pl.Expr:
-    return ratio_feature(
+    return surface_ratio_feature(
         "ret_bp_converted", "ret_bp_opportunities",
-        days, group_by=_SURFACE_GROUP, k=180.0,
+        days, k=180.0,
     )
 
 
@@ -224,9 +225,9 @@ def surface_ret_bp_convert_pct(days: int | None = None) -> pl.Expr:
     impute=None,
 )
 def surface_pts_service_won_pct(days: int | None = None) -> pl.Expr:
-    return ratio_feature(
+    return surface_ratio_feature(
         "pts_service_pts_won", "pts_service_pts_played",
-        days, group_by=_SURFACE_GROUP, k=82.0,
+        days, k=82.0,
     )
 
 
@@ -238,10 +239,40 @@ def surface_pts_service_won_pct(days: int | None = None) -> pl.Expr:
     impute=None,
 )
 def surface_pts_return_won_pct(days: int | None = None) -> pl.Expr:
-    return ratio_feature(
+    return surface_ratio_feature(
         "pts_return_pts_won", "pts_return_pts_played",
-        days, group_by=_SURFACE_GROUP, k=144.0,
+        days, k=144.0,
     )
+
+
+@feature(
+    name="surface_pts_total_won_pct",
+    params=["days"],
+    description="Total points won % on current surface",
+    mirror=True,
+    impute=None,
+)
+def surface_pts_total_won_pct(days: int | None = None) -> pl.Expr:
+    return surface_ratio_feature(
+        "pts_total_pts_won", "pts_total_pts_played",
+        days, k=194.0,
+    )
+
+
+@feature(
+    name="surface_dominance_ratio",
+    params=["days"],
+    description="Return pts won % / service pts lost % on current surface (>1 = dominant)",
+    mirror=True,
+    impute=None,
+)
+def surface_dominance_ratio(days: int | None = None) -> pl.Expr:
+    """Surface-conditioned dominance ratio — the base `dominance_ratio` composed
+    from the surface-split, per-surface-shrunk serve/return rates."""
+    ret = surface_ratio_feature("pts_return_pts_won", "pts_return_pts_played", days, k=144.0)
+    svc = surface_ratio_feature("pts_service_pts_won", "pts_service_pts_played", days, k=82.0)
+    svc_lost = 1.0 - svc
+    return pl.when(svc_lost > 0).then(ret / svc_lost).otherwise(None)
 
 
 # =============================================================================
@@ -255,9 +286,13 @@ for _base in [
     "surface_ret_first_serve_win_pct", "surface_ret_second_serve_win_pct",
     "surface_ret_bp_convert_pct",
     "surface_pts_service_won_pct", "surface_pts_return_won_pct",
+    "surface_pts_total_won_pct",
 ]:
     register_diff(_base)
     register_sum(_base)
+
+# dominance_ratio is a ratio-of-ratios — diff only, no sum (mirrors the base module).
+register_diff("surface_dominance_ratio")
 
 
 # =============================================================================

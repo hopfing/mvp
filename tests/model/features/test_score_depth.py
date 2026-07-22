@@ -374,3 +374,105 @@ class TestScoreDepthFeatureCount:
         for name in sd_names:
             registry.get(name)  # Will raise KeyError if missing
         assert len(sd_names) == 29
+
+
+class TestSurfaceScoreShape:
+    """Tests for A1 surface-conditioned score-shape means."""
+
+    _MEANS = [
+        "surface_sets_per_match", "surface_games_won_per_set",
+        "surface_games_lost_per_set", "surface_games_margin_per_set",
+        "surface_games_margin_per_set_won", "surface_games_margin_per_set_lost",
+        "surface_games_per_set", "surface_total_games_won",
+        "surface_total_games_lost", "surface_total_games",
+    ]
+
+    def test_family_and_diffs_registered(self):
+        registry = get_registry()
+        for name in self._MEANS:
+            feat = registry.get(name)
+            assert feat.params == ["days"]
+            assert feat.mirror is True
+            assert feat.impute is None
+            registry.get(f"{name}_diff")
+        # sums mirror the base module's choice
+        for name in ["surface_sets_per_match", "surface_games_per_set", "surface_total_games"]:
+            registry.get(f"{name}_sum")
+
+    def test_recent_games_load_not_surfaced(self):
+        """recent_games_load is a cross-surface fatigue proxy — intentionally excluded."""
+        with pytest.raises(KeyError):
+            get_registry().get("surface_recent_games_load")
+
+    def test_mean_within_surface_only(self):
+        """Clay match count must not leak into the hard-court per-set mean."""
+        # Loop-registered like the diff features, so access via the registry.
+        surface_sets_per_match = get_registry().get("surface_sets_per_match").func
+
+        df = pl.DataFrame(
+            {
+                "player_id": ["A", "A", "A", "A"],
+                "surface": ["Hard", "Hard", "Clay", "Hard"],
+                "effective_match_date": [
+                    date(2024, 1, 1),
+                    date(2024, 1, 5),
+                    date(2024, 1, 8),
+                    date(2024, 1, 12),
+                ],
+                "sets_played": [2, 3, 4, 3],
+            }
+        ).sort("effective_match_date")
+
+        result = df.with_columns(surface_sets_per_match(days=365).alias("val"))
+        vals = result["val"].to_list()
+        assert vals[0] is None                 # no prior Hard
+        assert vals[1] == pytest.approx(2.0)   # prior Hard {2}
+        assert vals[2] is None                 # no prior Clay
+        assert vals[3] == pytest.approx(2.5)   # prior Hard {2,3}; clay 4 excluded
+
+    def test_blowout_registered(self):
+        registry = get_registry()
+        feat = registry.get("surface_blowout_set_pct")
+        assert feat.params == ["days"]
+        assert feat.mirror is True
+        assert feat.impute is None
+        registry.get("surface_blowout_set_pct_diff")
+        registry.get("surface_blowout_set_pct_sum")
+
+    def test_straight_sets_and_tight_not_surfaced(self):
+        """Dropped on EB-k evidence: near-zero between-player signal (k~1350 /
+        degenerate), so a surface split would be ~constant."""
+        registry = get_registry()
+        for name in ["surface_straight_sets_win_pct", "surface_tight_set_pct"]:
+            with pytest.raises(KeyError):
+                registry.get(name)
+
+    def test_blowout_computes_per_surface(self):
+        # Loop-registered? No — surface_blowout_set_pct is a plain def, importable.
+        from mvp.model.features.score_depth import surface_blowout_set_pct
+
+        df = pl.DataFrame({
+            "player_id": ["P", "P", "P"],
+            "surface": ["Hard", "Clay", "Hard"],
+            "effective_match_date": [date(2024, 1, 1), date(2024, 2, 1), date(2024, 3, 1)],
+            "sets_played": [2, 2, 2],
+            "player_set1_games": [6, 6, 6],
+            "opp_set1_games": [0, 4, 3],
+            "player_set2_games": [6, 6, 6],
+            "opp_set2_games": [1, 4, 3],
+            "player_set3_games": [None, None, None],
+            "opp_set3_games": [None, None, None],
+            "player_set4_games": [None, None, None],
+            "opp_set4_games": [None, None, None],
+            "player_set5_games": [None, None, None],
+            "opp_set5_games": [None, None, None],
+        }).sort("effective_match_date")
+        vals = df.with_columns(
+            surface_blowout_set_pct(days=365).alias("v")
+        )["v"].to_list()
+        # Hard blowouts: match1 = 2 (6-0, 6-1); match3 = 0 (6-3, 6-3). Clay = 0.
+        assert vals[0] is None   # first Hard: no prior
+        assert vals[1] is None   # first Clay: no prior
+        # 2nd Hard: prior Hard {blowout=2, sets=2}; k=8; m_hard = 2/4 = 0.5
+        #   -> (2 + 8*0.5)/(2 + 8) = 0.6   (Clay history excluded)
+        assert abs(vals[2] - 0.6) < 1e-9

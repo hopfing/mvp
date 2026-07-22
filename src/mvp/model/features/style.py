@@ -11,7 +11,12 @@ Layer 3: Explicit matchup interaction terms (7)
 
 import polars as pl
 
-from mvp.model.primitives import ratio_feature, rolling_max, rolling_mean
+from mvp.model.primitives import (
+    ratio_feature,
+    rolling_max,
+    rolling_mean,
+    surface_ratio_feature,
+)
 from mvp.model.registry import feature, register_diff, register_matchup
 
 _DEFAULT_DAYS = 365
@@ -819,3 +824,149 @@ def matchup_net_rusher_vs_passer() -> pl.Expr:
         (pl.col("player_is_net_rusher") == 1)
         & (pl.col("opp_style_passing_frequency") > pass_p75)
     ).cast(pl.Int8)
+
+
+# =============================================================================
+# Surface-conditioned variants (Tier B)
+# =============================================================================
+#
+# Same per-match rate metrics as the raw style features above, but the rolling
+# mean is partitioned by (player_id, surface). These are means of per-match rates
+# (not EB-shrunk aggregate ratios), so they carry no shrinkage k — matching their
+# base features. impute=None: a surface with no match-beats history in the window
+# stays null (match-beats data is sparse/dense-only-recent, so many rows — grass
+# especially — will be null rather than fabricated).
+#
+# Serve-speed features are intentionally NOT surfaced (physical attribute, ~surface
+# invariant). The aggregate-ratio style features (easy/difficult/crucial holds) are
+# handled separately: they need a shrinkage k first (scripts/_eb_shrinkage_k.py).
+
+
+def _rolling_surface(expr: pl.Expr, days: int | None = None) -> pl.Expr:
+    """Rolling mean of a per-match expression, partitioned by player AND surface."""
+    d = days or _DEFAULT_DAYS
+    return (
+        expr.rolling_mean_by(by=_DATE, window_size=f"{d}d", closed="left")
+        .over([_GRP, "surface"])
+    )
+
+
+def _gt0(num: pl.Expr, den: pl.Expr) -> pl.Expr:
+    """num/den, null when den <= 0 (matches the base features' zero guard)."""
+    return pl.when(den > 0).then(num / den).otherwise(None)
+
+
+# (name, description, per-match expr thunk) — thunks mirror the base features.
+_SURFACE_STYLE_MEAN_SPECS = [
+    ("surface_style_winner_rate", "Rolling winners per point on current surface",
+     lambda: pl.col("mb_player_winners") / pl.col("total_points")),
+    ("surface_style_ue_rate", "Rolling UEs per point on current surface",
+     lambda: pl.col("mb_player_ues") / pl.col("total_points")),
+    ("surface_style_winner_ue_ratio", "Rolling winner/UE ratio on current surface",
+     lambda: pl.when(pl.col("mb_player_ues") > 0)
+     .then(pl.col("mb_player_winners") / pl.col("mb_player_ues")).otherwise(None)),
+    ("surface_style_forced_error_rate", "Rolling opponent FEs per point on current surface",
+     lambda: pl.col("mb_opp_fes") / pl.col("total_points")),
+    ("surface_style_fh_winner_share", "Rolling FH winner share on current surface",
+     lambda: _gt0(pl.col("player_fh_winners"),
+                  pl.col("player_fh_winners") + pl.col("player_bh_winners"))),
+    ("surface_style_fh_ue_share", "Rolling FH UE share on current surface",
+     lambda: _gt0(pl.col("player_fh_unforced_errors"),
+                  pl.col("player_fh_unforced_errors") + pl.col("player_bh_unforced_errors"))),
+    ("surface_style_fh_winner_rate", "Rolling FH productivity on current surface",
+     lambda: _gt0(pl.col("player_fh_winners"),
+                  pl.col("player_fh_winners") + pl.col("player_fh_forced_errors")
+                  + pl.col("player_fh_unforced_errors"))),
+    ("surface_style_bh_winner_rate", "Rolling BH productivity on current surface",
+     lambda: _gt0(pl.col("player_bh_winners"),
+                  pl.col("player_bh_winners") + pl.col("player_bh_forced_errors")
+                  + pl.col("player_bh_unforced_errors"))),
+    ("surface_style_ground_stroke_winner_rate", "Rolling ground-stroke winner rate on current surface",
+     lambda: _gt0(pl.col("player_ground_stroke_winners"), _shot_type_total("ground_stroke"))),
+    ("surface_style_ground_stroke_ue_rate", "Rolling ground-stroke UE rate on current surface",
+     lambda: _gt0(pl.col("player_ground_stroke_unforced_errors"), _shot_type_total("ground_stroke"))),
+    ("surface_style_net_approach_frequency", "Rolling net-approach shots per point on current surface",
+     lambda: _gt0(_shot_type_total("volley") + _shot_type_total("approach")
+                  + _shot_type_total("overhead"), pl.col("pts_total_pts_played"))),
+    ("surface_style_drop_shot_frequency", "Rolling drop shots per point on current surface",
+     lambda: _gt0(_shot_type_total("drop_shot"), pl.col("pts_total_pts_played"))),
+    ("surface_style_drop_shot_effectiveness", "Rolling drop-shot winners / drop shots on current surface",
+     lambda: _gt0(pl.col("player_drop_shot_winners"), _shot_type_total("drop_shot"))),
+    ("surface_style_passing_frequency", "Rolling passing shots per point on current surface",
+     lambda: _gt0(_shot_type_total("passing"), pl.col("pts_total_pts_played"))),
+    ("surface_style_lob_frequency", "Rolling lob shots per point on current surface",
+     lambda: _gt0(_shot_type_total("lob"), pl.col("pts_total_pts_played"))),
+    ("surface_style_short_rally_pct", "Rolling short-rally share on current surface",
+     lambda: _gt0(pl.col("rally_short_count"), pl.col("rally_points_with_data"))),
+    ("surface_style_long_rally_pct", "Rolling long-rally share on current surface",
+     lambda: _gt0(pl.col("rally_long_count"), pl.col("rally_points_with_data"))),
+    ("surface_style_short_rally_win_pct", "Rolling short-rally win pct on current surface",
+     lambda: _gt0(pl.col("player_short_won"),
+                  pl.col("player_short_won") + pl.col("player_short_err"))),
+    ("surface_style_long_rally_win_pct", "Rolling long-rally win pct on current surface",
+     lambda: _gt0(pl.col("player_long_won"),
+                  pl.col("player_long_won") + pl.col("player_long_err"))),
+]
+
+for _name, _desc, _pm in _SURFACE_STYLE_MEAN_SPECS:
+    @feature(name=_name, params=["days"], description=_desc, mirror=True, impute=None)
+    def _surface_style_mean(days: int | None = None, _pm=_pm) -> pl.Expr:
+        return _rolling_surface(_pm(), days)
+
+    register_diff(_name)
+
+
+# Rally-length aggregate ratios (avg shots per won/lost rally). Not proportions,
+# so Beta-Binomial EB k doesn't apply — kept unshrunk like their base, just
+# surface-grouped.
+@feature(
+    name="surface_style_rally_won_avg_length",
+    params=["days"],
+    description="Rolling avg rally length when winning, on current surface",
+    mirror=True,
+    impute=None,
+)
+def surface_style_rally_won_avg_length(days: int | None = None) -> pl.Expr:
+    return ratio_feature(
+        "mb_player_rally_won_shots", "mb_player_rally_won_count",
+        days=days or _DEFAULT_DAYS, group_by=[_GRP, "surface"],
+    )
+
+
+@feature(
+    name="surface_style_rally_lost_avg_length",
+    params=["days"],
+    description="Rolling avg rally length when losing, on current surface",
+    mirror=True,
+    impute=None,
+)
+def surface_style_rally_lost_avg_length(days: int | None = None) -> pl.Expr:
+    return ratio_feature(
+        "mb_player_rally_lost_shots", "mb_player_rally_lost_count",
+        days=days or _DEFAULT_DAYS, group_by=[_GRP, "surface"],
+    )
+
+
+register_diff("surface_style_rally_won_avg_length")
+register_diff("surface_style_rally_lost_avg_length")
+
+
+# EB-shrunk hold proportion (k from scripts/_eb_shrinkage_k.py). difficult_hold
+# and crucial_pts are NOT surfaced: the derivation gave difficult_hold a degenerate
+# k (no between-player signal) and crucial_pts had no usable data (the
+# mb_player_crucial_points_* columns are effectively all-null in the aggregate).
+@feature(
+    name="surface_easy_hold_pct",
+    params=["days"],
+    description="Rolling easy holds / service games on current surface (serve dominance)",
+    mirror=True,
+    impute=None,
+)
+def surface_easy_hold_pct(days: int | None = None) -> pl.Expr:
+    return surface_ratio_feature(
+        "mb_player_easy_holds", "mb_player_service_games",
+        days=days or _DEFAULT_DAYS, k=36.0,
+    )
+
+
+register_diff("surface_easy_hold_pct")

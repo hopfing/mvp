@@ -362,6 +362,38 @@ def ratio_feature(
     return pl.when(denom_filled > 0).then(shrunk).otherwise(None)
 
 
+def surface_ratio_feature(
+    numerator_col: str | pl.Expr,
+    denominator_col: str | pl.Expr,
+    days: int | None = None,
+    k: float | None = None,
+    by: str = "surface",
+) -> pl.Expr:
+    """EB ratio grouped by ``(player_id, by)`` that shrinks toward the per-``by``
+    pooled rate rather than the whole-frame global mean.
+
+    ``ratio_feature``'s default prior ``m`` is a single whole-frame constant, so
+    a surface-split ratio pulls thin strata toward an all-surface average that is
+    dominated by the majority surfaces (clay/hard). This passes ``prior`` as the
+    per-``by`` pooled rate instead — same whole-frame, date-blind posture as the
+    default ``m`` (just stratified), so it introduces no new leakage, and thin
+    rows shrink toward their own surface's mean.
+
+    Falls back to the global pooled mean for any ``by`` stratum whose denominator
+    sums to 0 over the compute frame; otherwise that stratum's prior would be null
+    and ``k*m`` would null every row in it — including rows with real data.
+    """
+    num_e, den_e = _to_expr(numerator_col), _to_expr(denominator_col)
+    den_sum = den_e.sum().over(by)
+    stratum_prior = num_e.sum().over(by) / den_sum
+    pooled_prior = num_e.sum() / den_e.sum()
+    prior = pl.when(den_sum > 0).then(stratum_prior).otherwise(pooled_prior)
+    return ratio_feature(
+        numerator_col, denominator_col, days=days,
+        group_by=["player_id", by], k=k, prior=prior,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Empirical-Bayes shrinkage strengths (k = alpha+beta, Beta-Binomial MoM).
 #

@@ -24,6 +24,7 @@ from mvp.model.primitives import (
     ratio_feature,
     rolling_mean,
     rolling_sum,
+    surface_ratio_feature,
 )
 from mvp.model.registry import feature, register_diff, register_sum
 
@@ -286,3 +287,80 @@ for _base in [
 for _base in ["games_per_set", "sets_per_match", "total_games",
               "tight_set_pct", "blowout_set_pct"]:
     register_sum(_base)
+
+
+# --- Surface-conditioned variants (A1: score shape) ---
+#
+# Same per-set / per-match means as the base features, grouped by
+# (player_id, surface). All are mean-based (no ``ratio_feature``), so there is
+# no EB shrinkage ``k`` — and therefore none of the pooled-shrinkage-target
+# concern that affects the surface_* ratio stats. Scoreline data is near-fully
+# covered, so the only cost of the split is sample-thinning.
+#
+# The three k-less ratios in this module (straight_sets_win_pct, tight_set_pct,
+# blowout_set_pct) are intentionally NOT surfaced here — they need shrinkage
+# added first (deferred to A2). ``recent_games_load`` is also omitted: cumulative
+# games-played is a cross-surface fatigue proxy, not a surface-specific shape.
+
+_SURFACE_GROUP = ["player_id", "surface"]
+
+# (name, description, per-match expr thunk)
+_SURFACE_MEAN_SPECS = [
+    ("surface_sets_per_match", "Avg sets per match on current surface in window",
+     lambda: pl.col("sets_played").cast(pl.Float64)),
+    ("surface_games_won_per_set", "Avg games won per set on current surface in window",
+     _games_won_per_set),
+    ("surface_games_lost_per_set", "Avg games lost per set on current surface in window",
+     _games_lost_per_set),
+    ("surface_games_margin_per_set", "Avg (games won - lost) per set on current surface in window",
+     _games_margin_per_set),
+    ("surface_games_margin_per_set_won", "Avg per-set games margin over WON matches on current surface",
+     _games_margin_per_set_won),
+    ("surface_games_margin_per_set_lost", "Avg per-set games margin over LOST matches on current surface",
+     _games_margin_per_set_lost),
+    ("surface_games_per_set", "Avg total games per set on current surface in window (tightness)",
+     _games_per_set),
+    ("surface_total_games_won", "Avg total games won per match on current surface in window",
+     lambda: _total_games_won().cast(pl.Float64)),
+    ("surface_total_games_lost", "Avg total games conceded per match on current surface in window",
+     lambda: _total_games_lost().cast(pl.Float64)),
+    ("surface_total_games", "Avg total games per match on current surface in window (length tendency)",
+     lambda: (_total_games_won() + _total_games_lost()).cast(pl.Float64)),
+]
+
+for _name, _desc, _expr_fn in _SURFACE_MEAN_SPECS:
+    @feature(name=_name, params=["days"], description=_desc, mirror=True, impute=None)
+    def _surface_mean(days: int | None = None, _expr_fn=_expr_fn) -> pl.Expr:
+        if days is None:
+            return cumulative_mean(_expr_fn(), group_by=_SURFACE_GROUP)
+        return rolling_mean(_expr_fn(), days=days, group_by=_SURFACE_GROUP)
+
+    register_diff(_name)
+
+# Sum contrasts for the length/tightness shape, mirroring the base module's choice.
+for _base in ["surface_sets_per_match", "surface_games_per_set", "surface_total_games"]:
+    register_sum(_base)
+
+
+# --- Surface-conditioned blowout tendency (A2) ---
+#
+# Unlike the A1 means above, this is an EB-shrunk RATE, so it needs a shrinkage k.
+# scripts/_eb_shrinkage_k.py gives k~8 sets — real between-player variance — so it
+# earns a surface split. The other two k-less score ratios were dropped on the same
+# derivation: straight_sets_win_pct came back k~1350 and tight_set_pct a degenerate
+# k (near-zero between-player signal), so surface-splitting them would be ~constant.
+@feature(
+    name="surface_blowout_set_pct",
+    params=["days"],
+    description="Fraction of sets at 6-0/6-1 on current surface (blowout tendency)",
+    mirror=True,
+    impute=None,
+)
+def surface_blowout_set_pct(days: int | None = None) -> pl.Expr:
+    return surface_ratio_feature(
+        _blowout_sets(), pl.col("sets_played").cast(pl.Int64), days, k=8.0,
+    )
+
+
+register_diff("surface_blowout_set_pct")
+register_sum("surface_blowout_set_pct")

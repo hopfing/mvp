@@ -265,3 +265,44 @@ class TestSvcDiffFeatures:
 
         assert abs(result["diff"][0] - 0.10) < 0.001
         assert abs(result["diff"][1] - (-0.05)) < 0.001
+
+
+class TestSurfaceSvcRatingFeature:
+    """Tests for surface_svc_rating (A1: serve rating averaged per surface)."""
+
+    def test_registered(self):
+        registry = get_registry()
+        feat = registry.get("surface_svc_rating")
+        assert feat.name == "surface_svc_rating"
+        assert feat.params == ["days"]
+        assert feat.mirror is True
+        assert feat.impute is None
+        registry.get("surface_svc_rating_diff")  # diff registered
+
+    def test_averages_within_surface_only(self):
+        """The clay history must not leak into the hard-court average."""
+        from mvp.model.features.serve import surface_svc_rating
+
+        df = pl.DataFrame(
+            {
+                "player_id": ["A", "A", "A", "A"],
+                "surface": ["Hard", "Hard", "Clay", "Hard"],
+                "effective_match_date": [
+                    date(2024, 1, 1),
+                    date(2024, 1, 5),
+                    date(2024, 1, 8),
+                    date(2024, 1, 12),
+                ],
+                "svc_serve_rating": [200.0, 250.0, 999.0, 300.0],
+            }
+        ).lazy()
+
+        vals = (
+            df.with_columns(surface_svc_rating(days=365).alias("val"))
+            .collect()["val"]
+            .to_list()
+        )
+        assert vals[0] is None          # no prior Hard
+        assert vals[1] == pytest.approx(200.0)   # prior Hard {200}
+        assert vals[2] is None          # no prior Clay (Hard history excluded)
+        assert vals[3] == pytest.approx(225.0)   # prior Hard {200,250}; clay 999 excluded
