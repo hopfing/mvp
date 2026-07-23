@@ -166,15 +166,20 @@ def generate_formulas(row: int) -> dict[str, str]:
         f'=IF({prediction_col}{r}="P1", {p1_odds}{r}, '
         f'IF({prediction_col}{r}="P2", {p2_odds}{r}, ""))'
     )
-    # fav_edge: edge on the model's picked player at its price
+    # fav_edge: edge on the model's picked player at its price. Blanks when
+    # pred_prob is missing (e.g. an un-backfillable historical row) so Sheets
+    # can't treat the blank as 0 and emit a spurious 0 - 1/odds edge.
     fav_edge_formula = (
-        f'=IF({pred_odds_col}{r}="", "", {pred_prob}{r}-(1/{pred_odds_col}{r}))'
+        f'=IF(OR({pred_prob}{r}="",{pred_odds_col}{r}=""), "", '
+        f'{pred_prob}{r}-(1/{pred_odds_col}{r}))'
     )
-    # dog_edge: edge on the other side = (1 - pred_prob) at the opponent's price
+    # dog_edge: edge on the other side = (1 - pred_prob) at the opponent's price.
+    # Same pred_prob guard so a blank prob doesn't produce (1-0) - 1/odds garbage.
     dog_edge_formula = (
-        f'=IF({prediction_col}{r}="P1", '
+        f'=IF({pred_prob}{r}="", "", '
+        f'IF({prediction_col}{r}="P1", '
         f'IF({p2_odds}{r}="", "", (1-{pred_prob}{r})-(1/{p2_odds}{r})), '
-        f'IF({p1_odds}{r}="", "", (1-{pred_prob}{r})-(1/{p1_odds}{r})))'
+        f'IF({p1_odds}{r}="", "", (1-{pred_prob}{r})-(1/{p1_odds}{r}))))'
     )
 
     # kelly_stake: fractional-Kelly dollars off this row's bankroll. Full Kelly
