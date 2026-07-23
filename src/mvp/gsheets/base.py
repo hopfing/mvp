@@ -204,7 +204,15 @@ def generate_formulas(row: int) -> dict[str, str]:
         "fav_edge": fav_edge_formula,
         "kelly_stake": kelly_stake_formula,
         "dog_edge": dog_edge_formula,
-        "bet_odds": f'=IF({bet_side}{r}="P1", {p1_odds}{r}, IF({bet_side}{r}="P2", {p2_odds}{r}, ""))',
+        # bet_odds: the line you actually got. When you bet the model's pick it
+        # is pred_odds (your editable actual line), so corrections there flow to
+        # to_win / net / CLV. Falls back to the raw side odds only for a bet
+        # against the pick.
+        "bet_odds": (
+            f'=IF({bet_side}{r}="", "", '
+            f'IF({bet_side}{r}={prediction_col}{r}, {pred_odds_col}{r}, '
+            f'IF({bet_side}{r}="P1", {p1_odds}{r}, {p2_odds}{r})))'
+        ),
         "to_win": f'=IF({stake_col}{r}="", "", ROUND({stake_col}{r}*{bet_odds_col}{r}, 2))',
         "pred_result": f'=IF({result_col}{r}="", "", IF({prediction_col}{r}={result_col}{r}, "W", "L"))',
         "net": f'=IF({bet_result_col}{r}="W", {to_win_col}{r}-{stake_col}{r}, IF({bet_result_col}{r}="L", -{stake_col}{r}, IF({bet_result_col}{r}="V", 0, "")))',
