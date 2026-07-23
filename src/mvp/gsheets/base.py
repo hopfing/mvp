@@ -31,23 +31,20 @@ COLUMN_SCHEMA = [
     {"name": "p1_elo", "owner": "pipeline"},
     {"name": "p2_elo", "owner": "pipeline"},
     {"name": "elo_diff", "owner": "formula"},
-    {"name": "p1_prob", "owner": "pipeline"},
-    {"name": "p2_prob", "owner": "pipeline"},
-    # Context diffs (picked - opponent), pipeline-written from the lead model's features
+    # Context diff (picked - opponent), pipeline-written from the lead model's features
     {"name": "age_diff", "owner": "pipeline"},
-    {"name": "mp_diff", "owner": "pipeline"},
     {"name": "prediction", "owner": "pipeline"},
+    {"name": "pred_prob", "owner": "pipeline"},
     {"name": "consensus", "owner": "pipeline"},
-    # Odds (user-filled or auto-filled from books)
-    {"name": "p1_odds", "owner": "user"},
-    {"name": "p2_odds", "owner": "user"},
+    # Picked player's price for display; raw p1/p2 odds live in the meta block at the end
+    {"name": "pred_odds", "owner": "formula"},
     # Edge analysis
     {"name": "fav_edge_open", "owner": "pipeline"},
     {"name": "fav_edge", "owner": "formula"},
-    {"name": "dog_edge", "owner": "formula"},
-    # Calibration tier (decision support adjacent to edges)
-    {"name": "cell_cal", "header": "cal", "owner": "pipeline"},
-    {"name": "cal_tier", "header": "tier", "owner": "pipeline"},
+    # Recommended stake — fractional Kelly off the row's control inputs
+    # (bankroll/kelly_fraction/max_pct). Live while the bet is open; frozen to a
+    # literal snapshot at bet time (when a stake is entered).
+    {"name": "kelly_stake", "owner": "formula"},
     # Bet action
     {"name": "bet_side", "owner": "user"},
     {"name": "bet_odds", "owner": "formula"},
@@ -61,9 +58,20 @@ COLUMN_SCHEMA = [
     {"name": "bet_result", "owner": "user"},
     {"name": "net", "owner": "formula"},
     {"name": "notes", "owner": "user"},
-    # Pinnacle odds (manual data capture)
-    {"name": "p1_pin", "owner": "user"},
-    {"name": "p2_pin", "owner": "user"},
+    # Kelly control inputs — user-maintained. Put whatever formula you like here
+    # (e.g. inherit-from-the-row-above); the sync preserves the formula on
+    # round-trip instead of flattening it to a computed value.
+    {"name": "bankroll", "owner": "user"},
+    {"name": "kelly_fraction", "owner": "user"},
+    {"name": "max_pct", "owner": "user"},
+    # Meta columns — moved out of the way but kept for downstream analysis.
+    # Raw per-side odds (auto-filled) feed pred_odds / fav_edge / dog_edge / bet_odds
+    # and the CLV/de-vig analysis in dataset.py.
+    {"name": "p1_odds", "owner": "user"},
+    {"name": "p2_odds", "owner": "user"},
+    {"name": "dog_edge", "owner": "formula"},
+    {"name": "cell_cal", "header": "cal", "owner": "pipeline"},
+    {"name": "cal_tier", "header": "tier", "owner": "pipeline"},
     # Metadata
     {"name": "match_uid", "owner": "pipeline"},
     {"name": "p1_id", "owner": "pipeline"},
@@ -83,6 +91,14 @@ SHEET_HEADERS = [c.get("header", c["name"]) for c in COLUMN_SCHEMA]
 PIPELINE_COLUMNS = {c["name"] for c in COLUMN_SCHEMA if c["owner"] == "pipeline"}
 USER_COLUMNS = {c["name"] for c in COLUMN_SCHEMA if c["owner"] == "user"}
 FORMULA_COLUMNS = {c["name"] for c in COLUMN_SCHEMA if c["owner"] == "formula"}
+# User-maintained columns that may hold a formula (e.g. an inherit-from-above
+# bankroll). The sync reads these with FORMULA rendering and writes the raw
+# formula back, rather than flattening them to a computed value.
+FORMULA_PRESERVE_COLUMNS = {"bankroll", "kelly_fraction", "max_pct"}
+# Formula columns that stay live while a bet is open but freeze to a literal
+# snapshot once the bet is placed (a stake is entered) — the recommended stake
+# should record what was advised at bet time, not keep recomputing afterward.
+FREEZE_AT_BET_COLUMNS = {"kelly_stake"}
 
 def _col_letter(index: int) -> str:
     """Convert 0-based column index to spreadsheet column letter(s)."""
@@ -127,8 +143,8 @@ def generate_formulas(row: int) -> dict[str, str]:
     r = row
     p1_elo = COL_LETTERS["p1_elo"]
     p2_elo = COL_LETTERS["p2_elo"]
-    p1_prob = COL_LETTERS["p1_prob"]
-    p2_prob = COL_LETTERS["p2_prob"]
+    pred_prob = COL_LETTERS["pred_prob"]
+    pred_odds_col = COL_LETTERS["pred_odds"]
     p1_odds = COL_LETTERS["p1_odds"]
     p2_odds = COL_LETTERS["p2_odds"]
     bet_side = COL_LETTERS["bet_side"]
@@ -139,23 +155,42 @@ def generate_formulas(row: int) -> dict[str, str]:
     bet_odds_col = COL_LETTERS["bet_odds"]
     prediction_col = COL_LETTERS["prediction"]
     result_col = COL_LETTERS["result"]
+    bankroll_col = COL_LETTERS["bankroll"]
+    kelly_fraction_col = COL_LETTERS["kelly_fraction"]
+    max_pct_col = COL_LETTERS["max_pct"]
 
-    # fav_edge: edge on the model's predicted winner
-    # dog_edge: edge on the other side
-    fav_edge_formula = (
-        f'=IF({prediction_col}{r}="P1", '
-        f'IF({p1_odds}{r}="", "", {p1_prob}{r}-(1/{p1_odds}{r})), '
-        f'IF({p2_odds}{r}="", "", {p2_prob}{r}-(1/{p2_odds}{r})))'
+    # pred_odds: the picked player's price (raw p1/p2 odds live in the meta block)
+    pred_odds_formula = (
+        f'=IF({prediction_col}{r}="P1", {p1_odds}{r}, '
+        f'IF({prediction_col}{r}="P2", {p2_odds}{r}, ""))'
     )
+    # fav_edge: edge on the model's picked player at its price
+    fav_edge_formula = (
+        f'=IF({pred_odds_col}{r}="", "", {pred_prob}{r}-(1/{pred_odds_col}{r}))'
+    )
+    # dog_edge: edge on the other side = (1 - pred_prob) at the opponent's price
     dog_edge_formula = (
         f'=IF({prediction_col}{r}="P1", '
-        f'IF({p2_odds}{r}="", "", {p2_prob}{r}-(1/{p2_odds}{r})), '
-        f'IF({p1_odds}{r}="", "", {p1_prob}{r}-(1/{p1_odds}{r})))'
+        f'IF({p2_odds}{r}="", "", (1-{pred_prob}{r})-(1/{p2_odds}{r})), '
+        f'IF({p1_odds}{r}="", "", (1-{pred_prob}{r})-(1/{p1_odds}{r})))'
+    )
+
+    # kelly_stake: fractional-Kelly dollars off this row's bankroll, floored at 0
+    # for non-positive edge and capped at max_pct * bankroll. Blank until the
+    # inputs (pred_prob / pred_odds / bankroll) are present.
+    kelly_stake_formula = (
+        f'=IF(OR({pred_prob}{r}="",{pred_odds_col}{r}="",{pred_odds_col}{r}<=1,'
+        f'{bankroll_col}{r}="",{bankroll_col}{r}<=0),"",'
+        f'MIN({max_pct_col}{r}*{bankroll_col}{r},'
+        f'MAX(0,{kelly_fraction_col}{r}*{bankroll_col}{r}*'
+        f'({pred_prob}{r}-1/{pred_odds_col}{r})/({pred_odds_col}{r}-1))))'
     )
 
     return {
         "elo_diff": f'=ABS({p1_elo}{r}-{p2_elo}{r})',
+        "pred_odds": pred_odds_formula,
         "fav_edge": fav_edge_formula,
+        "kelly_stake": kelly_stake_formula,
         "dog_edge": dog_edge_formula,
         "bet_odds": f'=IF({bet_side}{r}="P1", {p1_odds}{r}, IF({bet_side}{r}="P2", {p2_odds}{r}, ""))',
         "to_win": f'=IF({stake_col}{r}="", "", ROUND({stake_col}{r}*{bet_odds_col}{r}, 2))',
@@ -225,6 +260,7 @@ def prepare_predictions(predictions: pl.DataFrame) -> pl.DataFrame:
         p1_prob = row["p1_win_prob"]
         p2_prob = row["p2_win_prob"]
         prediction = "P1" if p1_prob >= p2_prob else "P2"
+        pred_prob = p1_prob if prediction == "P1" else p2_prob
         # Reorient the p1 - p2 context diffs onto the picked player, so they
         # read picked - opponent regardless of which slot the pick landed in.
         pick_sign = 1 if prediction == "P1" else -1
@@ -246,16 +282,11 @@ def prepare_predictions(predictions: pl.DataFrame) -> pl.DataFrame:
             "p2": row["p2_name"],
             "p1_elo": round(row["p1_elo"]),
             "p2_elo": round(row["p2_elo"]),
-            "p1_prob": p1_prob,
-            "p2_prob": p2_prob,
-            # picked - opponent diffs from the lead model's features (null -> blank)
+            "pred_prob": pred_prob,
+            # picked - opponent age diff from the lead model's features (null -> blank)
             "age_diff": (
                 round(pick_sign * row["player_age_diff"], 1)
                 if row.get("player_age_diff") is not None else None
-            ),
-            "mp_diff": (
-                int(round(pick_sign * row["player_match_count_diff_30d"]))
-                if row.get("player_match_count_diff_30d") is not None else None
             ),
             "prediction": prediction,
             "consensus": row.get("consensus") if row.get("consensus") is not None else "",
@@ -315,8 +346,7 @@ def prepare_predictions(predictions: pl.DataFrame) -> pl.DataFrame:
     result = result.with_columns(
         pl.col("p1_elo").cast(pl.Int64),
         pl.col("p2_elo").cast(pl.Int64),
-        pl.col("p1_prob").cast(pl.Float64),
-        pl.col("p2_prob").cast(pl.Float64),
+        pl.col("pred_prob").cast(pl.Float64),
     )
 
     return result.select(PIPELINE_COLUMN_ORDER)
@@ -570,13 +600,11 @@ def merge_predictions(
                 continue
 
             try:
-                p1_prob = float(row.get("p1_prob") or "")
-                p2_prob = float(row.get("p2_prob") or "")
+                pred_prob = float(row.get("pred_prob") or "")
             except (TypeError, ValueError):
                 new_fav_open.append("")
                 continue
 
-            pred_prob = p1_prob if prediction == "P1" else p2_prob
             pred_pid = p1_id if prediction == "P1" else p2_id
             if not pred_pid:
                 new_fav_open.append("")

@@ -9,9 +9,12 @@ from pathlib import Path
 import gspread
 import polars as pl
 from dotenv import load_dotenv
+from gspread.utils import ValueRenderOption
 
 from mvp.gsheets.base import (
     COLUMN_NAMES,
+    FORMULA_PRESERVE_COLUMNS,
+    FREEZE_AT_BET_COLUMNS,
     SHEET_HEADERS,
     _col_letter,
     generate_formulas,
@@ -54,7 +57,26 @@ class SheetsSync:
         if len(data) == 1:
             return pl.DataFrame(schema={col: pl.Utf8 for col in COLUMN_NAMES})
 
-        rows = data[1:]
+        rows = [list(r) for r in data[1:]]
+
+        # User-maintained columns may hold a formula (e.g. an inherit-from-above
+        # bankroll). get_all_values() returns the computed value, which we'd then
+        # write back as a literal — freezing the formula. Re-read those columns
+        # with FORMULA rendering and overlay the raw formula text so it survives
+        # the round-trip.
+        preserve_idx = [COLUMN_NAMES.index(c) for c in FORMULA_PRESERVE_COLUMNS]
+        if preserve_idx:
+            formula_rows = self._worksheet.get_all_values(
+                value_render_option=ValueRenderOption.formula
+            )[1:]
+            for i, row_list in enumerate(rows):
+                if i >= len(formula_rows):
+                    break
+                fr = formula_rows[i]
+                for ci in preserve_idx:
+                    if ci < len(fr):
+                        row_list[ci] = fr[ci]
+
         return pl.DataFrame(
             rows, schema={col: pl.Utf8 for col in COLUMN_NAMES}, orient="row"
         )
@@ -67,14 +89,23 @@ class SheetsSync:
 
         rows = str_df.rows()
 
+        always_formula = {"elo_diff", "fav_edge", "dog_edge", "pred_result", "bet_odds"}
+        bet_placed_idx = COLUMN_NAMES.index("bet_placed_at")
+
         cell_rows = []
         for i, row in enumerate(rows):
             row_list = list(row)
             sheet_row = i + 2  # 1-indexed, row 1 is header
             formulas = generate_formulas(sheet_row)
-            always_formula = {"elo_diff", "fav_edge", "dog_edge", "pred_result", "bet_odds"}
+            bet_placed = bool(row_list[bet_placed_idx].strip())
             for col_name, formula in formulas.items():
                 col_idx = COLUMN_NAMES.index(col_name)
+                if col_name in FREEZE_AT_BET_COLUMNS:
+                    # Live while the bet is open; once placed, keep whatever
+                    # literal is already there (the frozen bet-time snapshot).
+                    if not bet_placed:
+                        row_list[col_idx] = formula
+                    continue
                 if col_name in always_formula or not row_list[col_idx]:
                     row_list[col_idx] = formula
             cell_rows.append(row_list)

@@ -21,8 +21,8 @@ from mvp.gsheets.base import (
 
 
 class TestColumnSchema:
-    def test_column_schema_has_44_columns(self):
-        assert len(COLUMN_SCHEMA) == 44
+    def test_column_schema_has_45_columns(self):
+        assert len(COLUMN_SCHEMA) == 45
 
     def test_fav_edge_open_precedes_fav_edge(self):
         i = COLUMN_NAMES.index("fav_edge_open")
@@ -104,24 +104,22 @@ class TestPreparePredictions:
         assert df["prediction"][0] == "P2"
 
     def test_context_diffs_orient_to_p1_pick(self):
-        # p1 is the pick -> diffs read p1 - p2 unchanged.
+        # p1 is the pick -> age diff reads p1 - p2 unchanged.
         df = prepare_predictions(_make_predictions(
-            p1_win_prob=0.65, p2_win_prob=0.35,
-            player_age_diff=-4.2, player_match_count_diff_30d=3.0,
+            p1_win_prob=0.65, p2_win_prob=0.35, player_age_diff=-4.2,
         ))
         assert df["prediction"][0] == "P1"
+        assert df["pred_prob"][0] == 0.65
         assert df["age_diff"][0] == -4.2
-        assert df["mp_diff"][0] == 3
 
     def test_context_diffs_orient_to_p2_pick(self):
-        # p2 is the pick -> diffs flip to picked - opponent.
+        # p2 is the pick -> age diff flips to picked - opponent.
         df = prepare_predictions(_make_predictions(
-            p1_win_prob=0.35, p2_win_prob=0.65,
-            player_age_diff=-4.2, player_match_count_diff_30d=3.0,
+            p1_win_prob=0.35, p2_win_prob=0.65, player_age_diff=-4.2,
         ))
         assert df["prediction"][0] == "P2"
+        assert df["pred_prob"][0] == 0.65
         assert df["age_diff"][0] == 4.2
-        assert df["mp_diff"][0] == -3
 
     def test_timezone_conversion_to_ct(self):
         # 3am UTC on Jan 15 = 9pm CT on Jan 14 (UTC-6 in January)
@@ -249,8 +247,7 @@ def _make_sheet_row(**overrides):
         "p2": "Jane Doe",
         "p1_elo": "1530",
         "p2_elo": "1470",
-        "p1_prob": "0.65",
-        "p2_prob": "0.35",
+        "pred_prob": "0.65",
         "prediction": "P1",
         "tournament_day": "2024-01-15",
         "model_version": "v1",
@@ -419,7 +416,7 @@ class TestMergePredictions:
         })
         result = merge_predictions(existing, new, matches)
         assert list(result.columns) == COLUMN_NAMES
-        assert len(result.columns) == 44
+        assert len(result.columns) == 45
 
     def test_empty_existing_empty_new(self):
         existing = _sheet_df([])
@@ -452,7 +449,7 @@ class TestMergePredictions:
         })
         result = merge_predictions(existing, new, matches)
         assert len(result) == 0
-        assert len(result.columns) == 44
+        assert len(result.columns) == 45
         assert list(result.columns) == COLUMN_NAMES
 
     def test_fav_edge_open_populated_from_opening_odds(self):
@@ -755,7 +752,7 @@ class TestMergePredictions:
             surface="Hard",
             circuit="ATP",
             tournament_day="2024-01-14",
-            p1_prob="0.65",
+            pred_prob="0.65",
         )
         existing = _sheet_df([row])
         # New prediction has updated schedule (match moved to next day)
@@ -776,7 +773,7 @@ class TestMergePredictions:
         assert result["time"][0] == "21:00"
         assert result["tournament_day"][0] == "2024-01-15"
         # Prediction columns should NOT be updated
-        assert result["p1_prob"][0] == "0.65"
+        assert result["pred_prob"][0] == "0.65"
 
     def test_book2_filled_when_two_books_tie_at_best(self):
         row = _make_sheet_row(match_uid="M1", prediction="P1", stake="", book="", book2="")

@@ -15,8 +15,6 @@ SHEET_COLUMNS = [
     "match_uid",
     "p1_odds",
     "p2_odds",
-    "p1_pin",
-    "p2_pin",
     "fav_edge",
     "dog_edge",
     # The model's pick as frozen on the sheet when the bet was placed. The

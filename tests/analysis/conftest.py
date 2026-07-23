@@ -39,8 +39,6 @@ def sample_sheet_data():
         "prediction": ["P1", "P2", ""],
         "p1_odds": ["2.10", "1.80", ""],
         "p2_odds": ["1.75", "2.00", ""],
-        "p1_pin": ["2.05", "", ""],
-        "p2_pin": ["1.80", "", ""],
         "bet_side": ["P1", "P2", ""],
         "stake": ["10", "15", ""],
         "book": ["DraftKings", "Bet365", ""],
