@@ -312,6 +312,39 @@ class TestMergePredictions:
         result = merge_predictions(existing, new, matches)
         assert result["court"][0] == "outdoor"
 
+    def test_control_inputs_seeded_on_new_rows(self):
+        existing = _sheet_df([])
+        new = prepare_predictions(_make_predictions())
+        matches = _matches_df({
+            "match_uid": ["2024-0001-MS001"], "won": [None],
+            "player_id": ["A"], "opp_id": ["B"],
+        })
+        result = merge_predictions(
+            existing, new, matches,
+            control_defaults={"bankroll": "8000", "kelly_fraction": "0.25", "max_pct": "0.025"},
+        )
+        assert result["bankroll"][0] == "8000"
+        assert result["kelly_fraction"][0] == "0.25"
+        assert result["max_pct"][0] == "0.025"
+
+    def test_control_inputs_not_seeded_on_existing_rows(self):
+        # Existing row with a blank bankroll must stay blank; only the new match
+        # (truly-new) gets seeded from config.
+        existing = _sheet_df([_make_sheet_row(match_uid="M1", bankroll="")])
+        new = prepare_predictions(_make_predictions(match_uid="OTHER"))
+        matches = _matches_df({
+            "match_uid": ["OTHER"], "won": [None],
+            "player_id": ["A"], "opp_id": ["B"],
+        })
+        result = merge_predictions(
+            existing, new, matches,
+            control_defaults={"bankroll": "8000", "kelly_fraction": "0.25", "max_pct": "0.025"},
+        )
+        m1 = result.filter(pl.col("match_uid") == "M1")
+        other = result.filter(pl.col("match_uid") == "OTHER")
+        assert m1["bankroll"][0] == ""       # existing blank NOT seeded
+        assert other["bankroll"][0] == "8000"  # new row seeded
+
     def test_existing_rows_user_columns_preserved(self):
         row = _make_sheet_row(
             match_uid="2024-0001-MS001",

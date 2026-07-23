@@ -371,6 +371,7 @@ def merge_predictions(
     matches: pl.DataFrame,
     odds_maps: dict[str, dict[str, dict[str, float]]] | None = None,
     opening_odds_maps: dict[str, dict[str, dict[str, float]]] | None = None,
+    control_defaults: dict[str, str] | None = None,
 ) -> pl.DataFrame:
     """Merge new predictions with existing sheet data, auto-filling results.
 
@@ -692,6 +693,23 @@ def merge_predictions(
                 for i in range(len(merged))
             ])
         )
+
+    # 3c5. Seed Kelly control inputs (bankroll/kelly_fraction/max_pct) on rows
+    # appearing for the first time, from the `config` tab. ONLY new rows are
+    # seeded — existing rows, even blank ones, are never touched, so an old
+    # match never picks up today's bankroll. After seeding, a value changes only
+    # when it is edited manually on the sheet.
+    if len(merged) > 0 and control_defaults:
+        for col in ("bankroll", "kelly_fraction", "max_pct"):
+            default = str(control_defaults.get(col, "")).strip()
+            if not default:
+                continue
+            vals = []
+            for row in merged.iter_rows(named=True):
+                uid = row.get("match_uid") or ""
+                cur = row.get(col)
+                vals.append(default if uid in truly_new else (cur if cur is not None else ""))
+            merged = merged.with_columns(pl.Series(col, vals))
 
     # 3d. Stamp bet_placed_at when we first see a stake
     if len(merged) > 0:

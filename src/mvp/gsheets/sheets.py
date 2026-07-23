@@ -39,7 +39,25 @@ class SheetsSync:
         creds = json.loads(Path(creds_path).read_text())
         gc = gspread.service_account_from_dict(creds)
         spreadsheet = gc.open_by_key(sheet_id)
+        self._spreadsheet = spreadsheet
         self._worksheet = spreadsheet.worksheet("bets")
+
+    def read_config(self) -> dict[str, str]:
+        """Read the `config` tab (header row of names + one value row) into a
+        {name: value} dict. Empty dict if the tab is missing or has no value
+        row, so the sync degrades gracefully when config isn't set up."""
+        try:
+            values = self._spreadsheet.worksheet("config").get_all_values()
+        except Exception:
+            return {}
+        if len(values) < 2:
+            return {}
+        header, row = values[0], values[1]
+        return {
+            header[i].strip(): row[i].strip()
+            for i in range(min(len(header), len(row)))
+            if header[i].strip() and row[i].strip()
+        }
 
     def read_existing(self) -> pl.DataFrame:
         """Read all rows from the sheet."""

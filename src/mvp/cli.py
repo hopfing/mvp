@@ -3502,6 +3502,7 @@ def cmd_live(args: argparse.Namespace) -> int:
                 existing, prepared, matches_df,
                 odds_maps=book_odds_for_sheets or None,
                 opening_odds_maps=opening_odds_for_sheets or None,
+                control_defaults=sheets.read_config() or None,
             )
             sheets.write(merged)
 
