@@ -175,15 +175,20 @@ def generate_formulas(row: int) -> dict[str, str]:
         f'IF({p1_odds}{r}="", "", (1-{pred_prob}{r})-(1/{p1_odds}{r})))'
     )
 
-    # kelly_stake: fractional-Kelly dollars off this row's bankroll, floored at 0
-    # for non-positive edge and capped at max_pct * bankroll. Blank until the
-    # inputs (pred_prob / pred_odds / bankroll) are present.
+    # kelly_stake: fractional-Kelly dollars off this row's bankroll. Full Kelly
+    # for decimal odds o and win prob p is (p*o - 1)/(o - 1); we scale that by
+    # kelly_fraction, floor at 0 for non-positive edge, and cap at
+    # max_pct * bankroll. Blanks until every input is set, and on any negative
+    # control value (odds/bankroll/fraction/max_pct) rather than emitting a
+    # nonsensical or negative stake.
     kelly_stake_formula = (
         f'=IF(OR({pred_prob}{r}="",{pred_odds_col}{r}="",{pred_odds_col}{r}<=1,'
-        f'{bankroll_col}{r}="",{bankroll_col}{r}<=0),"",'
+        f'{bankroll_col}{r}="",{bankroll_col}{r}<=0,'
+        f'{kelly_fraction_col}{r}="",{kelly_fraction_col}{r}<0,'
+        f'{max_pct_col}{r}="",{max_pct_col}{r}<0),"",'
         f'MIN({max_pct_col}{r}*{bankroll_col}{r},'
         f'MAX(0,{kelly_fraction_col}{r}*{bankroll_col}{r}*'
-        f'({pred_prob}{r}-1/{pred_odds_col}{r})/({pred_odds_col}{r}-1))))'
+        f'({pred_prob}{r}*{pred_odds_col}{r}-1)/({pred_odds_col}{r}-1))))'
     )
 
     return {
