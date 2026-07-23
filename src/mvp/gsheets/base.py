@@ -72,6 +72,8 @@ COLUMN_SCHEMA = [
     {"name": "dog_edge", "owner": "formula"},
     {"name": "cell_cal", "header": "cal", "owner": "pipeline"},
     {"name": "cal_tier", "header": "tier", "owner": "pipeline"},
+    # Court (indoor/outdoor) — static match metadata from matches.parquet
+    {"name": "court", "owner": "pipeline"},
     # Metadata
     {"name": "match_uid", "owner": "pipeline"},
     {"name": "p1_id", "owner": "pipeline"},
@@ -309,6 +311,7 @@ def prepare_predictions(predictions: pl.DataFrame) -> pl.DataFrame:
             "fav_edge_open": "",
             "cell_cal": "",
             "cal_tier": "",
+            "court": "",
         })
 
     if not rows:
@@ -661,6 +664,28 @@ def merge_predictions(
         merged = merged.with_columns(
             pl.Series("cell_cal", new_cell_cal),
             pl.Series("cal_tier", new_cal_tier),
+        )
+
+    # 3c4. court (indoor/outdoor) from matches.parquet — static match metadata,
+    # refreshed from the source of truth each sync; preserved if a match isn't
+    # in matches yet.
+    if len(merged) > 0:
+        indoor_map: dict[str, str] = {}
+        if "indoor" in matches.columns and len(matches) > 0:
+            for row in matches.select("match_uid", "indoor").unique("match_uid").iter_rows(named=True):
+                v = row["indoor"]
+                indoor_map[row["match_uid"]] = (
+                    "indoor" if v is True else "outdoor" if v is False else ""
+                )
+        existing_court = (
+            merged["court"].to_list() if "court" in merged.columns else [""] * len(merged)
+        )
+        uids = merged["match_uid"].to_list()
+        merged = merged.with_columns(
+            pl.Series("court", [
+                indoor_map.get(uids[i] or "") or (existing_court[i] or "")
+                for i in range(len(merged))
+            ])
         )
 
     # 3d. Stamp bet_placed_at when we first see a stake

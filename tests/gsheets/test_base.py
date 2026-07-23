@@ -21,8 +21,8 @@ from mvp.gsheets.base import (
 
 
 class TestColumnSchema:
-    def test_column_schema_has_45_columns(self):
-        assert len(COLUMN_SCHEMA) == 45
+    def test_column_schema_has_46_columns(self):
+        assert len(COLUMN_SCHEMA) == 46
 
     def test_fav_edge_open_precedes_fav_edge(self):
         i = COLUMN_NAMES.index("fav_edge_open")
@@ -286,6 +286,32 @@ class TestMergePredictions:
         assert len(result) == 1
         assert result["match_uid"][0] == "2024-0001-MS001"
 
+    def test_court_populated_from_matches_indoor(self):
+        existing = _sheet_df([])
+        new = prepare_predictions(_make_predictions())
+        matches = _matches_df({
+            "match_uid": ["2024-0001-MS001"],
+            "won": [None],
+            "player_id": ["A"],
+            "opp_id": ["B"],
+            "indoor": [True],
+        })
+        result = merge_predictions(existing, new, matches)
+        assert result["court"][0] == "indoor"
+
+    def test_court_populated_from_matches_outdoor(self):
+        existing = _sheet_df([])
+        new = prepare_predictions(_make_predictions())
+        matches = _matches_df({
+            "match_uid": ["2024-0001-MS001"],
+            "won": [None],
+            "player_id": ["A"],
+            "opp_id": ["B"],
+            "indoor": [False],
+        })
+        result = merge_predictions(existing, new, matches)
+        assert result["court"][0] == "outdoor"
+
     def test_existing_rows_user_columns_preserved(self):
         row = _make_sheet_row(
             match_uid="2024-0001-MS001",
@@ -416,7 +442,7 @@ class TestMergePredictions:
         })
         result = merge_predictions(existing, new, matches)
         assert list(result.columns) == COLUMN_NAMES
-        assert len(result.columns) == 45
+        assert len(result.columns) == 46
 
     def test_empty_existing_empty_new(self):
         existing = _sheet_df([])
@@ -449,7 +475,7 @@ class TestMergePredictions:
         })
         result = merge_predictions(existing, new, matches)
         assert len(result) == 0
-        assert len(result.columns) == 45
+        assert len(result.columns) == 46
         assert list(result.columns) == COLUMN_NAMES
 
     def test_fav_edge_open_populated_from_opening_odds(self):
