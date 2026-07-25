@@ -15,6 +15,7 @@ import yaml
 
 from mvp.model.discovery.discover import get_all_feature_specs
 from mvp.model.discovery.selection import FeatureSelector, SelectionResult
+from mvp.model.parallelism import blas_thread_cap, resolve_candidate_parallelism
 from mvp.projection.lines.config import LinesDiscoveryConfig
 from mvp.projection.lines.fast_selection import FastLinesSelector
 
@@ -90,7 +91,17 @@ class LinesDiscovery:
             cache_dir=self.cache_dir,
         )
         fast.precompute()
-        scorer = fast.create_scorer()
+
+        # Candidate-loop parallelism: split the thread budget into concurrent
+        # candidate fits x per-fit threads (mirrors the classification FS path).
+        cand_workers, cand_n_jobs = resolve_candidate_parallelism(
+            (self.config.model.params or {}).get("n_jobs"), None,
+        )
+        logger.info(
+            "Candidate-loop parallelism: %d workers x %d threads/fit",
+            cand_workers, cand_n_jobs,
+        )
+        scorer = fast.create_scorer(n_jobs=cand_n_jobs)
 
         selector = FeatureSelector(
             scorer=scorer,
@@ -100,12 +111,15 @@ class LinesDiscovery:
             min_features=1,
             max_features=feat_cfg.max,
             base_features=base,
+            forward_max_workers=cand_workers,
         )
 
         kwargs: dict[str, Any] = {"verbose": True, "checkpoint_path": checkpoint_path}
         if checkpoint_interval is not None:
             kwargs["checkpoint_interval"] = checkpoint_interval
-        selection_result = selector.run(**kwargs)
+        # BLAS cap: no-op for xgboost (OpenMP via n_jobs), real cap for logistic.
+        with blas_thread_cap(self.config.model.type, cand_n_jobs):
+            selection_result = selector.run(**kwargs)
         selected = selection_result.selected_features
 
         if not selected:

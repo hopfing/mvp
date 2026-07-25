@@ -173,6 +173,9 @@ class FastLinesSelector:
             step_size=val.step_size,
             train_size=val.train_size,
             test_start=getattr(val, "test_start", None),
+            train_months=getattr(val, "train_months", None),
+            initial_train_months=getattr(val, "initial_train_months", None),
+            test_months=getattr(val, "test_months", None),
         )
         self.folds = [
             (np.array(train_idx), np.array(test_idx))
@@ -188,7 +191,7 @@ class FastLinesSelector:
             self.fold_medians.append(medians)
         logger.info("Per-fold medians computed in %.1fs", time.perf_counter() - t0)
 
-    def create_scorer(self) -> Callable[[list[str]], float]:
+    def create_scorer(self, n_jobs: int | None = None) -> Callable[[list[str]], float]:
         """Return a fast scorer that evaluates a feature subset across folds."""
         if self.X_wide is None:
             raise RuntimeError("FastLinesSelector.create_scorer called before precompute()")
@@ -204,6 +207,11 @@ class FastLinesSelector:
         metric_name = self.config.discovery.metric
         model_type = self.config.model.type
         model_params = self.config.model.params or {}
+        # Per-fit thread cap for candidate-loop parallelism: fresh dict so the
+        # shared config isn't mutated, spread-last so it wins over a config-pinned
+        # n_jobs. Mirrors model/discovery/fast_selection.py.
+        if n_jobs is not None:
+            model_params = {**model_params, "n_jobs": int(n_jobs)}
 
         def scorer(features: list[str]) -> float:
             if not features:
