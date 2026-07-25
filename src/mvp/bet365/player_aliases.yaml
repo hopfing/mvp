@@ -19,3 +19,9 @@
 "Cesar Stefan Bentzel": "B0Y3"
 "Jan Patrick Sinescu": "S1H8"
 "Joaquin A Cardozo": "A0JW"
+# Mojibake: B365 sometimes emits "Jose" with an accent as "JosA(c)" (UTF-8 read
+# as Latin-1). The clean spelling already resolves via bio names; this covers the
+# corrupt one. Escaped as \xC3\xA9 so this file stays pure ASCII -- the loader
+# opens it without an explicit encoding, so a literal would decode differently
+# on Windows (cp1252) than on the Beelink (UTF-8).
+"Jos\xC3\xA9 Pereira": "PC09"
