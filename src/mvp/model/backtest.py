@@ -665,6 +665,26 @@ def run_backtest(
         if fold_sidecar.exists():
             shutil.copy2(fold_sidecar, artifact_root / "lead_cal_tiers.json")
 
+    # Symmetric targets (e.g. deciding_set) produce one prob per match, not
+    # per-side moneyline bet rows — _build_bet_rows supports winner-target
+    # predictions only. Persist the OOS walk-forward predictions so an external
+    # evaluator can score them against a non-moneyline market (e.g. total sets),
+    # then stop here rather than raise NotImplementedError.
+    if lead_cfg.target != "won":
+        from mvp.common.config_hash import compute_fingerprint, fingerprint_dir
+
+        fp = compute_fingerprint(lead_cfg, config_path=config_path)
+        fp_dir = fingerprint_dir(fp)
+        fp_dir.mkdir(parents=True, exist_ok=True)
+        preds_out = fp_dir / "predictions.parquet"
+        predictions.write_parquet(preds_out)
+        logger.info(
+            "Symmetric target '%s': wrote %d OOS prediction rows to %s "
+            "(betting backtest skipped — score against an external market)",
+            lead_cfg.target, len(predictions), preds_out,
+        )
+        return preds_out
+
     # Build per-side bet rows + odds + outcomes
     bets = _build_bet_rows(predictions, bt_start, bt_end)
     bets, run_id = _attach_cal_tiers(
