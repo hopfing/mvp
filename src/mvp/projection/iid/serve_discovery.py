@@ -54,7 +54,10 @@ from mvp.projection.iid.score_state_features import (
     default_point_level_candidate_pool,
 )
 from mvp.projection.iid.score_state_model import build_score_state_model
-from mvp.projection.iid.serve_model import ScoreStateChainServeModel
+from mvp.projection.iid.serve_model import (
+    ScoreStateChainServeModel,
+    swap_side_opp_specs,
+)
 from mvp.projection.iid.stateful_chain import match_distribution_from_state_fn
 
 logger = logging.getLogger(__name__)
@@ -714,13 +717,44 @@ class ServeDiscoverySelector:
             subset=["match_uid"], keep="first", maintain_order=True,
         )
 
-        # Materialize all candidate match-level features from cache.
-        # ScoreStateChainServeModel.predict_state_fn reads `player_X` for
-        # the server-side value and either `opp_X` (mirror=True features)
-        # or the negated `player_X` (mirror=False / diff features) for the
-        # swap-side. load_features_numpy materializes the opp_ column only
-        # when the base feature mirrors, which matches that contract.
-        df = engine.load_features_numpy(match_pool, df, cache_key)
+        # Materialize every candidate match-level feature ON THE TWO-SIDED frame,
+        # then join onto the match-grain (one-row-per-match) df.
+        #
+        # ScoreStateChainServeModel.predict_state_fn reads `player_X` for the
+        # server-side value and, for mirror features, `opp_X` for the swap side
+        # (mirror=False diffs negate `player_X` instead) — so the opp_ specs from
+        # swap_side_opp_specs have to be requested here, not just the configured
+        # pool. Two-sided is load-bearing for them: load_features_numpy derives an
+        # opp_ column by self-joining the partner row on (match_uid, opp_id), so on
+        # an already-deduplicated frame every opp_ column comes back all-null.
+        #
+        # The two-sided frame is retained: the FS loop hands it to model.fit() per
+        # candidate × fold, which is what keeps fit off engine.compute() (a full
+        # 1.67M-row matches.parquet read each time).
+        load_specs = list(match_pool)
+        for spec in swap_side_opp_specs(match_pool):
+            if spec not in load_specs:
+                load_specs.append(spec)
+        self._match_features_both_sides = engine.load_features_numpy(
+            load_specs, both_sides_keys, cache_key,
+        )
+
+        # Join the server-perspective row's features (plus its opp_ columns) on
+        # (match_uid, player_id). Columns df already carries — computed filter
+        # specs loaded above — are skipped so the join can't produce `_right`
+        # duplicates; their values are identical either way.
+        already_present = set(df.columns) - {"match_uid", "player_id"}
+        feature_cols = [
+            c for c in self._match_features_both_sides.columns
+            if c not in already_present and c not in ("match_uid", "player_id", "opp_id")
+        ]
+        df = df.join(
+            self._match_features_both_sides.select(
+                ["match_uid", "player_id", *feature_cols]
+            ),
+            on=["match_uid", "player_id"],
+            how="left",
+        )
 
         val = self.config.validation
         splitter = make_splitter(
@@ -742,13 +776,10 @@ class ServeDiscoverySelector:
         self._match_splits = splits
         self._fs_match_splits = self._maybe_subsample_match_splits(splits)
         logger.info(
-            "Chain-metric path: match-grain df=%d matches, %d folds, %d candidate match feats materialized",
-            len(df), len(splits), len(match_pool),
+            "Chain-metric path: match-grain df=%d matches, %d folds, %d candidate match feats "
+            "materialized (+%d opp_ swap-side cols)",
+            len(df), len(splits), len(match_pool), len(load_specs) - len(match_pool),
         )
-
-        # Pre-load both-perspective match features to avoid engine.compute() (reads full
-        # 1.67M-row matches.parquet) on every candidate × fold during the FS loop.
-        self._match_features_both_sides = engine.load_features_numpy(match_pool, both_sides_keys, cache_key)
 
         # Pre-load points filtered to training matches to avoid 7.1M-row parquet read per fit call.
         match_uids = df["match_uid"].to_list()

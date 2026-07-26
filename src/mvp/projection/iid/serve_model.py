@@ -36,6 +36,86 @@ SERVE_PROB_MAX: Final[float] = 0.90
 LEAGUE_MEAN_SERVE_PROB: Final[float] = 0.62
 
 
+def resolve_match_feature_cols(
+    match_level_features: list[str],
+) -> tuple[list[str], list[bool]]:
+    """Map match-level feature specs to inference column names + swap mechanism.
+
+    `player_*` specs become `server_*`; `opp_*` become `returner_*`; unprefixed
+    specs pass through as match-level.
+
+    Returns `(cols, is_diff_flags)`. `is_diff` is True for diff-style features
+    (registry `mirror=False`) — these have only a `player_` column in the raw
+    frame, so the swap (B-serves) perspective is the NEGATION of the server-side
+    value. `is_diff=False` means the swap side is read from a separate `opp_`
+    column, which the caller must therefore materialize.
+
+    Module-level so the FS selector (which has to load those `opp_` columns) and
+    the model (which reads them) share one classification and can't drift.
+    """
+    from mvp.model.engine import build_column_name, parse_feature_spec
+    from mvp.model.registry import get_registry
+
+    registry = get_registry()
+    cols: list[str] = []
+    is_diff_flags: list[bool] = []
+    for spec in match_level_features:
+        prefix, base_name, full_name, params = parse_feature_spec(spec)
+        col = build_column_name(full_name, params)
+        if col.startswith("player_"):
+            col = "server_" + col[len("player_"):]
+        elif col.startswith("opp_"):
+            col = "returner_" + col[len("opp_"):]
+        is_diff = False
+        if prefix is not None:
+            try:
+                is_diff = not registry.get(base_name).mirror
+            except KeyError:
+                # base_name isn't a directly-registered feature — it's a
+                # transform-output column. A single transform (e.g.
+                # style_matchup, mirror=False) can emit BOTH a mirror pair
+                # (player_/opp_vs_opp_style_resid) AND a player-only diff
+                # (player_vs_opp_style_resid_diff), so the transform's mirror
+                # flag can't classify the column. Decide per-column by whether
+                # the opp_ counterpart output exists: present -> mirror pair
+                # (swap reads opp_); absent -> anti-symmetric diff (swap
+                # negates the player_ value).
+                is_diff = registry.transform_for_output("opp_" + base_name) is None
+        cols.append(col)
+        is_diff_flags.append(is_diff)
+    return cols, is_diff_flags
+
+
+def swap_side_opp_specs(match_level_features: list[str]) -> list[str]:
+    """`opp_`-prefixed specs the swap (B-serves) perspective reads as columns.
+
+    Mirror features — plain per-player features and `register_matchup` outputs
+    (`mirror=True`), plus transform-emitted mirror pairs — are read from `opp_X`
+    at the swap side, never negated: for a cross-domain matchup the swap value is
+    `opp_svc_elo - player_ret_elo`, which is not `-(player_svc_elo - opp_ret_elo)`.
+    Callers materializing a match-grain frame for `predict_state_fn` must request
+    these alongside the configured specs.
+
+    Diff/sum features (`mirror=False`) are absent from the result — their swap
+    side negates the `player_` column, so no `opp_` read is involved.
+    """
+    from mvp.model.engine import parse_feature_spec
+
+    _cols, is_diff_flags = resolve_match_feature_cols(match_level_features)
+    specs: list[str] = []
+    for spec, is_diff in zip(match_level_features, is_diff_flags):
+        prefix, base_name, _full_name, params = parse_feature_spec(spec)
+        if is_diff or prefix != "player":
+            continue
+        opp_spec = f"opp_{base_name}"
+        if params:
+            param_str = ",".join(f"{k}={v}" for k, v in params.items())
+            opp_spec = f"opp_{base_name}({param_str})"
+        if opp_spec not in specs:
+            specs.append(opp_spec)
+    return specs
+
+
 class ServeWinProbEstimator(ABC):
     """Predicts each player's serve point win probability per matchup."""
 
@@ -237,45 +317,11 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
         return sorted(cols)
 
     def _resolve_match_feature_cols(self) -> list[str]:
-        """Map config feature specs to the server_/returner_ column names used
-        at inference. `player_*` specs become `server_*`; `opp_*` become
-        `returner_*`; unprefixed specs are passed through as match-level.
-
-        Also populates `self._match_feature_is_diff`: True for registered
-        diff-style features (mirror=False) — these have only a `player_`
-        column in the raw frame, and the swap-side value is the negation
-        of the server-side value (handled in `_match_feature_values`).
+        """Resolve config specs to inference column names (see
+        `resolve_match_feature_cols`), populating `self._match_feature_is_diff`
+        with the per-feature swap mechanism used by `_match_feature_values`.
         """
-        from mvp.model.engine import build_column_name, parse_feature_spec
-        from mvp.model.registry import get_registry
-
-        registry = get_registry()
-        cols: list[str] = []
-        is_diff_flags: list[bool] = []
-        for spec in self.match_level_features:
-            prefix, base_name, full_name, params = parse_feature_spec(spec)
-            col = build_column_name(full_name, params)
-            if col.startswith("player_"):
-                col = "server_" + col[len("player_"):]
-            elif col.startswith("opp_"):
-                col = "returner_" + col[len("opp_"):]
-            is_diff = False
-            if prefix is not None:
-                try:
-                    is_diff = not registry.get(base_name).mirror
-                except KeyError:
-                    # base_name isn't a directly-registered feature — it's a
-                    # transform-output column. A single transform (e.g.
-                    # style_matchup, mirror=False) can emit BOTH a mirror pair
-                    # (player_/opp_vs_opp_style_resid) AND a player-only diff
-                    # (player_vs_opp_style_resid_diff), so the transform's mirror
-                    # flag can't classify the column. Decide per-column by whether
-                    # the opp_ counterpart output exists: present -> mirror pair
-                    # (swap reads opp_); absent -> anti-symmetric diff (swap
-                    # negates the player_ value).
-                    is_diff = registry.transform_for_output("opp_" + base_name) is None
-            cols.append(col)
-            is_diff_flags.append(is_diff)
+        cols, is_diff_flags = resolve_match_feature_cols(self.match_level_features)
         self._match_feature_is_diff = is_diff_flags
         return cols
 
