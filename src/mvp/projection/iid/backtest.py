@@ -281,49 +281,117 @@ def _closing_snapshots(
     )
 
 
-def _book_totals_pairs(
+def _prematch_snapshots(
+    market_df: pl.DataFrame, event_id_col: str,
+) -> pl.DataFrame:
+    """Every pre-event snapshot, not just the last one.
+
+    The backtest used to read closing prices only, which is the wrong end of the
+    market for a strategy that enters at open. Keeping the full prematch series
+    lets `compute_open_close_odds` place open / formed / close at time-aligned
+    instants across books.
+    """
+    return market_df.filter(
+        (pl.col("event_status") == "NOT_STARTED") & pl.col("odds").is_not_null()
+    )
+
+
+def _price_points(
+    snapshots: pl.DataFrame, side_col: str, line_col: str = "points",
+) -> pl.DataFrame:
+    """Time-aligned open/formed/close per (match_uid, side, line).
+
+    Delegates to the odds aggregator so line markets use the same instants and
+    the same best-across-books rule as the moneyline pipeline: per-book first and
+    last are hours apart, so maxing each book's own first price blends moments
+    that never coexisted on the board.
+    """
+    from mvp.odds.aggregator import compute_open_close_odds
+
+    if len(snapshots) == 0:
+        return pl.DataFrame()
+    frame = snapshots.rename({side_col: "side"}) if side_col != "side" else snapshots
+    out = compute_open_close_odds(frame, extra_keys=[line_col])
+    # The aggregator returns its id column as `player_id` regardless of input.
+    return out.rename({"player_id": "side"})
+
+
+def _book_totals_snapshots(
     book_code: str, stage_dir: str, event_id_col: str, em: pl.DataFrame,
 ) -> pl.DataFrame:
-    """Per-(match_uid, points) total_games closing pair: over_odds + under_odds."""
+    """Prematch total_games snapshots for one book, resolved to match_uid.
+
+    Returns the full time series rather than a closing pair — pricing happens
+    once across all books in `_totals_prices`, so open/formed/close land on
+    instants that actually existed on the board.
+    """
     path = get_data_root() / "stage" / stage_dir / "total_games.parquet"
     if not path.exists():
         return pl.DataFrame()
-    raw = pl.read_parquet(path)
-    closing = _closing_snapshots(raw, event_id_col)
-    if len(closing) == 0:
+    pre = _prematch_snapshots(pl.read_parquet(path), event_id_col)
+    if len(pre) == 0:
         return pl.DataFrame()
 
     em_book = em.filter(pl.col("book") == book_code).select(
         pl.col("event_id"), "match_uid", "p1_id", "p2_id",
     )
-    joined = closing.join(em_book, left_on=event_id_col, right_on="event_id", how="inner")
+    joined = pre.join(em_book, left_on=event_id_col, right_on="event_id", how="inner")
     if len(joined) == 0:
         return pl.DataFrame()
-
-    pivot = (
-        joined.select("match_uid", "points", "side", "odds")
-        .pivot(values="odds", index=["match_uid", "points"], on="side", aggregate_function="first")
+    return joined.select(
+        "match_uid", "p1_id", "p2_id", "points", "side", "odds",
+        "fetched_at", "event_status",
+        pl.lit(book_code).alias("book"),
     )
-    cols = pivot.columns
-    if "over" not in cols or "under" not in cols:
+
+
+def _totals_prices(snapshots: pl.DataFrame) -> pl.DataFrame:
+    """Per (match_uid, points): over/under prices at open, formed and close.
+
+    One row per line, best-across-books at each instant — not one row per book.
+    Books are shopped, so the price that matters is the best one available at
+    the moment of entry; a row per book would count the same bet repeatedly at
+    prices you would not have taken.
+    """
+    if len(snapshots) == 0:
         return pl.DataFrame()
-    pivot = pivot.rename({"over": "over_odds", "under": "under_odds"})
-    return (
-        pivot.filter(pl.col("over_odds").is_not_null() & pl.col("under_odds").is_not_null())
-        .with_columns(pl.lit(book_code).alias("book"))
+    priced = _price_points(snapshots, side_col="side")
+    if len(priced) == 0:
+        return pl.DataFrame()
+
+    depth = snapshots.group_by(["match_uid", "points"]).agg(
+        pl.col("book").n_unique().alias("n_books")
+    )
+    ids = snapshots.group_by(["match_uid", "points"]).agg(
+        pl.col("p1_id").first(), pl.col("p2_id").first()
+    )
+
+    wide = None
+    for side, prefix in (("over", "over"), ("under", "under")):
+        part = priced.filter(pl.col("side") == side).select(
+            "match_uid", "points",
+            pl.col("best_opening_odds").alias(f"{prefix}_open"),
+            pl.col("formed_odds").alias(f"{prefix}_formed"),
+            pl.col("best_closing_odds").alias(f"{prefix}_close"),
+        )
+        wide = part if wide is None else wide.join(
+            part, on=["match_uid", "points"], how="inner"
+        )
+    if wide is None or len(wide) == 0:
+        return pl.DataFrame()
+    return wide.join(depth, on=["match_uid", "points"], how="left").join(
+        ids, on=["match_uid", "points"], how="left"
     )
 
 
-def _book_spread_pairs(
+def _book_spread_snapshots(
     book_code: str, stage_dir: str, event_id_col: str, em: pl.DataFrame,
 ) -> pl.DataFrame:
-    """Per (match_uid, abs_points) game_spread closing pair, with each side's
-    odds and resolved player_id."""
+    """Prematch game_spread snapshots for one book, sides resolved to p1/p2."""
     path = get_data_root() / "stage" / stage_dir / "game_spread.parquet"
     if not path.exists():
         return pl.DataFrame()
-    raw = pl.read_parquet(path)
-    closing = _closing_snapshots(raw, event_id_col)
+    closing = _prematch_snapshots(pl.read_parquet(path), event_id_col)
     if len(closing) == 0:
         return pl.DataFrame()
 
@@ -352,24 +420,56 @@ def _book_spread_pairs(
     # opposite-sign points; absolute value defines the line magnitude.
     joined = joined.with_columns(pl.col("points").abs().alias("abs_points"))
 
-    p1 = (
-        joined.filter(pl.col("side_player_id") == pl.col("p1_id"))
-        .select(
-            "match_uid", "abs_points", "p1_id", "p2_id",
-            pl.col("points").alias("p1_points"),
-            pl.col("odds").alias("p1_odds"),
-        )
+    # Side label ("p1"/"p2") + line magnitude are the pricing key; the signed
+    # points per side are carried alongside so the settle keeps the handicap sign.
+    return joined.select(
+        "match_uid", "p1_id", "p2_id", "points",
+        pl.col("abs_points"),
+        pl.when(pl.col("side_player_id") == pl.col("p1_id"))
+        .then(pl.lit("p1")).otherwise(pl.lit("p2")).alias("side"),
+        "odds", "fetched_at", "event_status",
+        pl.lit(book_code).alias("book"),
     )
-    p2 = (
-        joined.filter(pl.col("side_player_id") == pl.col("p2_id"))
-        .select(
+
+
+def _spread_prices(snapshots: pl.DataFrame) -> pl.DataFrame:
+    """Per (match_uid, abs_points): p1/p2 prices at open, formed and close."""
+    if len(snapshots) == 0:
+        return pl.DataFrame()
+    priced = _price_points(snapshots, side_col="side", line_col="abs_points")
+    if len(priced) == 0:
+        return pl.DataFrame()
+
+    depth = snapshots.group_by(["match_uid", "abs_points"]).agg(
+        pl.col("book").n_unique().alias("n_books"),
+        pl.col("p1_id").first(), pl.col("p2_id").first(),
+    )
+    signed = (
+        snapshots.group_by(["match_uid", "abs_points", "side"])
+        .agg(pl.col("points").first())
+        .pivot(values="points", index=["match_uid", "abs_points"], on="side")
+    )
+    if "p1" not in signed.columns or "p2" not in signed.columns:
+        return pl.DataFrame()
+    signed = signed.rename({"p1": "p1_points", "p2": "p2_points"})
+
+    wide = None
+    for side in ("p1", "p2"):
+        part = priced.filter(pl.col("side") == side).select(
             "match_uid", "abs_points",
-            pl.col("points").alias("p2_points"),
-            pl.col("odds").alias("p2_odds"),
+            pl.col("best_opening_odds").alias(f"{side}_open"),
+            pl.col("formed_odds").alias(f"{side}_formed"),
+            pl.col("best_closing_odds").alias(f"{side}_close"),
         )
+        wide = part if wide is None else wide.join(
+            part, on=["match_uid", "abs_points"], how="inner"
+        )
+    if wide is None or len(wide) == 0:
+        return pl.DataFrame()
+    return (
+        wide.join(signed, on=["match_uid", "abs_points"], how="inner")
+        .join(depth, on=["match_uid", "abs_points"], how="left")
     )
-    paired = p1.join(p2, on=["match_uid", "abs_points"], how="inner")
-    return paired.with_columns(pl.lit(book_code).alias("book"))
 
 
 # ---------------- distribution lookups ----------------
@@ -446,8 +546,12 @@ def _offered_context(joined: pl.DataFrame, line_col: str) -> dict:
     paired sides of one line.
     """
     axis = pl.col(line_col).abs()
+    books = (
+        pl.col("n_books").max() if "n_books" in joined.columns
+        else pl.col("book").n_unique()
+    )
     per_line = joined.group_by(["match_uid", axis.alias("_axis")]).agg(
-        pl.col("book").n_unique().alias("_n_books")
+        books.alias("_n_books")
     )
     medians = joined.group_by("match_uid").agg(
         axis.median().alias("_median"),
@@ -471,6 +575,82 @@ def _offered_context(joined: pl.DataFrame, line_col: str) -> dict:
         r["match_uid"]: (r["_median"], r["_n_lines"], r["_main"])
         for r in picked.iter_rows(named=True)
     }
+
+
+_PRICE_POINTS = ("open", "formed", "close")
+
+
+def _identity_cols(
+    r: dict, med: float | None, n_lines: int | None, main: float | None,
+    line: float, market: str,
+) -> dict:
+    """Match / market identity, in the p1/p2 convention used everywhere else.
+
+    p1 and p2 come from `event_map` (the book's ordering). They are NOT the
+    projector's a/b, which is just "lower player_id first" from
+    `_collapse_to_match_rows` — so this maps names across rather than renaming.
+    """
+    a_id = r.get("a_player_id")
+    p1_is_a = r.get("p1_id") == a_id
+    axis = abs(line) if market == "game_spread" else line
+    return {
+        "match_uid": r["match_uid"],
+        "date": r["effective_match_date"],
+        "p1_id": r.get("p1_id"),
+        "p2_id": r.get("p2_id"),
+        "p1_name": r["a_name"] if p1_is_a else r["b_name"],
+        "p2_name": r["b_name"] if p1_is_a else r["a_name"],
+        "tournament_id": r.get("tournament_id"),
+        "tournament": r["tournament_name"],
+        "circuit": r["circuit"],
+        "surface": r["surface"],
+        "round": r["round"],
+        "best_of": int(r["best_of"]),
+        "market": market,
+        "line": line,
+        "is_main_line": int(main is not None and axis == main),
+        "median_offered_line": med,
+        "n_lines_offered": n_lines,
+        "line_offset": None if med is None else axis - med,
+        "n_books": r.get("n_books"),
+    }
+
+
+def _price_cols(model_p: float, own: dict, other: dict, won: int) -> dict:
+    """Odds / implied / no-vig / edge / pnl at each price point, plus CLV.
+
+    Mirrors the classification backtest's open|formed|close triples so the two
+    CSVs read the same way. CLV is `closing_implied - entry_implied`: how much
+    the close beat the price you actually took. Reading closing prices alone —
+    what this backtest did before — measures a strategy nobody runs.
+    """
+    out: dict = {}
+    close_implied = None
+    for point in _PRICE_POINTS:
+        odds = own.get(point)
+        opp_odds = other.get(point)
+        implied = (1.0 / odds) if odds else None
+        novig = None
+        if odds and opp_odds:
+            overround = (1.0 / odds) + (1.0 / opp_odds)
+            novig = (1.0 / odds) / overround
+        if point == "close":
+            close_implied = implied
+        out[f"{point}_odds"] = odds
+        out[f"{point}_implied"] = implied
+        out[f"{point}_p_novig"] = novig
+        out[f"{point}_edge"] = None if implied is None else model_p - implied
+        out[f"{point}_edge_novig"] = None if novig is None else model_p - novig
+        out[f"pnl_{point}"] = (
+            None if odds is None else ((odds - 1.0) if won else -1.0)
+        )
+    for point in ("open", "formed"):
+        entry = out[f"{point}_implied"]
+        out[f"clv_{point}"] = (
+            None if (close_implied is None or entry is None)
+            else close_implied - entry
+        )
+    return out
 
 
 def _settle_totals(preds: pl.DataFrame, totals: pl.DataFrame, dist) -> pl.DataFrame:
@@ -501,57 +681,43 @@ def _settle_totals(preds: pl.DataFrame, totals: pl.DataFrame, dist) -> pl.DataFr
         p_over_model = float(_p_over_at(pmf[idx:idx+1], line)[0])
         p_under_model = 1.0 - p_over_model
 
-        # No-vig: strip the overround using both sides at the same book.
-        over_implied = 1.0 / r["over_odds"]
-        under_implied = 1.0 / r["under_odds"]
-        overround = over_implied + under_implied
-        over_p_novig = over_implied / overround
-        under_p_novig = under_implied / overround
-
         actual = r["actual_total"]
-        for side, model_p, odds, won, p_novig in [
-            ("over", p_over_model, r["over_odds"], int(actual > line), over_p_novig),
-            ("under", p_under_model, r["under_odds"], int(actual < line), under_p_novig),
+        med, n_lines, main = offered.get(r["match_uid"], (None, None, None))
+        ident = _identity_cols(r, med, n_lines, main, line, "total_games")
+
+        for side, model_p, won in [
+            ("over", p_over_model, int(actual > line)),
+            ("under", p_under_model, int(actual < line)),
         ]:
-            book_p = 1.0 / odds
-            edge = model_p - book_p
-            profit = (odds - 1.0) if won else -1.0
-            med, n_lines, main = offered.get(r["match_uid"], (None, None, None))
+            prices = _price_cols(
+                model_p,
+                own={k: r[f"{side}_{k}"] for k in ("open", "formed", "close")},
+                other={
+                    k: r[f"{'under' if side == 'over' else 'over'}_{k}"]
+                    for k in ("open", "formed", "close")
+                },
+                won=won,
+            )
             rows.append({
-                "match_uid": r["match_uid"],
-                "date": r["effective_match_date"],
-                "a_name": r["a_name"],
-                "b_name": r["b_name"],
-                "tournament": r["tournament_name"],
-                "circuit": r["circuit"],
-                "surface": r["surface"],
-                "round": r["round"],
-                "best_of": int(r["best_of"]),
-                "market": "total_games",
-                "line": line,
-                "is_main_line": int(main is not None and line == main),
-                "median_offered_line": med,
-                "n_lines_offered": n_lines,
-                "line_offset": None if med is None else line - med,
+                **ident,
                 "side": side,
                 "bet_type": side,  # "over" / "under"
-                "book": r["book"],
-                "odds": odds,
-                "book_p_implied": book_p,
-                "book_p_novig": p_novig,
                 "model_p": model_p,
-                "edge": edge,
-                "edge_novig": model_p - p_novig,
                 # Mean gate: does the chain's expected total land on the bet side?
                 "mean_covers": int(e_total > line) if side == "over"
                 else int(e_total < line),
+                "expected_total": e_total,
+                **prices,
                 "actual": actual,
                 "won": won,
-                "profit": profit,
             })
     if not rows:
         return pl.DataFrame()
-    return pl.DataFrame(rows)
+    # infer_schema_length=None scans every row. The price columns are sparse —
+    # `formed_*` is null on ~69% of lines (it needs two books quoting in one
+    # 15-min bucket) — so the default 100-row inference can type a column as
+    # Null from an all-null head and then fail on the first real price.
+    return pl.DataFrame(rows, infer_schema_length=None)
 
 
 def _settle_spreads(preds: pl.DataFrame, spreads: pl.DataFrame, dist) -> pl.DataFrame:
@@ -595,55 +761,37 @@ def _settle_spreads(preds: pl.DataFrame, spreads: pl.DataFrame, dist) -> pl.Data
             p1_won = int(-a_margin > -p1_points)
             p2_won = int(a_margin > -p2_points)
 
-        # No-vig: strip overround from the paired p1/p2 prices at this book.
-        p1_implied = 1.0 / r["p1_odds"]
-        p2_implied = 1.0 / r["p2_odds"]
-        overround = p1_implied + p2_implied
-        p1_p_novig = p1_implied / overround
-        p2_p_novig = p2_implied / overround
-
-        for side, model_p, odds, won, points, p_novig, e_side_margin in [
-            ("p1", p_p1_model, r["p1_odds"], p1_won, p1_points, p1_p_novig, e_p1_margin),
-            ("p2", p_p2_model, r["p2_odds"], p2_won, p2_points, p2_p_novig, e_p2_margin),
+        med, n_lines, main = offered.get(r["match_uid"], (None, None, None))
+        for side, model_p, won, points, e_side_margin in [
+            ("p1", p_p1_model, p1_won, p1_points, e_p1_margin),
+            ("p2", p_p2_model, p2_won, p2_points, e_p2_margin),
         ]:
-            book_p = 1.0 / odds
-            edge = model_p - book_p
-            profit = (odds - 1.0) if won else -1.0
-            med, n_lines, main = offered.get(r["match_uid"], (None, None, None))
+            other_side = "p2" if side == "p1" else "p1"
+            prices = _price_cols(
+                model_p,
+                own={k: r[f"{side}_{k}"] for k in _PRICE_POINTS},
+                other={k: r[f"{other_side}_{k}"] for k in _PRICE_POINTS},
+                won=won,
+            )
             rows.append({
-                "match_uid": r["match_uid"],
-                "date": r["effective_match_date"],
-                "a_name": r["a_name"],
-                "b_name": r["b_name"],
-                "tournament": r["tournament_name"],
-                "circuit": r["circuit"],
-                "surface": r["surface"],
-                "round": r["round"],
-                "best_of": int(r["best_of"]),
-                "market": "game_spread",
-                "line": points,
-                "is_main_line": int(main is not None and abs(points) == main),
-                "median_offered_line": med,
-                "n_lines_offered": n_lines,
-                "line_offset": None if med is None else abs(points) - med,
-                "side": side,  # "p1" or "p2" relative to the event_map ordering
+                **_identity_cols(r, med, n_lines, main, points, "game_spread"),
+                "side": side,  # "p1" / "p2" in the event_map ordering
                 "bet_type": "favorite" if points < 0 else ("underdog" if points > 0 else "pickem"),
-                "book": r["book"],
-                "odds": odds,
-                "book_p_implied": book_p,
-                "book_p_novig": p_novig,
                 "model_p": model_p,
-                "edge": edge,
-                "edge_novig": model_p - p_novig,
                 # Mean gate: does the chain's expected margin cover this line?
                 "mean_covers": int(e_side_margin > -points),
+                "expected_total": e_side_margin,
+                **prices,
                 "actual": a_margin if r["p1_id"] == a_id else -a_margin,
                 "won": won,
-                "profit": profit,
             })
     if not rows:
         return pl.DataFrame()
-    return pl.DataFrame(rows)
+    # infer_schema_length=None scans every row. The price columns are sparse —
+    # `formed_*` is null on ~69% of lines (it needs two books quoting in one
+    # 15-min bucket) — so the default 100-row inference can type a column as
+    # Null from an all-null head and then fail on the first real price.
+    return pl.DataFrame(rows, infer_schema_length=None)
 
 
 def run_backtest(
@@ -689,22 +837,25 @@ def run_backtest(
     preds = _build_predictions_frame(test_df, out)
     em = pl.read_parquet(get_data_root() / "odds" / "event_map.parquet")
 
-    totals_frames = []
-    spread_frames = []
+    # Collect every book's prematch series first, then price once across books —
+    # open/formed/close have to be read at instants that existed on the board,
+    # which per-book aggregation can't do.
+    totals_snaps = []
+    spread_snaps = []
     for book_code, stage_dir, event_id_col in _BOOKS:
-        t = _book_totals_pairs(book_code, stage_dir, event_id_col, em)
-        s = _book_spread_pairs(book_code, stage_dir, event_id_col, em)
+        t = _book_totals_snapshots(book_code, stage_dir, event_id_col, em)
+        s = _book_spread_snapshots(book_code, stage_dir, event_id_col, em)
         if len(t) > 0:
-            totals_frames.append(t)
+            totals_snaps.append(t)
         if len(s) > 0:
-            spread_frames.append(s)
-    totals = (
-        pl.concat(totals_frames, how="diagonal_relaxed")
-        if totals_frames else pl.DataFrame()
+            spread_snaps.append(s)
+    totals = _totals_prices(
+        pl.concat(totals_snaps, how="diagonal_relaxed")
+        if totals_snaps else pl.DataFrame()
     )
-    spreads = (
-        pl.concat(spread_frames, how="diagonal_relaxed")
-        if spread_frames else pl.DataFrame()
+    spreads = _spread_prices(
+        pl.concat(spread_snaps, how="diagonal_relaxed")
+        if spread_snaps else pl.DataFrame()
     )
 
     bets_totals = _settle_totals(preds, totals, out.distribution)
@@ -714,7 +865,9 @@ def run_backtest(
     if not parts:
         raise RuntimeError("Backtest produced no priced rows (no book coverage)")
     bets = pl.concat(parts, how="diagonal_relaxed").sort(
-        ["date", "match_uid", "market", "line", "side", "book"]
+        # No `book` key: a row is a line, priced best-across-books at each
+        # instant, not one row per book.
+        ["date", "match_uid", "market", "line", "side"]
     )
 
     out_path = output_path(config, config_path)
@@ -724,13 +877,14 @@ def run_backtest(
     # Headline numbers are over the positive-no-vig-edge subset, not the whole
     # ledger — the ledger now includes every offered line, most of which the
     # model would never bet.
-    gated = bets.filter(pl.col("edge_novig") > 0)
+    gated = bets.filter(pl.col("open_edge_novig") > 0)
     if len(gated):
         logger.info(
-            "Wrote %d priced rows -> %s (%d with no-vig edge>0: "
-            "hit_rate=%.3f, ROI=%.3f)",
+            "Wrote %d priced rows -> %s (%d with open no-vig edge>0: "
+            "hit_rate=%.3f, ROI=%.3f, avg CLV=%+.4f)",
             len(bets), out_path, len(gated),
-            float(gated["won"].mean()), float(gated["profit"].mean()),
+            float(gated["won"].mean()), float(gated["pnl_open"].mean()),
+            float(gated["clv_open"].drop_nulls().mean() or 0.0),
         )
     else:
         logger.info(
@@ -762,7 +916,14 @@ def _band_exprs(edge_col: str) -> tuple[pl.Expr, pl.Expr]:
 
 
 def _dedupe_best_price(raw: pl.DataFrame) -> pl.DataFrame:
-    """One row per (match × market × line × side): best price across books."""
+    """Passthrough — rows are already one per (match × market × line × side).
+
+    Best-across-books now happens at pricing time, at a single instant per price
+    point, rather than by maxing per-book rows after the fact. Kept so older
+    callers and CSVs still work.
+    """
+    if "odds" not in raw.columns:
+        return raw
     return (
         raw.sort("odds", descending=True)
         .group_by(["match_uid", "market", "line", "side"])
@@ -795,9 +956,15 @@ def _select_main_line(raw: pl.DataFrame) -> pl.DataFrame:
         raw.group_by(["match_uid", "market"])
         .agg(pl.col("_line_axis").median().alias("_median_line"))
     )
+    if "n_books" in raw.columns:
+        book_depth = pl.col("n_books").max()
+    elif "book" in raw.columns:
+        book_depth = pl.col("book").n_unique()
+    else:
+        book_depth = pl.lit(1)
     coverage = (
         raw.group_by(["match_uid", "market", "_line_axis"])
-        .agg(pl.col("book").n_unique().alias("_n_books"))
+        .agg(book_depth.alias("_n_books"))
     )
     pick = (
         coverage.join(medians, on=["match_uid", "market"])
@@ -816,26 +983,39 @@ def _select_main_line(raw: pl.DataFrame) -> pl.DataFrame:
     )
 
 
+def _pnl_col(edge_col: str) -> str:
+    """The pnl column for the price point an edge column belongs to."""
+    for point in _PRICE_POINTS:
+        if edge_col.startswith(f"{point}_"):
+            return f"pnl_{point}"
+    return "pnl_open"
+
+
 def _agg(df: pl.DataFrame, by: list[str], edge_col: str) -> pl.DataFrame:
+    pnl = _pnl_col(edge_col)
     return df.group_by(by).agg(
         pl.len().alias("n_bets"),
         pl.col(edge_col).mean().alias("avg_edge"),
         pl.col("won").mean().alias("hit_rate"),
-        pl.col("profit").mean().alias("ROI"),
-        pl.col("profit").sum().round(2).alias("pl_units"),
+        pl.col(pnl).mean().alias("ROI"),
+        pl.col(pnl).sum().round(2).alias("pl_units"),
+        pl.col("clv_open").mean().alias("avg_clv"),
+        (pl.col("clv_open") > 0).mean().alias("clv_pos_rate"),
     ).sort(by)
 
 
 def _agg_band(df: pl.DataFrame, by: list[str], edge_col: str) -> pl.DataFrame:
     label, order = _band_exprs(edge_col)
+    pnl = _pnl_col(edge_col)
     return (
         df.with_columns(label, order)
         .group_by(by + ["edge_band", "_band_order"]).agg(
             pl.len().alias("n_bets"),
             pl.col(edge_col).mean().alias("avg_edge"),
             pl.col("won").mean().alias("hit_rate"),
-            pl.col("profit").mean().alias("ROI"),
-            pl.col("profit").sum().round(2).alias("pl_units"),
+            pl.col(pnl).mean().alias("ROI"),
+            pl.col(pnl).sum().round(2).alias("pl_units"),
+            pl.col("clv_open").mean().alias("avg_clv"),
         )
         .sort(by + ["_band_order"])
         .drop("_band_order")
@@ -851,13 +1031,19 @@ def _print_view(label: str, df: pl.DataFrame, edge_col: str) -> None:
     """
     considered = len(df)
     df = df.filter(pl.col(edge_col) > 0)
-    print(f"\n=== {label} (edge = {edge_col}) ===")
+    pnl = _pnl_col(edge_col)
+    print(f"\n=== {label} (edge = {edge_col}, settled at {pnl}) ===")
     if len(df) == 0:
         print(f"Bets: 0 of {considered} rows considered")
         return
+    clv = df["clv_open"].drop_nulls() if "clv_open" in df.columns else None
+    clv_str = (
+        f"  |  CLV: {clv.mean():+.4f} ({(clv > 0).mean():.1%} positive)"
+        if clv is not None and clv.len() else ""
+    )
     print(f"Bets: {len(df)} of {considered} considered  |  "
           f"Hit rate: {df['won'].mean():.3f}  "
-          f"|  ROI: {df['profit'].mean():.4f}  |  P&L: {df['profit'].sum():+.2f}u")
+          f"|  ROI: {df[pnl].mean():.4f}  |  P&L: {df[pnl].sum():+.2f}u{clv_str}")
     with pl.Config(tbl_rows=-1, tbl_cols=-1):
         print("\nBy market:")
         print(_agg(df, ["market"], edge_col))
@@ -897,10 +1083,14 @@ def print_backtest_summary(csv_path: Path) -> None:
             f"Main-line: {len(sub_main)}"
         )
         print(f"{'#' * 70}")
-        _print_view(f"{tag} — MAIN LINE — NO-VIG", sub_main, "edge_novig")
-        _print_view(f"{tag} — MAIN LINE — RAW", sub_main, "edge")
-        _print_view(f"{tag} — ALL LINES — NO-VIG", sub_all, "edge_novig")
-        _print_view(f"{tag} — ALL LINES — RAW", sub_all, "edge")
+        # Open first: that's where entry actually happens. The close views are
+        # kept for contrast — a strategy that only looks good at the close is
+        # measuring a price it never got.
+        _print_view(f"{tag} — MAIN LINE — OPEN NO-VIG", sub_main, "open_edge_novig")
+        _print_view(f"{tag} — MAIN LINE — OPEN RAW", sub_main, "open_edge")
+        _print_view(f"{tag} — MAIN LINE — CLOSE NO-VIG", sub_main, "close_edge_novig")
+        _print_view(f"{tag} — ALL LINES — OPEN NO-VIG", sub_all, "open_edge_novig")
+        _print_view(f"{tag} — ALL LINES — OPEN RAW", sub_all, "open_edge")
 
         # Mean-gated: only bets whose expected total/margin lands on the bet side
         # (the chain's point estimate agrees with the side, not just a pmf tail).
@@ -909,5 +1099,5 @@ def print_backtest_summary(csv_path: Path) -> None:
             if len(mean_raw):
                 mean_all = _dedupe_best_price(mean_raw)
                 mean_main = _dedupe_best_price(_select_main_line(mean_raw))
-                _print_view(f"{tag} — MEAN-GATED MAIN LINE — NO-VIG", mean_main, "edge_novig")
-                _print_view(f"{tag} — MEAN-GATED ALL LINES — NO-VIG", mean_all, "edge_novig")
+                _print_view(f"{tag} — MEAN-GATED MAIN LINE — OPEN NO-VIG", mean_main, "open_edge_novig")
+                _print_view(f"{tag} — MEAN-GATED ALL LINES — OPEN NO-VIG", mean_all, "open_edge_novig")

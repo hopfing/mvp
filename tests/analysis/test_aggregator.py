@@ -270,6 +270,42 @@ class TestOpenCloseOdds:
         # from open (2.00, earliest lone) and close (1.85, last lone)
         assert a["formed_odds"][0] == pytest.approx(3.00)
 
+    def test_extra_keys_prices_each_line_separately(self):
+        """Line markets (totals/spreads) price one market per LINE. Without the
+        extra key every line of a match collapses into one open/close pair."""
+        from mvp.odds.aggregator import compute_open_close_odds
+
+        snaps = pl.DataFrame({
+            "match_uid": ["m9"] * 4,
+            "book": ["dk"] * 4,
+            "side": ["over", "over", "over", "over"],
+            "points": [21.5, 21.5, 24.5, 24.5],
+            "odds": [1.90, 1.80, 3.00, 3.20],
+            "fetched_at": [
+                datetime(2026, 3, 10, 8, 0, tzinfo=timezone.utc),
+                datetime(2026, 3, 10, 12, 0, tzinfo=timezone.utc),
+                datetime(2026, 3, 10, 8, 0, tzinfo=timezone.utc),
+                datetime(2026, 3, 10, 12, 0, tzinfo=timezone.utc),
+            ],
+            "event_status": ["NOT_STARTED"] * 4,
+        })
+        out = compute_open_close_odds(snaps, extra_keys=["points"])
+        assert len(out) == 2
+        main = out.filter(pl.col("points") == 21.5)
+        alt = out.filter(pl.col("points") == 24.5)
+        assert main["best_opening_odds"][0] == pytest.approx(1.90)
+        assert main["best_closing_odds"][0] == pytest.approx(1.80)
+        assert alt["best_opening_odds"][0] == pytest.approx(3.00)
+
+    def test_without_extra_keys_behaviour_is_unchanged(self):
+        """The moneyline path must be untouched by the new parameter."""
+        from mvp.odds.aggregator import compute_open_close_odds
+
+        snaps = _make_open_close_snapshots()
+        assert compute_open_close_odds(snaps).equals(
+            compute_open_close_odds(snaps, extra_keys=None)
+        )
+
     def test_formed_null_when_never_multibook(self):
         from mvp.odds.aggregator import compute_open_close_odds
 

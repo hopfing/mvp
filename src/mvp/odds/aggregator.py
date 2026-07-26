@@ -138,6 +138,7 @@ def compute_cross_book_odds(book_odds_list: list[pl.DataFrame]) -> pl.DataFrame:
 def compute_open_close_odds(
     snapshots: pl.DataFrame,
     min_books_formed: int = 2,
+    extra_keys: list[str] | None = None,
 ) -> pl.DataFrame:
     """Time-aligned best-across-book opening, formed, and closing odds.
 
@@ -159,11 +160,16 @@ def compute_open_close_odds(
         snapshots: Resolved snapshots (match_uid, book, player_id, odds,
             fetched_at, event_status).
         min_books_formed: Books required for the market to count as "formed".
+        extra_keys: Additional grouping columns. Line markets (totals, spreads)
+            price one market per LINE, so they pass ``["points"]`` — without it
+            every line of a match collapses into one open/close pair.
 
     Returns:
-        One row per (match_uid, player_id) with best_opening_odds/formed_odds/
-        best_closing_odds; an empty typed frame if there are no prematch snapshots.
+        One row per (match_uid, player_id, *extra_keys) with best_opening_odds/
+        formed_odds/best_closing_odds; an empty typed frame if there are no
+        prematch snapshots.
     """
+    extra_keys = list(extra_keys or [])
     if len(snapshots) == 0:
         return _empty_open_close()
     id_col = "player_id" if "player_id" in snapshots.columns else "side"
@@ -173,7 +179,7 @@ def compute_open_close_odds(
     if len(pm) == 0:
         return _empty_open_close()
 
-    key = ["match_uid", id_col]
+    key = ["match_uid", id_col, *extra_keys]
 
     # Bucket fetches to 15-min rounds; one price per (match, player, round, book)
     # = that book's last quote in the round. Then per round take the distinct-book

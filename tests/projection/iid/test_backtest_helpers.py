@@ -97,41 +97,71 @@ class TestSelectMainLine:
         assert len(_select_main_line(pl.DataFrame())) == 0
 
 
+def _view_rows(open_novig: list[float], open_raw: list[float]) -> pl.DataFrame:
+    n = len(open_novig)
+    return pl.DataFrame({
+        "market": ["total_games"] * n,
+        "bet_type": ["over"] * n,
+        "open_edge": open_raw,
+        "open_edge_novig": open_novig,
+        "close_edge_novig": open_novig,
+        "won": [1] + [0] * (n - 1),
+        "pnl_open": [0.9] + [-1.0] * (n - 1),
+        "pnl_close": [0.8] + [-1.0] * (n - 1),
+        "clv_open": [0.01] * n,
+    })
+
+
+class TestSparsePriceColumns:
+    """`formed` prices are null on most lines — two books must quote in the same
+    15-minute bucket. A schema inferred from an all-null head then fails on the
+    first real price further down."""
+
+    def test_frame_builds_when_early_rows_are_all_null(self):
+        rows = [
+            {"match_uid": f"m{i}", "formed_odds": None, "open_odds": 1.9}
+            for i in range(150)
+        ]
+        rows.append({"match_uid": "m999", "formed_odds": 1.81, "open_odds": 1.9})
+        with pytest.raises(Exception):
+            pl.DataFrame(rows)  # default infer_schema_length=100
+        out = pl.DataFrame(rows, infer_schema_length=None)
+        assert out["formed_odds"].drop_nulls().to_list() == [1.81]
+
+    def test_price_cols_emits_none_for_a_missing_point(self):
+        from mvp.projection.iid.backtest import _price_cols
+
+        cols = _price_cols(
+            0.55, own={"open": 2.0, "formed": None, "close": 1.9},
+            other={"open": 2.0, "formed": None, "close": 2.1}, won=1,
+        )
+        assert cols["formed_odds"] is None
+        assert cols["formed_edge"] is None
+        assert cols["pnl_formed"] is None
+        assert cols["clv_formed"] is None
+        assert cols["open_odds"] == 2.0
+        assert cols["clv_open"] == pytest.approx(1 / 1.9 - 1 / 2.0)
+
+
 class TestPrintViewGating:
     def test_gates_on_the_named_edge_column(self, capsys):
-        df = pl.DataFrame({
-            "market": ["total_games"] * 3,
-            "bet_type": ["over"] * 3,
-            "edge": [0.05, 0.05, 0.05],
-            "edge_novig": [0.02, -0.01, -0.03],
-            "won": [1, 0, 0],
-            "profit": [0.9, -1.0, -1.0],
-        })
-        _print_view("T", df, "edge_novig")
-        out = capsys.readouterr().out
-        assert "Bets: 1 of 3 considered" in out
+        _print_view("T", _view_rows([0.02, -0.01, -0.03], [0.05] * 3), "open_edge_novig")
+        assert "Bets: 1 of 3 considered" in capsys.readouterr().out
 
     def test_raw_and_novig_gates_select_different_sets(self, capsys):
-        df = pl.DataFrame({
-            "market": ["total_games"] * 3,
-            "bet_type": ["over"] * 3,
-            "edge": [0.05, 0.05, 0.05],
-            "edge_novig": [0.02, -0.01, -0.03],
-            "won": [1, 0, 0],
-            "profit": [0.9, -1.0, -1.0],
-        })
-        _print_view("T", df, "edge")
-        raw_out = capsys.readouterr().out
-        assert "Bets: 3 of 3 considered" in raw_out
+        """The old emission gated on raw edge, so the NO-VIG views were a
+        raw-edge bet set with a different label."""
+        _print_view("T", _view_rows([0.02, -0.01, -0.03], [0.05] * 3), "open_edge")
+        assert "Bets: 3 of 3 considered" in capsys.readouterr().out
 
     def test_reports_zero_without_dividing_by_zero(self, capsys):
-        df = pl.DataFrame({
-            "market": ["total_games"],
-            "bet_type": ["over"],
-            "edge": [0.05],
-            "edge_novig": [-0.02],
-            "won": [0],
-            "profit": [-1.0],
-        })
-        _print_view("T", df, "edge_novig")
+        _print_view("T", _view_rows([-0.02], [0.05]), "open_edge_novig")
         assert "Bets: 0 of 1 rows considered" in capsys.readouterr().out
+
+    def test_pnl_follows_the_price_point_of_the_edge_column(self, capsys):
+        """A close-edge view must settle at close prices, not open."""
+        from mvp.projection.iid.backtest import _pnl_col
+
+        assert _pnl_col("open_edge_novig") == "pnl_open"
+        assert _pnl_col("close_edge_novig") == "pnl_close"
+        assert _pnl_col("formed_edge") == "pnl_formed"
