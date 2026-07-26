@@ -47,6 +47,7 @@ def _make_run(
             "market": ["total_games"] * 3 + ["game_spread"],
             "line": [21.5, 24.5, 22.5, -3.5],
             "side": ["over", "over", "under", "p1"],
+            "bet_type": ["over", "over", "under", "favorite"],
             "is_main_line": [1, 0, 1, 1],
             "open_odds": [2.00, 3.50, 1.85, 1.95],
             "open_edge_novig": [0.03, 0.09, 0.02, 0.04],
@@ -132,49 +133,87 @@ class TestFormatting:
         assert "No evaluated IID projection configs found" in out
         assert "iid-sweep" in out
 
+    def test_one_table_per_instrument_and_market(self, eval_root):
+        """Cramming instruments into one row is what capped how much each could
+        show; pooling markets invited a comparison that makes no sense."""
+        _make_run(eval_root, "aaa111", with_backtest=True, with_clv=True, run_id="run_a")
+        out = "\n".join(format_rank_table())
+        for title in (
+            "Table 1: TOTAL GAMES — distributional",
+            "Table 2: GAME SPREAD — distributional",
+            "Table 3: TOTAL GAMES — betting",
+            "Table 4: GAME SPREAD — betting",
+            "Table 5: TOTAL GAMES — sharp CLV",
+        ):
+            assert title in out
+
     def test_sorted_by_crps_ascending(self, eval_root):
         _make_run(eval_root, "worse", crps=2.95, run_id="worse")
         _make_run(eval_root, "better", crps=2.85, run_id="better")
-        lines = format_rank_table()
-        body = [ln for ln in lines if ln.startswith(("better", "worse"))]
-        assert body[0].startswith("better")
+        body = [ln for ln in format_rank_table() if " better" in ln or " worse" in ln]
+        assert " better" in body[0]
+
+    def test_rows_are_ranked(self, eval_root):
+        _make_run(eval_root, "aaa111", crps=2.85, run_id="first")
+        _make_run(eval_root, "bbb222", crps=2.95, run_id="second")
+        body = [ln for ln in format_rank_table() if " first" in ln or " second" in ln]
+        assert body[0].strip().startswith("1 ")
+        assert body[1].strip().startswith("2 ")
 
     def test_top_n_limits_rows(self, eval_root):
         for i in range(4):
             _make_run(eval_root, f"fp{i}", crps=2.9 + i / 100, run_id=f"r{i}")
-        lines = format_rank_table(top_n=2)
-        # "run" is the header; count only the r0/r1/... data rows.
-        data_rows = [ln for ln in lines if ln[:2] in {"r0", "r1", "r2", "r3"}]
-        assert len(data_rows) == 2
+        out = "\n".join(format_rank_table(top_n=2))
+        assert "r0" in out and "r1" in out
+        assert "r2" not in out and "r3" not in out
 
-    def test_shows_all_three_instruments(self, eval_root):
-        _make_run(eval_root, "aaa111", with_backtest=True, with_clv=True, run_id="run_a")
+    def test_variant_tag_is_parenthesised(self, eval_root):
+        """Sweep trials share a config name; only the variant should differ."""
+        _make_run(eval_root, "aaa111", run_id="totals_cfg__d01_t8")
         out = "\n".join(format_rank_table())
-        for band in ("distributional", "soft-book", "sharp CLV"):
-            assert band in out
-        assert "CRPS" in out
+        assert "totals_cfg (d01_t8)" in out
 
-    def test_one_row_per_run_and_market(self, eval_root):
-        _make_run(eval_root, "aaa111", with_backtest=True, with_clv=True, run_id="run_a")
-        body = [ln for ln in format_rank_table() if ln.startswith("run_a")]
-        assert len(body) == 2
-        assert any(" totals " in ln for ln in body)
-        assert any(" spread " in ln for ln in body)
+    def test_plain_run_id_has_no_parens(self, eval_root):
+        _make_run(eval_root, "aaa111", run_id="totals_cfg")
+        out = "\n".join(format_rank_table())
+        assert "totals_cfg (" not in out
 
-    def test_clv_only_on_the_totals_row(self, eval_root):
-        """The oddspapi scorer prices total games; there is no spread equivalent,
-        so the spread row must not borrow the totals CLV."""
+    def test_run_appears_once_per_table(self, eval_root):
+        """4 market tables + the CLV table = 5 rows for one run."""
         _make_run(eval_root, "aaa111", with_backtest=True, with_clv=True, run_id="run_a")
-        body = [ln for ln in format_rank_table() if ln.startswith("run_a")]
-        totals_row = next(ln for ln in body if " totals " in ln)
-        spread_row = next(ln for ln in body if " spread " in ln)
-        assert "3800" in totals_row
-        assert "3800" not in spread_row
+        body = [ln for ln in format_rank_table() if ln.strip().startswith("1 run_a")]
+        assert len(body) == 5
+
+    def test_spread_table_omits_a_run_with_no_spread_bets(self, eval_root):
+        _make_run(eval_root, "aaa111", with_backtest=True, run_id="run_a")
+        lines = format_rank_table()
+        start = next(i for i, ln in enumerate(lines) if "Table 4" in ln)
+        end = next(i for i, ln in enumerate(lines) if "Table 5" in ln)
+        assert any("run_a" in ln for ln in lines[start:end])
+
+    def test_clv_table_excludes_spreads(self, eval_root):
+        """The oddspapi scorer prices total games; there is no spread equivalent."""
+        _make_run(eval_root, "aaa111", with_backtest=True, with_clv=True, run_id="run_a")
+        lines = format_rank_table()
+        start = next(i for i, ln in enumerate(lines) if "Table 3" in ln)
+        clv_block = "\n".join(lines[start:])
+        assert "3800" in clv_block
+        assert " spread " not in clv_block
+
+    def test_sides_are_columns_per_market(self, eval_root):
+        """A tuning change often floods one side rather than moving ROI, so the
+        split gets real columns rather than a crammed string."""
+        _make_run(eval_root, "aaa111", with_backtest=True, run_id="run_a")
+        lines = format_rank_table()
+        totals_band = next(ln for ln in lines if "over" in ln and "under" in ln)
+        spread_band = next(ln for ln in lines if "fav" in ln and "dog" in ln)
+        assert totals_band and spread_band
+        assert "over:" not in "\n".join(lines)   # not the old inline form
 
     def test_states_the_betting_gate(self, eval_root):
         _make_run(eval_root, "aaa111", with_backtest=True, run_id="run_a")
         out = "\n".join(format_rank_table())
-        assert "MAIN LINE, open no-vig edge>0" in out
+        assert "Main line, open entry, no-vig edge>0" in out
         assert "never pooled" in out
 
     def test_reports_what_is_missing(self, eval_root):
