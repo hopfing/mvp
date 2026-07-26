@@ -7,11 +7,17 @@ match-row collapse) plus IIDProjectionConfig parsing.
 """
 
 import textwrap
+from datetime import date
 
 import numpy as np
 import polars as pl
 import pytest
 
+from mvp.model.splitters import (
+    DateExpandingWindowSplitter,
+    DateSlidingWindowSplitter,
+    ExpandingWindowSplitter,
+)
 from mvp.projection.iid.config import IIDProjectionConfig
 from mvp.projection.iid.runner import IIDProjectionRunner
 
@@ -91,8 +97,16 @@ class TestIIDProjectionConfig:
 class TestRunnerHelpers:
     """Test the runner's helper methods on hand-crafted DataFrames."""
 
-    def _make_runner(self, tmp_path):
+    def _make_runner(self, tmp_path, validation: str | None = None):
         # Build a minimal config file so the runner can be instantiated.
+        validation = validation or textwrap.dedent(
+            """
+            validation:
+              type: expanding_window
+              initial_train_size: 100
+              step_size: 50
+            """
+        )
         config_path = tmp_path / "test.yaml"
         config_path.write_text(
             textwrap.dedent(
@@ -107,12 +121,9 @@ class TestRunnerHelpers:
                 serve_model:
                   type: identity
                   window: 90
-                validation:
-                  type: expanding_window
-                  initial_train_size: 100
-                  step_size: 50
                 """
             )
+            + validation
         )
         return IIDProjectionRunner(
             config_path=config_path,
@@ -183,6 +194,64 @@ class TestRunnerHelpers:
         assert len(collapsed) == 1
         # Lower player_id "A" should be the kept row
         assert collapsed["player_id"][0] == "A"
+
+    def test_make_splitter_forwards_calendar_month_params(self, tmp_path):
+        """A promoted serve-FS config inherits its match-grain validation block
+        verbatim, so date_expanding has to survive the trip into make_splitter."""
+        runner = self._make_runner(tmp_path, textwrap.dedent(
+            """
+            validation:
+              type: date_expanding
+              initial_train_months: 12
+              test_months: 6
+            """
+        ))
+        splitter = runner._make_splitter()
+        assert isinstance(splitter, DateExpandingWindowSplitter)
+        assert splitter.initial_train_months == 12
+        assert splitter.test_months == 6
+
+    def test_make_splitter_date_sliding(self, tmp_path):
+        runner = self._make_runner(tmp_path, textwrap.dedent(
+            """
+            validation:
+              type: date_sliding
+              train_months: 24
+              test_months: 3
+            """
+        ))
+        splitter = runner._make_splitter()
+        assert isinstance(splitter, DateSlidingWindowSplitter)
+        assert splitter.train_months == 24
+        assert splitter.test_months == 3
+
+    def test_make_splitter_count_based_modes_still_work(self, tmp_path):
+        splitter = self._make_runner(tmp_path)._make_splitter()
+        assert isinstance(splitter, ExpandingWindowSplitter)
+
+    def test_make_splitter_date_windows_over_the_match_frame(self, tmp_path):
+        """The date splitter reads effective_match_date off the collapsed frame."""
+        runner = self._make_runner(tmp_path, textwrap.dedent(
+            """
+            validation:
+              type: date_expanding
+              initial_train_months: 6
+              test_months: 3
+            """
+        ))
+        df = pl.DataFrame({
+            "match_uid": [f"m{i}" for i in range(24)],
+            "effective_match_date": [
+                date(2024, 1 + i // 2, 1 + (i % 2) * 10) for i in range(24)
+            ],
+        })
+        folds = list(runner._make_splitter().split(df))
+        assert len(folds) == 2
+        for train_idx, test_idx in folds:
+            assert train_idx and test_idx
+            assert max(df["effective_match_date"][i] for i in train_idx) < min(
+                df["effective_match_date"][i] for i in test_idx
+            )
 
     def test_collapse_picks_lower_id(self, tmp_path):
         runner = self._make_runner(tmp_path)

@@ -26,7 +26,7 @@ from mvp.model.config import apply_filters, get_filter_feature_specs
 from mvp.model.engine import check_memory, make_fs_engine
 from mvp.model.features._score_helpers import total_games_lost, total_games_won
 from mvp.model.mlflow_logger import ExperimentLogger
-from mvp.model.splitters import make_splitter
+from mvp.model.splitters import BaseSplitter, make_splitter
 from mvp.projection.iid.config import IIDProjectionConfig, ServeModelConfig
 from mvp.projection.iid.diagnostics import IIDProjectionDiagnostics
 from mvp.projection.iid.metrics import (
@@ -145,6 +145,29 @@ class IIDProjectionRunner:
         )
         return df
 
+    def _make_splitter(self) -> BaseSplitter:
+        """Build the fold splitter from `config.validation`.
+
+        Every validation mode's parameters are forwarded, including the
+        calendar-month ones (`date_expanding` / `date_sliding`) — a serve-FS
+        config promoted by `experiment ... --output` inherits its match-grain
+        validation block verbatim, so a date-based mode arrives here intact.
+        """
+        val = self.config.validation
+        return make_splitter(
+            val_type=val.type,
+            n_splits=val.n_splits,
+            min_train_size=val.min_train_size,
+            test_size=val.test_size,
+            initial_train_size=val.initial_train_size,
+            step_size=val.step_size,
+            train_size=val.train_size,
+            test_start=getattr(val, "test_start", None),
+            train_months=getattr(val, "train_months", None),
+            initial_train_months=getattr(val, "initial_train_months", None),
+            test_months=getattr(val, "test_months", None),
+        )
+
     def _collapse_to_match_rows(self, df: pl.DataFrame) -> pl.DataFrame:
         """Collapse mirrored player rows to one row per `match_uid`.
 
@@ -219,17 +242,7 @@ class IIDProjectionRunner:
         if n_total == 0:
             raise ValueError("No matches remain after filtering and target resolution")
 
-        val = self.config.validation
-        splitter = make_splitter(
-            val_type=val.type,
-            n_splits=val.n_splits,
-            min_train_size=val.min_train_size,
-            test_size=val.test_size,
-            initial_train_size=val.initial_train_size,
-            step_size=val.step_size,
-            train_size=val.train_size,
-            test_start=getattr(val, "test_start", None),
-        )
+        splitter = self._make_splitter()
         run_logger.info(
             "IID projection on %d matches (after collapse), serve_model=%s",
             n_total, self.config.serve_model.type,
