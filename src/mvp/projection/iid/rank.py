@@ -35,6 +35,18 @@ from mvp.projection.iid.artifacts import (
 logger = logging.getLogger(__name__)
 
 
+# Per market: (display label, CRPS metric, calibration metric, bias metric).
+# Each market gets the distributional metric that describes IT — a spread row
+# showing total-games CRPS would invite exactly the cross-market comparison this
+# split exists to prevent.
+MARKETS: dict[str, tuple[str, str, str, str]] = {
+    "total_games": ("totals", "iid_crps_total_games", "iid_total_cal",
+                    "signed_total_bias"),
+    "game_spread": ("spread", "iid_crps_spread", "iid_spread_cal",
+                    "signed_spread_bias"),
+}
+
+
 @dataclass
 class RankRow:
     fp: str
@@ -42,8 +54,8 @@ class RankRow:
     run_ids: list[str] = field(default_factory=list)
     metrics: dict[str, Any] = field(default_factory=dict)
     n_folds: int = 0
-    fold_spread: tuple[float, float] | None = None
-    betting: dict[str, Any] | None = None
+    fold_metrics: list = field(default_factory=list)
+    betting: dict[str, dict[str, Any]] | None = None
     clv: dict[str, Any] | None = None
 
     @property
@@ -61,7 +73,7 @@ def _fold_spread(fold_metrics: list, metric: str) -> tuple[float, float] | None:
     return min(vals), max(vals)
 
 
-def _betting_summary(fp_dir: Path) -> dict[str, Any] | None:
+def _betting_summary(fp_dir: Path) -> dict[str, dict[str, Any]] | None:
     """Headline bet-level numbers on the MAIN LINE, no-vig edge, best price.
 
     The backtest CSV is a broad ledger: `_settle_totals` emits a row for every
@@ -85,31 +97,39 @@ def _betting_summary(fp_dir: Path) -> dict[str, Any] | None:
     if not csv_path.exists():
         return None
     df = pl.read_csv(csv_path)
-    if len(df) == 0:
+    if len(df) == 0 or "open_edge_novig" not in df.columns:
         return None
-    best = (
-        df.sort("odds", descending=True)
-        .group_by(["match_uid", "market", "line", "side"])
-        .agg(pl.all().first())
-    )
-    if "edge_novig" in best.columns:
-        best = best.filter(pl.col("edge_novig") > 0)
-    # n_all = every line the model would bet; n_bets = those on the main line.
-    # The gap is how much of the claimed edge lives on alternate lines.
-    n_all = len(best)
-    bets = _select_main_line(best)
-    if len(bets) == 0:
-        return {"n_bets": 0, "n_all": n_all, "hit_rate": None,
-                "roi": None, "pl_units": 0.0, "avg_edge": None}
-    return {
-        "n_bets": len(bets),
-        "n_all": n_all,
-        "hit_rate": float(bets["won"].mean()),
-        "roi": float(bets["profit"].mean()),
-        "pl_units": float(bets["profit"].sum()),
-        "avg_edge": float(bets["edge_novig"].mean())
-        if "edge_novig" in bets.columns else None,
-    }
+    # Entry is at OPEN, so the gate and the pnl are both the open-price ones.
+    priced = df.filter(pl.col("open_edge_novig") > 0)
+
+    # Per market, never pooled: totals and spreads are priced off different
+    # projections (total_games_pmf vs spread_pmf) against different books, so a
+    # combined ROI or average edge describes no strategy anyone could run.
+    out: dict[str, dict[str, Any]] = {}
+    for market in priced["market"].unique().sort().to_list():
+        sub = priced.filter(pl.col("market") == market)
+        # n_all = every line of this market the model would bet; n_bets = those
+        # on the main line. The gap is how much edge lives on alternate lines.
+        n_all = len(sub)
+        bets = _select_main_line(sub)
+        if len(bets) == 0:
+            out[market] = {"n_bets": 0, "n_all": n_all, "hit_rate": None,
+                           "roi": None, "pl_units": 0.0, "avg_edge": None,
+                           "avg_clv": None, "clv_pos_rate": None}
+            continue
+        clv = bets["clv_open"].drop_nulls() if "clv_open" in bets.columns else None
+        out[market] = {
+            "n_bets": len(bets),
+            "n_all": n_all,
+            "hit_rate": float(bets["won"].mean()),
+            "roi": float(bets["pnl_open"].mean()),
+            "pl_units": float(bets["pnl_open"].sum()),
+            "avg_edge": float(bets["open_edge_novig"].mean()),
+            "avg_clv": float(clv.mean()) if clv is not None and clv.len() else None,
+            "clv_pos_rate": float((clv > 0).mean())
+            if clv is not None and clv.len() else None,
+        }
+    return out or None
 
 
 def collect_rows(source: str | None = None) -> list[RankRow]:
@@ -129,9 +149,7 @@ def collect_rows(source: str | None = None) -> list[RankRow]:
             run_ids=sorted({s[1] for s in sources if s[1] != "-"}),
             metrics=metrics,
             n_folds=proj.get("n_folds") or 0,
-            fold_spread=_fold_spread(
-                proj.get("fold_metrics"), "iid_crps_total_games",
-            ),
+            fold_metrics=proj.get("fold_metrics") or [],
             betting=_betting_summary(fp_dir),
             clv=read_clv_json(fp_dir),
         ))
@@ -177,10 +195,10 @@ def format_rank_table(
     if top_n:
         rows = rows[:top_n]
 
-    name_w = min(44, max([len("Run")] + [len(r.label) for r in rows]))
+    name_w = min(38, max([len("Run")] + [len(r.label) for r in rows]))
 
-    dist_sub = f"{'CRPS_tot':>8} {'fold±':>6} {'CRPS_spr':>8} {'cal%':>6} {'bias':>6} {'F':>2}"
-    bt_sub = f"{'N':>5} {'Hit%':>5} {'ROI%':>6} {'U':>7} {'edge%':>6}"
+    dist_sub = f"{'CRPS':>8} {'fold±':>6} {'cal%':>6} {'bias':>6} {'F':>2}"
+    bt_sub = f"{'N':>5} {'/all':>5} {'Hit%':>5} {'ROI%':>6} {'U':>7} {'edge%':>6}"
     clv_sub = f"{'N':>5} {'CLV+%':>6} {'avgCLV':>7}"
 
     lines = [
@@ -188,51 +206,61 @@ def format_rank_table(
         f"IID projection runs ({len(rows)}, sorted by {sort_metric})",
         "=" * 80,
         "Instruments measure different samples and are never combined into a score.",
-        "Betting = MAIN LINE, no-vig edge>0, best price across books. fold± = "
-        "max-min of the sort metric across folds.",
+        "One row per (run, market) — totals and spreads are priced off different",
+        "projections against different books and are never pooled. CRPS/cal/bias",
+        "are the market's own. Betting = MAIN LINE, open no-vig edge>0; /all is",
+        "the all-lines count before the main-line filter.",
     ]
 
     band = (
-        " " * name_w + "  "
+        " " * (name_w + 8) + "  "
         + "distributional".center(len(dist_sub))
         + " | " + "soft-book".center(len(bt_sub))
         + " | " + "sharp CLV".center(len(clv_sub))
     )
-    header = f"{'Run':<{name_w}}  {dist_sub} | {bt_sub} | {clv_sub}  {'fp':<12}"
+    header = (
+        f"{'Run':<{name_w}} {'Market':<7}  {dist_sub} | {bt_sub} | {clv_sub}  "
+        f"{'fp':<12}"
+    )
     lines.append(band)
     lines.append(header)
     lines.append("-" * len(header))
 
     for r in rows:
         m = r.metrics
-        spread = (
-            f"{r.fold_spread[1] - r.fold_spread[0]:.3f}" if r.fold_spread else "--"
-        )
-        dist = (
-            f"{_fmt(m.get('iid_crps_total_games')):>8} "
-            f"{spread:>6} "
-            f"{_fmt(m.get('iid_crps_spread')):>8} "
-            f"{_fmt(_pct(m.get('iid_total_cal')), '.2f'):>6} "
-            f"{_fmt(m.get('signed_total_bias'), '+.3f'):>6} "
-            f"{r.n_folds:>2}"
-        )
-        b = r.betting
-        bt = (
-            f"{b['n_bets']:>5} "
-            f"{_fmt(_pct(b['hit_rate']), '.1f'):>5} "
-            f"{_fmt(_pct(b['roi']), '+.2f'):>6} "
-            f"{_fmt(b['pl_units'], '+.1f'):>7} "
-            f"{_fmt(_pct(b.get('avg_edge')), '+.2f'):>6}"
-        ) if b else f"{'--':>5} {'--':>5} {'--':>6} {'--':>7} {'--':>6}"
-        c = r.clv
-        clv = (
-            f"{c.get('n', 0):>5} "
-            f"{_fmt(_pct(c.get('positive_rate')), '.1f'):>6} "
-            f"{_fmt(_pct(c.get('avg_clvpin')), '+.3f'):>7}"
-        ) if c else f"{'--':>5} {'--':>6} {'--':>7}"
-        lines.append(
-            f"{r.label[:name_w]:<{name_w}}  {dist} | {bt} | {clv}  {r.fp:<12}"
-        )
+        present = [k for k in MARKETS if (r.betting or {}).get(k)] or ["total_games"]
+        for market in present:
+            label, crps_key, cal_key, bias_key = MARKETS[market]
+            spread = _fold_spread(r.fold_metrics, crps_key)
+            spread_str = f"{spread[1] - spread[0]:.3f}" if spread else "--"
+            dist = (
+                f"{_fmt(m.get(crps_key)):>8} "
+                f"{spread_str:>6} "
+                f"{_fmt(_pct(m.get(cal_key)), '.2f'):>6} "
+                f"{_fmt(m.get(bias_key), '+.3f'):>6} "
+                f"{r.n_folds:>2}"
+            )
+            b = (r.betting or {}).get(market)
+            bt = (
+                f"{b['n_bets']:>5} "
+                f"{b['n_all']:>5} "
+                f"{_fmt(_pct(b['hit_rate']), '.1f'):>5} "
+                f"{_fmt(_pct(b['roi']), '+.2f'):>6} "
+                f"{_fmt(b['pl_units'], '+.1f'):>7} "
+                f"{_fmt(_pct(b.get('avg_edge')), '+.2f'):>6}"
+            ) if b else f"{'--':>5} {'--':>5} {'--':>5} {'--':>6} {'--':>7} {'--':>6}"
+            # CLV is scored on total games only — the oddspapi scorer prices that
+            # market; there is no spread equivalent yet.
+            c = r.clv if market == "total_games" else None
+            clv = (
+                f"{c.get('n', 0):>5} "
+                f"{_fmt(_pct(c.get('positive_rate')), '.1f'):>6} "
+                f"{_fmt(_pct(c.get('avg_clvpin')), '+.3f'):>7}"
+            ) if c else f"{'--':>5} {'--':>6} {'--':>7}"
+            lines.append(
+                f"{r.label[:name_w]:<{name_w}} {label:<7}  {dist} | {bt} | {clv}  "
+                f"{r.fp:<12}"
+            )
 
     missing_bt = sum(1 for r in rows if r.betting is None)
     missing_clv = sum(1 for r in rows if r.clv is None)
@@ -243,16 +271,6 @@ def format_rank_table(
             f"(from a bare `iid-project`; `iid-sweep` always writes one); "
             f"{missing_clv}/{len(rows)} have no CLV "
             f"(score the fingerprint dir with the oddspapi total-games scorer)."
-        )
-    dropped = [
-        (r.label, r.betting["n_all"], r.betting["n_bets"])
-        for r in rows if r.betting and r.betting.get("n_all")
-    ]
-    if dropped:
-        lines.append(
-            "Ledger vs bettable: "
-            + ", ".join(f"{lbl[:20]} {n_bet}/{n_all}" for lbl, n_all, n_bet in dropped[:4])
-            + " (main-line no-vig kept / all positive-raw-edge rows)"
         )
     return lines
 
