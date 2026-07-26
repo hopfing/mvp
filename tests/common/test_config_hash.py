@@ -192,6 +192,17 @@ def test_n_jobs_does_not_affect_fingerprint():
     assert fp_none == fp_10 == fp_22
 
 
+def test_classification_fingerprint_is_frozen():
+    """The classification canonical form must never change.
+
+    Every artifact under B:/model_evaluations/ is keyed by this hash; changing
+    the canonical form silently orphans all of them and forces a full recompute.
+    If this test fails, the change to _canonicalize_config was not additive.
+    """
+    cfg = _from_dict(_make_base_config_dict())
+    assert compute_fingerprint(cfg) == "e629c878c73e"
+
+
 def test_fingerprint_length():
     cfg = _from_dict(_make_base_config_dict())
     fp = compute_fingerprint(cfg)

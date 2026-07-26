@@ -36,6 +36,52 @@ SERVE_PROB_MAX: Final[float] = 0.90
 LEAGUE_MEAN_SERVE_PROB: Final[float] = 0.62
 
 
+def build_serve_model(cfg: Any, engine: Any = None) -> "ServeWinProbEstimator":
+    """Construct the serve estimator described by a `ServeModelConfig`.
+
+    Single implementation shared by the projection runner, the backtest and the
+    tuner. It previously existed as a private copy in each of runner.py and
+    backtest.py, and the copies drifted: only the backtest passed `gap_shrink`,
+    so a config with `gap_shrink != 1.0` was scored by a *different model*
+    depending on which entrypoint you ran. Any new config field has to reach
+    every caller at once, which means one builder.
+    """
+    if cfg.type == "identity":
+        return IdentityServeModel(
+            window=cfg.window, clip_min=cfg.clip_min, clip_max=cfg.clip_max,
+        )
+    if cfg.type == "matchup":
+        if not cfg.feature_columns:
+            raise ValueError(
+                "serve_model.feature_columns must be non-empty for type=matchup"
+            )
+        return MatchupServeModel(
+            feature_columns=cfg.feature_columns,
+            match_level_columns=cfg.match_level_columns,
+            regressor_type=cfg.regressor.type,
+            regressor_params=dict(cfg.regressor.params),
+            clip_min=cfg.clip_min,
+            clip_max=cfg.clip_max,
+        )
+    if cfg.type == "score_state":
+        if not cfg.match_level_features and not cfg.point_level_features:
+            raise ValueError(
+                "serve_model.match_level_features and/or point_level_features "
+                "must be non-empty for type=score_state"
+            )
+        return ScoreStateChainServeModel(
+            model_type=cfg.model_type,
+            match_level_features=cfg.match_level_features,
+            point_level_features=cfg.point_level_features,
+            params=dict(cfg.params),
+            engine=engine,
+            clip_min=cfg.clip_min,
+            clip_max=cfg.clip_max,
+            gap_shrink=cfg.gap_shrink,
+        )
+    raise ValueError(f"Unknown serve model type: {cfg.type}")
+
+
 def resolve_match_feature_cols(
     match_level_features: list[str],
 ) -> tuple[list[str], list[bool]]:

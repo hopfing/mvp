@@ -54,6 +54,10 @@ _MAXIMIZE_METRICS = (
 def _is_iid_config(raw: dict) -> bool:
     return isinstance(raw.get("serve_model"), dict)
 
+
+# Trailing forward folds held search-blind for selection (classification only).
+_DEFAULT_OUTER_FOLDS = 4
+
 DEFAULT_SEARCH_SPACES: dict[str, dict[str, dict[str, Any]]] = {
     "xgb_regressor": {
         "max_depth": {"type": "int", "low": 3, "high": 5},
@@ -330,13 +334,16 @@ class HyperparamTuner:
         cache_dir: Path | str | None = None,
         state_dir: Path | str | None = None,
         n_startup_trials: int | None = None,
-        outer_folds: int = 4,
+        outer_folds: int | None = None,
         seed: int | None = None,
     ) -> None:
         self.config_path = Path(config_path)
         self.matches_path = matches_path
         self.cache_dir = cache_dir
         self.n_startup_trials = n_startup_trials
+        outer_folds_explicit = outer_folds is not None
+        if outer_folds is None:
+            outer_folds = _DEFAULT_OUTER_FOLDS
         if outer_folds < 1:
             raise ValueError(f"outer_folds must be >= 1, got {outer_folds}")
         # Forward-aligned tuning: the objective is the metric over the inner
@@ -357,30 +364,50 @@ class HyperparamTuner:
 
         self.is_iid = _is_iid_config(self.base_config)
 
+        # `outer_folds` is never passed to IIDProjectionRunner — there is no
+        # search-blind block for IID, and the objective is the mean over ALL
+        # folds. Accepting the flag silently implied a holdout that doesn't
+        # exist, so say so instead of ignoring it.
+        if self.is_iid and outer_folds_explicit:
+            raise ValueError(
+                "--outer-folds is not supported for IID/projection tuning: there "
+                "is no search-blind outer block, the objective is the mean over "
+                "all validation folds. Drop the flag."
+            )
+
         # Fail fast, before any Optuna storage/study side effects, if the span
         # can't feed a trustworthy forward-aligned search.
         self._preflight_fold_check()
 
-        # Objective source. CLASSIFICATION: metrics.objective from the config —
-        # the single source shared with early stopping + the pruner; no --metric,
-        # no log_loss default, absent = hard error (never a silent fallback to an
-        # arbitrary metric). A multi-element list = multi-objective (Pareto).
-        # IID/projection keeps the `metrics=` (--metric) mechanism for now —
-        # regression regime, no metrics block in serve_model configs (issue #96).
-        if self.is_iid:
-            self.metrics = metrics or ["mae"]
-        else:
-            objective = (self.base_config.get("metrics") or {}).get("objective")
-            if not objective:
-                raise ValueError(
-                    f"tuning requires metrics.objective in {self.config_path} "
-                    "(the metric(s) to optimize); none is set"
-                )
-            self.metrics = objective
         if self.is_iid:
             self.model_type = self.base_config["serve_model"].get("model_type", "xgboost")
         else:
             self.model_type = self.base_config["model"]["type"]
+
+        # Objective source. CLASSIFICATION and IID: metrics.objective from the
+        # config — one source, no --metric, no default, absent = hard error
+        # (never a silent fallback to an arbitrary metric). A multi-element list
+        # = multi-objective (Pareto). Only the regression PROJECTION path still
+        # takes `metrics=` (--metric); it has no metrics.objective field.
+        #
+        # IID moved off the `--metric`-with-`mae`-default mechanism because the
+        # default silently optimized a point-estimate metric on configs whose
+        # features had been selected against a distributional one.
+        if self.model_type in _PROJECTION_MODEL_TYPES:
+            self.metrics = metrics or ["mae"]
+        else:
+            objective = (self.base_config.get("metrics") or {}).get("objective")
+            if not objective:
+                example = "iid_crps_total_games" if self.is_iid else "log_loss"
+                raise ValueError(
+                    f"tuning requires metrics.objective in {self.config_path} "
+                    f"(the metric(s) to optimize); none is set. Add e.g.:\n"
+                    f"  metrics:\n    objective: {example}"
+                )
+            # base_config is the RAW yaml dict, not the validated model, so a
+            # scalar `objective: log_loss` arrives as a string. Iterating that
+            # would build one study direction per CHARACTER.
+            self.metrics = [objective] if isinstance(objective, str) else list(objective)
 
         # Search frame. Probability-scale objectives search on the calibrated
         # out-of-fold metric (raw-frame HPs are not the calibrated optimum); the
@@ -656,9 +683,22 @@ class HyperparamTuner:
                     baseline[k] = "none"
             elif k in base_params:
                 baseline[k] = base_params[k]
-        # Only enqueue if we have values for all search space params
-        if len(baseline) == len(self.search_space):
-            self.study.enqueue_trial(baseline)
+        if not baseline:
+            return
+        # A partial baseline is still worth enqueueing: Optuna samples the keys
+        # the config doesn't pin, so trial 0 is "your config, with the rest
+        # explored" rather than a fully random draw. Requiring a value for every
+        # search-space key meant configs that set only the handful of params they
+        # care about — the normal case for a promoted FS config — silently never
+        # evaluated their own hyperparameters.
+        if len(baseline) < len(self.search_space):
+            missing = sorted(set(self.search_space) - set(baseline))
+            logger.info(
+                "Baseline trial: config sets %d/%d search-space params; the rest "
+                "are sampled (%s)",
+                len(baseline), len(self.search_space), ", ".join(missing),
+            )
+        self.study.enqueue_trial(baseline)
 
     def _objective_metric_value(self, result: dict, metric: str) -> float:
         """The objective value for `metric` in this study's search frame.
@@ -822,6 +862,10 @@ class HyperparamTuner:
                     cache_dir=self.cache_dir,
                     run_name=f"tune_{self.config_path.stem}",
                     log_to_mlflow=False,
+                    # Trials run against a temp config; persisting would leave a
+                    # junk fingerprint dir per trial holding nothing the study
+                    # doesn't already carry.
+                    persist=False,
                 )
             elif self.model_type in _PROJECTION_MODEL_TYPES:
                 from mvp.projection.runner import ProjectionRunner

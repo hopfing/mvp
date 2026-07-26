@@ -21,16 +21,21 @@ import numpy as np
 import polars as pl
 
 from mvp.common.base_job import get_data_root, get_local_data_root
+from mvp.projection.iid.artifacts import (
+    BACKTEST_CSV,
+    SERVE_MODEL_JOBLIB,
+    fp_dir_for,
+    record_run,
+    write_pmf_parquet,
+)
 from mvp.model.config import apply_filters, get_filter_feature_specs
 from mvp.model.engine import make_fs_engine
 from mvp.model.features._score_helpers import total_games_lost, total_games_won
-from mvp.projection.iid.config import IIDProjectionConfig, ServeModelConfig
+from mvp.projection.iid.config import IIDProjectionConfig
 from mvp.projection.iid.projector import ProjectionOutput, TennisProjector
 from mvp.projection.iid.serve_model import (
-    IdentityServeModel,
-    MatchupServeModel,
     ScoreStateChainServeModel,
-    ServeWinProbEstimator,
+    build_serve_model,
 )
 
 logger = logging.getLogger(__name__)
@@ -43,53 +48,19 @@ _BOOKS: list[tuple[str, str, str]] = [
     ("br", "betrivers", "br_event_id"),
 ]
 
-ARTIFACT_ROOT = Path("B:/projections/iid")
-BACKTEST_ROOT = ARTIFACT_ROOT / "backtests"
+def artifact_path(config: IIDProjectionConfig, config_path: Path) -> Path:
+    """Trained-projector cache, keyed by config CONTENT rather than filename stem.
+
+    Stem-keying collided: a sweep over N hyperparameter variants of one config
+    wrote every variant to the same `<stem>.joblib` / `<stem>.csv`, so each run
+    silently overwrote the last and the comparison was between one model and
+    itself.
+    """
+    return fp_dir_for(config, config_path) / SERVE_MODEL_JOBLIB
 
 
-def artifact_path(config_path: Path) -> Path:
-    return ARTIFACT_ROOT / f"{config_path.stem}.joblib"
-
-
-def output_path(config_path: Path) -> Path:
-    return BACKTEST_ROOT / f"{config_path.stem}.csv"
-
-
-def _build_serve_model(
-    cfg: ServeModelConfig, engine: Any = None,
-) -> ServeWinProbEstimator:
-    if cfg.type == "identity":
-        return IdentityServeModel(
-            window=cfg.window, clip_min=cfg.clip_min, clip_max=cfg.clip_max,
-        )
-    if cfg.type == "matchup":
-        if not cfg.feature_columns:
-            raise ValueError("serve_model.feature_columns required for type=matchup")
-        return MatchupServeModel(
-            feature_columns=cfg.feature_columns,
-            match_level_columns=cfg.match_level_columns,
-            regressor_type=cfg.regressor.type,
-            regressor_params=dict(cfg.regressor.params),
-            clip_min=cfg.clip_min,
-            clip_max=cfg.clip_max,
-        )
-    if cfg.type == "score_state":
-        if not cfg.match_level_features and not cfg.point_level_features:
-            raise ValueError(
-                "serve_model.match_level_features and/or point_level_features "
-                "required for type=score_state"
-            )
-        return ScoreStateChainServeModel(
-            model_type=cfg.model_type,
-            match_level_features=cfg.match_level_features,
-            point_level_features=cfg.point_level_features,
-            params=dict(cfg.params),
-            engine=engine,
-            clip_min=cfg.clip_min,
-            clip_max=cfg.clip_max,
-            gap_shrink=cfg.gap_shrink,
-        )
-    raise ValueError(f"Unknown serve model type: {cfg.type}")
+def output_path(config: IIDProjectionConfig, config_path: Path) -> Path:
+    return fp_dir_for(config, config_path) / BACKTEST_CSV
 
 
 _RUNNER_COLUMNS = [
@@ -177,16 +148,17 @@ def _train_projector(
     if len(train_df) == 0:
         raise ValueError("No training matches after filters")
     logger.info("Training projector on %d matches", len(train_df))
-    serve_model = _build_serve_model(config.serve_model, engine=engine)
+    serve_model = build_serve_model(config.serve_model, engine=engine)
     projector = TennisProjector(serve_model)
     projector.fit(train_df)
     return projector
 
 
 def _save_artifact(
-    projector: TennisProjector, config_path: Path, n_train: int,
+    projector: TennisProjector, config: IIDProjectionConfig, config_path: Path,
+    n_train: int,
 ) -> None:
-    path = artifact_path(config_path)
+    path = artifact_path(config, config_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     artifact = {
         "serve_model": projector.serve_model,
@@ -199,11 +171,28 @@ def _save_artifact(
     logger.info("Saved IID artifact to %s", path)
 
 
-def _load_artifact(config_path: Path) -> TennisProjector:
-    path = artifact_path(config_path)
+def _load_artifact(
+    config: IIDProjectionConfig, config_path: Path,
+) -> TennisProjector | None:
+    """Load the cached projector, or None if it doesn't match the current config.
+
+    The fingerprint already keys the dir by content, so a mismatch here should be
+    rare — but the artifact also stores the config text it was trained from, and
+    fields outside the fingerprint (or a hand-edited file) can still diverge.
+    Without the check, editing a config and re-running without `--retrain`
+    silently scores the OLD model.
+    """
+    path = artifact_path(config, config_path)
     if not path.exists():
-        raise FileNotFoundError(f"No IID artifact at {path}")
+        return None
     artifact = joblib.load(path)
+    current = Path(config_path).read_text(encoding="utf-8")
+    if artifact.get("config_yaml") != current:
+        logger.info(
+            "IID artifact at %s was trained from different config text — retraining",
+            path,
+        )
+        return None
     return TennisProjector(serve_model=artifact["serve_model"])
 
 
@@ -211,16 +200,28 @@ def _train_or_load(
     config: IIDProjectionConfig, config_path: Path, df: pl.DataFrame,
     *, retrain: bool, engine: Any = None,
 ) -> TennisProjector:
-    if retrain or not artifact_path(config_path).exists():
-        projector = _train_projector(config, df, engine=engine)
-        _save_artifact(projector, config_path, n_train=0)
-        return projector
-    logger.info("Loading existing IID artifact for %s", config_path.stem)
-    return _load_artifact(config_path)
+    if not retrain:
+        cached = _load_artifact(config, config_path)
+        if cached is not None:
+            logger.info("Loading existing IID artifact for %s", config_path.stem)
+            return cached
+    projector = _train_projector(config, df, engine=engine)
+    _save_artifact(projector, config, config_path, n_train=len(df))
+    return projector
 
 
-def _build_test_set(config: IIDProjectionConfig, df: pl.DataFrame) -> pl.DataFrame:
-    """Filter to settled 2026 matches with event_map coverage; collapse."""
+def _build_test_set(
+    config: IIDProjectionConfig,
+    df: pl.DataFrame,
+    *,
+    require_odds_coverage: bool = True,
+) -> pl.DataFrame:
+    """Filter to settled 2026 matches; collapse to one row per match.
+
+    `require_odds_coverage=False` skips the staged-book event_map join, giving
+    every settleable 2026 match — the universe the pmf dump wants, since oddspapi
+    prices matches the staged books don't carry.
+    """
     test = df
     if config.data.filters:
         test = apply_filters(test, config.data.filters)
@@ -229,10 +230,35 @@ def _build_test_set(config: IIDProjectionConfig, df: pl.DataFrame) -> pl.DataFra
     test = test.filter(pl.col("best_of").is_in([3, 5]))
     test = _collapse_to_match_rows(test)
 
+    if not require_odds_coverage:
+        return test
     em = pl.read_parquet(get_data_root() / "odds" / "event_map.parquet")
     covered = em.select("match_uid").unique()
     test = test.join(covered, on="match_uid", how="inner")
     return test
+
+
+def _pmf_frame(test_df: pl.DataFrame, out: ProjectionOutput) -> pl.DataFrame:
+    """Per-match total-games pmf — the probability source for CLV scoring.
+
+    Column set matches scripts/oddspapi/iid_project_dump.py so the oddspapi
+    scorer reads it unchanged; the difference is that this one is written per
+    fingerprint instead of to a single fixed path that every run overwrote.
+    """
+    pmf = out.distribution.total_games_pmf
+    return pl.DataFrame({
+        "match_uid": test_df["match_uid"],
+        "circuit": test_df["circuit"],
+        "surface": test_df["surface"],
+        "round": test_df["round"],
+        "best_of": test_df["best_of"].cast(pl.Int64),
+        "actual_total": (
+            test_df["_target_games_a"] + test_df["_target_games_b"]
+        ).cast(pl.Float64),
+        "p_match_win_a": out.distribution.p_match_win_a,
+        "expected_total_games": out.distribution.expected_total_games,
+        "total_games_pmf": [row.tolist() for row in pmf],
+    })
 
 
 def _project(projector: TennisProjector, test_df: pl.DataFrame) -> ProjectionOutput:
@@ -406,8 +432,57 @@ def _build_predictions_frame(
     })
 
 
+def _offered_context(joined: pl.DataFrame, line_col: str) -> dict:
+    """Per-match offered-line context: (median, n_distinct_lines, main_line).
+
+    Computed over EVERY offered line, before any edge gate, so the emitted rows
+    self-describe: `is_main_line` is a column you can filter in a spreadsheet
+    rather than a rule every reader has to re-derive. Deriving it downstream only
+    works when the rows are the complete offer set, which is exactly what the old
+    positive-edge-only emission broke.
+
+    Main line = offered line closest to the per-match median, ties broken by the
+    line carried at the most books. Magnitudes throughout, since +/- spreads are
+    paired sides of one line.
+    """
+    axis = pl.col(line_col).abs()
+    per_line = joined.group_by(["match_uid", axis.alias("_axis")]).agg(
+        pl.col("book").n_unique().alias("_n_books")
+    )
+    medians = joined.group_by("match_uid").agg(
+        axis.median().alias("_median"),
+        axis.n_unique().alias("_n_lines"),
+    )
+    picked = (
+        per_line.join(medians, on="match_uid")
+        .with_columns((pl.col("_axis") - pl.col("_median")).abs().alias("_dist"))
+        .sort(
+            ["match_uid", "_dist", "_n_books", "_axis"],
+            descending=[False, False, True, False],
+        )
+        .group_by("match_uid")
+        .agg(
+            pl.col("_axis").first().alias("_main"),
+            pl.col("_median").first(),
+            pl.col("_n_lines").first(),
+        )
+    )
+    return {
+        r["match_uid"]: (r["_median"], r["_n_lines"], r["_main"])
+        for r in picked.iter_rows(named=True)
+    }
+
+
 def _settle_totals(preds: pl.DataFrame, totals: pl.DataFrame, dist) -> pl.DataFrame:
-    """Build bet-level rows for totals across all books × lines, edge > 0 only."""
+    """Bet-level rows for totals across every book × line × side.
+
+    Emits EVERY offered line, including negative-edge rows. The CSV is the
+    market record, not one selection rule's output: gating at emission made the
+    offered-line universe unrecoverable downstream, so "main line" could only be
+    computed over the lines the model happened to like, and every summary view
+    silently inherited a raw-edge gate regardless of the edge column it named.
+    Filter at read time instead.
+    """
     if len(totals) == 0:
         return pl.DataFrame()
 
@@ -415,6 +490,7 @@ def _settle_totals(preds: pl.DataFrame, totals: pl.DataFrame, dist) -> pl.DataFr
     if len(joined) == 0:
         return pl.DataFrame()
 
+    offered = _offered_context(joined, "points")
     pmf = dist.total_games_pmf
     total_support = np.arange(pmf.shape[1], dtype=np.float64)
     rows = []
@@ -439,9 +515,8 @@ def _settle_totals(preds: pl.DataFrame, totals: pl.DataFrame, dist) -> pl.DataFr
         ]:
             book_p = 1.0 / odds
             edge = model_p - book_p
-            if edge <= 0:
-                continue
             profit = (odds - 1.0) if won else -1.0
+            med, n_lines, main = offered.get(r["match_uid"], (None, None, None))
             rows.append({
                 "match_uid": r["match_uid"],
                 "date": r["effective_match_date"],
@@ -454,6 +529,10 @@ def _settle_totals(preds: pl.DataFrame, totals: pl.DataFrame, dist) -> pl.DataFr
                 "best_of": int(r["best_of"]),
                 "market": "total_games",
                 "line": line,
+                "is_main_line": int(main is not None and line == main),
+                "median_offered_line": med,
+                "n_lines_offered": n_lines,
+                "line_offset": None if med is None else line - med,
                 "side": side,
                 "bet_type": side,  # "over" / "under"
                 "book": r["book"],
@@ -482,6 +561,7 @@ def _settle_spreads(preds: pl.DataFrame, spreads: pl.DataFrame, dist) -> pl.Data
     if len(joined) == 0:
         return pl.DataFrame()
 
+    offered = _offered_context(joined, "p1_points")
     pmf = dist.spread_pmf
     offset = dist.spread_offset
     margin_support = np.arange(pmf.shape[1], dtype=np.float64) - offset
@@ -528,9 +608,8 @@ def _settle_spreads(preds: pl.DataFrame, spreads: pl.DataFrame, dist) -> pl.Data
         ]:
             book_p = 1.0 / odds
             edge = model_p - book_p
-            if edge <= 0:
-                continue
             profit = (odds - 1.0) if won else -1.0
+            med, n_lines, main = offered.get(r["match_uid"], (None, None, None))
             rows.append({
                 "match_uid": r["match_uid"],
                 "date": r["effective_match_date"],
@@ -543,6 +622,10 @@ def _settle_spreads(preds: pl.DataFrame, spreads: pl.DataFrame, dist) -> pl.Data
                 "best_of": int(r["best_of"]),
                 "market": "game_spread",
                 "line": points,
+                "is_main_line": int(main is not None and abs(points) == main),
+                "median_offered_line": med,
+                "n_lines_offered": n_lines,
+                "line_offset": None if med is None else abs(points) - med,
                 "side": side,  # "p1" or "p2" relative to the event_map ordering
                 "bet_type": "favorite" if points < 0 else ("underdog" if points > 0 else "pickem"),
                 "book": r["book"],
@@ -563,24 +646,45 @@ def _settle_spreads(preds: pl.DataFrame, spreads: pl.DataFrame, dist) -> pl.Data
     return pl.DataFrame(rows)
 
 
-def run_backtest(config_path: Path | str, *, retrain: bool = False) -> Path:
-    """End-to-end backtest. Returns the output CSV path."""
+def run_backtest(
+    config_path: Path | str,
+    *,
+    retrain: bool = False,
+    source: str | None = None,
+    run_id: str | None = None,
+) -> Path:
+    """End-to-end backtest. Returns the output CSV path.
+
+    `source` / `run_id` group this run under a parent config in the fingerprint
+    dir's source.txt — a sweep passes its parent stem so `iid-rank` can show the
+    variants together.
+    """
     config_path = Path(config_path)
     if not config_path.exists():
         raise FileNotFoundError(f"Config not found: {config_path}")
 
     config = IIDProjectionConfig.from_file(str(config_path))
+    record_run(config, config_path, source=source, run_id=run_id)
     df, engine = _compute_features(config)
 
     projector = _train_or_load(
         config, config_path, df, retrain=retrain, engine=engine,
     )
 
-    test_df = _build_test_set(config, df)
+    # Project the FULL settleable 2026 set once, not just the staged-book-covered
+    # subset. Settlement inner-joins preds to book rows, so the wider projection
+    # yields an identical bet set — and it gives the pmf dump the universe it
+    # needs (oddspapi prices matches the staged books don't carry) for one chain
+    # pass instead of two.
+    test_df = _build_test_set(config, df, require_odds_coverage=False)
     if len(test_df) == 0:
-        raise RuntimeError("No 2026 settled matches with event_map coverage to backtest")
+        raise RuntimeError("No settled 2026 matches to backtest")
     logger.info("Projecting %d 2026 matches", len(test_df))
     out = _project(projector, test_df)
+
+    fp_dir = fp_dir_for(config, config_path)
+    pmf_path = write_pmf_parquet(fp_dir, _pmf_frame(test_df, out))
+    logger.info("Wrote per-match total-games pmf -> %s", pmf_path)
 
     preds = _build_predictions_frame(test_df, out)
     em = pl.read_parquet(get_data_root() / "odds" / "event_map.parquet")
@@ -608,21 +712,31 @@ def run_backtest(config_path: Path | str, *, retrain: bool = False) -> Path:
 
     parts = [b for b in (bets_totals, bets_spread) if len(b) > 0]
     if not parts:
-        raise RuntimeError("Backtest produced no positive-edge bets")
+        raise RuntimeError("Backtest produced no priced rows (no book coverage)")
     bets = pl.concat(parts, how="diagonal_relaxed").sort(
         ["date", "match_uid", "market", "line", "side", "book"]
     )
 
-    out_path = output_path(config_path)
+    out_path = output_path(config, config_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     bets.write_csv(out_path)
 
-    n_won = int(bets["won"].sum())
-    roi = float(bets["profit"].sum() / max(len(bets), 1))
-    logger.info(
-        "Wrote %d bet rows -> %s (hit_rate=%.3f, ROI=%.3f)",
-        len(bets), out_path, n_won / max(len(bets), 1), roi,
-    )
+    # Headline numbers are over the positive-no-vig-edge subset, not the whole
+    # ledger — the ledger now includes every offered line, most of which the
+    # model would never bet.
+    gated = bets.filter(pl.col("edge_novig") > 0)
+    if len(gated):
+        logger.info(
+            "Wrote %d priced rows -> %s (%d with no-vig edge>0: "
+            "hit_rate=%.3f, ROI=%.3f)",
+            len(bets), out_path, len(gated),
+            float(gated["won"].mean()), float(gated["profit"].mean()),
+        )
+    else:
+        logger.info(
+            "Wrote %d priced rows -> %s (none with no-vig edge>0)",
+            len(bets), out_path,
+        )
     return out_path
 
 
@@ -657,14 +771,20 @@ def _dedupe_best_price(raw: pl.DataFrame) -> pl.DataFrame:
 
 
 def _select_main_line(raw: pl.DataFrame) -> pl.DataFrame:
-    """Filter raw bet rows to only the main (median-offered) line per (match × market).
+    """Filter rows to the main line per (match × market).
 
-    Main line = the offered line value whose distance to the per-(match, market)
-    median is smallest, ties broken by the line offered at the most books.
-    Spreads use line magnitude (|line|) since +/- are paired sides of the same line.
+    Reads the `is_main_line` flag stamped at settle time over EVERY offered line.
+    Falls back to the median of the lines present, which is only correct when
+    those rows are the complete offer set — on a filtered frame it silently takes
+    the median of whatever survived. That fallback exists for CSVs written before
+    the flag; regenerate them and it stops being used.
+
+    Spreads use line magnitude (|line|) since +/- are paired sides of one line.
     """
     if len(raw) == 0:
         return raw
+    if "is_main_line" in raw.columns:
+        return raw.filter(pl.col("is_main_line") == 1)
     line_axis = (
         pl.when(pl.col("market") == "game_spread")
         .then(pl.col("line").abs())
@@ -723,8 +843,20 @@ def _agg_band(df: pl.DataFrame, by: list[str], edge_col: str) -> pl.DataFrame:
 
 
 def _print_view(label: str, df: pl.DataFrame, edge_col: str) -> None:
+    """Print one view. Gates on `edge_col` > 0 — the column the label names.
+
+    The CSV now carries every offered line including negative-edge rows, so the
+    gate is explicit here. Previously emission applied a RAW-edge gate and every
+    view inherited it, which made the NO-VIG views a raw-edge bet set relabelled.
+    """
+    considered = len(df)
+    df = df.filter(pl.col(edge_col) > 0)
     print(f"\n=== {label} (edge = {edge_col}) ===")
-    print(f"Bets: {len(df)}  |  Hit rate: {df['won'].mean():.3f}  "
+    if len(df) == 0:
+        print(f"Bets: 0 of {considered} rows considered")
+        return
+    print(f"Bets: {len(df)} of {considered} considered  |  "
+          f"Hit rate: {df['won'].mean():.3f}  "
           f"|  ROI: {df['profit'].mean():.4f}  |  P&L: {df['profit'].sum():+.2f}u")
     with pl.Config(tbl_rows=-1, tbl_cols=-1):
         print("\nBy market:")
@@ -741,7 +873,7 @@ def print_backtest_summary(csv_path: Path) -> None:
     raw = pl.read_csv(csv_path)
 
     print(f"\nBacktest output: {csv_path}")
-    print(f"Raw bet rows (all books): {len(raw)}")
+    print(f"Priced rows (every book x line x side, pre-gate): {len(raw)}")
 
     # Three sections: combined plus bo3 / bo5 broken out separately. Main lines
     # are recomputed per-filter so the median-line selection reflects only the

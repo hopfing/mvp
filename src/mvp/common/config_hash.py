@@ -1,8 +1,13 @@
-"""Content-hash fingerprint for ExperimentConfig.
+"""Content-hash fingerprints for ExperimentConfig and IIDProjectionConfig.
 
 Same (data, features, params, validation, sample_weight, calibration,
 metrics.objective) → same fingerprint → shared evaluation artifacts. Any
 training-affecting change produces a new fingerprint and a new artifact dir.
+
+IID projection configs get a parallel canonicalizer and their own artifact root
+(`projection_evaluations/` vs `model_evaluations/`) — see `iid_fingerprint_dir`.
+The classification canonical form is frozen: changing it re-keys every existing
+fingerprint dir, so IID support is strictly additive.
 
 Excluded from the hash: `description`, `metrics.primary` / `metrics.secondary`
 (descriptive / non-training-affecting). `name` and `selection_history` are
@@ -18,12 +23,16 @@ import hashlib
 import json
 import logging
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import yaml
 
 from mvp.common.base_job import get_data_root
 from mvp.model.config import ExperimentConfig
 from mvp.model.discovery.sweeps import build_feature_spec, parse_feature_spec
+
+if TYPE_CHECKING:
+    from mvp.projection.iid.config import IIDProjectionConfig
 
 logger = logging.getLogger(__name__)
 
@@ -191,8 +200,94 @@ def compute_fingerprint(
     return _hash_dict(canon)[:FINGERPRINT_LEN]
 
 
-def fingerprint_dir(fp: str) -> Path:
-    return get_data_root() / "model_evaluations" / fp
+def _canonicalize_iid_config(
+    config: "IIDProjectionConfig",
+    config_path: Path | None = None,
+) -> dict:
+    """Canonical dict for an IID projection config (`serve_model:` shape).
+
+    Parallel to `_canonicalize_config`, not an extension of it: the two schemas
+    share almost no fields, and the classification canonical form must stay
+    byte-identical or every existing fingerprint dir is orphaned.
+
+    `metrics` IS included, covering both its reporting fields (which metric
+    families and which total/spread lines get emitted, so two configs differing
+    only there produce different `projection.json`) and `objective`, the tune
+    target. Including the objective mirrors the classification canonical form's
+    `metrics_objective` — it doesn't change the trained model on either side once
+    early stopping is off, but the two families should key runs the same way.
+    """
+    del config_path  # signature parity with _canonicalize_config; unused today
+    dump = config.model_dump()
+
+    canon: dict = {"schema": "iid_projection"}
+
+    data = dump.get("data") or {}
+    canon["data"] = {
+        "date_range": data.get("date_range"),
+        "filters": _deep_sort(data.get("filters") or {}),
+        "train_filters": _deep_sort(data.get("train_filters") or {}),
+        "eval_filters": _deep_sort(data.get("eval_filters") or {}),
+    }
+
+    canon["features"] = _canonicalize_features(dump.get("features"))
+
+    sm = dump.get("serve_model") or {}
+    canon["serve_model"] = {
+        "type": sm.get("type"),
+        "model_type": sm.get("model_type"),
+        "window": sm.get("window"),
+        "clip_min": sm.get("clip_min"),
+        "clip_max": sm.get("clip_max"),
+        "gap_shrink": sm.get("gap_shrink"),
+        "feature_columns": sorted(
+            _normalize_feature_spec(s) for s in (sm.get("feature_columns") or [])
+        ),
+        "match_level_columns": sorted(
+            _normalize_feature_spec(s) for s in (sm.get("match_level_columns") or [])
+        ),
+        # Order is meaningful downstream (it fixes the model's column order), so
+        # these two are NOT sorted — a reordered feature list is a different model.
+        "match_level_features": [
+            _normalize_feature_spec(s) for s in (sm.get("match_level_features") or [])
+        ],
+        "point_level_features": list(sm.get("point_level_features") or []),
+        "params": _canonicalize_params(sm.get("params")),
+        "regressor": _deep_sort(sm.get("regressor")),
+    }
+
+    canon["validation"] = _deep_sort(dump.get("validation") or {})
+    canon["metrics"] = _deep_sort(dump.get("metrics") or {})
+
+    return canon
+
+
+def compute_iid_fingerprint(
+    config: "IIDProjectionConfig",
+    config_path: Path | None = None,
+) -> str:
+    """SHA-256 of the canonical IID config, truncated to 12 hex chars."""
+    return _hash_dict(_canonicalize_iid_config(config, config_path=config_path))[
+        :FINGERPRINT_LEN
+    ]
+
+
+# Projection evaluations live under their OWN root, deliberately.
+# `mvp.model.evaluation.wipe_stale_evaluations` clears everything in
+# model_evaluations/ older than the current ISO week, because classification
+# comparability is scoped to the weekly frozen-matches snapshot. IID projection
+# runs have no weekly-snapshot semantics and cost far more per run, so they must
+# not sit under that broom.
+MODEL_EVAL_ROOT = "model_evaluations"
+PROJECTION_EVAL_ROOT = "projection_evaluations"
+
+
+def fingerprint_dir(fp: str, root: str = MODEL_EVAL_ROOT) -> Path:
+    return get_data_root() / root / fp
+
+
+def iid_fingerprint_dir(fp: str) -> Path:
+    return fingerprint_dir(fp, root=PROJECTION_EVAL_ROOT)
 
 
 def write_config_snapshot(
@@ -206,10 +301,28 @@ def write_config_snapshot(
     indicate a fingerprint collision (or a bug in canonicalization). Use
     `os.replace` semantics for atomic write.
     """
-    fp_dir = fingerprint_dir(fp)
+    return _write_snapshot(
+        _canonicalize_config(config, config_path=config_path), fp, MODEL_EVAL_ROOT,
+    )
+
+
+def write_iid_config_snapshot(
+    config: "IIDProjectionConfig",
+    fp: str,
+    config_path: Path | None = None,
+) -> Path:
+    """`write_config_snapshot` for IID projection configs."""
+    return _write_snapshot(
+        _canonicalize_iid_config(config, config_path=config_path),
+        fp,
+        PROJECTION_EVAL_ROOT,
+    )
+
+
+def _write_snapshot(canon: dict, fp: str, root: str) -> Path:
+    fp_dir = fingerprint_dir(fp, root=root)
     fp_dir.mkdir(parents=True, exist_ok=True)
     snapshot_path = fp_dir / "config.yaml"
-    canon = _canonicalize_config(config, config_path=config_path)
     new_text = yaml.safe_dump(canon, sort_keys=True, default_flow_style=False)
     if snapshot_path.exists():
         existing = snapshot_path.read_text(encoding="utf-8")
@@ -232,6 +345,7 @@ def append_source(
     fp: str,
     source_name: str,
     run_id: str | None,
+    root: str = MODEL_EVAL_ROOT,
 ) -> Path:
     """Append `<source_name>\\t<run_id>\\t<isoformat_ts>` to source.txt.
 
@@ -241,7 +355,7 @@ def append_source(
     """
     import datetime as _dt
 
-    fp_dir = fingerprint_dir(fp)
+    fp_dir = fingerprint_dir(fp, root=root)
     fp_dir.mkdir(parents=True, exist_ok=True)
     source_path = fp_dir / "source.txt"
     run_id_clean = run_id or "-"

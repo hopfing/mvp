@@ -290,8 +290,8 @@ model:
   type: logistic
   params:
     C: 1.0
-    # Full logistic search space (C + l1_ratio) so the baseline is complete and
-    # is enqueued as trial 0. A partial config intentionally skips the baseline.
+    # Full logistic search space (C + l1_ratio), so trial 0 is the config's own
+    # params exactly. A partial config also enqueues, with the unset keys sampled.
     l1_ratio: 0.0
 metrics:
   objective:

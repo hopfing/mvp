@@ -27,7 +27,8 @@ from mvp.model.engine import check_memory, make_fs_engine
 from mvp.model.features._score_helpers import total_games_lost, total_games_won
 from mvp.model.mlflow_logger import ExperimentLogger
 from mvp.model.splitters import BaseSplitter, make_splitter
-from mvp.projection.iid.config import IIDProjectionConfig, ServeModelConfig
+from mvp.projection.iid.artifacts import record_run, write_projection_json
+from mvp.projection.iid.config import IIDProjectionConfig
 from mvp.projection.iid.diagnostics import IIDProjectionDiagnostics
 from mvp.projection.iid.metrics import (
     compute_hold_diagnostics,
@@ -38,53 +39,11 @@ from mvp.projection.iid.metrics import (
 )
 from mvp.projection.iid.projector import TennisProjector
 from mvp.projection.iid.serve_model import (
-    IdentityServeModel,
-    MatchupServeModel,
     ScoreStateChainServeModel,
-    ServeWinProbEstimator,
+    build_serve_model,
 )
 
 run_logger = logging.getLogger(__name__)
-
-
-def _build_serve_model(
-    cfg: ServeModelConfig, engine: Any = None,
-) -> ServeWinProbEstimator:
-    if cfg.type == "identity":
-        return IdentityServeModel(
-            window=cfg.window,
-            clip_min=cfg.clip_min,
-            clip_max=cfg.clip_max,
-        )
-    if cfg.type == "matchup":
-        if not cfg.feature_columns:
-            raise ValueError(
-                "serve_model.feature_columns must be non-empty for type=matchup"
-            )
-        return MatchupServeModel(
-            feature_columns=cfg.feature_columns,
-            match_level_columns=cfg.match_level_columns,
-            regressor_type=cfg.regressor.type,
-            regressor_params=dict(cfg.regressor.params),
-            clip_min=cfg.clip_min,
-            clip_max=cfg.clip_max,
-        )
-    if cfg.type == "score_state":
-        if not cfg.match_level_features and not cfg.point_level_features:
-            raise ValueError(
-                "serve_model.match_level_features and/or point_level_features "
-                "must be non-empty for type=score_state"
-            )
-        return ScoreStateChainServeModel(
-            model_type=cfg.model_type,
-            match_level_features=cfg.match_level_features,
-            point_level_features=cfg.point_level_features,
-            params=dict(cfg.params),
-            engine=engine,
-            clip_min=cfg.clip_min,
-            clip_max=cfg.clip_max,
-        )
-    raise ValueError(f"Unknown serve model type: {cfg.type}")
 
 
 class IIDProjectionRunner:
@@ -99,9 +58,21 @@ class IIDProjectionRunner:
         workflow: str = "iid_projection",
         run_name: str | None = None,
         log_to_mlflow: bool = True,
+        source: str | None = None,
+        persist: bool = True,
     ) -> None:
         self.config_path = Path(config_path)
         self.config = IIDProjectionConfig.from_file(str(config_path))
+        # Groups this run under a parent config in the fingerprint dir's
+        # source.txt — a sweep passes its parent stem so iid-rank can show the
+        # hyperparameter variants of one config together.
+        self.source = source
+        # Write evaluation artifacts to the fingerprint dir. The tuner sets this
+        # False: it runs this runner once per trial against a temp config, so
+        # persisting would leave one junk dir per trial — all labelled
+        # `tune_<stem>` with a `tmpXXXX` source — carrying nothing the study DB
+        # doesn't already hold (the tuner runs no backtest).
+        self.persist = persist
 
         self.matches_path = Path(matches_path) if matches_path else (
             get_data_root() / "aggregate" / "atptour" / "matches.parquet"
@@ -303,7 +274,7 @@ class IIDProjectionRunner:
                     fold_idx + 1, len(train_df), len(test_df),
                 )
 
-                serve_model = _build_serve_model(
+                serve_model = build_serve_model(
                     self.config.serve_model, engine=self.engine,
                 )
                 projector = TennisProjector(serve_model)
@@ -432,7 +403,7 @@ class IIDProjectionRunner:
             "IID projection run complete in %.1fs", time.perf_counter() - t_run,
         )
 
-        return {
+        result = {
             "metrics": avg_metrics,
             "fold_metrics": all_metrics,
             "n_folds": len(all_metrics),
@@ -441,3 +412,17 @@ class IIDProjectionRunner:
             "diagnostics": diagnostic_results,
             "_config": self.config,
         }
+
+        # Persist to the config's fingerprint dir so runs are comparable after
+        # the fact. Previously the only durable output was MLflow and everything
+        # else was stdout, so comparing two configs meant re-running both and
+        # reading the scrollback.
+        if self.persist:
+            fp_dir = record_run(
+                self.config, self.config_path,
+                source=self.source, run_id=self.run_name,
+            )
+            write_projection_json(fp_dir, result)
+            run_logger.info("Wrote projection metrics -> %s", fp_dir)
+
+        return result

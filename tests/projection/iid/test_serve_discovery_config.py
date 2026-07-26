@@ -105,6 +105,44 @@ class TestServeDiscoveryConfig:
         assert "player_pts_service_won_pct(days=90)" in loaded.features.include
         assert "opp_pts_service_won_pct(days=90)" in loaded.features.include
 
+    def test_promoted_config_carries_the_fs_objective(self):
+        """The promoted config must state what its features were selected against,
+        so `mvp tune` optimizes that by default instead of needing a flag."""
+        cfg = ServeDiscoveryConfig.from_yaml(dedent("""
+            data:
+              date_range:
+                start: 2022-01-01
+                end: 2025-12-31
+              filters: {}
+            metric: iid_crps_total_games
+            features:
+              candidate_point_level_features: []
+        """))
+        emitted = cfg.to_iid_projection_config_dict(
+            selected_match_level=["player_pts_service_won_pct(days=90)"],
+            selected_point_level=["is_break_point"],
+        )
+        assert emitted["metrics"]["objective"] == ["iid_crps_total_games"]
+        loaded = IIDProjectionConfig.model_validate(emitted)
+        assert loaded.metrics.objective == ["iid_crps_total_games"]
+
+    def test_promoted_objective_tracks_a_different_fs_metric(self):
+        cfg = ServeDiscoveryConfig.from_yaml(dedent("""
+            data:
+              date_range:
+                start: 2022-01-01
+                end: 2025-12-31
+              filters: {}
+            metric: iid_total_cal
+            features:
+              candidate_point_level_features: []
+        """))
+        emitted = cfg.to_iid_projection_config_dict(
+            selected_match_level=["player_pts_service_won_pct(days=90)"],
+            selected_point_level=[],
+        )
+        assert emitted["metrics"]["objective"] == ["iid_total_cal"]
+
     def test_point_validation_does_not_leak_into_emitted_projection_config(self):
         """`point_validation` is FS-side (point-grain, millions of rows). Only
         the match-grain `validation` block is inherited into the emitted IID

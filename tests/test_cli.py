@@ -72,6 +72,55 @@ class TestParseArgs:
         assert args.log_level == "DEBUG"
 
 
+class TestTuneMetricGate:
+    """--metric is for IID/projection configs; classification reads the config.
+
+    The gate consulted only `_is_projection_discovery`, which reads `model.type`.
+    An IID config has `serve_model:` and no `model:`, so it was misread as
+    classification and could never be tuned on anything but the `mae` default —
+    despite the flag's own help text advertising it as IID/projection-only.
+    """
+
+    def _write(self, tmp_path, name, body):
+        p = tmp_path / name
+        p.write_text(body, encoding="utf-8")
+        return p
+
+    def test_iid_config_is_recognized(self, tmp_path):
+        from mvp.cli import _is_iid_discovery, _is_projection_discovery
+
+        cfg = self._write(
+            tmp_path, "iid.yaml",
+            "serve_model:\n  type: score_state\n  model_type: xgboost\n",
+        )
+        assert _is_iid_discovery(cfg) is True
+        assert _is_projection_discovery(cfg) is False
+
+    def test_classification_config_is_not_iid(self, tmp_path):
+        from mvp.cli import _is_iid_discovery
+
+        cfg = self._write(
+            tmp_path, "clf.yaml", "model:\n  type: xgboost\n  params: {}\n",
+        )
+        assert _is_iid_discovery(cfg) is False
+
+    def test_outer_folds_defaults_to_none(self):
+        """So the tuner can tell "user asked for 4" from "user said nothing"."""
+        from mvp.cli import parse_args
+
+        args = parse_args(["tune", "some_config", "--limit", "5"])
+        assert args.outer_folds is None
+
+    def test_metric_flag_parses_multiple(self):
+        from mvp.cli import parse_args
+
+        args = parse_args([
+            "tune", "totals", "--limit", "5",
+            "--metric", "iid_crps_total_games", "iid_crps_spread",
+        ])
+        assert args.metric == ["iid_crps_total_games", "iid_crps_spread"]
+
+
 class TestCmdModel:
     def test_model_calls_runner(self, tmp_path: Path):
         from mvp.cli import main

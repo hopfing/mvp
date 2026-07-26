@@ -971,14 +971,15 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     tune_parser.add_argument(
-        "--outer-folds", type=int, default=4,
+        "--outer-folds", type=int, default=None,
         help=(
             "[bayesian, classification] Number of trailing forward folds held "
             "search-blind for selection (the honest outer block). The search runs "
             "on the remaining inner folds. Default 4 (one surface-rotation year). "
             "Leaving <5 inner folds warns (thin tune, proceeds); <2 refuses to "
             "start (the calibrated objective can't be computed). Lower this to free "
-            "inner folds on fold-poor configs."
+            "inner folds on fold-poor configs. Rejected for IID/projection configs, "
+            "which have no outer block."
         ),
     )
     tune_parser.add_argument(
@@ -1096,6 +1097,63 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
     iid_bt_parser.add_argument(
         "--retrain", action="store_true",
         help="Force retrain even if a saved artifact exists",
+    )
+
+    # iid-sweep subcommand - evaluate N tuning trials of an IID projection config
+    iid_sweep_parser = subparsers.add_parser(
+        "iid-sweep",
+        help="Evaluate N tuning trials of an IID projection config for comparison",
+    )
+    iid_sweep_parser.add_argument(
+        "configs", nargs="+",
+        help="Config name(s) or path(s), resolved under projections/. "
+             "Study name == config stem.",
+    )
+    iid_sweep_parser.add_argument(
+        "--n-trials", "--n_trials", "--top", dest="n_trials", type=int, required=True,
+        help="How many trials per study to select and evaluate",
+    )
+    iid_sweep_parser.add_argument(
+        "--select", choices=["diverse", "topn"], default="diverse",
+        help="diverse (default): maximin spread over the hyperparameter space, "
+             "metric-agnostic — the right sampler when the tune metric doesn't "
+             "separate trials, which on a plateau it usually doesn't. "
+             "topn: the leaderboard's own top N by --sort.",
+    )
+    iid_sweep_parser.add_argument(
+        "--sort", default=None,
+        help="Trial metric to rank by (required for --select topn). Bare metric "
+             "name, e.g. iid_crps_total_games — IID studies have no holdout block.",
+    )
+    iid_sweep_parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Select and write the configs, evaluate nothing",
+    )
+    iid_sweep_parser.add_argument(
+        "--refresh", action="store_true",
+        help="Re-evaluate trials that already have artifacts (default: skip them)",
+    )
+    iid_sweep_parser.add_argument(
+        "--memory-limit", type=int, default=None,
+        help="Override memory limit %% (0 to disable, default 75)",
+    )
+
+    # iid-rank subcommand - compare evaluated IID projection configs
+    iid_rank_parser = subparsers.add_parser(
+        "iid-rank",
+        help="Compare evaluated IID projection configs across all instruments",
+    )
+    iid_rank_parser.add_argument(
+        "--sort", default="iid_crps_total_games",
+        help="Metric to order by (default: iid_crps_total_games)",
+    )
+    iid_rank_parser.add_argument(
+        "--source", default=None,
+        help="Only show runs recorded under this parent config stem",
+    )
+    iid_rank_parser.add_argument(
+        "--top", type=int, default=None,
+        help="Show only the first N rows",
     )
 
     # backtest subcommand - simulate a lead model's bets on a window with odds data
@@ -1319,15 +1377,16 @@ def cmd_tune(args: argparse.Namespace) -> int:
     if args.limit is None and args.cap is None:
         raise ValueError("--limit or --cap is required")
 
-    # Classification: the objective is metrics.objective in the config (one
-    # source shared by tuning, early stopping, and the pruner). Reject --metric
-    # here so it can't silently diverge from the config. IID/projection
-    # legitimately still uses --metric (issue #96).
+    # Classification and IID both take their objective from metrics.objective in
+    # the config — one source, so the tuned objective can't diverge from the
+    # config that drives the run and is recorded in the fingerprint. Only the
+    # regression projection path still takes --metric; it has no such field.
     if not _is_projection_discovery(config_path) and args.metric is not None:
+        family = "IID" if _is_iid_discovery(config_path) else "classification"
         raise ValueError(
-            "--metric is not accepted for classification tuning; set "
-            "metrics.objective in the config instead (it drives tuning, early "
-            f"stopping, and the pruner together). Got --metric {args.metric}."
+            f"--metric is not accepted for {family} tuning; set "
+            "metrics.objective in the config instead. "
+            f"Got --metric {args.metric}."
         )
 
     tuner = HyperparamTuner(
@@ -2872,6 +2931,55 @@ def cmd_iid_backtest(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_iid_sweep(args: argparse.Namespace) -> int:
+    """Evaluate N tuning trials of an IID projection config for comparison."""
+    from mvp.projection.iid.sweep import run_sweep
+
+    if args.select == "topn" and not args.sort:
+        raise ValueError("--select topn requires --sort METRIC")
+
+    if args.memory_limit is not None:
+        from mvp.model import engine as _engine
+
+        _engine._MEMORY_LIMIT_PCT = args.memory_limit
+        print(
+            f"Memory limit override: {args.memory_limit}%"
+            f"{' (guard disabled)' if args.memory_limit <= 0 else ''}"
+        )
+
+    result = run_sweep(
+        args.configs,
+        args.n_trials,
+        select=args.select,
+        sort=args.sort,
+        dry_run=args.dry_run,
+        refresh=args.refresh,
+    )
+    if args.dry_run:
+        return 0
+
+    n_ok = len(result.entries) - len(result.failures) - len(result.skipped)
+    print(
+        f"\nEvaluated {n_ok}, skipped {len(result.skipped)}, "
+        f"failed {len(result.failures)} of {len(result.entries)}"
+    )
+    for stem, err in result.failures:
+        print(f"  FAILED {stem}: {err}")
+    print("\nCompare with: poetry run py -m mvp iid-rank")
+    return 1 if result.failures else 0
+
+
+def cmd_iid_rank(args: argparse.Namespace) -> int:
+    """Compare evaluated IID projection configs across all instruments."""
+    from mvp.projection.iid.rank import format_rank_table
+
+    lines = format_rank_table(
+        sort_metric=args.sort, source=args.source, top_n=args.top,
+    )
+    print("\n".join(lines))
+    return 0
+
+
 def cmd_model_report(args: argparse.Namespace) -> int:
     """Single-model end-to-end report across diagnostics, confidence, and backtest."""
     from mvp.model.report import run_report
@@ -3672,6 +3780,10 @@ def main(args: list[str] | None = None) -> int:
         return cmd_iid_project(parsed)
     elif parsed.command == "iid-backtest":
         return cmd_iid_backtest(parsed)
+    elif parsed.command == "iid-sweep":
+        return cmd_iid_sweep(parsed)
+    elif parsed.command == "iid-rank":
+        return cmd_iid_rank(parsed)
     elif parsed.command == "backtest":
         return cmd_backtest(parsed)
     elif parsed.command == "model-errors":

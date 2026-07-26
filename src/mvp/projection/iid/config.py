@@ -40,13 +40,42 @@ class ServeModelConfig(BaseModel):
     params: dict[str, Any] = {}
 
 
+def _as_metric_list(v: Any) -> Any:
+    """Accept a bare metric name as shorthand for a one-element objective list."""
+    return [v] if isinstance(v, str) else v
+
+
 class IIDMetricsConfig(BaseModel):
-    """Metric reporting configuration for the IID projector."""
+    """Metric configuration for the IID projector.
+
+    `total_lines` / `spread_lines` / the include flags are REPORTING: they select
+    which metrics get computed. `objective` is the optimization target for
+    `mvp tune`, mirroring the classification `metrics.objective` — declared in the
+    config rather than passed per-invocation so the tuned objective can't diverge
+    from the config that drives the run, and so it's recorded in the fingerprint.
+    """
 
     include_classification: bool = True
     include_regression: bool = True
     total_lines: list[float] = [18.5, 19.5, 20.5, 21.5, 22.5, 23.5, 24.5, 25.5]
     spread_lines: list[float] = [-5.5, -4.5, -3.5, -2.5, -1.5, 1.5, 2.5, 3.5, 4.5, 5.5]
+    # No default: an unset objective is a hard error at tune time, never a silent
+    # fallback (the previous `mae` default optimized a point-estimate metric while
+    # the feature set had been selected on a distributional one). A multi-element
+    # list = multi-objective (Pareto) tuning.
+    objective: Annotated[list[MetricName] | None, BeforeValidator(_as_metric_list)] = None
+
+    @model_validator(mode="after")
+    def _validate_objective(self) -> "IIDMetricsConfig":
+        if self.objective is None:
+            return self
+        if not self.objective:
+            raise ValueError("metrics.objective must be non-empty when set")
+        if len(self.objective) != len(set(self.objective)):
+            raise ValueError(
+                f"metrics.objective has duplicate metrics: {self.objective}"
+            )
+        return self
 
 
 class IIDProjectionConfig(BaseModel):
@@ -228,6 +257,10 @@ class ServeDiscoveryConfig(BaseModel):
             ),
             "data": self.data.model_dump(),
             "features": {"include": include_specs},
+            # Carry the FS objective forward as the tune objective. Without it the
+            # promoted config states nothing about what its features were selected
+            # against, and `mvp tune` would have to be told per invocation.
+            "metrics": {"objective": [self.metric]},
             "serve_model": {
                 "type": "score_state",
                 "model_type": model_type,

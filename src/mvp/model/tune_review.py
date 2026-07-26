@@ -57,6 +57,19 @@ def _to_ranked(metric: str, use_cal: bool) -> str:
     return f"holdout_{metric}"
 
 
+def _fold_spread_from(ua: dict, fold_key: str, metric: str) -> str:
+    """Min..max of `metric` across the per-fold dicts stored under `fold_key`."""
+    folds = ua.get(fold_key)
+    if not folds:
+        return ""
+    vals = [
+        f[metric] for f in folds if isinstance(f, dict) and f.get(metric) is not None
+    ]
+    if len(vals) < 2:
+        return ""
+    return f"[{min(vals):.4f}..{max(vals):.4f}] over {len(vals)} folds"
+
+
 def _fold_spread(ua: dict, metric: str, use_cal: bool) -> str:
     """Min..max dispersion of ``metric`` across the K outer-block folds, or ""
     if fewer than two folds carry it. Uses the calibrated per-fold metrics when
@@ -181,13 +194,20 @@ def format_leaderboard(
     # rank on — Optuna optimizes in-fold per trial, but ranking across trials
     # uses the holdout measurement (calibrated for classification when
     # available, raw otherwise).
+    # IID studies have NO holdout block — the tuner never passes outer_folds to
+    # IIDProjectionRunner, so every trial carries bare in-fold metrics only.
+    # Holdout-prefixing their sort keys made every IID leaderboard fall through
+    # to the "no holdout metrics" bail-out below, i.e. `tune-review` could never
+    # render one and the IID column block was unreachable.
     if sort_by is None:
         if is_iid:
-            sort_by = [_to_ranked("iid_crps_total_games", use_cal)]
+            sort_by = ["iid_crps_total_games"]
         elif is_projection:
             sort_by = [_to_ranked("mae", use_cal)]
         else:
             sort_by = [_to_ranked("log_loss", use_cal)]
+    elif is_iid:
+        sort_by = list(sort_by)
     else:
         sort_by = [_to_ranked(m, use_cal) for m in sort_by]
 
@@ -291,6 +311,12 @@ def format_leaderboard(
                 f"  CRPS_spread={crps_spread:.4f}"
                 f"  MAE={mae:.4f}  LL={ll:.4f}  ({duration:.0f}s · {trial_id})"
             )
+            # The per-fold breakdown is persisted per trial but was never shown.
+            # On a flat plateau the fold spread is often wider than the gap
+            # between adjacent trials, which is the thing worth seeing.
+            spread = _fold_spread_from(ua, "fold_metrics", sort_by[0])
+            if spread:
+                lines.append(f"      {sort_by[0]} per fold: {spread}")
             shown = {"iid_crps_total_games", "iid_crps_spread", "mae", "log_loss"}
         elif is_projection:
             mae = ua.get("mae", float("nan"))
