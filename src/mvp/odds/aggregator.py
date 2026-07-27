@@ -203,7 +203,11 @@ def compute_open_close_odds(
     formed = (rounds.filter(pl.col("_n") >= min_books_formed)
               .group_by(key, maintain_order=True)
               .agg(pl.col("_best").first().alias("formed_odds")))
-    out = out.join(formed, on=key, how="left")
+    # nulls_equal: `points` is null on non-line markets (moneyline), and polars
+    # joins do not match null keys, so without this every such row would come back
+    # with a null formed_odds. group_by above already groups nulls together, so the
+    # two halves would disagree.
+    out = out.join(formed, on=key, how="left", nulls_equal=True)
     if id_col != "player_id":
         out = out.rename({id_col: "player_id"})
     return out
