@@ -48,6 +48,8 @@ class MappingResult:
     # event's. Kept apart from no_match_found: "the pair has no match near this
     # date" is a different diagnosis from "we don't know these players".
     date_rejected: list[tuple[str, str, str, str, int]] = field(default_factory=list)
+    # The pair has matches, but none in the tournament the event belongs to.
+    tournament_rejected: list[tuple[str, str, str]] = field(default_factory=list)
 
 
 def build_player_lookup(
@@ -470,6 +472,29 @@ def map_book_events(
             year_filtered = [c for c in candidates if c["year"] == odds_year]
             if year_filtered:
                 candidates = year_filtered
+
+        # Tournament identity, where the caller resolved it. This is the constraint
+        # the date was standing in for: `_match_tournament` below compares strings,
+        # and for oddspapi ZERO of 184 tournament names match one of ours, so it
+        # no-ops and leaves every meeting of the pair in play. A caller that can map
+        # its own tournament text to our ids passes them here instead.
+        #
+        # A set rather than one id, because a city can host two same-circuit events
+        # that neither side numbers consistently. Narrowing to that city's events
+        # still leaves the date choosing between two candidates rather than all.
+        #
+        # No-op for callers that don't supply the column — the live scrapers don't.
+        tournament_ids = rows[0].get("tournament_ids")
+        if tournament_ids:
+            wanted = {str(t) for t in tournament_ids}
+            in_tournament = [
+                c for c in candidates if str(c.get("tournament_id")) in wanted
+            ]
+            if not in_tournament:
+                result.tournament_rejected.append((eid, name_a, name_b))
+                skipped_no_match += 1
+                continue
+            candidates = in_tournament
 
         # Round gate: if the book's tournament text surfaces a round class
         # (main draw vs qualifier), drop catalog candidates whose round class

@@ -241,6 +241,89 @@ class TestMatchByDate:
         assert got["match_uid"] == "dated"
 
 
+class TestTournamentConstraint:
+    """Tournament identity, where the caller can resolve it.
+
+    `_match_tournament` compares strings, and for oddspapi zero of 184 tournament
+    names match one of ours, so it no-ops and leaves every meeting of the pair in
+    play. A caller that maps its own tournament text to our ids passes them instead.
+    """
+
+    def _odds(self, tournament_ids, when=datetime(2026, 5, 8, 12, 0)):
+        return pl.DataFrame({
+            "oap_event_id": ["e1", "e1"],
+            "player_name": ["Roger Federer", "Rafael Nadal"],
+            "tournament": ["ATP Madrid, Spain Men Singles"] * 2,
+            "fetched_at": [when, when],
+            "tournament_ids": [tournament_ids, tournament_ids],
+        })
+
+    def _lookup(self):
+        return {"roger federer": "A001", "rafael nadal": "B002"}
+
+    def _catalog(self):
+        """The same pair met twice in 2026, at different tournaments."""
+        return {
+            frozenset({"A001", "B002"}): [
+                {"match_uid": "madrid", "tournament_id": "1536", "year": 2026,
+                 "tournament_name": "Madrid 1", "p1_id": "A001",
+                 "effective_match_date": date(2026, 5, 8)},
+                {"match_uid": "rome", "tournament_id": "416", "year": 2026,
+                 "tournament_name": "Rome 2", "p1_id": "A001",
+                 "effective_match_date": date(2026, 5, 15)},
+            ],
+        }
+
+    def test_pins_the_meeting_at_that_tournament(self):
+        result = map_book_events(
+            self._odds(["1536"]), "oap_event_id", "oddspapi",
+            self._lookup(), self._catalog(),
+        )
+        assert [em.match_uid for em in result.event_matches] == ["madrid"]
+
+    def test_picks_the_other_tournament_when_told_so(self):
+        """Same date on the row — only the tournament differs, so this fails if the
+        date is still doing the work."""
+        result = map_book_events(
+            self._odds(["416"]), "oap_event_id", "oddspapi",
+            self._lookup(), self._catalog(),
+        )
+        assert [em.match_uid for em in result.event_matches] == ["rome"]
+
+    def test_no_match_in_that_tournament_is_rejected(self):
+        result = map_book_events(
+            self._odds(["9999"]), "oap_event_id", "oddspapi",
+            self._lookup(), self._catalog(),
+        )
+        assert result.event_matches == []
+        assert result.tournament_rejected == [("e1", "Roger Federer", "Rafael Nadal")]
+
+    def test_a_narrowed_set_still_lets_the_date_decide(self):
+        """A city hosting two same-circuit events narrows to both; the date then
+        chooses between two candidates rather than every meeting ever."""
+        result = map_book_events(
+            self._odds(["1536", "416"]), "oap_event_id", "oddspapi",
+            self._lookup(), self._catalog(),
+        )
+        assert [em.match_uid for em in result.event_matches] == ["madrid"]
+
+    def test_absent_column_is_a_no_op(self):
+        """The live scrapers pass no tournament_ids; behaviour must be unchanged."""
+        odds = pl.DataFrame({
+            "dk_event_id": ["e1", "e1"],
+            "player_name": ["Roger Federer", "Rafael Nadal"],
+            "tournament": ["ATP - Madrid"] * 2,
+        })
+        result = map_book_events(
+            odds, "dk_event_id", "dk", self._lookup(), self._catalog(),
+        )
+        assert result.tournament_rejected == []
+        # And it still resolves the way it always did — 'ATP - Madrid' strips to
+        # 'Madrid', which substring-matches our 'Madrid 1'. That the scrapers'
+        # strings align with ours is exactly why they never needed tournament ids.
+        assert [em.match_uid for em in result.event_matches] == ["madrid"]
+
+
 class TestSeasonIsAConstraintNotJustATiebreak:
     """A single candidate used to be accepted regardless of which season it was in.
 
