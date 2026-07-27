@@ -29,6 +29,12 @@ from mvp.model.features._score_helpers import (
     tiebreaks_won as _tiebreaks_won,
     tight_sets as _tight_sets,
 )
+from mvp.model.features._duration_helpers import (
+    EXPECTED_MINUTES_PER_POINT,
+    MATCH_POINTS,
+    match_minutes,
+    match_minutes_for_rates,
+)
 from mvp.model.registry import feature, register_diff, register_matchup
 
 DATE_COL = "effective_match_date"
@@ -226,6 +232,179 @@ _reg("tourn_tiebreak_win_pct", _rate(TBW, TBP), "In-tournament tiebreak win % (o
 _reg("tourn_tiebreaks_per_match", _rate(TBP, ONE), "In-tournament tiebreaks played per match")
 _reg("tourn_deciding_set_pct", _rate(DEC, ONE), "In-tournament deciding-set rate per match")
 _reg("tourn_deciding_set_win_pct", _rate(DEC * WON_I, DEC), "In-tournament deciding-set win % (of deciding sets)")
+
+
+# --- on-court time -----------------------------------------------------------
+#
+# Duration is the one workload axis that is not a re-encoding of the score.
+# Points / games / sets played correlate at r=0.87-0.91 with each other and
+# with minutes, but within a fixed points-played quintile match length still
+# varies by 12-32 minutes standard deviation: 200 points of baseline grinding
+# is not 200 points of quick service holds.
+#
+# Volume features group by WORKLOAD_GROUP (no draw_type) so a doubles match
+# counts toward the player's load — duration coverage on tour+chal doubles is
+# 98.3%. Rate features stay on TOURN_GROUP, since their denominators are
+# draw-type-specific stats.
+#
+# Every pooled volume feature also ships a `tourn_singles_*` twin on TOURN_GROUP.
+# Pooling alone would hardcode that a doubles minute costs the player exactly
+# what a singles minute does; with both, the model can learn the exchange rate.
+# Same pairing as `tourn_matches_played` / `tourn_singles_played`.
+#
+# `pooled - singles` is a real doubles quantity only for the ADDITIVE pairs —
+# `tourn_minutes_played` and `tourn_minutes_per_elapsed_day` (the latter only
+# because its twin keeps the pooled elapsed-day clock, see below). For
+# `tourn_last_match_minutes` and `tourn_max_match_minutes` the two halves report
+# different MATCHES, so their difference means nothing; those twins earn their
+# place as standalone signals, not as a decomposition.
+
+WORKLOAD_GROUP = ["player_id", "tournament_id", "year"]
+
+MINUTES = match_minutes()
+MINUTES_RATE = match_minutes_for_rates()
+
+
+def _cum_masked(expr: pl.Expr, group: list[str]) -> pl.Expr:
+    """Cumulative sum over prior rows that have a known value.
+
+    Null until at least one prior match carries a usable duration, so "played
+    two matches, both with missing duration" reads as unknown rather than as a
+    confident zero.
+    """
+    valid = expr.is_not_null()
+    total = (
+        pl.when(valid).then(expr.cast(pl.Float64)).otherwise(0.0)
+        .cum_sum().shift(1).over(group, order_by=ORDER)
+    )
+    seen = valid.cast(pl.Int64).cum_sum().shift(1).over(group, order_by=ORDER)
+    return pl.when(seen > 0).then(total).otherwise(None)
+
+
+def _reg_custom(name: str, expr: pl.Expr, description: str) -> None:
+    """Register a feature that needs a non-``_rate`` construct, tracked for diffs."""
+    feature(name=name, params=[], description=description, mirror=True, impute=None)(
+        lambda _e=expr: _e
+    )
+    _BASES.append(name)
+
+
+def _last_match_minutes(group: list[str]) -> pl.Expr:
+    """Most recent prior match WITH a known duration, within `group`.
+
+    A plain shift(1) would go null whenever the immediately preceding match had
+    its duration cleaned away, even though an earlier usable one exists.
+    Mirrors `days_since_singles`.
+    """
+    return (
+        pl.when(MINUTES.is_not_null()).then(MINUTES)
+        .shift(1).forward_fill().over(group, order_by=ORDER)
+    )
+
+
+def _max_match_minutes(group: list[str]) -> pl.Expr:
+    """Longest prior match within `group`; null when no prior duration is known."""
+    return (
+        pl.when(
+            MINUTES.is_not_null().cast(pl.Int64)
+            .cum_sum().shift(1).over(group, order_by=ORDER) > 0,
+        )
+        .then(
+            MINUTES.fill_null(0.0)
+            .cum_max().shift(1).over(group, order_by=ORDER),
+        )
+        .otherwise(None)
+    )
+
+
+_reg_custom(
+    "tourn_minutes_played",
+    _cum_masked(MINUTES, WORKLOAD_GROUP),
+    "Cumulative on-court minutes at this tournament (all draw types)",
+)
+_reg_custom(
+    "tourn_singles_minutes_played",
+    _cum_masked(MINUTES, TOURN_GROUP),
+    "Cumulative on-court SINGLES minutes at this tournament (doubles excluded)",
+)
+
+_reg("tourn_minutes_per_point", _rate(MINUTES_RATE, PT_PLAYED),
+     "In-tournament minutes per point played (match tempo)")
+_reg("tourn_minutes_per_game", _rate(MINUTES_RATE, TOTAL_GP),
+     "In-tournament minutes per game played")
+_reg("tourn_minutes_per_set", _rate(MINUTES_RATE, SP),
+     "In-tournament minutes per set played")
+_reg("tourn_minutes_per_match", _rate(MINUTES_RATE, ONE),
+     "In-tournament minutes per match played")
+
+_reg_custom(
+    "tourn_last_match_minutes",
+    _last_match_minutes(WORKLOAD_GROUP),
+    "Minutes of the player's most recent prior match at this tournament",
+)
+_reg_custom(
+    "tourn_singles_last_match_minutes",
+    _last_match_minutes(TOURN_GROUP),
+    "Minutes of the player's most recent prior SINGLES match at this tournament",
+)
+
+_reg_custom(
+    "tourn_max_match_minutes",
+    _max_match_minutes(WORKLOAD_GROUP),
+    "Longest prior match (minutes) at this tournament",
+)
+_reg_custom(
+    "tourn_singles_max_match_minutes",
+    _max_match_minutes(TOURN_GROUP),
+    "Longest prior SINGLES match (minutes) at this tournament",
+)
+
+# Minutes beyond what the point count implies. Scale-dependent counterpart to
+# `tourn_minutes_per_point`: a long grinding week accumulates excess, whereas
+# the rate stays flat. EXPECTED_MINUTES_PER_POINT is a fixed literal, not refit.
+_reg_custom(
+    "tourn_minutes_excess",
+    _cum_masked(
+        MINUTES_RATE - EXPECTED_MINUTES_PER_POINT * MATCH_POINTS, TOURN_GROUP,
+    ),
+    "Cumulative minutes beyond the point count's expectation at this tournament",
+)
+
+# Schedule compression. The denominator is days since the player's OWN first
+# match at the event, not `tournament_start_date` — qualifying runs before the
+# main draw (median -1 day, 23.9% of real 2026 matches fall before it), which
+# would make a start-date denominator zero or negative exactly where same-day
+# double-ups concentrate. `.min().over(...)` is safe: a group's earliest match
+# is never in the future relative to any row in it.
+#
+# The numerator group and the elapsed-day clock are SEPARATE parameters. The
+# singles twin scopes only its numerator and keeps the pooled clock: both halves
+# of the pair then divide by the same denominator, so pooled minus singles is
+# genuinely the doubles rate. Scoping the clock too would date the twin from the
+# player's first SINGLES match, and the difference of two rates over different
+# denominators means nothing.
+def _minutes_per_elapsed_day(
+    minutes_group: list[str], clock_group: list[str],
+) -> pl.Expr:
+    return (
+        _cum_masked(MINUTES, minutes_group)
+        / (
+            (pl.col(DATE_COL) - pl.col(DATE_COL).min().over(clock_group))
+            .dt.total_days().cast(pl.Float64) + 1.0
+        )
+    )
+
+
+_reg_custom(
+    "tourn_minutes_per_elapsed_day",
+    _minutes_per_elapsed_day(WORKLOAD_GROUP, WORKLOAD_GROUP),
+    "Cumulative on-court minutes per elapsed day since the player's first match here",
+)
+_reg_custom(
+    "tourn_singles_minutes_per_elapsed_day",
+    _minutes_per_elapsed_day(TOURN_GROUP, WORKLOAD_GROUP),
+    "Cumulative SINGLES minutes per elapsed day since the player's first match here",
+)
 
 
 # --- diffs (player - opp) on every base --------------------------------------

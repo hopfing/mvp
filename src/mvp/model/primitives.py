@@ -175,6 +175,102 @@ def rolling_std(
     )
 
 
+def same_day_ordering_key(date_col: str = "effective_match_date") -> pl.Expr:
+    """Strictly-ordered stand-in for ``date_col`` that separates same-date rows.
+
+    ``rolling_*_by(..., closed="left")`` excludes rows whose ``by`` value TIES
+    the current row's. Before 2026 ``effective_match_date`` carries no clock
+    time (0.0% of tour+chal singles have one; it is estimated from round
+    position), so every match a player plays on one estimated date shares a
+    single timestamp and is dropped from the window — including the earlier leg
+    of a same-day double-up, which is precisely the workload we want to see.
+
+    Offsetting by ``round_order`` seconds separates those rows in true play
+    order. Within one player's path through one draw ``round_order`` is
+    strictly increasing in real time — a round must be won to reach the next —
+    so an earlier match can never sort after a later one. The offset is at most
+    12 seconds and cannot move a row across the boundary of a multi-day window.
+
+    Pass to BOTH ``by=`` and ``over(order_by=)``: the frame is not pre-sorted,
+    and ``rolling_*_by`` requires its ``by`` values ascending within each group.
+
+    The offset is microseconds, not seconds, and callers must pair it with
+    :func:`same_day_window_size`. Any positive offset shifts the current row
+    forward, which drags the window's trailing edge forward with it and can
+    drop a prior match sitting exactly on the boundary; the paired window adds
+    a full second of slack so a microsecond offset can never reach it.
+    """
+    return pl.col(date_col) + pl.duration(
+        microseconds=pl.col("round_order").fill_null(0),
+    )
+
+
+def same_day_window_size(days: int) -> str:
+    """Window for :func:`same_day_ordering_key`, widened to absorb the offset.
+
+    One second of slack against a sub-millisecond offset. Widening only reaches
+    FURTHER BACK, so it cannot introduce a forward leak — that is governed by
+    ``closed="left"`` on a strictly increasing key, not by window width.
+    """
+    return f"{days * 86_400 + 1}s"
+
+
+def rolling_sum_same_day(
+    col: str | pl.Expr,
+    days: int,
+    group_by: str | list[str],
+    date_col: str = "effective_match_date",
+    fill_with: int | None = 0,
+) -> pl.Expr:
+    """``rolling_sum`` that also counts earlier matches on the SAME date.
+
+    Deliberately a separate primitive rather than a change to ``rolling_sum``:
+    switching the shared helper would silently alter every existing rolling
+    feature, and with them the production model's inputs.
+    """
+    if isinstance(group_by, str):
+        group_by = [group_by]
+
+    ord_key = same_day_ordering_key(date_col)
+    rolling = (
+        _to_expr(col)
+        .rolling_sum_by(
+            by=ord_key, window_size=same_day_window_size(days), closed="left",
+        )
+        .over(group_by, order_by=ord_key)
+    )
+    if fill_with is None:
+        return rolling
+    return rolling.fill_null(fill_with)
+
+
+def rolling_std_same_day(
+    col: str | pl.Expr,
+    days: int,
+    group_by: str | list[str],
+    date_col: str = "effective_match_date",
+) -> pl.Expr:
+    """``rolling_std`` counterpart of :func:`rolling_sum_same_day`.
+
+    Null with fewer than two prior observations in the window; pair with
+    ``impute=None`` so thin history does not become a fake "low volatility".
+    """
+    if isinstance(group_by, str):
+        group_by = [group_by]
+
+    ord_key = same_day_ordering_key(date_col)
+    return (
+        _to_expr(col)
+        .rolling_std_by(
+            by=ord_key,
+            window_size=same_day_window_size(days),
+            closed="left",
+            min_samples=2,
+        )
+        .over(group_by, order_by=ord_key)
+    )
+
+
 def cumulative_sum(
     col: str | pl.Expr,
     group_by: str | list[str],
