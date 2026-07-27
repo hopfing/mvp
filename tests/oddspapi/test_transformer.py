@@ -104,6 +104,12 @@ def _quotes(market: str | None = None) -> pl.DataFrame:
     return df.filter(pl.col("market") == market) if market else df
 
 
+def _snapshots(book: str, market: str) -> pl.DataFrame:
+    from mvp.oddspapi import paths
+
+    return pl.read_parquet(paths.snapshots_path(book, market))
+
+
 def _fake_crosswalk(monkeypatch, fixture_id, start, true_start):
     xw = pl.DataFrame([{
         "fixture_id": fixture_id, "match_uid": "2026_1_SGL_R32_AA_BB",
@@ -318,6 +324,95 @@ class TestQuotes:
         # A lone reference book still gets a formed price; requiring two would null
         # every one of them.
         assert ref["formed_odds"].item() == 1.75
+
+
+class TestSnapshotLayer:
+    """Per-book prices at every instant, kept rather than spent on the reduction.
+
+    quotes.parquet answers "what was the best price" at three moments. It cannot
+    answer WHICH book held it or what the board looked like at any other moment,
+    because best-across spends book identity and open/formed/close spend the rest.
+    Both questions decide real bets, so the layer they are answerable from is the
+    one that gets persisted; quotes stays derived.
+    """
+
+    def _two_book_total(self, data_root, monkeypatch):
+        return TestQuotes()._two_book_total(data_root, monkeypatch)
+
+    def test_one_file_per_book_and_market(self, data_root, monkeypatch):
+        self._two_book_total(data_root, monkeypatch)
+        for book in ("betrivers", "fanduel"):
+            snaps = _snapshots(book, "total_games")
+            assert snaps["book"].unique().to_list() == [book]
+            assert snaps["market"].unique().to_list() == ["total_games"]
+
+    def test_columns_are_the_scraper_stage_contract(self, data_root, monkeypatch):
+        """`stage/betrivers/total_games.parquet` reads the same, minus the event id
+        the crosswalk already resolved."""
+        self._two_book_total(data_root, monkeypatch)
+        assert _snapshots("betrivers", "total_games").columns == [
+            "match_uid", "p1_id", "p2_id", "market", "points", "side", "book",
+            "odds", "fetched_at", "event_status",
+        ]
+
+    def test_the_best_price_is_attributable_to_a_book(self, data_root, monkeypatch):
+        """The question quotes cannot answer. Both books are on the board at the
+        close at different prices; the aggregate keeps 2.00 and n_books=2, which
+        does not tell you where to place the bet."""
+        self._two_book_total(data_root, monkeypatch)
+        close = SCHED - timedelta(hours=1)
+        at_close = {
+            book: _snapshots(book, "total_games").filter(
+                (pl.col("side") == "Over") & (pl.col("fetched_at") == close)
+            )["odds"].item()
+            for book in ("betrivers", "fanduel")
+        }
+        assert at_close == {"betrivers": 1.95, "fanduel": 2.00}
+        assert _quotes("total_games").filter(
+            pl.col("side") == "Over"
+        )["best_closing_odds"].item() == 2.00
+
+    def test_a_standing_price_is_present_where_it_did_not_tick(
+        self, data_root, monkeypatch
+    ):
+        """betrivers quotes at t0 and does not move again until t2, but it was on
+        the board throughout — the fill is what makes `n_books` mean books quoting
+        rather than books that happened to move."""
+        self._two_book_total(data_root, monkeypatch)
+        middle = SCHED - timedelta(hours=2)
+        row = _snapshots("betrivers", "total_games").filter(
+            (pl.col("side") == "Over") & (pl.col("fetched_at") == middle)
+        )
+        assert row["odds"].item() == 1.80
+
+    def test_in_play_is_absent_here_and_present_in_the_ticks(
+        self, data_root, monkeypatch
+    ):
+        """Prematch only, like the reduction it feeds. The ticks stay the record."""
+        _reference(data_root)
+        _write_raw("f1", {900: {
+            9001: [_tick(SCHED - timedelta(hours=1), 1.9),
+                   _tick(TRUE + timedelta(minutes=30), 3.4)],
+            9002: [_tick(SCHED - timedelta(hours=1), 2.0),
+                   _tick(TRUE + timedelta(minutes=30), 1.3)],
+        }}, book="fanduel", group=1)
+        _fake_crosswalk(monkeypatch, "f1", SCHED, TRUE)
+        transformer.transform()
+
+        assert len(_ticks("total_games")) == 4
+        snaps = _snapshots("fanduel", "total_games")
+        assert snaps["event_status"].unique().to_list() == ["NOT_STARTED"]
+        assert len(snaps) == 2
+
+    def test_rerunning_replaces_the_layer_rather_than_appending(
+        self, data_root, monkeypatch
+    ):
+        """The reduce rebuilds every match each run, so parts left by a previous
+        run would land in the next one's files as duplicates."""
+        self._two_book_total(data_root, monkeypatch)
+        before = len(_snapshots("betrivers", "total_games"))
+        transformer.transform()
+        assert len(_snapshots("betrivers", "total_games")) == before
 
     def test_non_line_markets_reduce_too(self, data_root, monkeypatch):
         """Moneyline carries handicap 0.0 in the reference, so `points` is 0.0 and

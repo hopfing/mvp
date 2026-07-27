@@ -3,7 +3,8 @@
 `B:/raw/oddspapi/` -> `B:/stage/oddspapi/`, mirroring every other source
 (`raw/<source>/<dataset>/`, `stage/<source>/<market>.parquet`). The scrapers are
 one-source-one-book by coincidence; oddspapi is one source carrying many books, so
-`book` is a column rather than a directory.
+`book` is a column in the ticks and a directory in the snapshot layer, where the
+per-book file IS the scraper's stage file.
 
 Raw CAPTURE is out of scope (spec 2026-07-26-oddspapi-odds-ingest §1) — this module
 only declares where capture is expected to write, so the stage layer reads from the
@@ -66,6 +67,27 @@ def aggregate_root() -> Path:
 
 def quotes_path() -> Path:
     return aggregate_root() / "quotes.parquet"
+
+
+def snapshots_dir() -> Path:
+    """Per-book prices at every instant — the layer the scrapers persist.
+
+    quotes.parquet is this priced: three moments, best across books, book identity
+    spent. That makes it unable to answer the two questions a bettor asks — WHICH
+    book, and what the board looked like at any other moment — and it bakes the
+    reduction's policies (15-minute buckets, `min_books_formed`, the prematch
+    boundary) into the artifact rather than leaving them at read time, where the
+    backtest already applies them to the four scraper books.
+
+    Laid out as `<book>/<market>.parquet` because that is exactly what
+    `stage/betrivers/total_games.parquet` is, so a consumer written for a scraper
+    reads this without a special case.
+    """
+    return stage_root() / "snapshots"
+
+
+def snapshots_path(book: str, market: str) -> Path:
+    return snapshots_dir() / book / f"{market}.parquet"
 
 
 def crosswalk_path() -> Path:

@@ -11,10 +11,18 @@ Three layers, each with a different lifetime:
             35 GB) and rare, skipped per file on the rule atptour stages on
             (`atptour/pipeline.py:131-148`): staged file missing, raw newer than
             staged, or the parser's schema hash changed.
-  REDUCE    staged ticks -> aggregate/oddspapi/quotes.parquet, one row per
+  SNAPSHOT  staged ticks -> stage/oddspapi/snapshots/<book>/<market>.parquet, one
+            row per (match_uid, market, points, side, book, 15-min bucket). The
+            capture records CHANGES, so this forward-fills each book's standing
+            price into the buckets it was on the board for — see
+            `_snapshots_from_ticks`. Column-for-column a scraper's stage file,
+            which is the point: book identity and the time axis survive here, so
+            what price was reachable, where, and when stays answerable.
+  REDUCE    snapshots -> aggregate/oddspapi/quotes.parquet, one row per
             (match_uid, market, points, side, role) with the price at open /
-            formed / close. This is what consumers read: ~141 M ticks collapse to
-            ~1 M quotes. Cheap and frequent — the matcher keeps improving, and
+            formed / close. Convenient, and lossy by construction: best-across
+            spends book identity and three moments spend the rest. Derived, never
+            the record. Cheap and frequent — the matcher keeps improving, and
             re-running is a join plus a group_by, not a reparse.
 
 Everything captured is staged. No prematch cut, no `active` cut — those are
@@ -41,6 +49,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -56,6 +65,8 @@ from mvp.oddspapi.paths import (
     historical_dirs,
     quotes_path,
     role_of,
+    snapshots_dir,
+    stage_root,
     ticks_dir,
     ticks_path,
     ticks_schema_marker,
@@ -108,6 +119,25 @@ QUOTE_SCHEMA: dict[str, pl.DataType] = {
 }
 QUOTE_SORT = ["match_uid", "market", "points", "side", "role"]
 
+# The scrapers' stage columns, which is the point: `stage/oddspapi/snapshots/<book>/
+# total_games.parquet` and `stage/betrivers/total_games.parquet` are the same table.
+# `match_uid` stands where a scraper carries its own event id, because the crosswalk
+# already resolved identity — a consumer joins the event map for one and not the
+# other, and that is the only asymmetry left between them.
+SNAPSHOT_SCHEMA: dict[str, pl.DataType] = {
+    "match_uid": pl.Utf8,
+    "p1_id": pl.Utf8,
+    "p2_id": pl.Utf8,
+    "market": pl.Utf8,
+    "points": pl.Float64,
+    "side": pl.Utf8,
+    "book": pl.Utf8,
+    "odds": pl.Float64,
+    "fetched_at": pl.Datetime(time_unit="us", time_zone="UTC"),
+    "event_status": pl.Utf8,
+}
+SNAPSHOT_SORT = ["match_uid", "market", "points", "side", "fetched_at"]
+
 XW_COLS = ["fixture_id", "match_uid", "p1_id", "p2_id", "start_time", "true_start_time"]
 
 # A reference book quotes alone, so it never reaches two books deep; requiring
@@ -132,6 +162,8 @@ class TransformReport:
     quotes: int = 0
     quotes_by_market: dict[str, int] = field(default_factory=dict)
     quotes_by_role: dict[str, int] = field(default_factory=dict)
+    snapshots: int = 0
+    snapshots_by_book: dict[str, int] = field(default_factory=dict)
 
     def summary(self) -> str:
         return (
@@ -435,6 +467,75 @@ def _snapshots_from_ticks(ticks: pl.DataFrame) -> pl.DataFrame:
     return filled.rename({"_rnd": "fetched_at"})
 
 
+def _snapshot_parts_dir() -> Path:
+    return stage_root() / ".snapshots.parts"
+
+
+def _write_snapshot_parts(
+    snaps: pl.DataFrame, ids: pl.DataFrame, batch: int,
+) -> None:
+    """One part per (book, batch); consolidated into per-market files at the end.
+
+    Parts rather than one accumulating frame for the reason the reduction is batched
+    at all: the snapshot expansion runs several times the quote count, and holding
+    the corpus is exactly what the batching exists to avoid.
+    """
+    if snaps.is_empty():
+        return
+    frame = snaps.join(ids, on="match_uid", how="left")
+    for book in frame["book"].unique().sort().to_list():
+        d = _snapshot_parts_dir() / book
+        d.mkdir(parents=True, exist_ok=True)
+        (
+            frame.filter(pl.col("book") == book)
+            .select(list(SNAPSHOT_SCHEMA))
+            .write_parquet(d / f"part-{batch:05d}.parquet")
+        )
+
+
+def _consolidate_snapshots(report: TransformReport) -> None:
+    """Parts -> `snapshots/<book>/<market>.parquet`, then swap the layer in.
+
+    One book at a time: a book's parts are bounded by its share of the corpus, so
+    this holds no more than the batching already permits.
+
+    The swap renames the live layer aside before renaming the new one in, so the
+    window in which no layer exists is one rename wide rather than a whole rewrite.
+    B:/ is shared with the live pipeline; a consumer reading mid-write is a real
+    event here, not a hypothetical.
+    """
+    parts = _snapshot_parts_dir()
+    if not parts.exists():
+        return
+    new_root = stage_root() / ".snapshots.new"
+    shutil.rmtree(new_root, ignore_errors=True)
+    for book_dir in sorted(p for p in parts.iterdir() if p.is_dir()):
+        files = sorted(book_dir.glob("part-*.parquet"))
+        if not files:
+            continue
+        frame = pl.read_parquet(files)
+        for market in frame["market"].unique().sort().to_list():
+            path = new_root / book_dir.name / f"{market}.parquet"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            frame.filter(pl.col("market") == market).sort(SNAPSHOT_SORT).write_parquet(
+                path
+            )
+        report.snapshots_by_book[book_dir.name] = len(frame)
+        report.snapshots += len(frame)
+
+    old = stage_root() / ".snapshots.old"
+    shutil.rmtree(old, ignore_errors=True)
+    try:
+        if snapshots_dir().exists():
+            snapshots_dir().rename(old)
+        if new_root.exists():
+            new_root.rename(snapshots_dir())
+    finally:
+        shutil.rmtree(old, ignore_errors=True)
+        shutil.rmtree(parts, ignore_errors=True)
+        shutil.rmtree(new_root, ignore_errors=True)
+
+
 def _reduce(xw: pl.DataFrame, report: TransformReport) -> None:
     """Staged ticks -> the quotes aggregate, batched by fixture.
 
@@ -485,6 +586,9 @@ def _reduce(xw: pl.DataFrame, report: TransformReport) -> None:
     xw_slim = xw.select(XW_COLS)
     boundary = pl.coalesce([pl.col("true_start_time"), pl.col("start_time")])
     out: list[pl.DataFrame] = []
+    # A killed run leaves parts behind, and they would be consolidated into the next
+    # run's layer as duplicates of matches it also wrote.
+    shutil.rmtree(_snapshot_parts_dir(), ignore_errors=True)
     todo = sorted(by_match)
     logger.info(
         "reducing %d matches from %d fixtures (%d unmatched, %d matches with "
@@ -524,6 +628,7 @@ def _reduce(xw: pl.DataFrame, report: TransformReport) -> None:
             ticks.filter((pl.col("event_status") == PREMATCH)
                          & pl.col("odds").is_not_null())
         )
+        _write_snapshot_parts(snaps, ids, start // REDUCE_BATCH)
         for role, min_books in MIN_BOOKS_FORMED.items():
             books = REFERENCE_BOOKS if role == "reference" else None
             side = (
@@ -558,6 +663,13 @@ def _reduce(xw: pl.DataFrame, report: TransformReport) -> None:
                 "reduced %d/%d matches (%d ticks -> %d snapshot rows this batch)",
                 min(start + REDUCE_BATCH, len(todo)), len(todo), len(ticks), len(snaps),
             )
+
+    _consolidate_snapshots(report)
+    if report.snapshots:
+        logger.info(
+            "wrote %d snapshots across %d books -> %s",
+            report.snapshots, len(report.snapshots_by_book), snapshots_dir(),
+        )
 
     quotes = (
         pl.concat(out, how="vertical").sort(QUOTE_SORT)
