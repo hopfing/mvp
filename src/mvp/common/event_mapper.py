@@ -44,6 +44,10 @@ class MappingResult:
     unresolved_names: set[str] = field(default_factory=set)
     no_match_found: list[tuple[str, str, str]] = field(default_factory=list)
     collisions: list[tuple[str, str, str, int]] = field(default_factory=list)
+    # Resolved to a real match, then rejected because its date is too far from the
+    # event's. Kept apart from no_match_found: "the pair has no match near this
+    # date" is a different diagnosis from "we don't know these players".
+    date_rejected: list[tuple[str, str, str, str, int]] = field(default_factory=list)
 
 
 def build_player_lookup(
@@ -190,6 +194,10 @@ def build_match_catalog(
     has_name = "tournament_name" in matches_df.columns
     has_p1 = "draw_p1_id" in matches_df.columns
     has_round = "round" in matches_df.columns
+    # Carried so a caller supplying an event start time can disambiguate two
+    # meetings of the same pair by date. Tournament-name matching only works when
+    # the book's naming aligns with ours, which for some sources it never does.
+    has_date = "effective_match_date" in matches_df.columns
     optional = []
     if has_name:
         optional.append("tournament_name")
@@ -197,6 +205,8 @@ def build_match_catalog(
         optional.append("draw_p1_id")
     if has_round:
         optional.append("round")
+    if has_date:
+        optional.append("effective_match_date")
     cols = list(required) + optional
 
     # Deduplicate: same match_uid can appear twice (player + opp perspective)
@@ -216,6 +226,8 @@ def build_match_catalog(
             entry["tournament_name"] = row.get("tournament_name")
         if has_round:
             entry["round"] = row.get("round")
+        if has_date:
+            entry["effective_match_date"] = row.get("effective_match_date")
         catalog.setdefault(pair, []).append(entry)
 
     # Log collision warnings (same pair, same tournament+year)
@@ -288,6 +300,67 @@ def _round_class(catalog_round: str | None) -> str | None:
     if not catalog_round:
         return None
     return "qual" if catalog_round.upper().startswith("Q") else "main"
+
+
+# How far the book's event start may sit from our match date and still count, and
+# how much closer the winner must be than the runner-up. A pair meeting twice in a
+# season is normally weeks apart, so this stays conservative: an unclear pick is
+# left as a collision rather than guessed at.
+_DATE_MATCH_MAX_DAYS = 2
+_DATE_MATCH_MARGIN_DAYS = 2
+
+
+def _date_gap_days(fetched_at, candidate: dict) -> int | None:
+    """Days between the event's date and a candidate's match date.
+
+    None when either side has no date — which is what keeps this inert for callers
+    that supply no date column at all.
+    """
+    if fetched_at is None:
+        return None
+    import datetime as _dt
+
+    d = candidate.get("effective_match_date")
+    if isinstance(d, _dt.datetime):
+        d = d.date()
+    if not isinstance(d, _dt.date):
+        return None
+    target = fetched_at.date() if hasattr(fetched_at, "date") else fetched_at
+    return abs((d - target).days)
+
+
+def _match_by_date(fetched_at, candidates: list[dict]) -> dict | None:
+    """The candidate whose match date is nearest `fetched_at`, or None.
+
+    Returns None unless exactly one candidate is within `_DATE_MATCH_MAX_DAYS`
+    AND beats the runner-up by `_DATE_MATCH_MARGIN_DAYS` — no date on the row or
+    no dates in the catalog also yields None, leaving behaviour unchanged for
+    callers that don't supply one.
+    """
+    if fetched_at is None:
+        return None
+    import datetime as _dt
+
+    target = fetched_at.date() if hasattr(fetched_at, "date") else fetched_at
+    scored: list[tuple[int, dict]] = []
+    for c in candidates:
+        d = c.get("effective_match_date")
+        if d is None:
+            continue
+        if isinstance(d, _dt.datetime):
+            d = d.date()
+        if not isinstance(d, _dt.date):
+            continue
+        scored.append((abs((d - target).days), c))
+    if not scored:
+        return None
+    scored.sort(key=lambda t: t[0])
+    best_days, best = scored[0]
+    if best_days > _DATE_MATCH_MAX_DAYS:
+        return None
+    if len(scored) > 1 and scored[1][0] - best_days < _DATE_MATCH_MARGIN_DAYS:
+        return None
+    return best
 
 
 def _match_tournament(
@@ -425,10 +498,48 @@ def map_book_events(
             if len(narrowed) == 1:
                 match = narrowed[0]
             else:
-                result.collisions.append((
-                    eid, name_a, name_b, len(narrowed or candidates),
-                ))
-                skipped_ambiguous += 1
+                # Fall back to the event start date. Tournament-name matching
+                # only narrows when the book's naming aligns with ours; where it
+                # does not, the string comparison silently no-ops and returns the
+                # candidates unchanged. Two meetings of one pair in a season are
+                # normally weeks apart, so the date separates them cleanly.
+                by_date = _match_by_date(fetched_at, narrowed or candidates)
+                if by_date is not None:
+                    match = by_date
+                else:
+                    result.collisions.append((
+                        eid, name_a, name_b, len(narrowed or candidates),
+                    ))
+                    skipped_ambiguous += 1
+                    continue
+
+        # SEASON is a constraint, not just a tiebreak. The year filter above only
+        # narrows when there are two or more candidates, and keeps them all when
+        # none matches the year — so a pair that met once, in a prior season,
+        # resolved to that match unchecked. Measured on the oddspapi backfill: 33
+        # of 8,946 fixtures took 2026 prices onto 2018-2025 matches, which in a
+        # backtest settles a bet against a different match entirely.
+        #
+        # The date is only the escape hatch, for tournaments running across New
+        # Year: those carry the prior season's `year` while being a day or two away.
+        # It is NOT the constraint itself — `effective_match_date` is estimated for
+        # rounds whose real date we don't have, and gating on a 2-day tolerance
+        # rejected 210 fixtures instead of 33, most of them same-season qualifying
+        # matches sitting 3 days off their estimate.
+        #
+        # No-op unless the caller supplies a date: the live scraper path passes no
+        # date column, so `fetched_at` is None and this cannot fire.
+        cand_year = match.get("year")
+        if fetched_at is not None and cand_year is not None and (
+            cand_year != fetched_at.year
+        ):
+            gap = _date_gap_days(fetched_at, match)
+            if gap is None or gap > _DATE_MATCH_MAX_DAYS:
+                result.date_rejected.append(
+                    (eid, name_a, name_b, match.get("match_uid", ""),
+                     gap if gap is not None else -1)
+                )
+                skipped_no_match += 1
                 continue
 
         # Assign p1/p2 book names and player IDs

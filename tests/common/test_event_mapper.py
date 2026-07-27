@@ -1,5 +1,7 @@
 """Tests for the decoupled event mapper."""
 
+from datetime import date, datetime
+
 import polars as pl
 import pytest
 from pathlib import Path
@@ -11,6 +13,7 @@ from mvp.common.event_mapper import (
     build_player_lookup,
     map_book_events,
     _strip_circuit_prefix,
+    _match_by_date,
     _match_tournament,
     _parse_book_round,
 )
@@ -182,6 +185,206 @@ class TestBuildMatchCatalog:
 # ---------------------------------------------------------------------------
 # Tournament name matching
 # ---------------------------------------------------------------------------
+
+class TestMatchByDate:
+    """Date fallback for pairs that met twice in a season.
+
+    Tournament-name matching only narrows when the book's naming aligns with ours.
+    For oddspapi it never does ('French Open Men Singles' against our Roland Garros
+    naming), so the string comparison silently no-ops and every repeat meeting
+    lands as a collision — 224 of them before this existed.
+    """
+
+    def _candidates(self):
+        return [
+            {"match_uid": "early", "effective_match_date": date(2026, 5, 29)},
+            {"match_uid": "late", "effective_match_date": date(2026, 7, 3)},
+        ]
+
+    def test_picks_the_nearer_match(self):
+        got = _match_by_date(datetime(2026, 7, 3, 15, 0), self._candidates())
+        assert got["match_uid"] == "late"
+
+    def test_picks_the_other_one_from_the_other_date(self):
+        got = _match_by_date(datetime(2026, 5, 29, 9, 0), self._candidates())
+        assert got["match_uid"] == "early"
+
+    def test_refuses_when_two_are_equally_close(self):
+        """Better a collision than a coin flip on which match a bet belongs to."""
+        cands = [
+            {"match_uid": "a", "effective_match_date": date(2026, 6, 1)},
+            {"match_uid": "b", "effective_match_date": date(2026, 6, 2)},
+        ]
+        assert _match_by_date(datetime(2026, 6, 1, 12, 0), cands) is None
+
+    def test_refuses_when_nothing_is_close_enough(self):
+        assert _match_by_date(datetime(2026, 9, 1), self._candidates()) is None
+
+    def test_accepts_a_date_object_as_well_as_datetime(self):
+        got = _match_by_date(date(2026, 7, 3), self._candidates())
+        assert got["match_uid"] == "late"
+
+    def test_no_dates_in_catalog_yields_none(self):
+        """Backward compatibility: callers that never supplied dates are unaffected."""
+        cands = [{"match_uid": "a"}, {"match_uid": "b"}]
+        assert _match_by_date(datetime(2026, 6, 1), cands) is None
+
+    def test_no_fetched_at_yields_none(self):
+        assert _match_by_date(None, self._candidates()) is None
+
+    def test_partial_dates_still_resolve(self):
+        cands = [
+            {"match_uid": "dated", "effective_match_date": date(2026, 7, 3)},
+            {"match_uid": "undated"},
+        ]
+        got = _match_by_date(datetime(2026, 7, 3), cands)
+        assert got["match_uid"] == "dated"
+
+
+class TestSeasonIsAConstraintNotJustATiebreak:
+    """A single candidate used to be accepted regardless of which season it was in.
+
+    The year filter only narrows when there are two or more candidates, and keeps
+    them all when none matches the year. So a pair that met once, in a prior season,
+    resolved to that match unchecked: 33 of 8,946 oddspapi fixtures took 2026 prices
+    onto 2018-2025 matches, which in a backtest settles a bet against a different
+    match entirely.
+
+    The constraint is the SEASON, with the date only as the New Year escape hatch.
+    Gating on the date itself rejected 210 fixtures rather than 33, because
+    `effective_match_date` is estimated for rounds whose real date we lack — most of
+    the false rejections were same-season qualifying matches 3 days off.
+    """
+
+    def _odds(self, when):
+        return pl.DataFrame({
+            "oap_event_id": ["e1", "e1"],
+            "player_name": ["Roger Federer", "Rafael Nadal"],
+            "tournament": ["Wimbledon Men Singles", "Wimbledon Men Singles"],
+            "fetched_at": [when, when],
+        })
+
+    def _lookup(self):
+        return {"roger federer": "A001", "rafael nadal": "B002"}
+
+    def _catalog(self, match_date):
+        return {
+            frozenset({"A001", "B002"}): [
+                {"match_uid": "2024_540_SGL_F_A001_B002", "tournament_id": "540",
+                 "year": 2024, "tournament_name": "Wimbledon",
+                 "effective_match_date": match_date, "p1_id": "A001"},
+            ],
+        }
+
+    def test_lone_candidate_from_another_season_is_rejected(self):
+        result = map_book_events(
+            self._odds(datetime(2026, 7, 19, 12, 0)), "oap_event_id", "oddspapi",
+            self._lookup(), self._catalog(date(2024, 7, 14)),
+        )
+        assert result.event_matches == []
+        assert len(result.date_rejected) == 1
+        eid, a, b, muid, gap = result.date_rejected[0]
+        assert (eid, muid) == ("e1", "2024_540_SGL_F_A001_B002")
+        assert gap > 700
+
+    def test_lone_candidate_on_the_right_date_is_kept(self):
+        result = map_book_events(
+            self._odds(datetime(2024, 7, 14, 12, 0)), "oap_event_id", "oddspapi",
+            self._lookup(), self._catalog(date(2024, 7, 14)),
+        )
+        assert len(result.event_matches) == 1
+        assert result.date_rejected == []
+
+    def test_tolerance_spans_a_new_year_rollover(self):
+        """A tournament running across New Year has a prior-season `year` while
+        being days away — a year-equality check would wrongly reject it."""
+        result = map_book_events(
+            self._odds(datetime(2026, 1, 1, 3, 0)), "oap_event_id", "oddspapi",
+            self._lookup(), self._catalog(date(2025, 12, 31)),
+        )
+        assert len(result.event_matches) == 1
+        assert result.date_rejected == []
+
+    def _undated(self, year):
+        return {
+            frozenset({"A001", "B002"}): [
+                {"match_uid": f"{year}_540_SGL_F_A001_B002", "tournament_id": "540",
+                 "year": year, "tournament_name": "Wimbledon", "p1_id": "A001"},
+            ],
+        }
+
+    def test_undated_candidate_in_another_season_is_rejected(self):
+        """No date means no escape hatch, and a wrong season is the defect itself."""
+        result = map_book_events(
+            self._odds(datetime(2026, 7, 19, 12, 0)), "oap_event_id", "oddspapi",
+            self._lookup(), self._undated(2024),
+        )
+        assert result.event_matches == []
+        assert result.date_rejected[0][4] == -1     # gap unknown
+
+    def test_undated_candidate_in_the_same_season_is_kept(self):
+        """Most of the catalog predates the date column; absence is not evidence."""
+        result = map_book_events(
+            self._odds(datetime(2026, 7, 19, 12, 0)), "oap_event_id", "oddspapi",
+            self._lookup(), self._undated(2026),
+        )
+        assert len(result.event_matches) == 1
+        assert result.date_rejected == []
+
+    def test_same_season_estimated_date_is_not_rejected(self):
+        """`effective_match_date` is estimated for rounds whose real date we lack.
+        Gating on the date rejected 210 fixtures instead of 33 — mostly same-season
+        qualifiers sitting 3 days off their estimate."""
+        result = map_book_events(
+            self._odds(datetime(2026, 7, 19, 12, 0)), "oap_event_id", "oddspapi",
+            self._lookup(),
+            {frozenset({"A001", "B002"}): [
+                {"match_uid": "2026_301_SGL_Q1_A001_B002", "tournament_id": "301",
+                 "year": 2026, "tournament_name": "Wimbledon", "p1_id": "A001",
+                 "effective_match_date": date(2026, 7, 16)},
+            ]},
+        )
+        assert len(result.event_matches) == 1
+        assert result.date_rejected == []
+
+    def test_the_live_path_cannot_fire_this(self):
+        """The scrapers pass no date column, so `fetched_at` is None and the guard
+        is unreachable for them. event_mapper is shared with the live pipeline."""
+        odds = pl.DataFrame({
+            "dk_event_id": ["e1", "e1"],
+            "player_name": ["Roger Federer", "Rafael Nadal"],
+            "tournament": ["ATP - Wimbledon", "ATP - Wimbledon"],
+        })
+        result = map_book_events(
+            odds, "dk_event_id", "dk", self._lookup(), self._catalog(date(2024, 7, 14)),
+        )
+        assert len(result.event_matches) == 1
+        assert result.date_rejected == []
+
+
+class TestCatalogCarriesDate:
+    def _df(self, with_date: bool):
+        data = {
+            "match_uid": ["m1"],
+            "player_id": ["A001"],
+            "opp_id": ["B002"],
+            "tournament_id": ["403"],
+            "year": [2026],
+        }
+        if with_date:
+            data["effective_match_date"] = [date(2026, 5, 29)]
+        return pl.DataFrame(data)
+
+    def test_date_is_carried_when_present(self):
+        catalog = build_match_catalog(self._df(with_date=True))
+        entry = catalog[frozenset({"A001", "B002"})][0]
+        assert entry["effective_match_date"] == date(2026, 5, 29)
+
+    def test_absent_date_column_is_not_required(self):
+        catalog = build_match_catalog(self._df(with_date=False))
+        entry = catalog[frozenset({"A001", "B002"})][0]
+        assert "effective_match_date" not in entry
+
 
 class TestStripCircuitPrefix:
     def test_atp_prefix(self):
