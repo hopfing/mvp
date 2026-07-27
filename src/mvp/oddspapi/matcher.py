@@ -24,6 +24,7 @@ from mvp.common.event_mapper import (
     build_player_lookup,
     map_book_events,
 )
+from mvp.oddspapi import tournaments
 from mvp.oddspapi.paths import crosswalk_path, fixtures_dir
 
 logger = logging.getLogger(__name__)
@@ -122,9 +123,21 @@ def resolve_raw(fixtures: list[dict]):
     diagnostic can never drift from the real query — building a second `matches`
     select for analysis is how a fix silently fails to show up in its own probe.
     """
+    # Tournament identity, so the mapper can constrain on it instead of leaning on
+    # the estimated per-match date. 92% of fixtures pin to one tournament_id and
+    # another 7% narrow to one city's events; the rest carry no constraint and fall
+    # back to the player-pair path exactly as before.
+    tournament_ids, trep = tournaments.resolve_fixtures(fixtures)
+    logger.info(
+        "Tournaments: %d fixtures pinned, %d narrowed, %d unresolved (%d names)",
+        trep.pinned, trep.narrowed, sum(trep.unresolved.values()),
+        len(trep.unresolved),
+    )
+
     rows = []
     for f in fixtures:
         start = parse_ts(f["startTime"])
+        tids = tournament_ids.get(f["fixtureId"])
         for nm in (
             to_first_last(f.get("participant1Name", "")),
             to_first_last(f.get("participant2Name", "")),
@@ -134,6 +147,7 @@ def resolve_raw(fixtures: list[dict]):
                 "player_name": nm,
                 "tournament": f.get("tournamentName", ""),
                 "fetched_at": start,
+                "tournament_ids": sorted(tids) if tids else None,
             })
     if not rows:
         return None
@@ -226,9 +240,10 @@ def build(refresh: bool = False) -> pl.DataFrame:
     if raw is not None:
         logger.info(
             "Crosswalk: %d unresolved names, %d no match, %d ambiguous, "
-            "%d rejected on date",
+            "%d rejected on date, %d rejected on tournament",
             len(raw.unresolved_names), len(raw.no_match_found),
             len(raw.collisions), len(raw.date_rejected),
+            len(raw.tournament_rejected),
         )
         for _eid, a, b, muid, gap in raw.date_rejected[:10]:
             logger.info("  date-rejected: %s vs %s -> %s (%d days)", a, b, muid, gap)

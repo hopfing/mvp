@@ -1,0 +1,12 @@
+# oddspapi tournamentName (with the ' Men Singles' suffix stripped) -> our
+# tournament_id.
+#
+# Only for what structure cannot reach. Most names resolve on (city, circuit) or on
+# a direct name match, so this file stays short by design — see tournaments.py for
+# the resolution order. City matching is already apostrophe-insensitive, strips
+# parentheticals, and understands Roman-numeral sequences, so entries here are
+# genuine naming differences rather than formatting.
+
+French Open: "520"                                  # ours: Roland Garros
+ATP Challenger Bad Rappenau, Germany: "460"         # ours: Heilbronn - Bad Rappenau
+ATP Challenger Francavilla, Italy: "7707"           # ours: Francavilla al Mare
