@@ -1099,6 +1099,21 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         help="Force retrain even if a saved artifact exists",
     )
 
+    # oddspapi-transform subcommand - raw/oddspapi -> stage/oddspapi
+    oap_parser = subparsers.add_parser(
+        "oddspapi-transform",
+        help="Stage captured oddspapi ticks, then reduce to aggregate/oddspapi/quotes.parquet",
+    )
+    oap_parser.add_argument(
+        "--refresh", action="store_true",
+        help="Re-parse every raw file even if already staged (default: skip "
+             "those — captured odds are immutable). Needed when the parser changes.",
+    )
+    oap_parser.add_argument(
+        "--refresh-matcher", action="store_true",
+        help="Rebuild the fixture -> match_uid crosswalk before transforming",
+    )
+
     # iid-sweep subcommand - evaluate N tuning trials of an IID projection config
     iid_sweep_parser = subparsers.add_parser(
         "iid-sweep",
@@ -2931,6 +2946,31 @@ def cmd_iid_backtest(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_oddspapi_transform(args: argparse.Namespace) -> int:
+    """raw/oddspapi -> stage/oddspapi/ticks -> aggregate/oddspapi/quotes.parquet."""
+    from mvp.oddspapi.transformer import transform
+
+    report = transform(
+        refresh=args.refresh, refresh_matcher=args.refresh_matcher,
+    )
+    print(f"\n{report.summary()}")
+    print(f"\nticks read: {report.ticks_parsed:,}")
+    if report.matches_multi_fixture:
+        print(f"matches with >1 captured fixture: {report.matches_multi_fixture}")
+    if report.files_orphan_kept:
+        print(
+            f"staged files kept unpruned: {report.files_orphan_kept} "
+            "(their capture group yielded no raw files)"
+        )
+    print("\nquotes per market:")
+    for market, n in sorted(report.quotes_by_market.items(), key=lambda kv: -kv[1]):
+        print(f"  {market:32s} {n:>12,}")
+    print("\nquotes per book role:")
+    for role, n in sorted(report.quotes_by_role.items(), key=lambda kv: -kv[1]):
+        print(f"  {role:12s} {n:>12,}")
+    return 0
+
+
 def cmd_iid_sweep(args: argparse.Namespace) -> int:
     """Evaluate N tuning trials of an IID projection config for comparison."""
     from mvp.projection.iid.sweep import run_sweep
@@ -3780,6 +3820,8 @@ def main(args: list[str] | None = None) -> int:
         return cmd_iid_project(parsed)
     elif parsed.command == "iid-backtest":
         return cmd_iid_backtest(parsed)
+    elif parsed.command == "oddspapi-transform":
+        return cmd_oddspapi_transform(parsed)
     elif parsed.command == "iid-sweep":
         return cmd_iid_sweep(parsed)
     elif parsed.command == "iid-rank":

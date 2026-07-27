@@ -1,0 +1,61 @@
+# OddsPapi player-name aliases -> our player_id.
+# Keys are the OddsPapi name in "First Surname" form (post Surname,First
+# conversion). Add entries when the matcher logs unresolved names.
+# Format:  "First Surname": "PLAYER_ID"
+#
+# Most entries exist because oddspapi keeps the full legal name where our bio
+# record keeps a subset — common for Latin American and Asian players — or
+# because the two sources transliterate differently.
+
+"Connor Huertas Del Pino": "HG90"    # ours: Conner Huertas Del Pino (spelling)
+"Diego Dedura-Palomero": "D0LJ"
+"James Kent Trotter": "T0BW"         # ours: James Trotter
+"Jan Patrick Sinescu": "S1H8"        # ours: Jan Sinescu
+"Jeffrey John Wolf": "W09G"
+"Johan Alexander Rodriguez Rodriguez": "R0F1"  # ours: single Rodriguez
+"Luis Carlos Alvarez Valdes": "A0IY"           # ours: Luis Carlos Alvarez
+"Marcelo Tomas Barrios Vera": "BS86"
+"Martin Damm Jr": "D0DT"
+"Pyotr Nesterov": "N0CJ"             # ours: Petr Nesterov (spelling)
+
+# --- 2026-07-26: extra given names / dropped middle names ---
+"Alvaro Ariel Frutos Alonso": "F0IA"   # ours: Alvaro Frutos Alonso
+"Cemil Tugra Duran": "D0MX"            # ours: Cemil Duran
+"Donald Nikolas Stoot": "S1DH"         # ours: Nikolas Stoot
+"Felipe Virgili Berini": "V0HQ"        # ours: Felipe Virgili
+"Ivan Lopez": "L0M4"                   # ours: Ivan Lopez Martos
+"Joan Nadal Vives": "N0DD"             # ours: Joan Nadal
+"Joao Dinis Silva": "S0Y4"             # ours: Joao Silva
+"Luis Guto Miguel": "M0WY"             # ours: Luis "Guto" Miguel (quoting only)
+"Miguel Bellorio Pinheiro": "B0ZS"     # ours: Miguel Bellorio
+"Nicolas Villalon Valdes": "V0F6"      # ours: Nicolas Villalon
+"Pietro Orlando Fellin": "F0BP"        # ours: Pietro Fellin
+"Rafael Alfonso De Alba Valdes": "D0JM"  # ours: Rafael De Alba
+"Saul Pacheco Benasayag": "P0P9"       # ours: Saul Pacheco
+"Tai Leonard Sach": "S0U5"             # ours: Tai Sach
+"Tomas Luis": "L0CU"                   # ours: Tomas Serrano Luis
+"Vicente Freda": "M1A0"                # ours: Vicente Menezes Freda
+"Younes Lalami Laaroussi": "L0CK"      # ours: Younes Lalami
+
+# --- 2026-07-26: name-order differences ---
+"Sasikumar Mukund": "MP13"             # ours: Mukund Sasikumar
+"Tran Quoc Cuong": "T0M0"              # ours: Quoc Cuong Tran
+
+# --- 2026-07-26: transliteration / spelling ---
+"Bekhan Atlangeriev": "A0E6"           # ours: Bekkhan Atlangeriev
+"Bienvenu Bolangi": "B19D"             # ours: Bienvenue Bolangi
+"Denys Klok": "KG49"                   # ours: Denis Klok
+"Faris Zakaria": "Z0BL"                # ours: Fares Zakaria
+"Stephanos Schinas": "SQ27"            # ours: Stefanos Schinas
+
+# --- UNRESOLVED, deliberately not guessed ---
+# Ambiguous between two plausible players; a wrong id silently attaches odds to
+# the wrong match, so these stay unmapped until confirmed by hand:
+#   Daniel Salazar Martinez  -> S0GM (Daniel Salazar) or MI58 (Daniel Martinez)?
+#   Joel Santiago Navarro    -> N0DO (Santiago Navarro) or N0H4 (Joel Navarro)?
+#   Joao Goncalves           -> GJ90 / GD17 / GF61, three Goncalves
+#   Lucas Gueymard Wayenburg -> only G0GW (Sascha Gueymard Wayenburg) is close;
+#                               different given name, likely a sibling, not a match
+#   James Tracy              -> T0GF (JJ Tracy)? nickname, unverified
+# Absent from our bio table entirely:
+#   Andre Souza Pinto de Camargo E Silva, Ji Sung Nam, Vincenzo Picardi
