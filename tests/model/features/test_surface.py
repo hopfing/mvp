@@ -192,7 +192,7 @@ class TestSurfaceFeatureCount:
         registry = get_registry()
         expected = (
             2       # surface_win_pct, surface_matches
-            + 1     # surface_win_pct_diff
+            + 2     # surface_win_pct_diff, surface_matches_diff
             + 2     # surface_quality_win_rate + its diff
             + 14    # surface-stratified base (7 serve + 3 return + 3 points + dominance_ratio)
             + 14    # diffs
@@ -202,6 +202,7 @@ class TestSurfaceFeatureCount:
         # Verify all are accessible
         all_names = [
             "surface_win_pct", "surface_matches", "surface_win_pct_diff",
+            "surface_matches_diff",
             "surface_quality_win_rate", "surface_quality_win_rate_diff",
             "surface_first_serve_win_pct", "surface_second_serve_win_pct",
             "surface_ace_pct", "surface_df_pct", "surface_bp_save_pct",
@@ -213,7 +214,7 @@ class TestSurfaceFeatureCount:
         ]
         for name in all_names:
             registry.get(name)
-        assert expected == 54
+        assert expected == 55
 
 
 class TestSurfaceTierC:

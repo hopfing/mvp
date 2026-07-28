@@ -47,6 +47,7 @@ def surface_matches(days: int | None = None) -> pl.Expr:
 
 
 register_diff("surface_win_pct")
+register_diff("surface_matches")
 
 
 @feature(
