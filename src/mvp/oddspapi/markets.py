@@ -57,6 +57,37 @@ def stage_name(market_type: str, period: str | None) -> str:
     return re.sub(r"[^a-z0-9]+", "_", raw.lower()).strip("_")
 
 
+# Outcome names that mean "the fixture's first / second participant". A market is
+# participant-sided when its outcomes are exactly these, optionally with a draw.
+_PARTICIPANT_OUTCOMES = frozenset({"1", "2"})
+_DRAW_OUTCOME = "X"
+
+
+def participant_sided_markets() -> set[str]:
+    """Stage names whose "1"/"2" outcomes are the fixture's participants.
+
+    Derived from the reference rather than hardcoded, so a market the feed adds
+    classifies itself.
+
+    The distinction is load-bearing and not obvious from the side value alone:
+    `exactsets_result` has outcomes ["2","3","4","5"] for the number of sets a match
+    takes, so a row with side="2" there means a two-set match, not participant two.
+    Resolving sides to players by matching the string would attribute a set-count
+    outcome to a player.
+
+    Measured over the reference: 14 markets qualify (moneyline, game_spread,
+    spreads_result, moneyline_p1..p5, spreads_games_p1..p5, moneyline_aces_result),
+    and exactsets_result is the only market with a bare "2" that does not.
+    """
+    out: set[str] = set()
+    for m in load_index().values():
+        names = {o.name for o in m.outcomes}
+        if _PARTICIPANT_OUTCOMES <= names and not (names - _PARTICIPANT_OUTCOMES
+                                                   - {_DRAW_OUTCOME}):
+            out.add(m.stage_name)
+    return out
+
+
 def load_index() -> dict[str, Market]:
     """marketId -> Market, for every market the reference defines."""
     path = markets_reference()

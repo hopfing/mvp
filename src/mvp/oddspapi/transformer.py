@@ -100,8 +100,7 @@ TICK_SCHEMA: dict[str, pl.DataType] = {
 # ticks, and the ticks tree keeps it regardless.
 MARKET_SCHEMA: dict[str, pl.DataType] = {
     "match_uid": pl.Utf8,
-    "p1_id": pl.Utf8,
-    "p2_id": pl.Utf8,
+    "side_player_id": pl.Utf8,
     "market": pl.Utf8,
     "points": pl.Float64,
     "side": pl.Utf8,
@@ -112,9 +111,6 @@ MARKET_SCHEMA: dict[str, pl.DataType] = {
     "active": pl.Boolean,
     "limit": pl.Float64,
 }
-
-XW_COLS = ["fixture_id", "match_uid", "p1_id", "p2_id", "start_time", "true_start_time"]
-
 
 @dataclass
 class TransformReport:
@@ -355,7 +351,7 @@ def _swap_books_in(new_root: Path, report: TransformReport) -> None:
 
     ONE BOOK AT A TIME. The books sit directly under stage_root(), alongside
     `ticks/` (16.5k staged files, 35 GB of raw behind them) and
-    `_crosswalk.parquet`, so renaming "the layer" aside would take those with it and
+    `_fixture_map.parquet`, so renaming "the layer" aside would take those with it and
     the cleanup below would delete them. Never rename stage_root().
 
     Renaming the live directory aside before renaming the new one in keeps the
@@ -423,20 +419,17 @@ def _organise(xw: pl.DataFrame, report: TransformReport) -> None:
 
     # fixture -> match_uid is not injective: 38 match_uids carry more than one
     # captured fixture (superseded events, one with three), and two fixtures of the
-    # same match can list the participants in opposite order. Taking p1/p2 from the
-    # fixture row would then give one match contradictory ids, so they are
-    # canonicalised per match first and joined on match_uid.
-    per_match = (
-        xw.select("match_uid", "p1_id", "p2_id")
-        .unique()
-        .sort(["match_uid", "p1_id", "p2_id"])
-        .group_by("match_uid", maintain_order=True)
-        .agg(pl.col("p1_id").first(), pl.col("p2_id").first())
-    )
+    # same match can list the participants in opposite order. That used to force a
+    # per-match canonicalisation of p1/p2 — an arbitrary pick after a sort.
+    # Resolving each side against its OWN fixture makes the situation impossible
+    # instead: a tick only ever needs the fixture it came from.
     report.matches_multi_fixture = (
         xw.group_by("match_uid").len().filter(pl.col("len") > 1).height
     )
-    fixtures = xw.select("fixture_id", "match_uid", "start_time", "true_start_time")
+    fixtures = xw.select(
+        "fixture_id", "match_uid", "participant1_id", "participant2_id",
+        "start_time", "true_start_time",
+    )
 
     files = [str(p) for p in sorted(_staged_index())]
     scan = pl.scan_parquet(files)
@@ -449,6 +442,7 @@ def _organise(xw: pl.DataFrame, report: TransformReport) -> None:
     report.ticks_parsed = int(stats["ticks"][0])
     report.fixtures_empty = report.fixtures_staged - int(stats["fixtures"][0])
 
+    participant_sided = sorted(markets.participant_sided_markets())
     boundary = pl.coalesce([pl.col("true_start_time"), pl.col("start_time")])
     lf = (
         # LEFT, not inner. An inner join drops every tick of a fixture the crosswalk
@@ -457,7 +451,20 @@ def _organise(xw: pl.DataFrame, report: TransformReport) -> None:
         # Same reason nothing here cuts on prematch or `active`: an unresolved
         # fixture is a null match_uid to filter, not an absence.
         scan.join(fixtures.lazy(), on="fixture_id", how="left")
-        .join(per_match.lazy(), on="match_uid", how="left")
+        .with_columns(
+            # Which player a side refers to, resolved against the fixture's OWN
+            # participant order. Guarded on the market, not on the side string:
+            # `exactsets_result` has outcomes ["2","3","4","5"] for the number of
+            # sets a match takes, so matching side == "2" would attribute a set
+            # count to a player. Null for over/under, yes/no, correct-score, and
+            # the draw outcome in moneyline_aces_result.
+            pl.when(~pl.col("market").is_in(participant_sided))
+            .then(pl.lit(None, dtype=pl.Utf8))
+            .when(pl.col("side") == "1").then(pl.col("participant1_id"))
+            .when(pl.col("side") == "2").then(pl.col("participant2_id"))
+            .otherwise(pl.lit(None, dtype=pl.Utf8))
+            .alias("side_player_id")
+        )
         .with_columns(
             # Three-way, not two. With no crosswalk row there is no boundary, and
             # `otherwise` would label those IN_PLAY — asserting a match state we do

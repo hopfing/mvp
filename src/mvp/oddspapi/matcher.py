@@ -25,7 +25,7 @@ from mvp.common.event_mapper import (
     map_book_events,
 )
 from mvp.oddspapi import tournaments
-from mvp.oddspapi.paths import crosswalk_path, fixtures_dir
+from mvp.oddspapi.paths import fixture_map_path, fixtures_dir
 
 logger = logging.getLogger(__name__)
 
@@ -47,8 +47,17 @@ _YEAR_SUFFIX = re.compile(r"\s*\([^)]*\)\s*$")
 # `true_start_time` is the real boundary, not `start_time`: 48% of fixtures begin
 # more than 5 minutes after their scheduled time and 1.7% more than an hour, so
 # cutting on the schedule misclassifies genuinely prematch ticks as in-play.
-CROSSWALK_COLUMNS = ["fixture_id", "match_uid", "p1_id", "p2_id",
-                     "p1_book_name", "p2_book_name"]
+# The FEED's participant order, not ours. The odds are sided positionally — a tick
+# belongs to an outcome named "1" or "2", with no player attached — so a side can
+# only be resolved against the order the feed listed. `event_mapper` reorders to our
+# match record's p1, which disagrees with the feed on 85 of 8,881 fixtures and would
+# silently reattribute those prices to the wrong player.
+#
+# Our convention is not stored because it is derivable: matches.parquet carries
+# player_id/opp_id per match_uid, and it is where that convention actually lives.
+FIXTURE_MAP_COLUMNS = ["fixture_id", "match_uid",
+                       "participant1_id", "participant2_id",
+                       "participant1_name", "participant2_name"]
 _TS_COLUMNS = ["start_time", "true_start_time"]
 _INT_COLUMNS = ["status_id"]
 
@@ -83,7 +92,7 @@ def _is_singles(f: dict) -> bool:
 
 # Bracket placeholders for unplayed matches — "Qf1", "R16P12", "WQF3", "WSF1".
 # They are draw slots, not people, so they can never resolve; counting them as
-# misses made the crosswalk look 0.3pp worse than it is and buried three real
+# misses made the fixture map look 0.3pp worse than it is and buried three real
 # unmapped players in a list of thirty placeholders.
 _PLACEHOLDER = re.compile(r"^[A-Za-z]{1,4}\d+[A-Za-z]*\d*$")
 
@@ -119,7 +128,7 @@ def load_in_scope_fixtures() -> list[dict]:
 def resolve_raw(fixtures: list[dict]):
     """Run the mapper and return its full result, for diagnostics.
 
-    `resolve` wraps this into the crosswalk frame. Both go through here so a
+    `resolve` wraps this into the fixture map frame. Both go through here so a
     diagnostic can never drift from the real query — building a second `matches`
     select for analysis is how a fix silently fails to show up in its own probe.
     """
@@ -178,38 +187,38 @@ def resolve_raw(fixtures: list[dict]):
 
 def resolve(fixtures: list[dict]) -> pl.DataFrame:
     """Map fixtures to match_uid. One row per resolved fixture."""
-    return to_crosswalk(resolve_raw(fixtures), fixtures)
+    return to_fixture_map(resolve_raw(fixtures), fixtures)
 
 
-def to_crosswalk(res, fixtures: list[dict]) -> pl.DataFrame:
-    """Crosswalk frame from an already-computed MappingResult.
+def to_fixture_map(res, fixtures: list[dict]) -> pl.DataFrame:
+    """Fixture map from an already-computed MappingResult.
 
     Separate from `resolve` so a caller that wants the diagnostics does not have to
     resolve twice — the resolution reads matches.parquet and rebuilds the player
     lookup, so it is the expensive half.
     """
     if res is None:
-        return pl.DataFrame(schema=_crosswalk_schema())
+        return pl.DataFrame(schema=_fixture_map_schema())
     meta = {f["fixtureId"]: f for f in fixtures}
     return pl.DataFrame([
         {
             "fixture_id": em.event_id,
             "match_uid": em.match_uid,
-            "p1_id": em.p1_id,
-            "p2_id": em.p2_id,
-            "p1_book_name": em.p1_book_name,
-            "p2_book_name": em.p2_book_name,
+            "participant1_id": em.participant1_id,
+            "participant2_id": em.participant2_id,
+            "participant1_name": em.participant1_name,
+            "participant2_name": em.participant2_name,
             "start_time": parse_ts(meta[em.event_id].get("startTime")),
             "true_start_time": parse_ts(meta[em.event_id].get("trueStartTime")),
             "status_id": meta[em.event_id].get("statusId"),
         }
         for em in res.event_matches
         if em.event_id in meta
-    ], schema=_crosswalk_schema())
+    ], schema=_fixture_map_schema())
 
 
-def _crosswalk_schema() -> dict:
-    schema: dict = {c: pl.Utf8 for c in CROSSWALK_COLUMNS}
+def _fixture_map_schema() -> dict:
+    schema: dict = {c: pl.Utf8 for c in FIXTURE_MAP_COLUMNS}
     for c in _TS_COLUMNS:
         schema[c] = pl.Datetime(time_unit="us", time_zone="UTC")
     for c in _INT_COLUMNS:
@@ -222,24 +231,24 @@ def _matches_path() -> Path:
 
 
 def build(refresh: bool = False) -> pl.DataFrame:
-    """Load the cached crosswalk, rebuilding it when missing or when asked.
+    """Load the cached fixture map, rebuilding it when missing or when asked.
 
     matches.parquet is rewritten every 15 minutes by the live pipeline, so a
     rebuild can read a torn snapshot. Caching means one exposure per transform
     session instead of one per market.
     """
-    path = crosswalk_path()
+    path = fixture_map_path()
     if path.exists() and not refresh:
         cached = pl.read_parquet(path)
-        logger.info("Crosswalk: %d fixtures (cached)", len(cached))
+        logger.info("Fixture map: %d fixtures (cached)", len(cached))
         return cached
 
     fixtures = load_in_scope_fixtures()
-    logger.info("Crosswalk: resolving %d in-scope fixtures", len(fixtures))
+    logger.info("Fixture map: resolving %d in-scope fixtures", len(fixtures))
     raw = resolve_raw(fixtures)
     if raw is not None:
         logger.info(
-            "Crosswalk: %d unresolved names, %d no match, %d ambiguous, "
+            "Fixture map: %d unresolved names, %d no match, %d ambiguous, "
             "%d rejected on date, %d rejected on tournament",
             len(raw.unresolved_names), len(raw.no_match_found),
             len(raw.collisions), len(raw.date_rejected),
@@ -247,12 +256,12 @@ def build(refresh: bool = False) -> pl.DataFrame:
         )
         for _eid, a, b, muid, gap in raw.date_rejected[:10]:
             logger.info("  date-rejected: %s vs %s -> %s (%d days)", a, b, muid, gap)
-    resolved = to_crosswalk(raw, fixtures)
+    resolved = to_fixture_map(raw, fixtures)
     path.parent.mkdir(parents=True, exist_ok=True)
     resolved.write_parquet(path)
     rate = len(resolved) / max(len(fixtures), 1)
     logger.info(
-        "Crosswalk: resolved %d/%d fixtures (%.1f%%) -> %s",
+        "Fixture map: resolved %d/%d fixtures (%.1f%%) -> %s",
         len(resolved), len(fixtures), 100 * rate, path,
     )
     return resolved

@@ -104,7 +104,7 @@ def _all_books(market: str | None = None) -> pl.DataFrame:
     """Every book's rows concatenated — what the transform produced in total.
 
     Enumerated from ALL_BOOKS rather than by globbing the source root, since
-    `ticks/` and `_crosswalk.parquet` are siblings of the book directories.
+    `ticks/` and `_fixture_map.parquet` are siblings of the book directories.
     """
     from mvp.oddspapi import paths
 
@@ -125,18 +125,22 @@ def _snapshots(book: str, market: str) -> pl.DataFrame:
     return pl.read_parquet(paths.market_path(book, market))
 
 
-def _fake_crosswalk(monkeypatch, fixture_id, start, true_start):
+_FIXTURE_MAP_SCHEMA = {
+    "fixture_id": pl.Utf8, "match_uid": pl.Utf8,
+    "participant1_id": pl.Utf8, "participant2_id": pl.Utf8,
+    "participant1_name": pl.Utf8, "participant2_name": pl.Utf8,
+    "start_time": pl.Datetime("us", "UTC"),
+    "true_start_time": pl.Datetime("us", "UTC"), "status_id": pl.Int64,
+}
+
+
+def _fake_fixture_map(monkeypatch, fixture_id, start, true_start):
     xw = pl.DataFrame([{
         "fixture_id": fixture_id, "match_uid": "2026_1_SGL_R32_AA_BB",
-        "p1_id": "AA", "p2_id": "BB",
-        "p1_book_name": "A A", "p2_book_name": "B B",
+        "participant1_id": "AA", "participant2_id": "BB",
+        "participant1_name": "A A", "participant2_name": "B B",
         "start_time": start, "true_start_time": true_start, "status_id": 2,
-    }], schema={
-        "fixture_id": pl.Utf8, "match_uid": pl.Utf8, "p1_id": pl.Utf8,
-        "p2_id": pl.Utf8, "p1_book_name": pl.Utf8, "p2_book_name": pl.Utf8,
-        "start_time": pl.Datetime("us", "UTC"),
-        "true_start_time": pl.Datetime("us", "UTC"), "status_id": pl.Int64,
-    })
+    }], schema=_FIXTURE_MAP_SCHEMA)
     monkeypatch.setattr(transformer.matcher, "build", lambda *a, **k: xw)
 
 
@@ -144,22 +148,96 @@ SCHED = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
 TRUE = datetime(2026, 6, 1, 13, 0, tzinfo=UTC)     # an hour late
 
 
-def _fake_crosswalk_many(monkeypatch, fixture_ids):
+def _fake_fixture_map_many(monkeypatch, fixture_ids):
     xw = pl.DataFrame([
         {
             "fixture_id": fid, "match_uid": f"2026_1_SGL_R32_{fid}",
-            "p1_id": "AA", "p2_id": "BB",
-            "p1_book_name": "A A", "p2_book_name": "B B",
+            "participant1_id": "AA", "participant2_id": "BB",
+            "participant1_name": "A A", "participant2_name": "B B",
             "start_time": SCHED, "true_start_time": TRUE, "status_id": 2,
         }
         for fid in fixture_ids
-    ], schema={
-        "fixture_id": pl.Utf8, "match_uid": pl.Utf8, "p1_id": pl.Utf8,
-        "p2_id": pl.Utf8, "p1_book_name": pl.Utf8, "p2_book_name": pl.Utf8,
-        "start_time": pl.Datetime("us", "UTC"),
-        "true_start_time": pl.Datetime("us", "UTC"), "status_id": pl.Int64,
-    })
+    ], schema=_FIXTURE_MAP_SCHEMA)
     monkeypatch.setattr(transformer.matcher, "build", lambda *a, **k: xw)
+
+
+class TestSideAttribution:
+    """Which player a positional side refers to.
+
+    The feed sides odds positionally — a tick belongs to an outcome named "1" or
+    "2", with no player attached — so the only correct answer comes from the order
+    the FEED listed participants for that fixture. `event_mapper` reorders to our
+    match record's p1, which disagrees on 85 of 8,881 real fixtures; resolving
+    against that would silently attribute those prices to the wrong player.
+    """
+
+    def test_each_fixture_resolves_against_its_own_participant_order(
+        self, data_root, monkeypatch
+    ):
+        """Two captures of one match listing participants in opposite order.
+
+        side="1" means AA in one and BB in the other, and both are right. An earlier
+        version canonicalised p1/p2 per match with an arbitrary pick, which made one
+        of these wrong with nothing to show for it.
+        """
+        _reference(data_root)
+        t = SCHED - timedelta(hours=2)
+        _write_raw("f1", {121: {121: [_tick(t, 1.50)], 122: [_tick(t, 2.60)]}},
+                   book="betrivers", group=0)
+        _write_raw("f2", {121: {121: [_tick(t, 1.55)], 122: [_tick(t, 2.50)]}},
+                   book="fanduel", group=1)
+        xw = pl.DataFrame([
+            {"fixture_id": fid, "match_uid": "2026_1_SGL_R32_AA_BB",
+             "participant1_id": p1, "participant2_id": p2,
+             "participant1_name": "A A", "participant2_name": "B B",
+             "start_time": SCHED, "true_start_time": TRUE, "status_id": 2}
+            for fid, p1, p2 in (("f1", "AA", "BB"), ("f2", "BB", "AA"))
+        ], schema=_FIXTURE_MAP_SCHEMA)
+        monkeypatch.setattr(transformer.matcher, "build", lambda *a, **k: xw)
+        transformer.transform()
+
+        br = _snapshots("betrivers", "moneyline")
+        fd = _snapshots("fanduel", "moneyline")
+        assert br.filter(pl.col("side") == "1")["side_player_id"].item() == "AA"
+        assert fd.filter(pl.col("side") == "1")["side_player_id"].item() == "BB"
+        assert br.filter(pl.col("side") == "2")["side_player_id"].item() == "BB"
+        assert fd.filter(pl.col("side") == "2")["side_player_id"].item() == "AA"
+
+    def test_a_bare_digit_side_on_a_non_participant_market_stays_null(
+        self, data_root, monkeypatch
+    ):
+        """`exactsets_result` has outcomes ["2","3","4","5"] — the number of sets.
+
+        Matching the side string would attribute "match goes 2 sets" to participant
+        two. The guard is on the market, so this resolves to nothing.
+        """
+        from mvp.oddspapi import paths
+
+        paths.markets_reference().write_text(json.dumps([{
+            "marketId": 800, "marketType": "exactsets", "period": "result",
+            "outcomes": [{"outcomeId": 8002, "outcomeName": "2"},
+                         {"outcomeId": 8003, "outcomeName": "3"}],
+        }]), encoding="utf-8")
+        t = SCHED - timedelta(hours=2)
+        _write_raw("f1", {800: {8002: [_tick(t, 2.10)], 8003: [_tick(t, 1.80)]}},
+                   book="betrivers", group=0)
+        _fake_fixture_map(monkeypatch, "f1", SCHED, TRUE)
+        transformer.transform()
+
+        rows = _snapshots("betrivers", "exactsets_result")
+        assert sorted(rows["side"].to_list()) == ["2", "3"]
+        assert rows["side_player_id"].null_count() == len(rows)
+
+    def test_over_under_has_no_player(self, data_root, monkeypatch):
+        _reference(data_root)
+        t = SCHED - timedelta(hours=2)
+        _write_raw("f1", {900: {9001: [_tick(t, 1.90)], 9002: [_tick(t, 2.00)]}},
+                   book="betrivers", group=0)
+        _fake_fixture_map(monkeypatch, "f1", SCHED, TRUE)
+        transformer.transform()
+
+        rows = _snapshots("betrivers", "total_games")
+        assert rows["side_player_id"].null_count() == len(rows)
 
 
 class TestParser:
@@ -202,7 +280,7 @@ class TestEventStatus:
     """Derived on the ticks, and it decides what the reduction can see."""
 
     def _run(self, monkeypatch, true_start):
-        _fake_crosswalk(monkeypatch, "f1", SCHED, true_start)
+        _fake_fixture_map(monkeypatch, "f1", SCHED, true_start)
         return transformer.transform()
 
     def test_boundary_is_the_true_start_not_the_schedule(self, data_root, monkeypatch):
@@ -243,7 +321,7 @@ class TestNothingIsFilteredFromTheRecord:
             9002: [_tick(SCHED - timedelta(hours=1), 2.0),
                    _tick(TRUE + timedelta(minutes=30), 1.3)],
         }})
-        _fake_crosswalk(monkeypatch, "f1", SCHED, TRUE)
+        _fake_fixture_map(monkeypatch, "f1", SCHED, TRUE)
         transformer.transform()
         assert len(_ticks("total_games")) == 4
 
@@ -253,7 +331,7 @@ class TestNothingIsFilteredFromTheRecord:
             9001: [_tick(SCHED - timedelta(hours=1), 1.9, active=False)],
             9002: [_tick(SCHED - timedelta(hours=1), 2.0, active=True)],
         }})
-        _fake_crosswalk(monkeypatch, "f1", SCHED, TRUE)
+        _fake_fixture_map(monkeypatch, "f1", SCHED, TRUE)
         transformer.transform()
         assert sorted(_ticks("total_games")["active"].to_list()) == [False, True]
 
@@ -262,7 +340,7 @@ class TestNothingIsFilteredFromTheRecord:
         not cost a 35 GB reparse, and unresolved fixtures must stay recoverable."""
         _reference(data_root)
         _write_raw("f1", {900: {9001: [_tick(SCHED, 1.9)], 9002: [_tick(SCHED, 2.0)]}})
-        _fake_crosswalk(monkeypatch, "f1", SCHED, TRUE)
+        _fake_fixture_map(monkeypatch, "f1", SCHED, TRUE)
         transformer.transform()
         assert "match_uid" not in _ticks().columns
 
@@ -291,7 +369,7 @@ class TestSnapshotLayer:
         _write_raw("f1", {900: {9001: [_tick(t1, 1.85), _tick(t2, 2.00)],
                                 9002: [_tick(t1, 2.00), _tick(t2, 1.85)]}},
                    book="fanduel", group=1)
-        _fake_crosswalk(monkeypatch, "f1", SCHED, TRUE)
+        _fake_fixture_map(monkeypatch, "f1", SCHED, TRUE)
         return transformer.transform()
 
     def test_each_book_keeps_its_own_prices(self, data_root, monkeypatch):
@@ -314,7 +392,7 @@ class TestSnapshotLayer:
                    book="pinnacle", group=0)
         _write_raw("f1", {900: {9001: [_tick(t0, 1.95)], 9002: [_tick(t0, 1.90)]}},
                    book="fanduel", group=1)
-        _fake_crosswalk(monkeypatch, "f1", SCHED, TRUE)
+        _fake_fixture_map(monkeypatch, "f1", SCHED, TRUE)
         transformer.transform()
 
         pin = _snapshots("pinnacle", "total_games").filter(pl.col("side") == "Over")
@@ -334,7 +412,7 @@ class TestSnapshotLayer:
         the crosswalk already resolved."""
         self._two_book_total(data_root, monkeypatch)
         assert _snapshots("betrivers", "total_games").columns == [
-            "match_uid", "p1_id", "p2_id", "market", "points", "side", "book",
+            "match_uid", "side_player_id", "market", "points", "side", "book",
             "odds", "fetched_at", "event_status", "active", "limit",
         ]
 
@@ -375,7 +453,7 @@ class TestSnapshotLayer:
             9002: [_tick(SCHED - timedelta(hours=1), 2.0),
                    _tick(TRUE + timedelta(minutes=30), 1.3)],
         }}, book="fanduel", group=1)
-        _fake_crosswalk(monkeypatch, "f1", SCHED, TRUE)
+        _fake_fixture_map(monkeypatch, "f1", SCHED, TRUE)
         transformer.transform()
 
         assert len(_ticks("total_games")) == 4
@@ -405,7 +483,7 @@ class TestSnapshotLayer:
                    book="betrivers", group=0)
         _write_raw("f1", {121: {121: [_tick(t1, 1.55)], 122: [_tick(t1, 2.50)]}},
                    book="fanduel", group=1)
-        _fake_crosswalk(monkeypatch, "f1", SCHED, TRUE)
+        _fake_fixture_map(monkeypatch, "f1", SCHED, TRUE)
         transformer.transform()
 
         for book, price in (("betrivers", 1.50), ("fanduel", 1.55)):
@@ -430,7 +508,7 @@ class TestSnapshotLayer:
                    book="betrivers", group=0)
         _write_raw("f1", {700: {7001: [_tick(t1, 1.65)], 7002: [_tick(t1, 2.30)]}},
                    book="fanduel", group=1)
-        _fake_crosswalk(monkeypatch, "f1", SCHED, TRUE)
+        _fake_fixture_map(monkeypatch, "f1", SCHED, TRUE)
         transformer.transform()
 
         for book, price in (("betrivers", 1.60), ("fanduel", 1.65)):
@@ -446,7 +524,7 @@ class TestSnapshotLayer:
             9002: [_tick(SCHED - timedelta(hours=1), 2.0),
                    _tick(TRUE + timedelta(minutes=30), 1.3)],
         }}, book="betrivers")
-        _fake_crosswalk(monkeypatch, "f1", SCHED, TRUE)
+        _fake_fixture_map(monkeypatch, "f1", SCHED, TRUE)
         transformer.transform()
 
         over = _snapshots("betrivers", "total_games").filter(pl.col("side") == "Over")
@@ -459,7 +537,7 @@ class TestIncremental:
     def test_second_run_skips_already_parsed_files(self, data_root, monkeypatch):
         _reference(data_root)
         _write_raw("f1", {900: {9001: [_tick(SCHED, 1.9)], 9002: [_tick(SCHED, 2.0)]}})
-        _fake_crosswalk(monkeypatch, "f1", SCHED, TRUE)
+        _fake_fixture_map(monkeypatch, "f1", SCHED, TRUE)
 
         first = transformer.transform()
         assert first.files_parsed == 1 and first.files_skipped == 0
@@ -471,7 +549,7 @@ class TestIncremental:
         _reference(data_root)
         _write_raw("f1", {900: {9001: [_tick(SCHED, 1.9)], 9002: [_tick(SCHED, 2.0)]}},
                    book="betrivers")
-        _fake_crosswalk(monkeypatch, "f1", SCHED, TRUE)
+        _fake_fixture_map(monkeypatch, "f1", SCHED, TRUE)
 
         transformer.transform()
         a = _all_books()
@@ -488,7 +566,7 @@ class TestIncremental:
         staged file — it cannot double-count, so re-staging is the right answer."""
         _reference(data_root)
         _write_raw("f1", {900: {9001: [_tick(SCHED, 1.9)], 9002: [_tick(SCHED, 2.0)]}})
-        _fake_crosswalk(monkeypatch, "f1", SCHED, TRUE)
+        _fake_fixture_map(monkeypatch, "f1", SCHED, TRUE)
         transformer.transform()
 
         _write_raw("f1", {900: {9001: [_tick(SCHED, 1.7), _tick(SCHED, 1.8)],
@@ -503,7 +581,7 @@ class TestIncremental:
         marker is read once per run rather than per file (233s at 16.5k files)."""
         _reference(data_root)
         _write_raw("f1", {900: {9001: [_tick(SCHED, 1.9)], 9002: [_tick(SCHED, 2.0)]}})
-        _fake_crosswalk(monkeypatch, "f1", SCHED, TRUE)
+        _fake_fixture_map(monkeypatch, "f1", SCHED, TRUE)
         transformer.transform()
 
         from mvp.oddspapi import paths
@@ -525,7 +603,7 @@ class TestIncremental:
 
         _reference(data_root)
         _write_raw("f1", {900: {9001: [_tick(SCHED, 1.9)], 9002: [_tick(SCHED, 2.0)]}})
-        _fake_crosswalk(monkeypatch, "f1", SCHED, TRUE)
+        _fake_fixture_map(monkeypatch, "f1", SCHED, TRUE)
         transformer.transform()
 
         from mvp.oddspapi import paths
@@ -547,7 +625,7 @@ class TestIncremental:
 
         _reference(data_root)
         _write_raw("f1", {900: {9001: [_tick(SCHED, 1.9)], 9002: [_tick(SCHED, 2.0)]}})
-        _fake_crosswalk(monkeypatch, "f1", SCHED, TRUE)
+        _fake_fixture_map(monkeypatch, "f1", SCHED, TRUE)
         transformer.transform()
 
         from mvp.oddspapi import paths
@@ -572,7 +650,7 @@ class TestIncremental:
         should cost a metadata read, not a full reparse."""
         _reference(data_root)
         _write_raw("f1", {900: {9001: [_tick(SCHED, 1.9)], 9002: [_tick(SCHED, 2.0)]}})
-        _fake_crosswalk(monkeypatch, "f1", SCHED, TRUE)
+        _fake_fixture_map(monkeypatch, "f1", SCHED, TRUE)
         transformer.transform()
 
         from mvp.oddspapi import paths
@@ -593,7 +671,7 @@ class TestIncremental:
                    book="betrivers", group=0)
         _write_raw("f1", {900: {9001: [_tick(SCHED, 1.95)], 9002: [_tick(SCHED, 1.9)]}},
                    book="fanduel", group=1)
-        _fake_crosswalk(monkeypatch, "f1", SCHED, TRUE)
+        _fake_fixture_map(monkeypatch, "f1", SCHED, TRUE)
         transformer.transform()
 
         from mvp.oddspapi import paths
@@ -617,7 +695,7 @@ class TestIncremental:
         _reference(data_root)
         _write_raw("f1", {900: {9001: [_tick(SCHED, 1.9)], 9002: [_tick(SCHED, 2.0)]}})
         _write_raw("f2", {900: {9001: [_tick(SCHED, 1.5)], 9002: [_tick(SCHED, 2.4)]}})
-        _fake_crosswalk_many(monkeypatch, ["f1", "f2"])
+        _fake_fixture_map_many(monkeypatch, ["f1", "f2"])
         transformer.transform()
 
         from mvp.oddspapi import paths
@@ -630,7 +708,7 @@ class TestIncremental:
     def test_refresh_reparses_everything(self, data_root, monkeypatch):
         _reference(data_root)
         _write_raw("f1", {900: {9001: [_tick(SCHED, 1.9)], 9002: [_tick(SCHED, 2.0)]}})
-        _fake_crosswalk(monkeypatch, "f1", SCHED, TRUE)
+        _fake_fixture_map(monkeypatch, "f1", SCHED, TRUE)
         transformer.transform()
         again = transformer.transform(refresh=True)
         assert again.files_parsed == 1 and again.files_skipped == 0
@@ -653,7 +731,7 @@ class TestMatchingIsIndependentOfParsing:
 
     def test_unmatched_ticks_survive_in_the_ticks_tree(self, data_root, monkeypatch):
         self._setup(data_root)
-        _fake_crosswalk_many(monkeypatch, [f"f{i}" for i in range(4)])  # f4 unresolved
+        _fake_fixture_map_many(monkeypatch, [f"f{i}" for i in range(4)])  # f4 unresolved
         transformer.transform()
 
         assert "f4" in _ticks()["fixture_id"].unique().to_list()
@@ -671,14 +749,14 @@ class TestMatchingIsIndependentOfParsing:
         rather than in-play.
         """
         self._setup(data_root)
-        _fake_crosswalk_many(monkeypatch, [f"f{i}" for i in range(4)])  # f4 unresolved
+        _fake_fixture_map_many(monkeypatch, [f"f{i}" for i in range(4)])  # f4 unresolved
         transformer.transform()
 
         rows = _all_books()
         orphan = rows.filter(pl.col("match_uid").is_null())
         assert len(orphan) > 0
         assert orphan["event_status"].null_count() == len(orphan)
-        assert orphan["p1_id"].null_count() == len(orphan)
+        assert orphan["side_player_id"].null_count() == len(orphan)
         # The odds themselves are intact — only the identity is missing.
         assert orphan["odds"].null_count() == 0
         # And the resolved fixtures are unaffected.
@@ -688,13 +766,13 @@ class TestMatchingIsIndependentOfParsing:
         self, data_root, monkeypatch
     ):
         self._setup(data_root)
-        _fake_crosswalk_many(monkeypatch, [f"f{i}" for i in range(4)])
+        _fake_fixture_map_many(monkeypatch, [f"f{i}" for i in range(4)])
         first = transformer.transform()
         assert first.files_parsed == 5
         assert first.fixtures_unmatched == 1
 
         # The matcher improves — same staged ticks, no reparse.
-        _fake_crosswalk_many(monkeypatch, [f"f{i}" for i in range(5)])
+        _fake_fixture_map_many(monkeypatch, [f"f{i}" for i in range(5)])
         second = transformer.transform()
         assert second.files_parsed == 0
         assert second.files_skipped == 5
@@ -714,7 +792,7 @@ class TestMatchingIsIndependentOfParsing:
             _write_raw(f"f{i}", {900: {9001: [_tick(t1, 1.95)],
                                        9002: [_tick(t1, 1.90)]}},
                        book="fanduel", group=1)
-        _fake_crosswalk_many(monkeypatch, [f"f{i}" for i in range(6)])
+        _fake_fixture_map_many(monkeypatch, [f"f{i}" for i in range(6)])
         transformer.transform()
 
         q = _all_books("total_games").filter(pl.col("side") == "Over")
@@ -735,7 +813,7 @@ class TestGuards:
         for i in range(4):
             _write_raw(f"f{i}", {900: {9001: [_tick(SCHED, 1.9)],
                                        9002: [_tick(SCHED, 2.0)]}})
-        _fake_crosswalk(monkeypatch, "nonexistent", SCHED, TRUE)
+        _fake_fixture_map(monkeypatch, "nonexistent", SCHED, TRUE)
         with pytest.raises(RuntimeError, match="did not resolve to a match_uid"):
             transformer.transform()
 
@@ -745,7 +823,7 @@ class TestGuards:
         _reference(data_root)
         _write_raw("f1", {900: {9001: [_tick(SCHED, 1.9)], 9002: [_tick(SCHED, 2.0)]}},
                    book="some_new_book")
-        _fake_crosswalk(monkeypatch, "f1", SCHED, TRUE)
+        _fake_fixture_map(monkeypatch, "f1", SCHED, TRUE)
         with pytest.raises(ValueError, match="has no role"):
             transformer.transform()
 
@@ -768,7 +846,7 @@ class TestSchemasCannotDrift:
         _reference(data_root)
         _write_raw("f1", {900: {9001: [_tick(SCHED, 1.9)], 9002: [_tick(SCHED, 2.0)]}},
                    book="betrivers")
-        _fake_crosswalk(monkeypatch, "f1", SCHED, TRUE)
+        _fake_fixture_map(monkeypatch, "f1", SCHED, TRUE)
         transformer.transform()
 
         q = _all_books()
@@ -792,7 +870,7 @@ class TestActiveIsAColumn:
         _write_raw("f1", {900: {9001: [_tick(t0, 2.50), _tick(t1, 2.50, active=False)],
                                 9002: [_tick(t0, 1.55), _tick(t1, 1.55, active=False)]}},
                    book="betrivers", group=0)
-        _fake_crosswalk(monkeypatch, "f1", SCHED, TRUE)
+        _fake_fixture_map(monkeypatch, "f1", SCHED, TRUE)
         transformer.transform()
 
         over = _snapshots("betrivers", "total_games").filter(pl.col("side") == "Over")
@@ -809,7 +887,7 @@ class TestActiveIsAColumn:
                    book="betrivers", group=0)
         _write_raw("f1", {900: {9001: [_tick(late, 1.95)], 9002: [_tick(late, 1.90)]}},
                    book="fanduel", group=1)
-        _fake_crosswalk(monkeypatch, "f1", SCHED, TRUE)
+        _fake_fixture_map(monkeypatch, "f1", SCHED, TRUE)
         transformer.transform()
 
         br = _snapshots("betrivers", "total_games").filter(pl.col("side") == "Over")
@@ -826,16 +904,13 @@ class TestOneMatchManyFixtures:
     def _two_fixtures_one_match(self, monkeypatch):
         xw = pl.DataFrame([
             {"fixture_id": fid, "match_uid": "2026_1_SGL_R32_AA_BB",
-             "p1_id": p1, "p2_id": p2, "p1_book_name": "A A", "p2_book_name": "B B",
+             "participant1_id": p1, "participant2_id": p2,
+             "participant1_name": "A A", "participant2_name": "B B",
              "start_time": SCHED, "true_start_time": TRUE, "status_id": 2}
-            # Opposite participant order, which is what duplicates the ids join.
+            # Opposite participant order — the feed listed them differently in the
+            # two captures of this one match.
             for fid, p1, p2 in (("f1", "AA", "BB"), ("f2", "BB", "AA"))
-        ], schema={
-            "fixture_id": pl.Utf8, "match_uid": pl.Utf8, "p1_id": pl.Utf8,
-            "p2_id": pl.Utf8, "p1_book_name": pl.Utf8, "p2_book_name": pl.Utf8,
-            "start_time": pl.Datetime("us", "UTC"),
-            "true_start_time": pl.Datetime("us", "UTC"), "status_id": pl.Int64,
-        })
+        ], schema=_FIXTURE_MAP_SCHEMA)
         monkeypatch.setattr(transformer.matcher, "build", lambda *a, **k: xw)
 
     def test_one_row_per_series_instant(self, data_root, monkeypatch):

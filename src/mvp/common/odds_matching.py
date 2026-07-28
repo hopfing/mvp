@@ -38,7 +38,21 @@ def normalize_tournament(name: str) -> str:
 
 @dataclass
 class EventMatch:
-    """Record of a successful match between a book event and a prediction."""
+    """Record of a successful match between a book event and a prediction.
+
+    `p1_*`/`p2_*` are OUR convention: the mapper reorders the book's two participants
+    to match the match record's p1. `participant1_*`/`participant2_*` are the book's
+    own order, as it listed them.
+
+    Both are kept because they answer different questions. A book that names its
+    players per row (the scrapers) resolves sides by name and wants ours. A book that
+    sides positionally — oddspapi quotes outcome "1" and "2" with no name attached —
+    can only resolve a side against the book's own order, and reordering to ours
+    silently reattributes it. That happens on 85 of 8,881 oddspapi fixtures.
+
+    Defaults are empty so callers constructing these without the book's order (there
+    are none today) stay valid rather than raising.
+    """
 
     match_uid: str
     event_id: str
@@ -46,6 +60,10 @@ class EventMatch:
     p2_book_name: str
     p1_id: str = ""
     p2_id: str = ""
+    participant1_id: str = ""
+    participant2_id: str = ""
+    participant1_name: str = ""
+    participant2_name: str = ""
 
 
 @dataclass

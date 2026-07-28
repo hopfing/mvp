@@ -582,6 +582,15 @@ def map_book_events(
             p2_book_name=p2_book_name,
             p1_id=p1_id,
             p2_id=p2_id,
+            # The book's own order, before the swap above. Which branch that swap
+            # took IS "is the book's first participant our p1?", and discarding it
+            # left positionally-sided odds unresolvable — see EventMatch's docstring.
+            # Additive: `save_event_mappings` names its columns, so event_map.parquet
+            # is unchanged.
+            participant1_id=pid_a,
+            participant2_id=pid_b,
+            participant1_name=name_a,
+            participant2_name=name_b,
         ))
         mapped += 1
 

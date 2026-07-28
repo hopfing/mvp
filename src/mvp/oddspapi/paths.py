@@ -68,7 +68,7 @@ def book_dir(book: str) -> Path:
     reads it with no special case.
 
     Books are enumerated from `ALL_BOOKS`, never by scanning this directory, since
-    `ticks/` and `_crosswalk.parquet` are its siblings.
+    `ticks/` and `_fixture_map.parquet` are its siblings.
     """
     return stage_root() / book
 
@@ -85,13 +85,18 @@ def market_path(book: str, market: str) -> Path:
     return book_dir(book) / f"{market}.parquet"
 
 
-def crosswalk_path() -> Path:
-    """Cached fixture -> match_uid crosswalk, shared across markets.
+def fixture_map_path() -> Path:
+    """Cached fixture -> match_uid map, shared across markets.
+
+    Describes the fixture as the FEED presents it — participants in the book's own
+    order — plus the match it resolves to. Our p1/p2 convention is deliberately not
+    stored: it is derivable from matches.parquet, and baking it in here is what made
+    positionally-sided odds unresolvable.
 
     Resolution reads matches.parquet and rebuilds the player lookup, so redoing it
     per market would be pure waste.
     """
-    return stage_root() / "_crosswalk.parquet"
+    return stage_root() / "_fixture_map.parquet"
 
 
 def ticks_dir() -> Path:
