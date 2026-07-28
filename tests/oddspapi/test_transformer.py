@@ -1,11 +1,14 @@
-"""raw/oddspapi -> stage/oddspapi/ticks -> aggregate/oddspapi/quotes.parquet.
+"""raw/oddspapi -> stage/oddspapi/ticks -> stage/oddspapi/<book>/<market>.parquet.
 
 The ticks tree is the record: every tick captured is staged, with `active` and
 `event_status` as columns. Filtering there would make the dropped universe
 unrecoverable without a full reparse — the mistake made one layer up, where the
 backtest CSV gated at emission and the offered-line universe was lost.
 
-The quotes aggregate is derived: prematch only, reduced to open/formed/close.
+The per-book files are the terminal artifact. An earlier version also wrote
+aggregate/oddspapi/quotes.parquet, best-across-books at open/formed/close; it has
+been removed, because best-across spends book identity and three moments spend the
+time axis, and cross-book comparison belongs at read time.
 """
 
 from __future__ import annotations
@@ -97,11 +100,23 @@ def _ticks(market: str | None = None) -> pl.DataFrame:
     return df.filter(pl.col("market") == market) if market else df
 
 
-def _quotes(market: str | None = None) -> pl.DataFrame:
+def _all_books(market: str | None = None) -> pl.DataFrame:
+    """Every book's rows concatenated — what the transform produced in total.
+
+    Enumerated from ALL_BOOKS rather than by globbing the source root, since
+    `ticks/` and `_crosswalk.parquet` are siblings of the book directories.
+    """
     from mvp.oddspapi import paths
 
-    df = pl.read_parquet(paths.quotes_path())
-    return df.filter(pl.col("market") == market) if market else df
+    parts = []
+    for book in paths.ALL_BOOKS:
+        d = paths.book_dir(book)
+        if not d.exists():
+            continue
+        for f in sorted(d.glob("*.parquet")):
+            if market is None or f.stem == market:
+                parts.append(pl.read_parquet(f))
+    return pl.concat(parts) if parts else pl.DataFrame()
 
 
 def _snapshots(book: str, market: str) -> pl.DataFrame:
@@ -192,7 +207,7 @@ class TestEventStatus:
 
     def test_boundary_is_the_true_start_not_the_schedule(self, data_root, monkeypatch):
         """48% of fixtures start >5 min late; cutting on the schedule files
-        genuinely prematch quotes as in-play, which would drop them from quotes."""
+        genuinely prematch quotes as in-play, which would drop them here."""
         _reference(data_root)
         # 12:30 is after the scheduled start but before the real one.
         _write_raw("f1", {900: {
@@ -200,7 +215,7 @@ class TestEventStatus:
             9002: [_tick(datetime(2026, 6, 1, 12, 30, tzinfo=UTC), 2.0)],
         }})
         self._run(monkeypatch, TRUE)
-        assert len(_quotes("total_games")) == 2
+        assert len(_all_books("total_games")) == 2
 
     def test_falls_back_to_scheduled_start_when_true_is_missing(
         self, data_root, monkeypatch
@@ -211,9 +226,9 @@ class TestEventStatus:
             9002: [_tick(datetime(2026, 6, 1, 12, 30, tzinfo=UTC), 2.0)],
         }})
         self._run(monkeypatch, None)
-        # In-play by the scheduled boundary, so nothing reaches the aggregate —
-        # but the ticks survive.
-        assert len(_quotes()) == 0
+        # In-play by the scheduled boundary — kept, and labelled as such.
+        rows = _all_books()
+        assert rows["event_status"].unique().to_list() == ["IN_PLAY"]
         assert len(_ticks("total_games")) == 2
 
 
@@ -252,8 +267,15 @@ class TestNothingIsFilteredFromTheRecord:
         assert "match_uid" not in _ticks().columns
 
 
-class TestQuotes:
-    """The reduction: prematch only, open/formed/close per line and side."""
+class TestSnapshotLayer:
+    """Per-book prices at every instant — the terminal artifact of the transform.
+
+    An earlier version also wrote aggregate/oddspapi/quotes.parquet: best across
+    books at open, formed and close. It could not answer WHICH book held a price or
+    what the board looked like at any other moment, because best-across spends book
+    identity and three moments spend the time axis. Both decide real bets, so the
+    aggregate was removed and cross-book comparison moved to read time.
+    """
 
     def _two_book_total(self, data_root, monkeypatch):
         """Two entry books plus the reference book, quoting at three instants."""
@@ -272,40 +294,20 @@ class TestQuotes:
         _fake_crosswalk(monkeypatch, "f1", SCHED, TRUE)
         return transformer.transform()
 
-    def test_one_row_per_line_side_and_role(self, data_root, monkeypatch):
+    def test_each_book_keeps_its_own_prices(self, data_root, monkeypatch):
+        """The reason the aggregate went: 1.95 and 2.00 are different bets at
+        different books, and best-across reported one number with no name on it."""
         self._two_book_total(data_root, monkeypatch)
-        q = _quotes("total_games")
-        assert set(q["side"].to_list()) == {"Over", "Under"}
-        assert q["role"].unique().to_list() == ["entry"]
-        assert q["points"].unique().to_list() == [21.5]
-        assert len(q) == 2
+        br = _snapshots("betrivers", "total_games").filter(pl.col("side") == "Over")
+        fd = _snapshots("fanduel", "total_games").filter(pl.col("side") == "Over")
+        assert br["odds"].max() == 1.95
+        assert fd["odds"].max() == 2.00
+        assert br["book"].unique().to_list() == ["betrivers"]
+        assert fd["book"].unique().to_list() == ["fanduel"]
 
-    def test_open_is_the_earliest_instant_close_the_latest(
-        self, data_root, monkeypatch
-    ):
-        """Only betrivers is on the board at the open, so the opening price is
-        its own — not a blend with a book that had not posted yet."""
-        self._two_book_total(data_root, monkeypatch)
-        over = _quotes("total_games").filter(pl.col("side") == "Over").row(0, named=True)
-        assert over["best_opening_odds"] == 1.80
-        assert over["best_closing_odds"] == 2.00     # max across both at the last instant
-        assert over["n_books"] == 2
-
-    def test_formed_needs_two_entry_books(self, data_root, monkeypatch):
-        """Formed is the first shoppable moment; one book on the board is not it.
-
-        betrivers quotes at t0 and does not move again until t2, so the bucket where
-        fanduel arrives contains no betrivers TICK — only its standing price. That
-        bucket is the first two-books-deep moment, and reading it correctly is what
-        _snapshots_from_ticks exists for.
-        """
-        self._two_book_total(data_root, monkeypatch)
-        over = _quotes("total_games").filter(pl.col("side") == "Over").row(0, named=True)
-        assert over["formed_odds"] == 1.85          # max(1.80 standing, 1.85 new)
-
-    def test_reference_and_entry_books_stay_separate(self, data_root, monkeypatch):
-        """Pinnacle is the de-vig reference for CLV, not a bettable price — maxing
-        it together with retail would quote a number no bet can be placed at."""
+    def test_the_reference_book_is_a_file_like_any_other(self, data_root, monkeypatch):
+        """Pinnacle is not bettable, but nothing here enforces that — role is a
+        read-time concern now that no aggregate mixes the two."""
         _reference(data_root)
         t0 = SCHED - timedelta(hours=2)
         _write_raw("f1", {900: {9001: [_tick(t0, 1.75)], 9002: [_tick(t0, 2.10)]}},
@@ -315,29 +317,10 @@ class TestQuotes:
         _fake_crosswalk(monkeypatch, "f1", SCHED, TRUE)
         transformer.transform()
 
-        q = _quotes("total_games")
-        assert sorted(q["role"].unique().to_list()) == ["entry", "reference"]
-        ref = q.filter((pl.col("role") == "reference") & (pl.col("side") == "Over"))
-        ent = q.filter((pl.col("role") == "entry") & (pl.col("side") == "Over"))
-        assert ref["best_opening_odds"].item() == 1.75
-        assert ent["best_opening_odds"].item() == 1.95
-        # A lone reference book still gets a formed price; requiring two would null
-        # every one of them.
-        assert ref["formed_odds"].item() == 1.75
-
-
-class TestSnapshotLayer:
-    """Per-book prices at every instant, kept rather than spent on the reduction.
-
-    quotes.parquet answers "what was the best price" at three moments. It cannot
-    answer WHICH book held it or what the board looked like at any other moment,
-    because best-across spends book identity and open/formed/close spend the rest.
-    Both questions decide real bets, so the layer they are answerable from is the
-    one that gets persisted; quotes stays derived.
-    """
-
-    def _two_book_total(self, data_root, monkeypatch):
-        return TestQuotes()._two_book_total(data_root, monkeypatch)
+        pin = _snapshots("pinnacle", "total_games").filter(pl.col("side") == "Over")
+        ent = _snapshots("fanduel", "total_games").filter(pl.col("side") == "Over")
+        assert pin["odds"].to_list() == [1.75]
+        assert ent["odds"].to_list() == [1.95]
 
     def test_one_file_per_book_and_market(self, data_root, monkeypatch):
         self._two_book_total(data_root, monkeypatch)
@@ -352,13 +335,13 @@ class TestSnapshotLayer:
         self._two_book_total(data_root, monkeypatch)
         assert _snapshots("betrivers", "total_games").columns == [
             "match_uid", "p1_id", "p2_id", "market", "points", "side", "book",
-            "odds", "fetched_at", "event_status",
+            "odds", "fetched_at", "event_status", "active", "limit",
         ]
 
     def test_the_best_price_is_attributable_to_a_book(self, data_root, monkeypatch):
-        """The question quotes cannot answer. Both books are on the board at the
-        close at different prices; the aggregate keeps 2.00 and n_books=2, which
-        does not tell you where to place the bet."""
+        """The question the retired aggregate could not answer. Both books are on
+        the board at the last instant at different prices; best-across kept 2.00
+        with n_books=2 and no name, which does not tell you where to bet."""
         self._two_book_total(data_root, monkeypatch)
         close = SCHED - timedelta(hours=1)
         at_close = {
@@ -368,27 +351,23 @@ class TestSnapshotLayer:
             for book in ("betrivers", "fanduel")
         }
         assert at_close == {"betrivers": 1.95, "fanduel": 2.00}
-        assert _quotes("total_games").filter(
-            pl.col("side") == "Over"
-        )["best_closing_odds"].item() == 2.00
 
-    def test_a_standing_price_is_present_where_it_did_not_tick(
+    def test_a_price_exists_only_where_the_book_ticked(
         self, data_root, monkeypatch
     ):
-        """betrivers quotes at t0 and does not move again until t2, but it was on
-        the board throughout — the fill is what makes `n_books` mean books quoting
-        rather than books that happened to move."""
+        """No interpolation. betrivers quotes at t0 and t2 and nothing in between,
+        so there is no row at t1 — an earlier version filled the gap, which on thin
+        books invented more rows than the book ever posted."""
         self._two_book_total(data_root, monkeypatch)
-        middle = SCHED - timedelta(hours=2)
-        row = _snapshots("betrivers", "total_games").filter(
-            (pl.col("side") == "Over") & (pl.col("fetched_at") == middle)
-        )
-        assert row["odds"].item() == 1.80
+        br = _snapshots("betrivers", "total_games").filter(pl.col("side") == "Over")
+        assert sorted(br["fetched_at"].to_list()) == [
+            SCHED - timedelta(hours=3), SCHED - timedelta(hours=1),
+        ]
+        assert sorted(br["odds"].to_list()) == [1.80, 1.95]
 
-    def test_in_play_is_absent_here_and_present_in_the_ticks(
-        self, data_root, monkeypatch
-    ):
-        """Prematch only, like the reduction it feeds. The ticks stay the record."""
+    def test_in_play_is_kept_and_labelled(self, data_root, monkeypatch):
+        """In-play is 98% of the real corpus and the chain prices from any score, so
+        it is a column to filter rather than a cut to make at write time."""
         _reference(data_root)
         _write_raw("f1", {900: {
             9001: [_tick(SCHED - timedelta(hours=1), 1.9),
@@ -401,8 +380,10 @@ class TestSnapshotLayer:
 
         assert len(_ticks("total_games")) == 4
         snaps = _snapshots("fanduel", "total_games")
-        assert snaps["event_status"].unique().to_list() == ["NOT_STARTED"]
-        assert len(snaps) == 2
+        assert len(snaps) == 4
+        assert dict(snaps.group_by("event_status").len().rows()) == {
+            "NOT_STARTED": 2, "IN_PLAY": 2,
+        }
 
     def test_rerunning_replaces_the_layer_rather_than_appending(
         self, data_root, monkeypatch
@@ -427,16 +408,16 @@ class TestSnapshotLayer:
         _fake_crosswalk(monkeypatch, "f1", SCHED, TRUE)
         transformer.transform()
 
-        q = _quotes("moneyline").filter(pl.col("role") == "entry")
-        assert len(q) == 2
-        assert q["points"].unique().to_list() == [0.0]
-        assert q["formed_odds"].null_count() == 0
-        assert q["n_books"].to_list() == [2, 2]
+        for book, price in (("betrivers", 1.50), ("fanduel", 1.55)):
+            m = _snapshots(book, "moneyline")
+            assert m["points"].unique().to_list() == [0.0]
+            assert sorted(m["side"].unique().to_list()) == ["1", "2"]
+            assert m.filter(pl.col("side") == "1")["odds"].to_list()[0] == price
 
-    def test_null_points_market_keeps_its_formed_price(self, data_root, monkeypatch):
+    def test_null_points_market_survives_the_grid_join(self, data_root, monkeypatch):
         """The nulls_equal guard, exercised directly: a reference entry with no
-        handicap yields null points, and a null-dropping join would have returned
-        formed_odds as null while group_by grouped the nulls together."""
+        handicap yields null points, and the grid join in `_snapshots_from_ticks`
+        keys on it. A null-dropping join would silently lose the whole market."""
         from mvp.oddspapi import paths
 
         paths.markets_reference().write_text(json.dumps([{
@@ -452,12 +433,12 @@ class TestSnapshotLayer:
         _fake_crosswalk(monkeypatch, "f1", SCHED, TRUE)
         transformer.transform()
 
-        q = _quotes().filter(pl.col("role") == "entry")
-        assert q["points"].unique().to_list() == [None]
-        assert q["formed_odds"].null_count() == 0
-        assert q["n_books"].to_list() == [2, 2]
+        for book, price in (("betrivers", 1.60), ("fanduel", 1.65)):
+            m = _snapshots(book, "winner_set1_result")
+            assert m["points"].unique().to_list() == [None]
+            assert m.filter(pl.col("side") == "1")["odds"].to_list()[0] == price
 
-    def test_in_play_ticks_do_not_reach_quotes(self, data_root, monkeypatch):
+    def test_in_play_prices_are_labelled_not_dropped(self, data_root, monkeypatch):
         _reference(data_root)
         _write_raw("f1", {900: {
             9001: [_tick(SCHED - timedelta(hours=1), 1.9),
@@ -468,8 +449,10 @@ class TestSnapshotLayer:
         _fake_crosswalk(monkeypatch, "f1", SCHED, TRUE)
         transformer.transform()
 
-        over = _quotes("total_games").filter(pl.col("side") == "Over").row(0, named=True)
-        assert over["best_closing_odds"] == 1.9      # not the 3.4 in-play price
+        over = _snapshots("betrivers", "total_games").filter(pl.col("side") == "Over")
+        assert sorted(over["odds"].to_list()) == [1.9, 3.4]
+        assert over.filter(pl.col("odds") == 3.4)["event_status"].item() == "IN_PLAY"
+        assert over.filter(pl.col("odds") == 1.9)["event_status"].item() == "NOT_STARTED"
 
 
 class TestIncremental:
@@ -484,16 +467,21 @@ class TestIncremental:
         second = transformer.transform()
         assert second.files_parsed == 0 and second.files_skipped == 1
 
-    def test_quotes_are_identical_across_runs(self, data_root, monkeypatch):
+    def test_output_is_identical_across_runs(self, data_root, monkeypatch):
         _reference(data_root)
         _write_raw("f1", {900: {9001: [_tick(SCHED, 1.9)], 9002: [_tick(SCHED, 2.0)]}},
                    book="betrivers")
         _fake_crosswalk(monkeypatch, "f1", SCHED, TRUE)
 
         transformer.transform()
-        a = _quotes()
+        a = _all_books()
         transformer.transform()
-        assert a.equals(_quotes())
+        b = _all_books()
+        # Content, not row order. Every row carries `fetched_at`, so the order the
+        # streaming sink happens to emit rows in is not information — asserting on
+        # it would fail a rebuild that changed nothing.
+        key = list(a.columns)
+        assert a.sort(key).equals(b.sort(key))
 
     def test_raw_newer_than_staged_is_reparsed(self, data_root, monkeypatch):
         """Staging is per raw file, so a rewritten capture overwrites its own
@@ -618,9 +606,10 @@ class TestIncremental:
         assert again.files_pruned == 0
         assert again.files_orphan_kept == 1
         assert len(list(paths.ticks_dir().glob("*/*.parquet"))) == 2
-        # And the surviving staged half still contributes to the aggregate.
-        over = _quotes("total_games").filter(pl.col("side") == "Over").row(0, named=True)
-        assert over["n_books"] == 2
+        # And the surviving staged half still reaches its book's file.
+        assert sorted(_all_books("total_games")["book"].unique().to_list()) == [
+            "betrivers", "fanduel",
+        ]
 
     def test_orphaned_staged_file_is_pruned(self, data_root, monkeypatch):
         """A staged file whose raw capture is gone must not keep feeding the
@@ -636,7 +625,7 @@ class TestIncremental:
         (paths.historical_dirs()[0] / "historical_f2.json").unlink()
         again = transformer.transform()
         assert again.files_pruned == 1
-        assert _quotes()["match_uid"].unique().to_list() == ["2026_1_SGL_R32_f1"]
+        assert _all_books()["match_uid"].unique().to_list() == ["2026_1_SGL_R32_f1"]
 
     def test_refresh_reparses_everything(self, data_root, monkeypatch):
         _reference(data_root)
@@ -668,7 +657,32 @@ class TestMatchingIsIndependentOfParsing:
         transformer.transform()
 
         assert "f4" in _ticks()["fixture_id"].unique().to_list()
-        assert "2026_1_SGL_R32_f4" not in _quotes()["match_uid"].unique().to_list()
+        assert "2026_1_SGL_R32_f4" not in _all_books()["match_uid"].unique().to_list()
+
+    def test_unmatched_ticks_reach_the_book_files_with_a_null_match(
+        self, data_root, monkeypatch
+    ):
+        """An unresolved fixture is a null match_uid to filter, not an absence.
+
+        The join is LEFT: an inner join dropped every tick of an unresolved fixture,
+        which on the real corpus was 290 fixtures and ~3.9M ticks invisible unless
+        you went back to the ticks tree. `event_status` is null too — with no
+        crosswalk row there is no start boundary, so the match state is unknown
+        rather than in-play.
+        """
+        self._setup(data_root)
+        _fake_crosswalk_many(monkeypatch, [f"f{i}" for i in range(4)])  # f4 unresolved
+        transformer.transform()
+
+        rows = _all_books()
+        orphan = rows.filter(pl.col("match_uid").is_null())
+        assert len(orphan) > 0
+        assert orphan["event_status"].null_count() == len(orphan)
+        assert orphan["p1_id"].null_count() == len(orphan)
+        # The odds themselves are intact — only the identity is missing.
+        assert orphan["odds"].null_count() == 0
+        # And the resolved fixtures are unaffected.
+        assert rows.filter(pl.col("match_uid").is_not_null())["event_status"].null_count() == 0
 
     def test_a_later_alias_recovers_them_without_reparsing(
         self, data_root, monkeypatch
@@ -685,11 +699,12 @@ class TestMatchingIsIndependentOfParsing:
         assert second.files_parsed == 0
         assert second.files_skipped == 5
         assert second.fixtures_unmatched == 0
-        assert "2026_1_SGL_R32_f4" in _quotes()["match_uid"].unique().to_list()
+        assert "2026_1_SGL_R32_f4" in _all_books()["match_uid"].unique().to_list()
 
-    def test_batching_does_not_split_a_fixture(self, data_root, monkeypatch):
-        """A price series lives inside one fixture, so batching by fixture is
-        exact — but only if every file of a fixture lands in the same batch."""
+    def test_every_fixture_reaches_its_book_file(self, data_root, monkeypatch):
+        """Six fixtures across two capture groups all land, each book's rows in its
+        own file. There is no batching to get wrong any more — the write is one
+        streaming pass — but the fan-in is still the thing that can lose rows."""
         _reference(data_root)
         t0, t1 = SCHED - timedelta(hours=2), SCHED - timedelta(hours=1)
         for i in range(6):
@@ -700,13 +715,15 @@ class TestMatchingIsIndependentOfParsing:
                                        9002: [_tick(t1, 1.90)]}},
                        book="fanduel", group=1)
         _fake_crosswalk_many(monkeypatch, [f"f{i}" for i in range(6)])
-        monkeypatch.setattr(transformer, "REDUCE_BATCH", 2)
         transformer.transform()
 
-        q = _quotes("total_games").filter(pl.col("side") == "Over")
-        assert len(q) == 6
-        assert q["n_books"].unique().to_list() == [2]
-        assert q["best_opening_odds"].unique().to_list() == [1.80]
+        q = _all_books("total_games").filter(pl.col("side") == "Over")
+        assert q["match_uid"].n_unique() == 6
+        assert sorted(q["book"].unique().to_list()) == ["betrivers", "fanduel"]
+        # Every fixture's betrivers open survived; a split batch would lose some.
+        br = q.filter(pl.col("book") == "betrivers")
+        assert br["match_uid"].n_unique() == 6
+        assert br["odds"].unique().to_list() == [1.80]
 
 
 class TestGuards:
@@ -745,12 +762,7 @@ class TestSchemasCannotDrift:
 
         assert list(transformer.TICK_SCHEMA) == list(TickRecord.model_fields)
 
-    def test_quote_schema_matches_its_record(self):
-        from mvp.oddspapi.schemas.quotes import QuoteRecord
-
-        assert list(transformer.QUOTE_SCHEMA) == list(QuoteRecord.model_fields)
-
-    def test_written_quotes_match_the_declared_dtypes(self, data_root, monkeypatch):
+    def test_written_rows_match_the_declared_dtypes(self, data_root, monkeypatch):
         """n_unique() returns UInt32 while the schema declares Int64, so a populated
         file and an empty one would not concatenate."""
         _reference(data_root)
@@ -759,51 +771,37 @@ class TestSchemasCannotDrift:
         _fake_crosswalk(monkeypatch, "f1", SCHED, TRUE)
         transformer.transform()
 
-        q = _quotes()
+        q = _all_books()
         assert q.height > 0
-        assert dict(q.schema) == transformer.QUOTE_SCHEMA
+        assert dict(q.schema) == transformer.MARKET_SCHEMA
 
 
-class TestForwardFillBounds:
-    def test_withdrawn_quote_does_not_reach_the_close(self, data_root, monkeypatch):
-        """active=False is a withdrawal; carrying it forward as a live price would
-        quote a book that has left the market."""
+class TestActiveIsAColumn:
+    """A withdrawn quote is an event, not an absence.
+
+    An earlier version filtered `active=False` out and forward-filled each book's
+    standing price across 15-minute buckets, capped at 4 hours. All of that was a
+    reader's policy frozen into storage: whether a stale or withdrawn price still
+    counts depends on the question being asked, so the row is kept and labelled.
+    """
+
+    def test_a_withdrawn_quote_is_kept_and_flagged(self, data_root, monkeypatch):
         _reference(data_root)
         t0 = SCHED - timedelta(hours=3)
         t1 = SCHED - timedelta(hours=2)
-        t2 = SCHED - timedelta(hours=1)
         _write_raw("f1", {900: {9001: [_tick(t0, 2.50), _tick(t1, 2.50, active=False)],
                                 9002: [_tick(t0, 1.55), _tick(t1, 1.55, active=False)]}},
                    book="betrivers", group=0)
-        _write_raw("f1", {900: {9001: [_tick(t0, 1.90), _tick(t2, 1.95)],
-                                9002: [_tick(t0, 2.00), _tick(t2, 1.90)]}},
-                   book="fanduel", group=1)
         _fake_crosswalk(monkeypatch, "f1", SCHED, TRUE)
         transformer.transform()
 
-        over = _quotes("total_games").filter(pl.col("side") == "Over").row(0, named=True)
-        assert over["best_opening_odds"] == 2.50    # both live at t0
-        assert over["best_closing_odds"] == 1.95    # betrivers withdrew, so not 2.50
+        over = _snapshots("betrivers", "total_games").filter(pl.col("side") == "Over")
+        assert len(over) == 2
+        assert over.sort("fetched_at")["active"].to_list() == [True, False]
 
-    def test_standing_price_reaches_the_close(self, data_root, monkeypatch):
-        """The case the fill exists for: a book that quoted once and never moved is
-        still on the board at the off, so the close is best-across-books."""
-        _reference(data_root)
-        t0, t2 = SCHED - timedelta(hours=3), SCHED - timedelta(hours=1)
-        _write_raw("f1", {900: {9001: [_tick(t0, 2.10)], 9002: [_tick(t0, 1.75)]}},
-                   book="betrivers", group=0)
-        _write_raw("f1", {900: {9001: [_tick(t2, 1.95)], 9002: [_tick(t2, 1.90)]}},
-                   book="fanduel", group=1)
-        _fake_crosswalk(monkeypatch, "f1", SCHED, TRUE)
-        transformer.transform()
-
-        over = _quotes("total_games").filter(pl.col("side") == "Over").row(0, named=True)
-        assert over["best_closing_odds"] == 2.10    # betrivers' standing price wins
-        assert over["n_books"] == 2
-
-    def test_carry_is_capped(self, data_root, monkeypatch):
-        """A book that stops sending ticks without going inactive would otherwise
-        have a two-day-old price counted at the close — measured tail is 44.8 h."""
+    def test_a_price_is_not_carried_past_its_tick(self, data_root, monkeypatch):
+        """No interpolation at any distance. betrivers quotes once, 30 hours out;
+        fanduel quotes an hour before. betrivers has exactly its one row."""
         _reference(data_root)
         stale = SCHED - timedelta(hours=30)
         late = SCHED - timedelta(hours=1)
@@ -814,24 +812,9 @@ class TestForwardFillBounds:
         _fake_crosswalk(monkeypatch, "f1", SCHED, TRUE)
         transformer.transform()
 
-        over = _quotes("total_games").filter(pl.col("side") == "Over").row(0, named=True)
-        assert over["best_opening_odds"] == 2.60    # real at the time it was posted
-        assert over["best_closing_odds"] == 1.95    # 29h stale, so not 2.60
-
-    def test_carry_within_the_cap_is_kept(self, data_root, monkeypatch):
-        _reference(data_root)
-        early = SCHED - timedelta(hours=3)
-        late = SCHED - timedelta(hours=1)
-        assert (late - early).total_seconds() / 60 <= transformer.MAX_CARRY_MIN
-        _write_raw("f1", {900: {9001: [_tick(early, 2.60)], 9002: [_tick(early, 1.50)]}},
-                   book="betrivers", group=0)
-        _write_raw("f1", {900: {9001: [_tick(late, 1.95)], 9002: [_tick(late, 1.90)]}},
-                   book="fanduel", group=1)
-        _fake_crosswalk(monkeypatch, "f1", SCHED, TRUE)
-        transformer.transform()
-
-        over = _quotes("total_games").filter(pl.col("side") == "Over").row(0, named=True)
-        assert over["best_closing_odds"] == 2.60
+        br = _snapshots("betrivers", "total_games").filter(pl.col("side") == "Over")
+        assert br["odds"].to_list() == [2.60]
+        assert br["fetched_at"].to_list() == [stale]
 
 
 class TestOneMatchManyFixtures:
@@ -855,7 +838,7 @@ class TestOneMatchManyFixtures:
         })
         monkeypatch.setattr(transformer.matcher, "build", lambda *a, **k: xw)
 
-    def test_one_row_per_quote_key(self, data_root, monkeypatch):
+    def test_one_row_per_series_instant(self, data_root, monkeypatch):
         _reference(data_root)
         t0, t1 = SCHED - timedelta(hours=3), SCHED - timedelta(hours=1)
         _write_raw("f1", {900: {9001: [_tick(t0, 1.90)], 9002: [_tick(t0, 2.00)]}},
@@ -863,19 +846,17 @@ class TestOneMatchManyFixtures:
         _write_raw("f2", {900: {9001: [_tick(t1, 1.95)], 9002: [_tick(t1, 1.90)]}},
                    book="fanduel", group=1)
         self._two_fixtures_one_match(monkeypatch)
-        # One match per batch, so the two fixtures would land apart if batching were
-        # keyed on fixture.
-        monkeypatch.setattr(transformer, "REDUCE_BATCH", 1)
         report = transformer.transform()
 
         assert report.matches_multi_fixture == 1
-        q = _quotes("total_games")
-        key = ["match_uid", "market", "points", "side", "role"]
+        q = _all_books("total_games")
+        key = ["match_uid", "market", "points", "side", "book", "fetched_at"]
         assert q.height == q.unique(subset=key).height
-        over = q.filter(pl.col("side") == "Over").row(0, named=True)
-        assert over["best_opening_odds"] == 1.90     # from f1, the earlier fixture
-        assert over["best_closing_odds"] == 1.95     # from f2, the later one
-        assert over["n_books"] == 2
+        # Both fixtures' prices reach the one match, each under its own book.
+        over = q.filter(pl.col("side") == "Over")
+        assert over["match_uid"].unique().to_list() == ["2026_1_SGL_R32_AA_BB"]
+        assert over.filter(pl.col("book") == "betrivers")["odds"].min() == 1.90
+        assert over.filter(pl.col("book") == "fanduel")["odds"].min() == 1.95
     def test_known_markets_keep_friendly_names(self):
         assert markets.stage_name("totals-games", "result") == "total_games"
         assert markets.stage_name("spreads-games", "result") == "game_spread"

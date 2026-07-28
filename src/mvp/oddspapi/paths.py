@@ -3,8 +3,9 @@
 `B:/raw/oddspapi/` -> `B:/stage/oddspapi/`, mirroring every other source
 (`raw/<source>/<dataset>/`, `stage/<source>/<market>.parquet`). The scrapers are
 one-source-one-book by coincidence; oddspapi is one source carrying many books, so
-`book` is a column in the ticks and a directory in the snapshot layer, where the
-per-book file IS the scraper's stage file.
+`book` is a column in the ticks and a directory under the source root, where the
+per-book file IS the scraper's stage file. There is no aggregate: cross-book
+comparison happens at read time, over these files.
 
 Raw CAPTURE is out of scope (spec 2026-07-26-oddspapi-odds-ingest §1) — this module
 only declares where capture is expected to write, so the stage layer reads from the
@@ -58,17 +59,6 @@ def historical_dirs() -> list[Path]:
     return [raw_root() / "historical" / "+".join(g) for g in BOOK_GROUPS]
 
 
-def aggregate_root() -> Path:
-    """Cross-fixture output. `stage/` is 1:1 with raw; combining across fixtures is
-    an aggregate, the same relation aggregate/atptour/matches.parquet has to the
-    per-tournament stage files."""
-    return get_data_root() / "aggregate" / SOURCE
-
-
-def quotes_path() -> Path:
-    return aggregate_root() / "quotes.parquet"
-
-
 def book_dir(book: str) -> Path:
     """One book's staged markets: `stage/oddspapi/<book>/`.
 
@@ -86,11 +76,11 @@ def book_dir(book: str) -> Path:
 def market_path(book: str, market: str) -> Path:
     """One book's prices for one market, at every captured instant.
 
-    quotes.parquet is this priced: three moments, best across books, book identity
-    spent. That makes it unable to answer the two questions a bettor asks — WHICH
-    book, and what the board looked like at any other moment — and it bakes the
-    reduction's policies (15-minute buckets, `min_books_formed`, the prematch
-    boundary) into the artifact rather than leaving them at read time.
+    This is the terminal artifact. An earlier aggregate priced it down to three
+    moments, best across books, and that spent both things a bettor needs — WHICH
+    book held the price, and what the board looked like at any other moment. It
+    also baked the reduction's policies into storage rather than leaving them at
+    read time. Cross-book comparison happens over these files, not before them.
     """
     return book_dir(book) / f"{market}.parquet"
 
@@ -142,8 +132,7 @@ def ensure_dirs() -> None:
     The raw subdirectories are created even though capture is out of scope, so the
     expected layout exists and a capture job has somewhere to land.
     """
-    for d in (fixtures_dir(), reference_dir(), *historical_dirs(),
-              stage_root(), aggregate_root()):
+    for d in (fixtures_dir(), reference_dir(), *historical_dirs(), stage_root()):
         d.mkdir(parents=True, exist_ok=True)
     for g in historical_dirs():
         (ticks_dir() / g.name).mkdir(parents=True, exist_ok=True)

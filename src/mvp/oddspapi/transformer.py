@@ -1,36 +1,35 @@
-"""raw/oddspapi -> stage/oddspapi/ticks -> aggregate/oddspapi/quotes.parquet.
+"""raw/oddspapi -> stage/oddspapi/ticks -> stage/oddspapi/<book>/<market>.parquet.
 
 Reshapes captured ticks to the stage contract:
 
     price -> odds        createdAt -> fetched_at        handicap -> points
 
-Three layers, each with a different lifetime:
+Two layers, each with a different lifetime:
 
   PARSE     one raw JSON -> one parquet under stage/oddspapi/ticks/<group>/,
             keyed by fixture_id, no match resolution. Expensive (~10 min over
             35 GB) and rare, skipped per file on the rule atptour stages on
             (`atptour/pipeline.py:131-148`): staged file missing, raw newer than
             staged, or the parser's schema hash changed.
-  SNAPSHOT  staged ticks -> stage/oddspapi/<book>/<market>.parquet, one
-            row per (match_uid, market, points, side, book, 15-min bucket). The
-            capture records CHANGES, so this forward-fills each book's standing
-            price into the buckets it was on the board for — see
-            `_snapshots_from_ticks`. Column-for-column a scraper's stage file,
-            which is the point: book identity and the time axis survive here, so
-            what price was reachable, where, and when stays answerable.
-  REDUCE    snapshots -> aggregate/oddspapi/quotes.parquet, one row per
-            (match_uid, market, points, side, role) with the price at open /
-            formed / close. Convenient, and lossy by construction: best-across
-            spends book identity and three moments spend the rest. Derived, never
-            the record. Cheap and frequent — the matcher keeps improving, and
-            re-running is a join plus a group_by, not a reparse.
+  ORGANISE  staged ticks -> stage/oddspapi/<book>/<market>.parquet, one row per
+            captured tick, with `match_uid` joined and `event_status` derived. A
+            transpose: input partitioned by capture file with books mixed inside,
+            output partitioned by book and market with captures mixed inside.
+            Nothing is aggregated or filtered, so every output row exists in the
+            input. Cheap and rebuildable — 47s over the full tree — because the
+            matcher keeps improving and this is a re-join, not a reparse.
+There was a third, `aggregate/oddspapi/quotes.parquet`: best-across-books at open,
+formed and close per (match_uid, market, points, side, role). It has been removed.
+It spent book identity on the aggregation and the time axis on three moments, and
+both are the things a per-book consumer needs — cross-book comparison belongs at
+read time, over these files, not frozen into a fourth artifact.
 
-Everything captured is staged. No prematch cut, no `active` cut — those are
-columns, and filtering them here would make the dropped universe unrecoverable
-without a full reparse. In-play ticks matter in particular: the chain is a
-score-state model and prices from any score, so live pricing is the market it has
-the strongest claim on. The reduction takes only prematch ticks, but it is derived
-— the ticks tree remains the record.
+Everything captured is kept, at both layers. No prematch cut, no `active` cut —
+those are columns, and filtering here would make the dropped universe unrecoverable
+without a full reparse. In-play is not a rounding error: it is 98% of the corpus
+(betrivers/total_games is 10.8M in-play against 226k prematch), and the chain is a
+score-state model that prices from any score, so live pricing is the market it has
+the strongest claim on.
 
 `event_status` is derived, because the ticks carry no match state: a historical
 payload is only {fixtureId, bookmakers} and a tick only
@@ -39,10 +38,9 @@ payload is only {fixtureId, bookmakers} and a tick only
 fixtures begin more than 5 minutes late, so cutting on the schedule would file
 genuinely prematch quotes as in-play.
 
-Memory is bounded by a batch of fixtures, never by the corpus. A price series is
-(book, market, points, side) within one fixture, and a fixture's books span at
-most two staged files, so the reduction needs no shuffle — batching by fixture is
-sufficient and exact.
+Memory is bounded by the streaming engine, not by the corpus and not by a
+hand-picked batch size: the organise step scans lazily and lets polars partition
+the write.
 """
 
 from __future__ import annotations
@@ -54,24 +52,21 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import polars as pl
+from polars.io.partition import PartitionBy
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from mvp.odds.aggregator import compute_open_close_odds
 from mvp.oddspapi import markets, matcher, parser
 from mvp.oddspapi.paths import (
-    REFERENCE_BOOKS,
     book_dir,
     ensure_dirs,
     historical_dirs,
-    quotes_path,
     role_of,
     stage_root,
     ticks_dir,
     ticks_path,
     ticks_schema_marker,
 )
-from mvp.oddspapi.schemas.quotes import SCHEMA_HASH as QUOTES_SCHEMA_HASH
 from mvp.oddspapi.schemas.ticks import SCHEMA_HASH as TICKS_SCHEMA_HASH
 
 logger = logging.getLogger(__name__)
@@ -84,12 +79,6 @@ PREMATCH = "NOT_STARTED"
 IN_PLAY = "IN_PLAY"
 
 SCHEMA_META_KEY = "pydantic_schema_hash"
-
-# Fixtures per reduction batch. compute_open_close_odds groups by match_uid, so
-# batching is exact; this only trades memory for the number of passes. ~20k ticks
-# per fixture, and the snapshot expansion multiplies that by the books per series,
-# so 100 keeps a batch in the low hundreds of MB.
-REDUCE_BATCH = 100
 
 TICK_SCHEMA: dict[str, pl.DataType] = {
     "fixture_id": pl.Utf8,
@@ -104,27 +93,12 @@ TICK_SCHEMA: dict[str, pl.DataType] = {
     "exchange_meta": pl.Utf8,
 }
 
-QUOTE_SCHEMA: dict[str, pl.DataType] = {
-    "match_uid": pl.Utf8,
-    "market": pl.Utf8,
-    "points": pl.Float64,
-    "side": pl.Utf8,
-    "role": pl.Utf8,
-    "best_opening_odds": pl.Float64,
-    "formed_odds": pl.Float64,
-    "best_closing_odds": pl.Float64,
-    "n_books": pl.Int64,
-    "p1_id": pl.Utf8,
-    "p2_id": pl.Utf8,
-}
-QUOTE_SORT = ["match_uid", "market", "points", "side", "role"]
-
-# The scrapers' stage columns, which is the point: `stage/oddspapi/betrivers/
-# total_games.parquet` and `stage/betrivers/total_games.parquet` are the same table.
-# `match_uid` stands where a scraper carries its own event id, because the crosswalk
-# already resolved identity — a consumer joins the event map for one and not the
-# other, and that is the only asymmetry left between them.
-SNAPSHOT_SCHEMA: dict[str, pl.DataType] = {
+# One row per captured tick. Close to a scraper's stage file — `match_uid` stands
+# where a scraper carries its own event id, since the crosswalk resolved identity —
+# but it carries `active` and `limit`, which the scrapers do not, because nothing
+# here filters on them. `exchange_meta` is dropped: 0% populated across 16M sampled
+# ticks, and the ticks tree keeps it regardless.
+MARKET_SCHEMA: dict[str, pl.DataType] = {
     "match_uid": pl.Utf8,
     "p1_id": pl.Utf8,
     "p2_id": pl.Utf8,
@@ -135,14 +109,11 @@ SNAPSHOT_SCHEMA: dict[str, pl.DataType] = {
     "odds": pl.Float64,
     "fetched_at": pl.Datetime(time_unit="us", time_zone="UTC"),
     "event_status": pl.Utf8,
+    "active": pl.Boolean,
+    "limit": pl.Float64,
 }
-SNAPSHOT_SORT = ["match_uid", "market", "points", "side", "fetched_at"]
 
 XW_COLS = ["fixture_id", "match_uid", "p1_id", "p2_id", "start_time", "true_start_time"]
-
-# A reference book quotes alone, so it never reaches two books deep; requiring
-# two would null every formed price on that side.
-MIN_BOOKS_FORMED = {"reference": 1, "entry": 2}
 
 
 @dataclass
@@ -159,15 +130,12 @@ class TransformReport:
     fixtures_unmatched: int = 0
     matches_multi_fixture: int = 0
     ticks_parsed: int = 0
-    quotes: int = 0
-    quotes_by_market: dict[str, int] = field(default_factory=dict)
-    quotes_by_role: dict[str, int] = field(default_factory=dict)
-    snapshots: int = 0
-    snapshots_by_book: dict[str, int] = field(default_factory=dict)
+    rows: int = 0
+    rows_by_book: dict[str, int] = field(default_factory=dict)
 
     def summary(self) -> str:
         return (
-            f"{self.quotes:,} quotes across {len(self.quotes_by_market)} markets "
+            f"{self.rows:,} rows across {len(self.rows_by_book)} books "
             f"from {self.fixtures_staged:,} staged fixtures "
             f"({self.files_parsed} newly parsed, {self.files_skipped} skipped, "
             f"{self.fixtures_empty} staged with no ticks, "
@@ -251,7 +219,7 @@ def transform(
     refresh: bool = False,
     refresh_matcher: bool = False,
 ) -> TransformReport:
-    """Parse new raw files, then rebuild the quotes aggregate.
+    """Parse new raw files, then rebuild the per-book stage files.
 
     `refresh=True` re-parses every raw file regardless of what is staged. Normal
     runs skip per file, so re-running after an alias change re-reduces without
@@ -372,7 +340,7 @@ def transform(
     if pending or not marker.exists():
         marker.write_text(TICKS_SCHEMA_HASH, encoding="utf-8")
 
-    _reduce(xw, report)
+    _organise(xw, report)
     logger.info(report.summary())
     return report
 
@@ -382,328 +350,164 @@ def _fixture_of(path: Path) -> str:
     return path.stem.removeprefix("historical_")
 
 
-SERIES = ["match_uid", "market", "points", "side"]
+def _swap_books_in(new_root: Path, report: TransformReport) -> None:
+    """Move each freshly written book directory into the source root.
 
-# How long a book's untouched price still counts as being on the board. Books also
-# just stop sending ticks without going inactive, and the measured carry tail runs
-# to 44.8 h; 4 h leaves ~97.5% of real carries (p95 = 80 min) untouched while
-# keeping a stale price out of the closing bucket.
-MAX_CARRY_MIN = 240
-
-
-def _snapshots_from_ticks(ticks: pl.DataFrame) -> pl.DataFrame:
-    """Ticks -> per-bucket snapshots, forward-filling each book's standing price.
-
-    compute_open_close_odds reads "books quoting in this 15-minute bucket" as the
-    number of books on the board, which is true of the scrapers because they poll
-    every 15 minutes. OddsPapi captures CHANGES: measured on real ticks, a book is
-    present in 10.3 of the 45.2 buckets it spans (53%).
-
-    Two of the three prices are wrong without this:
-
-      close   the last bucket with any quote holds only the books that MOVED then,
-              usually one, so the close is that book's price instead of the best
-              across the books still standing at the off.
-      formed  needs two books in one bucket; a book that quoted at 09:00 and not
-              again until 11:00 was on the board at 10:00 but invisible there, so
-              formed arrives late or never.
-
-    The open is unaffected: the earliest bucket with any quote is by construction
-    the first bucket anything was posted in, so no book can have been live before
-    it, and the fill only ever adds rows at later buckets.
-
-    A quote stands until it changes or is withdrawn, so each book's last price is
-    carried forward to the last bucket any book quoted in that series, stopping at
-    an `active=False` tick. The one case this cannot see is capture downtime, which
-    is indistinguishable from "nothing changed".
-
-    MAX_CARRY_MIN bounds it, because a book can also just stop sending ticks without
-    ever going inactive. Measured carry age from a book's last tick to the series'
-    last prematch bucket: p50 0 min, p75 3, p90 36, p95 80, p99 862, max 2,688
-    (44.8 h). Uncapped, a two-day-old price lands in the closing bucket and inflates
-    both best_closing_odds and n_books on thin markets — and those close prices feed
-    CLV. `compute_threshold_odds` guards the same way with `max_lag_min`.
-    """
-    if ticks.is_empty():
-        return ticks
-
-    obs = (
-        ticks.with_columns(pl.col("fetched_at").dt.truncate("15m").alias("_rnd"))
-        .sort("fetched_at")
-        .group_by([*SERIES, "book", "_rnd"], maintain_order=True)
-        .agg(pl.col("odds").last(), pl.col("active").last(),
-             pl.col("event_status").last())
-    )
-    # Grid: the buckets in which SOME book quoted this series, crossed with the
-    # books that quoted it at all. Buckets nobody quoted carry no information.
-    grid = obs.select([*SERIES, "_rnd"]).unique()
-    books = obs.select([*SERIES, "book"]).unique()
-    filled = (
-        grid.join(books, on=SERIES, how="inner", nulls_equal=True)
-        .join(obs, on=[*SERIES, "book", "_rnd"], how="left", nulls_equal=True)
-        .sort([*SERIES, "book", "_rnd"])
-        .with_columns(
-            # _src_rnd tracks the bucket each carried price came FROM, so the carry
-            # age is measurable rather than assumed.
-            pl.when(pl.col("odds").is_not_null()).then(pl.col("_rnd")).alias("_src_rnd"),
-        )
-        .with_columns(
-            pl.col("odds").forward_fill().over([*SERIES, "book"]),
-            pl.col("active").forward_fill().over([*SERIES, "book"]),
-            pl.col("event_status").forward_fill().over([*SERIES, "book"]),
-            pl.col("_src_rnd").forward_fill().over([*SERIES, "book"]),
-        )
-        # Rows before a book's first quote stay null; a withdrawn quote is gone; and
-        # a price nobody has touched for MAX_CARRY_MIN is no longer evidence the book
-        # is on the board.
-        .filter(
-            pl.col("odds").is_not_null()
-            & pl.col("active").fill_null(True)
-            & ((pl.col("_rnd") - pl.col("_src_rnd")).dt.total_minutes()
-               <= MAX_CARRY_MIN)
-        )
-        .drop("_src_rnd")
-    )
-    return filled.rename({"_rnd": "fetched_at"})
-
-
-def _snapshot_parts_dir() -> Path:
-    return stage_root() / ".snapshots.parts"
-
-
-def _write_snapshot_parts(
-    snaps: pl.DataFrame, ids: pl.DataFrame, batch: int,
-) -> None:
-    """One part per (book, batch); consolidated into per-market files at the end.
-
-    Parts rather than one accumulating frame for the reason the reduction is batched
-    at all: the snapshot expansion runs several times the quote count, and holding
-    the corpus is exactly what the batching exists to avoid.
-    """
-    if snaps.is_empty():
-        return
-    frame = snaps.join(ids, on="match_uid", how="left")
-    for book in frame["book"].unique().sort().to_list():
-        d = _snapshot_parts_dir() / book
-        d.mkdir(parents=True, exist_ok=True)
-        (
-            frame.filter(pl.col("book") == book)
-            .select(list(SNAPSHOT_SCHEMA))
-            .write_parquet(d / f"part-{batch:05d}.parquet")
-        )
-
-
-def _consolidate_snapshots(report: TransformReport) -> None:
-    """Parts -> `<book>/<market>.parquet`, then swap each book in.
-
-    One book at a time on both halves: a book's parts are bounded by its share of
-    the corpus, so this holds no more than the batching already permits, and the
-    swap replaces one book directory per rename rather than a whole layer.
+    ONE BOOK AT A TIME. The books sit directly under stage_root(), alongside
+    `ticks/` (16.5k staged files, 35 GB of raw behind them) and
+    `_crosswalk.parquet`, so renaming "the layer" aside would take those with it and
+    the cleanup below would delete them. Never rename stage_root().
 
     Renaming the live directory aside before renaming the new one in keeps the
-    window in which a book has no directory one rename wide rather than a whole
-    rewrite. B:/ is shared with the live pipeline; a consumer reading mid-write is a
-    real event here, not a hypothetical. Consumers read one book at a time, so a
-    reader seeing book A refreshed and book B not yet is the same situation as
-    reading them a second apart.
+    window where a book has no directory one rename wide rather than a whole
+    rewrite. B:/ is shared with the live pipeline; a reader mid-write is a real
+    event here. Consumers read one book at a time, so seeing book A refreshed and
+    book B not is the same as reading them a second apart.
     """
-    parts = _snapshot_parts_dir()
-    if not parts.exists():
-        return
-    new_root = stage_root() / ".snapshots.new"
-    shutil.rmtree(new_root, ignore_errors=True)
-    written: list[str] = []
-    for part_dir in sorted(p for p in parts.iterdir() if p.is_dir()):
-        files = sorted(part_dir.glob("part-*.parquet"))
-        if not files:
-            continue
-        frame = pl.read_parquet(files)
-        for market in frame["market"].unique().sort().to_list():
-            path = new_root / part_dir.name / f"{market}.parquet"
-            path.parent.mkdir(parents=True, exist_ok=True)
-            frame.filter(pl.col("market") == market).sort(SNAPSHOT_SORT).write_parquet(
-                path
-            )
-        report.snapshots_by_book[part_dir.name] = len(frame)
-        report.snapshots += len(frame)
-        written.append(part_dir.name)
-
-    try:
-        # Swap ONE BOOK AT A TIME. The books live directly under stage_root() now,
-        # alongside ticks/ and _crosswalk.parquet, so renaming "the layer" aside
-        # would move the staged tick tree with it and the cleanup below would then
-        # delete it — a 35 GB reparse. Never rename stage_root().
-        for book in written:
-            live, staged = book_dir(book), new_root / book
-            old = stage_root() / f".{book}.old"
+    for staged in sorted(p for p in new_root.iterdir() if p.is_dir()):
+        book = staged.name
+        live = book_dir(book)
+        old = stage_root() / f".{book}.old"
+        shutil.rmtree(old, ignore_errors=True)
+        try:
+            if live.exists():
+                live.rename(old)
+            staged.rename(live)
+        finally:
             shutil.rmtree(old, ignore_errors=True)
-            try:
-                if live.exists():
-                    live.rename(old)
-                staged.rename(live)
-            finally:
-                shutil.rmtree(old, ignore_errors=True)
-    finally:
-        shutil.rmtree(parts, ignore_errors=True)
-        shutil.rmtree(new_root, ignore_errors=True)
+        report.rows_by_book[book] = sum(
+            pq.read_metadata(f).num_rows for f in live.glob("*.parquet")
+        )
+        report.rows += report.rows_by_book[book]
 
 
-def _reduce(xw: pl.DataFrame, report: TransformReport) -> None:
-    """Staged ticks -> the quotes aggregate, batched by fixture.
+def _organise(xw: pl.DataFrame, report: TransformReport) -> None:
+    """Staged ticks -> stage/oddspapi/<book>/<market>.parquet, in one streaming pass.
 
-    Batching by fixture is exact, not an approximation: a price series is
-    (book, market, points, side) inside one fixture, and a fixture's books live in
-    at most two staged files, so no series is ever split across batches. That is
-    what makes this bounded — an earlier version read the whole tree into one frame
-    (141 M rows, ~10.6 GB per copy, three copies live) and a version before that
-    re-scanned every file once per market.
+    A transpose, not a reduction. The input is partitioned by capture file with up
+    to three books mixed inside; the output is partitioned by book and market with
+    every capture mixed inside. Nothing is aggregated, filtered or interpolated —
+    every output row exists in the input, and the only additions are `match_uid`,
+    `p1_id`, `p2_id` from the crosswalk and a derived `event_status`.
+
+    An earlier version reduced here: 15-minute buckets, a forward-filled grid of
+    each book's standing price, a carry cap, and prematch-only. All of it existed to
+    hand `compute_open_close_odds` a grid it already understood, for an aggregate
+    that has since been deleted. It cost 21x the rows on total_games while 96% of
+    price changes fell inside a bucket, and on thin books it invented rows — bet365
+    carried 44,774 filled rows built from 33,828 actual ticks.
+
+    polars partitions the write, so memory is bounded by the streaming engine rather
+    than by a batch size picked by hand. Measured over the full tree: 16,535 files
+    to 117 output files in 47s, 141M rows, 671 MB.
     """
     by_fixture: dict[str, list[Path]] = {}
     for p in _staged_index():
         by_fixture.setdefault(_fixture_of(p), []).append(p)
     if not by_fixture:
-        logger.warning("no staged ticks to reduce")
+        logger.warning("no staged ticks to organise")
         return
     report.fixtures_staged = len(by_fixture)
 
-    # Batch by MATCH, not fixture. The quote key is (match_uid, market, points,
-    # side, role), and fixture -> match_uid is not injective: 38 match_uids carry
-    # more than one captured fixture (superseded events, one with three). Batching
-    # by fixture would put those in different batches and emit the same key twice,
-    # each with a partial open/close and no uniqueness guard on the output.
-    fixture_to_match = dict(zip(xw["fixture_id"].to_list(), xw["match_uid"].to_list()))
-    by_match: dict[str, list[Path]] = {}
-    unmatched = 0
-    for fixture, files in by_fixture.items():
-        match_uid = fixture_to_match.get(fixture)
-        if match_uid is None:
-            unmatched += 1
-            continue
-        by_match.setdefault(match_uid, []).extend(files)
+    resolved = set(xw["fixture_id"].to_list())
+    unmatched = sum(1 for f in by_fixture if f not in resolved)
     report.fixtures_unmatched = unmatched
-    report.matches_multi_fixture = sum(
-        1 for m, fs in by_match.items()
-        if len({_fixture_of(p) for p in fs}) > 1
-    )
-
     frac = unmatched / max(len(by_fixture), 1)
     if frac > MAX_UNMATCHED_FRACTION:
         raise RuntimeError(
             f"{unmatched} of {len(by_fixture)} staged fixtures did not resolve to a "
             f"match_uid ({frac:.1%} > {MAX_UNMATCHED_FRACTION:.0%}). Refusing to "
-            "write a silently thin aggregate — check the matcher (stale fixtures? "
+            "write a silently thin layer — check the matcher (stale fixtures? "
             "bad aliases?)."
         )
 
-    xw_slim = xw.select(XW_COLS)
+    # fixture -> match_uid is not injective: 38 match_uids carry more than one
+    # captured fixture (superseded events, one with three), and two fixtures of the
+    # same match can list the participants in opposite order. Taking p1/p2 from the
+    # fixture row would then give one match contradictory ids, so they are
+    # canonicalised per match first and joined on match_uid.
+    per_match = (
+        xw.select("match_uid", "p1_id", "p2_id")
+        .unique()
+        .sort(["match_uid", "p1_id", "p2_id"])
+        .group_by("match_uid", maintain_order=True)
+        .agg(pl.col("p1_id").first(), pl.col("p2_id").first())
+    )
+    report.matches_multi_fixture = (
+        xw.group_by("match_uid").len().filter(pl.col("len") > 1).height
+    )
+    fixtures = xw.select("fixture_id", "match_uid", "start_time", "true_start_time")
+
+    files = [str(p) for p in sorted(_staged_index())]
+    scan = pl.scan_parquet(files)
+    # One cheap single-column pass for the counters. A fixture whose staged files
+    # are all zero-row is invisible downstream, and parse-time counters only show it
+    # on the run that parsed it, so it is surfaced every run.
+    stats = scan.select(
+        pl.len().alias("ticks"), pl.col("fixture_id").n_unique().alias("fixtures")
+    ).collect(engine="streaming")
+    report.ticks_parsed = int(stats["ticks"][0])
+    report.fixtures_empty = report.fixtures_staged - int(stats["fixtures"][0])
+
     boundary = pl.coalesce([pl.col("true_start_time"), pl.col("start_time")])
-    out: list[pl.DataFrame] = []
-    # A killed run leaves parts behind, and they would be consolidated into the next
-    # run's layer as duplicates of matches it also wrote.
-    shutil.rmtree(_snapshot_parts_dir(), ignore_errors=True)
-    todo = sorted(by_match)
+    lf = (
+        # LEFT, not inner. An inner join drops every tick of a fixture the crosswalk
+        # cannot resolve — 290 fixtures and ~3.9M ticks on the current corpus — and
+        # makes the dropped universe invisible without going back to the ticks tree.
+        # Same reason nothing here cuts on prematch or `active`: an unresolved
+        # fixture is a null match_uid to filter, not an absence.
+        scan.join(fixtures.lazy(), on="fixture_id", how="left")
+        .join(per_match.lazy(), on="match_uid", how="left")
+        .with_columns(
+            # Three-way, not two. With no crosswalk row there is no boundary, and
+            # `otherwise` would label those IN_PLAY — asserting a match state we do
+            # not know. Unknown is null.
+            pl.when(boundary.is_null())
+            .then(pl.lit(None, dtype=pl.Utf8))
+            .when(pl.col("fetched_at") <= boundary)
+            .then(pl.lit(PREMATCH))
+            .otherwise(pl.lit(IN_PLAY))
+            .alias("event_status")
+        )
+        .select(list(MARKET_SCHEMA))
+    )
+
     logger.info(
-        "reducing %d matches from %d fixtures (%d unmatched, %d matches with "
-        "multiple fixtures) in batches of %d",
-        len(todo), report.fixtures_staged, unmatched,
-        report.matches_multi_fixture, REDUCE_BATCH,
+        "organising %d ticks from %d fixtures (%d unmatched, %d matches with "
+        "multiple fixtures)",
+        report.ticks_parsed, report.fixtures_staged, unmatched,
+        report.matches_multi_fixture,
     )
 
-    for start in range(0, len(todo), REDUCE_BATCH):
-        batch = todo[start:start + REDUCE_BATCH]
-        files = [p for m in batch for p in by_match[m]]
-        ticks = pl.read_parquet(files)
-        report.ticks_parsed += len(ticks)
-        # A fixture whose staged files are all zero-row is invisible downstream, and
-        # parse-time counters only show it on the run that parsed it. An unreadable
-        # capture stays hidden until someone runs --refresh, so surface it every run.
-        report.fixtures_empty += len(
-            {_fixture_of(p) for p in files} - set(ticks["fixture_id"].unique().to_list())
-        )
-        ticks = ticks.join(xw_slim, on="fixture_id", how="inner").with_columns(
-            pl.when(boundary.is_not_null() & (pl.col("fetched_at") <= boundary))
-            .then(pl.lit(PREMATCH)).otherwise(pl.lit(IN_PLAY)).alias("event_status")
-        )
-        # One row per match. `unique()` alone would keep two rows if two fixtures of
-        # the same match list the participants in opposite order, and the left join
-        # below would then duplicate every quote with contradictory p1/p2.
-        ids = (
-            ticks.select("match_uid", "p1_id", "p2_id")
-            .unique()
-            .sort(["match_uid", "p1_id", "p2_id"])
-            .group_by("match_uid", maintain_order=True)
-            .agg(pl.col("p1_id").first(), pl.col("p2_id").first())
-        )
-        # Prematch only, and expanded to snapshots before the shared aggregator
-        # sees it — see _snapshots_from_ticks for why the raw ticks would misprice.
-        snaps = _snapshots_from_ticks(
-            ticks.filter((pl.col("event_status") == PREMATCH)
-                         & pl.col("odds").is_not_null())
-        )
-        _write_snapshot_parts(snaps, ids, start // REDUCE_BATCH)
-        for role, min_books in MIN_BOOKS_FORMED.items():
-            books = REFERENCE_BOOKS if role == "reference" else None
-            side = (
-                snaps.filter(pl.col("book").is_in(list(books)))
-                if books is not None
-                else snaps.filter(~pl.col("book").is_in(list(REFERENCE_BOOKS)))
-            )
-            if side.is_empty():
-                continue
-            counts = side.group_by(SERIES).agg(
-                pl.col("book").n_unique().alias("n_books")
-            )
-            reduced = compute_open_close_odds(
-                side, min_books_formed=min_books, extra_keys=["market", "points"],
-            )
-            if reduced.is_empty():
-                continue
-            out.append(
-                reduced.rename({"player_id": "side"})
-                .with_columns(pl.lit(role).alias("role"))
-                .join(counts, on=["match_uid", "market", "points", "side"],
-                      how="left", nulls_equal=True)
-                .join(ids, on="match_uid", how="left")
-                # n_unique() gives UInt32; QUOTE_SCHEMA declares Int64, and an
-                # empty run writes the Int64 frame, so without the cast the two
-                # cases produce files that will not concatenate.
-                .with_columns(pl.col("n_books").cast(pl.Int64))
-                .select(list(QUOTE_SCHEMA))
-            )
-        if (start // REDUCE_BATCH) % 10 == 0:
-            logger.info(
-                "reduced %d/%d matches (%d ticks -> %d snapshot rows this batch)",
-                min(start + REDUCE_BATCH, len(todo)), len(todo), len(ticks), len(snaps),
-            )
+    # Written aside and renamed in, so a reader on the shared B:/ never sees a
+    # half-written file. A killed run leaves this behind; it is cleared on the next.
+    new_root = stage_root() / ".new"
+    shutil.rmtree(new_root, ignore_errors=True)
+    new_root.mkdir(parents=True, exist_ok=True)
 
-    _consolidate_snapshots(report)
-    if report.snapshots:
-        logger.info(
-            "wrote %d snapshots across %d books -> %s",
-            report.snapshots, len(report.snapshots_by_book), stage_root(),
-        )
+    def _dest(args) -> Path:
+        key = args.partition_keys.row(0, named=True)
+        return new_root / key["book"] / f"{key['market']}.parquet"
 
-    quotes = (
-        pl.concat(out, how="vertical").sort(QUOTE_SORT)
-        if out else pl.DataFrame(schema=QUOTE_SCHEMA)
-    )
-    # Atomic, for the same reason the staged ticks are: this sits on the shared B:/
-    # drive and a kill mid-write would leave consumers reading a truncated aggregate.
-    quotes_path().parent.mkdir(parents=True, exist_ok=True)
-    tmp = quotes_path().with_suffix(".parquet.tmp")
     try:
-        quotes.write_parquet(tmp, metadata={SCHEMA_META_KEY: QUOTES_SCHEMA_HASH})
-        tmp.replace(quotes_path())
-    except Exception:
-        tmp.unlink(missing_ok=True)
-        raise
-    report.quotes = len(quotes)
-    for r in quotes.group_by("market").agg(pl.len().alias("n")).iter_rows(named=True):
-        report.quotes_by_market[r["market"]] = r["n"]
-    for r in quotes.group_by("role").agg(pl.len().alias("n")).iter_rows(named=True):
-        report.quotes_by_role[r["role"]] = r["n"]
+        lf.sink_parquet(
+            # PartitionBy is unstable API in polars 1.39. It is confined to this
+            # call: if it changes, only this function does. The size-based defaults
+            # are switched off — a book x market must be exactly one file, not
+            # however many the writer felt like.
+            PartitionBy(
+                base_path=new_root, key=["book", "market"], include_key=True,
+                file_path_provider=_dest,
+                max_rows_per_file=None, approximate_bytes_per_file=None,
+            ),
+            engine="streaming",
+        )
+        _swap_books_in(new_root, report)
+    finally:
+        shutil.rmtree(new_root, ignore_errors=True)
 
-    logger.info(
-        "wrote %d quotes from %d ticks -> %s",
-        len(quotes), report.ticks_parsed, quotes_path(),
-    )
+    if report.rows:
+        logger.info(
+            "wrote %d rows across %d books -> %s",
+            report.rows, len(report.rows_by_book), stage_root(),
+        )

@@ -1102,7 +1102,7 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
     # oddspapi-transform subcommand - raw/oddspapi -> stage/oddspapi
     oap_parser = subparsers.add_parser(
         "oddspapi-transform",
-        help="Stage captured oddspapi ticks, then reduce to aggregate/oddspapi/quotes.parquet",
+        help="Stage captured oddspapi ticks, then reduce to stage/oddspapi/<book>/<market>.parquet",
     )
     oap_parser.add_argument(
         "--refresh", action="store_true",
@@ -2947,7 +2947,7 @@ def cmd_iid_backtest(args: argparse.Namespace) -> int:
 
 
 def cmd_oddspapi_transform(args: argparse.Namespace) -> int:
-    """raw/oddspapi -> stage/oddspapi/ticks -> aggregate/oddspapi/quotes.parquet."""
+    """raw/oddspapi -> stage/oddspapi/ticks -> stage/oddspapi/<book>/<market>.parquet."""
     from mvp.oddspapi.transformer import transform
 
     report = transform(
@@ -2962,12 +2962,9 @@ def cmd_oddspapi_transform(args: argparse.Namespace) -> int:
             f"staged files kept unpruned: {report.files_orphan_kept} "
             "(their capture group yielded no raw files)"
         )
-    print("\nquotes per market:")
-    for market, n in sorted(report.quotes_by_market.items(), key=lambda kv: -kv[1]):
-        print(f"  {market:32s} {n:>12,}")
-    print("\nquotes per book role:")
-    for role, n in sorted(report.quotes_by_role.items(), key=lambda kv: -kv[1]):
-        print(f"  {role:12s} {n:>12,}")
+    print("\nrows per book:")
+    for book, n in sorted(report.rows_by_book.items(), key=lambda kv: -kv[1]):
+        print(f"  {book:12s} {n:>12,}")
     return 0
 
 
