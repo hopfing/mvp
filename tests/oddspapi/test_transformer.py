@@ -107,7 +107,7 @@ def _quotes(market: str | None = None) -> pl.DataFrame:
 def _snapshots(book: str, market: str) -> pl.DataFrame:
     from mvp.oddspapi import paths
 
-    return pl.read_parquet(paths.snapshots_path(book, market))
+    return pl.read_parquet(paths.market_path(book, market))
 
 
 def _fake_crosswalk(monkeypatch, fixture_id, start, true_start):

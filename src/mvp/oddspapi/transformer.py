@@ -11,7 +11,7 @@ Three layers, each with a different lifetime:
             35 GB) and rare, skipped per file on the rule atptour stages on
             (`atptour/pipeline.py:131-148`): staged file missing, raw newer than
             staged, or the parser's schema hash changed.
-  SNAPSHOT  staged ticks -> stage/oddspapi/snapshots/<book>/<market>.parquet, one
+  SNAPSHOT  staged ticks -> stage/oddspapi/<book>/<market>.parquet, one
             row per (match_uid, market, points, side, book, 15-min bucket). The
             capture records CHANGES, so this forward-fills each book's standing
             price into the buckets it was on the board for — see
@@ -61,11 +61,11 @@ from mvp.odds.aggregator import compute_open_close_odds
 from mvp.oddspapi import markets, matcher, parser
 from mvp.oddspapi.paths import (
     REFERENCE_BOOKS,
+    book_dir,
     ensure_dirs,
     historical_dirs,
     quotes_path,
     role_of,
-    snapshots_dir,
     stage_root,
     ticks_dir,
     ticks_path,
@@ -119,7 +119,7 @@ QUOTE_SCHEMA: dict[str, pl.DataType] = {
 }
 QUOTE_SORT = ["match_uid", "market", "points", "side", "role"]
 
-# The scrapers' stage columns, which is the point: `stage/oddspapi/snapshots/<book>/
+# The scrapers' stage columns, which is the point: `stage/oddspapi/betrivers/
 # total_games.parquet` and `stage/betrivers/total_games.parquet` are the same table.
 # `match_uid` stands where a scraper carries its own event id, because the crosswalk
 # already resolved identity — a consumer joins the event map for one and not the
@@ -494,44 +494,56 @@ def _write_snapshot_parts(
 
 
 def _consolidate_snapshots(report: TransformReport) -> None:
-    """Parts -> `snapshots/<book>/<market>.parquet`, then swap the layer in.
+    """Parts -> `<book>/<market>.parquet`, then swap each book in.
 
-    One book at a time: a book's parts are bounded by its share of the corpus, so
-    this holds no more than the batching already permits.
+    One book at a time on both halves: a book's parts are bounded by its share of
+    the corpus, so this holds no more than the batching already permits, and the
+    swap replaces one book directory per rename rather than a whole layer.
 
-    The swap renames the live layer aside before renaming the new one in, so the
-    window in which no layer exists is one rename wide rather than a whole rewrite.
-    B:/ is shared with the live pipeline; a consumer reading mid-write is a real
-    event here, not a hypothetical.
+    Renaming the live directory aside before renaming the new one in keeps the
+    window in which a book has no directory one rename wide rather than a whole
+    rewrite. B:/ is shared with the live pipeline; a consumer reading mid-write is a
+    real event here, not a hypothetical. Consumers read one book at a time, so a
+    reader seeing book A refreshed and book B not yet is the same situation as
+    reading them a second apart.
     """
     parts = _snapshot_parts_dir()
     if not parts.exists():
         return
     new_root = stage_root() / ".snapshots.new"
     shutil.rmtree(new_root, ignore_errors=True)
-    for book_dir in sorted(p for p in parts.iterdir() if p.is_dir()):
-        files = sorted(book_dir.glob("part-*.parquet"))
+    written: list[str] = []
+    for part_dir in sorted(p for p in parts.iterdir() if p.is_dir()):
+        files = sorted(part_dir.glob("part-*.parquet"))
         if not files:
             continue
         frame = pl.read_parquet(files)
         for market in frame["market"].unique().sort().to_list():
-            path = new_root / book_dir.name / f"{market}.parquet"
+            path = new_root / part_dir.name / f"{market}.parquet"
             path.parent.mkdir(parents=True, exist_ok=True)
             frame.filter(pl.col("market") == market).sort(SNAPSHOT_SORT).write_parquet(
                 path
             )
-        report.snapshots_by_book[book_dir.name] = len(frame)
+        report.snapshots_by_book[part_dir.name] = len(frame)
         report.snapshots += len(frame)
+        written.append(part_dir.name)
 
-    old = stage_root() / ".snapshots.old"
-    shutil.rmtree(old, ignore_errors=True)
     try:
-        if snapshots_dir().exists():
-            snapshots_dir().rename(old)
-        if new_root.exists():
-            new_root.rename(snapshots_dir())
+        # Swap ONE BOOK AT A TIME. The books live directly under stage_root() now,
+        # alongside ticks/ and _crosswalk.parquet, so renaming "the layer" aside
+        # would move the staged tick tree with it and the cleanup below would then
+        # delete it — a 35 GB reparse. Never rename stage_root().
+        for book in written:
+            live, staged = book_dir(book), new_root / book
+            old = stage_root() / f".{book}.old"
+            shutil.rmtree(old, ignore_errors=True)
+            try:
+                if live.exists():
+                    live.rename(old)
+                staged.rename(live)
+            finally:
+                shutil.rmtree(old, ignore_errors=True)
     finally:
-        shutil.rmtree(old, ignore_errors=True)
         shutil.rmtree(parts, ignore_errors=True)
         shutil.rmtree(new_root, ignore_errors=True)
 
@@ -668,7 +680,7 @@ def _reduce(xw: pl.DataFrame, report: TransformReport) -> None:
     if report.snapshots:
         logger.info(
             "wrote %d snapshots across %d books -> %s",
-            report.snapshots, len(report.snapshots_by_book), snapshots_dir(),
+            report.snapshots, len(report.snapshots_by_book), stage_root(),
         )
 
     quotes = (

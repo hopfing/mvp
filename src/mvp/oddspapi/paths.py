@@ -69,25 +69,30 @@ def quotes_path() -> Path:
     return aggregate_root() / "quotes.parquet"
 
 
-def snapshots_dir() -> Path:
-    """Per-book prices at every instant — the layer the scrapers persist.
+def book_dir(book: str) -> Path:
+    """One book's staged markets: `stage/oddspapi/<book>/`.
+
+    Sits directly under the source root, with no grouping level in between, because
+    `stage/oddspapi/betrivers/total_games.parquet` is then exactly what
+    `stage/betrivers/total_games.parquet` is — a consumer written for a scraper
+    reads it with no special case.
+
+    Books are enumerated from `ALL_BOOKS`, never by scanning this directory, since
+    `ticks/` and `_crosswalk.parquet` are its siblings.
+    """
+    return stage_root() / book
+
+
+def market_path(book: str, market: str) -> Path:
+    """One book's prices for one market, at every captured instant.
 
     quotes.parquet is this priced: three moments, best across books, book identity
     spent. That makes it unable to answer the two questions a bettor asks — WHICH
     book, and what the board looked like at any other moment — and it bakes the
     reduction's policies (15-minute buckets, `min_books_formed`, the prematch
-    boundary) into the artifact rather than leaving them at read time, where the
-    backtest already applies them to the four scraper books.
-
-    Laid out as `<book>/<market>.parquet` because that is exactly what
-    `stage/betrivers/total_games.parquet` is, so a consumer written for a scraper
-    reads this without a special case.
+    boundary) into the artifact rather than leaving them at read time.
     """
-    return stage_root() / "snapshots"
-
-
-def snapshots_path(book: str, market: str) -> Path:
-    return snapshots_dir() / book / f"{market}.parquet"
+    return book_dir(book) / f"{market}.parquet"
 
 
 def crosswalk_path() -> Path:
