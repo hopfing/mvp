@@ -485,9 +485,25 @@ class HyperparamTuner:
                     "type": "float", "low": 0.01, "high": 5.0, "log": True,
                 }
 
-        # Pin specific params, removing them from the search space
+        # Pin specific params, removing them from the search space. A param is
+        # pinnable only if this model type actually tunes it — the search space
+        # above is the authority, after every conditional adjustment (dart,
+        # early stopping, MTL) has been applied. Rejecting anything else here,
+        # before the Optuna storage below exists, is what keeps a foreign param
+        # (e.g. tree_method on a logistic study) from being written into the
+        # study's pinned_params user attr, where it would survive every later
+        # run and get merged into configs by tune-review / the frozen sweep.
+        # Non-searched model params belong in the config's model.params, not
+        # here — see the `booster: dart` pattern above.
         self.pinned_params: dict[str, Any] = {}
         if param_overrides:
+            unknown = sorted(k for k in param_overrides if k not in self.search_space)
+            if unknown:
+                raise ValueError(
+                    f"--param {unknown} not tunable for model type "
+                    f"'{self.model_type}'. Pinnable params: "
+                    f"{sorted(self.search_space)}"
+                )
             for k, v in param_overrides.items():
                 self.pinned_params[k] = v
                 self.search_space.pop(k, None)

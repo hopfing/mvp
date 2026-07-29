@@ -351,6 +351,115 @@ validation:
         # C should be removed from search space since it's pinned
         assert "C" not in tuner.search_space
 
+    def _xgb_config(self, tmp_path: Path, name: str, params: str) -> Path:
+        """An xgboost variant of sample_config, for the dart-conditional cases."""
+        path = tmp_path / f"{name}.yaml"
+        path.write_text(f"""
+name: {name}
+data:
+  date_range:
+    start: "2024-01-01"
+    end: "2024-12-31"
+features:
+  include:
+    - player_ranking_points_diff
+model:
+  type: xgboost
+  params:
+{params}
+metrics:
+  objective:
+    - log_loss
+validation:
+  type: walk_forward
+  n_splits: 2
+  min_train_size: 50
+  test_size: 25
+""")
+        return path
+
+    def test_param_override_rejects_untunable_param(
+        self, sample_config, sample_matches, tmp_path
+    ):
+        """A param this model type doesn't tune is refused, and refused before the
+        Optuna storage exists — otherwise it lands in the study's pinned_params
+        user attr, survives every later run, and gets merged into generated
+        configs (an xgb param on a logistic model then dies at fit time)."""
+        state_dir = tmp_path / "tuning"
+        with pytest.raises(ValueError, match="not tunable for model type 'logistic'"):
+            HyperparamTuner(
+                config_path=sample_config,
+                matches_path=sample_matches,
+                cache_dir=tmp_path / "cache",
+                state_dir=state_dir,
+                param_overrides={"tree_method": "hist"},
+            )
+        assert not (state_dir / "test_tune.db").exists()
+
+    def test_param_override_error_lists_pinnable_params(
+        self, sample_config, sample_matches, tmp_path
+    ):
+        """The error names what IS pinnable, so the fix doesn't need a code read."""
+        with pytest.raises(ValueError, match=r"Pinnable params: .*'l1_ratio'"):
+            HyperparamTuner(
+                config_path=sample_config,
+                matches_path=sample_matches,
+                cache_dir=tmp_path / "cache",
+                state_dir=tmp_path / "tuning",
+                param_overrides={"n_estimators": 300},
+            )
+
+    def test_param_override_accepts_every_searched_param(
+        self, sample_config, sample_matches, tmp_path
+    ):
+        """The whole search space stays pinnable — the guard rejects only what's
+        outside it."""
+        tuner = HyperparamTuner(
+            config_path=sample_config,
+            matches_path=sample_matches,
+            cache_dir=tmp_path / "cache",
+            state_dir=tmp_path / "tuning",
+            param_overrides={"C": 0.5, "l1_ratio": 0.3},
+        )
+        assert tuner.pinned_params == {"C": 0.5, "l1_ratio": 0.3}
+        assert tuner.search_space == {}
+
+    def test_param_override_accepts_xgb_searched_param(self, sample_matches, tmp_path):
+        """colsample_bynode is in the xgboost space, so it pins."""
+        cfg = self._xgb_config(tmp_path, "xgb_plain", "    max_depth: 4")
+        tuner = HyperparamTuner(
+            config_path=cfg,
+            matches_path=sample_matches,
+            cache_dir=tmp_path / "cache",
+            state_dir=tmp_path / "tuning",
+            param_overrides={"colsample_bynode": 0.3},
+        )
+        assert tuner.pinned_params == {"colsample_bynode": 0.3}
+
+    def test_param_override_honors_conditional_space(self, sample_matches, tmp_path):
+        """rate_drop enters the search space only under booster=dart, so it's
+        pinnable there and refused otherwise — the guard reads the space after
+        every conditional adjustment, not the static default."""
+        dart = self._xgb_config(tmp_path, "xgb_dart", "    booster: dart")
+        tuner = HyperparamTuner(
+            config_path=dart,
+            matches_path=sample_matches,
+            cache_dir=tmp_path / "cache",
+            state_dir=tmp_path / "tuning",
+            param_overrides={"rate_drop": 0.1},
+        )
+        assert tuner.pinned_params == {"rate_drop": 0.1}
+
+        plain = self._xgb_config(tmp_path, "xgb_gbtree", "    max_depth: 4")
+        with pytest.raises(ValueError, match="not tunable for model type 'xgboost'"):
+            HyperparamTuner(
+                config_path=plain,
+                matches_path=sample_matches,
+                cache_dir=tmp_path / "cache",
+                state_dir=tmp_path / "tuning",
+                param_overrides={"rate_drop": 0.1},
+            )
+
     def test_run_single_objective(self, sample_config, sample_matches, tmp_path):
         """Tuner runs trials and stores results."""
         import mlflow
