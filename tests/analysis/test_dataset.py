@@ -190,6 +190,50 @@ class TestUnifiedDataset:
         expected = 0.65 - (1.0 / 2.10)
         assert m1["model_edge_best_close"][0] == pytest.approx(expected, abs=0.01)
 
+    def test_open_and_formed_use_real_lines_not_means(self, sample_predictions):
+        """pred_odds_open / pred_odds_market_formed must come from the
+        best-across-books columns, not the cross-book averages.
+
+        compute_opening_odds emits open_odds / market_formed_odds as means
+        across books — not a price anyone can bet. compute_open_close_odds
+        emits best_opening_odds / formed_odds as the max at a single 15-min
+        bucket. Both frames are joined, so the mapping has to pick the latter.
+        """
+        from mvp.analysis.dataset import build_analysis_dataset
+
+        cross_book = pl.DataFrame({
+            "match_uid": ["m1", "m1", "m2", "m2"],
+            "player_id": ["A001", "A002", "B001", "B002"],
+            "best_closing_odds": [2.10, 1.75, 1.85, 1.95],
+            "best_opening_odds": [2.20, 1.80, 1.90, 2.00],
+            "formed_odds": [2.15, 1.78, 1.88, 1.97],
+        })
+
+        # Means — deliberately different from the real lines above so a
+        # regression to the old mapping fails loudly.
+        opening = pl.DataFrame({
+            "match_uid": ["m1", "m1", "m2", "m2"],
+            "player_id": ["A001", "A002", "B001", "B002"],
+            "open_odds": [2.05, 1.70, 1.80, 1.90],
+            "market_formed_odds": [2.00, 1.68, 1.78, 1.88],
+        })
+
+        ds = build_analysis_dataset(
+            predictions=sample_predictions,
+            cross_book_odds=cross_book,
+            opening_odds=opening,
+        )
+
+        m1 = ds.filter(pl.col("match_uid") == "m1")
+        # pred_side is P1 (p1_win_prob=0.65), so the A001 values apply.
+        assert m1["pred_odds_open"][0] == pytest.approx(2.20)
+        assert m1["pred_odds_market_formed"][0] == pytest.approx(2.15)
+        # Edges derive from the real lines, not the means.
+        assert m1["model_edge_open"][0] == pytest.approx(0.65 - 1 / 2.20)
+        assert m1["model_edge_market_formed"][0] == pytest.approx(
+            0.65 - 1 / 2.15
+        )
+
     def test_clv_computation(self, sample_predictions):
         from mvp.analysis.dataset import build_analysis_dataset
 

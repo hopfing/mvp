@@ -482,8 +482,12 @@ def _compute_pred_side_metrics(ds: pl.DataFrame) -> pl.DataFrame:
         ("best_opening_odds", "pred_odds_best_open"),
         ("best_intraday_odds", "pred_odds_best_intraday"),
         ("worst_intraday_odds", "pred_odds_worst_intraday"),
-        ("open_odds", "pred_odds_open"),
-        ("market_formed_odds", "pred_odds_market_formed"),
+        # Sourced from compute_open_close_odds (best across books at a single
+        # 15-min bucket) — a real quoted line. The compute_opening_odds columns
+        # open_odds / market_formed_odds average across books, which is not a
+        # price anyone can take.
+        ("best_opening_odds", "pred_odds_open"),
+        ("formed_odds", "pred_odds_market_formed"),
     ]
 
     # Threshold odds — auto-discover any "<agg>_<N>h_odds_p1" pairs.
