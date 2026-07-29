@@ -505,8 +505,6 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
 
     resolved = _add_edge_flag(resolved, edge_col)
 
-    st.caption(f"Flat $1 bets priced at {basis_label} ({odds_col}).")
-
     # --- Headline stats ---
     all_stats = _flat_bet_stats(resolved, odds_col)
     edge_stats = _flat_bet_stats(resolved.filter(pl.col("has_edge")), odds_col)
