@@ -160,6 +160,30 @@ def odds_basis_selector(ds: pl.DataFrame, key: str) -> tuple[str, str, str]:
     return next(b for b in available if b[0] == selected)
 
 
+EDGE_FILTERS: list[tuple[str, bool | None]] = [
+    ("All", None),
+    ("Edge", True),
+    ("No Edge", False),
+]
+
+
+def edge_selector(key: str) -> bool | None:
+    """Render an edge-filter selectbox. Returns True / False, or None for All.
+
+    Which predictions the filter keeps depends on the odds basis selected
+    alongside it, since the edge sign is read from that basis's edge column.
+    """
+    import streamlit as st
+
+    labels = [label for label, _ in EDGE_FILTERS]
+    selected = st.sidebar.selectbox(
+        "Edge",
+        options=labels,
+        key=f"edge_filter_{key}",
+    )
+    return next(flag for label, flag in EDGE_FILTERS if label == selected)
+
+
 def metric_card_data(
     label: str,
     value: float | int | None,

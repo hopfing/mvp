@@ -63,6 +63,30 @@ def _edge_subset(df: pl.DataFrame, edge_flag: bool | None) -> pl.DataFrame:
     return df
 
 
+def _edge_slices(edge_flag: bool | None) -> list[tuple[str, bool | None]]:
+    """Row slices a breakdown table expands each dimension into.
+
+    Unfiltered, that's All / Edge / No Edge. Under a page-level Edge filter
+    the rows are already restricted, so the triplet would be one real row,
+    one empty row and a duplicate — collapse it to a single row labelled
+    with the active filter.
+    """
+    if edge_flag is None:
+        return _EDGE_SLICES
+    return [("Edge" if edge_flag else "No Edge", None)]
+
+
+def _circuit_slices(df: pl.DataFrame) -> list[tuple[str, str]]:
+    """Circuit (value, label) pairs with rows in ``df``, tour first."""
+    if "circuit" not in df.columns:
+        return []
+    return [
+        (val, label)
+        for val, label in (("tour", "Tour"), ("chal", "Challenger"))
+        if len(df.filter(pl.col("circuit") == val)) > 0
+    ]
+
+
 def _flat_bet_stats(df: pl.DataFrame, odds_col: str) -> dict:
     """Compute flat-$1-bet stats: N, W, L, Acc %, ROI %, P&L."""
     subset = df.filter(pl.col(odds_col).is_not_null())
@@ -90,6 +114,7 @@ def _aggregate_by(
     df: pl.DataFrame,
     col: str,
     odds_col: str,
+    edge_flag: bool | None,
     sort_order: list[str] | None = None,
 ) -> pl.DataFrame:
     """Group by dimension x edge (no All summary — used for circuit-sliced tables)."""
@@ -101,7 +126,7 @@ def _aggregate_by(
     rows: list[dict] = []
     for val in vals:
         dim_df = df.filter(pl.col(col) == val)
-        for label, flag in _EDGE_SLICES:
+        for label, flag in _edge_slices(edge_flag):
             stats = _flat_bet_stats(_edge_subset(dim_df, flag), odds_col)
             stats[col] = str(val)
             stats["Edge"] = label
@@ -153,7 +178,9 @@ def _aggregate_by_timing(df: pl.DataFrame, agg: str) -> pl.DataFrame:
     return pl.DataFrame(rows)
 
 
-def _aggregate_books(df: pl.DataFrame, books: list[str]) -> pl.DataFrame:
+def _aggregate_books(
+    df: pl.DataFrame, books: list[str], edge_flag: bool | None
+) -> pl.DataFrame:
     """Aggregate by book x edge using per-book closing odds (no All summary)."""
     rows: list[dict] = []
     for book in books:
@@ -163,7 +190,7 @@ def _aggregate_books(df: pl.DataFrame, books: list[str]) -> pl.DataFrame:
         book_df = df.filter(pl.col(odds_col).is_not_null())
         if len(book_df) == 0:
             continue
-        for label, flag in _EDGE_SLICES:
+        for label, flag in _edge_slices(edge_flag):
             stats = _flat_bet_stats(_edge_subset(book_df, flag), odds_col)
             stats["Book"] = book.upper()
             stats["Edge"] = label
@@ -202,11 +229,14 @@ def _style_breakdown(df: pl.DataFrame, label_col: str, st) -> None:
     st.dataframe(styled, use_container_width=True, hide_index=True)
 
 
-def _render_cal_tier_breakdown(df: pl.DataFrame, odds_col: str, st) -> None:
+def _render_cal_tier_breakdown(
+    df: pl.DataFrame, odds_col: str, edge_flag: bool | None, st
+) -> None:
     """Per-tier breakdown with All / Edge / No Edge slices.
 
     Matches the rest of the Model Performance page: each tier gets three
-    rows (All / Edge / No Edge) styled by Edge column.
+    rows (All / Edge / No Edge) styled by Edge column, or one row when the
+    page-level Edge filter is active.
     """
     if "cal_tier" not in df.columns:
         st.info("No cal_tier data available.")
@@ -219,16 +249,19 @@ def _render_cal_tier_breakdown(df: pl.DataFrame, odds_col: str, st) -> None:
         return
 
     table = _aggregate_by(
-        tiered, "cal_tier", odds_col, sort_order=_TIER_ORDER
+        tiered, "cal_tier", odds_col, edge_flag, sort_order=_TIER_ORDER
     ).rename({"cal_tier": "Tier"})
     _style_breakdown(table, "Tier", st)
 
 
-def _render_per_cell_table(df: pl.DataFrame, odds_col: str, st) -> None:
+def _render_per_cell_table(
+    df: pl.DataFrame, odds_col: str, edge_flag: bool | None, st
+) -> None:
     """Per-(round, tier) drill-down with All / Edge / No Edge slices.
 
     Each (round, tier) cell expands to three rows mirroring the page-wide
-    Edge slicing pattern. Cell Cal is the cell-mean of the cell_cal column.
+    Edge slicing pattern, or one row when the page-level Edge filter is
+    active. Cell Cal is the cell-mean of the cell_cal column.
     """
     needed = {"cal_tier", "round"}
     if not needed.issubset(df.columns):
@@ -259,7 +292,7 @@ def _render_per_cell_table(df: pl.DataFrame, odds_col: str, st) -> None:
                 if cell_cal_vals is not None and len(cell_cal_vals) > 0
                 else None
             )
-            for label, flag in _EDGE_SLICES:
+            for label, flag in _edge_slices(edge_flag):
                 stats = _flat_bet_stats(
                     _edge_subset(cell_df, flag), odds_col
                 )
@@ -313,12 +346,14 @@ def _render_per_cell_table(df: pl.DataFrame, odds_col: str, st) -> None:
 
 
 def _render_edge_bands(
-    df: pl.DataFrame, odds_col: str, edge_col: str, st
+    df: pl.DataFrame, odds_col: str, edge_col: str, edge_flag: bool | None, st
 ) -> None:
     """Edge band performance table using scanner's 2.5pp buckets.
 
     Includes All / Edge / No Edge summary rows, then per-band rows
-    ordered positive-first (10%+ at top, below -10% at bottom).
+    ordered positive-first (10%+ at top, below -10% at bottom). Under the
+    page-level Edge filter the bands on the excluded side of zero are empty
+    by construction, so they're dropped rather than shown as zero rows.
     """
     from mvp.analysis.scanner import EDGE_BREAKS, EDGE_LABELS
 
@@ -338,7 +373,7 @@ def _render_edge_bands(
 
     # Summary rows first
     rows: list[dict] = []
-    for label, flag in _EDGE_SLICES:
+    for label, flag in _edge_slices(edge_flag):
         stats = _flat_bet_stats(_edge_subset(df, flag), odds_col)
         stats["Edge Band"] = label
         rows.append(stats)
@@ -348,6 +383,8 @@ def _render_edge_bands(
         stats = _flat_bet_stats(
             bucketed.filter(pl.col("edge_band") == label), odds_col
         )
+        if edge_flag is not None and stats["N"] == 0:
+            continue
         stats["Edge Band"] = label
         rows.append(stats)
 
@@ -473,6 +510,7 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
 
     from mvp.analysis.dashboard.components import (
         consensus_selector,
+        edge_selector,
         metric_card_data,
         model_selector,
         odds_basis_selector,
@@ -489,6 +527,7 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
         ds = ds.filter(pl.col("consensus") == consensus)
 
     basis_label, odds_col, edge_col = odds_basis_selector(ds, key="perf")
+    edge_flag = edge_selector(key="perf")
 
     granularity = st.sidebar.radio(
         "Chart Granularity",
@@ -505,12 +544,19 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
 
     resolved = _add_edge_flag(resolved, edge_col)
 
+    # By Timing filters each cell on that threshold's own edge column rather
+    # than the selected basis, so it reads the pre-filter frame — see
+    # _aggregate_by_timing.
+    unfiltered = resolved
+
+    resolved = _edge_subset(resolved, edge_flag)
+    if len(resolved) == 0:
+        slice_label = "Edge" if edge_flag else "No Edge"
+        st.info(f"No {slice_label} predictions priced at {basis_label}.")
+        return
+
     # --- Headline stats ---
     all_stats = _flat_bet_stats(resolved, odds_col)
-    edge_stats = _flat_bet_stats(resolved.filter(pl.col("has_edge")), odds_col)
-    no_edge_stats = _flat_bet_stats(
-        resolved.filter(~pl.col("has_edge")), odds_col
-    )
 
     render_metric_cards([
         metric_card_data("Resolved", all_stats["N"], fmt="d"),
@@ -527,43 +573,58 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
         ),
     ])
 
-    sub = st.columns(2)
-    with sub[0]:
-        st.markdown("**Edge**")
-        render_metric_cards([
-            metric_card_data("N", edge_stats["N"], fmt="d"),
-            metric_card_data(
-                "Acc",
-                edge_stats["Acc %"] / 100 if edge_stats["Acc %"] is not None else None,
-                fmt=".1%",
-            ),
-            metric_card_data(
-                "ROI",
-                edge_stats["ROI %"] / 100 if edge_stats["ROI %"] is not None else None,
-                fmt=".1%",
-            ),
-            metric_card_data("P&L", edge_stats["P&L"], fmt="$.2f"),
-        ])
-    with sub[1]:
-        st.markdown("**No Edge**")
-        render_metric_cards([
-            metric_card_data("N", no_edge_stats["N"], fmt="d"),
-            metric_card_data(
-                "Acc",
-                no_edge_stats["Acc %"] / 100
-                if no_edge_stats["Acc %"] is not None
-                else None,
-                fmt=".1%",
-            ),
-            metric_card_data(
-                "ROI",
-                no_edge_stats["ROI %"] / 100
-                if no_edge_stats["ROI %"] is not None
-                else None,
-                fmt=".1%",
-            ),
-            metric_card_data("P&L", no_edge_stats["P&L"], fmt="$.2f"),
-        ])
+    # Under an Edge filter one of these two blocks is empty by construction
+    # and the other restates the headline cards, so show them only when
+    # both sides carry rows.
+    if edge_flag is None:
+        edge_stats = _flat_bet_stats(
+            resolved.filter(pl.col("has_edge")), odds_col
+        )
+        no_edge_stats = _flat_bet_stats(
+            resolved.filter(~pl.col("has_edge")), odds_col
+        )
+
+        sub = st.columns(2)
+        with sub[0]:
+            st.markdown("**Edge**")
+            render_metric_cards([
+                metric_card_data("N", edge_stats["N"], fmt="d"),
+                metric_card_data(
+                    "Acc",
+                    edge_stats["Acc %"] / 100
+                    if edge_stats["Acc %"] is not None
+                    else None,
+                    fmt=".1%",
+                ),
+                metric_card_data(
+                    "ROI",
+                    edge_stats["ROI %"] / 100
+                    if edge_stats["ROI %"] is not None
+                    else None,
+                    fmt=".1%",
+                ),
+                metric_card_data("P&L", edge_stats["P&L"], fmt="$.2f"),
+            ])
+        with sub[1]:
+            st.markdown("**No Edge**")
+            render_metric_cards([
+                metric_card_data("N", no_edge_stats["N"], fmt="d"),
+                metric_card_data(
+                    "Acc",
+                    no_edge_stats["Acc %"] / 100
+                    if no_edge_stats["Acc %"] is not None
+                    else None,
+                    fmt=".1%",
+                ),
+                metric_card_data(
+                    "ROI",
+                    no_edge_stats["ROI %"] / 100
+                    if no_edge_stats["ROI %"] is not None
+                    else None,
+                    fmt=".1%",
+                ),
+                metric_card_data("P&L", no_edge_stats["P&L"], fmt="$.2f"),
+            ])
 
     # --- Charts ---
     _render_charts(resolved, odds_col, granularity, st)
@@ -594,12 +655,7 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
         prob_expr = prob_expr.otherwise(pl.lit(_PROB_LABELS[-1]))
         resolved = resolved.with_columns(prob_expr.alias("prob_band"))
 
-    circuits = [
-        (val, label)
-        for val, label in [("tour", "Tour"), ("chal", "Challenger")]
-        if "circuit" in resolved.columns
-        and len(resolved.filter(pl.col("circuit") == val)) > 0
-    ]
+    circuits = _circuit_slices(resolved)
     circuit_dfs = {
         val: resolved.filter(pl.col("circuit") == val) for val, _ in circuits
     }
@@ -611,18 +667,20 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
         st.subheader("By Calibration Tier")
         for val, label in circuits:
             st.markdown(f"**{label}**")
-            _render_cal_tier_breakdown(circuit_dfs[val], odds_col, st)
+            _render_cal_tier_breakdown(
+                circuit_dfs[val], odds_col, edge_flag, st
+            )
 
         st.subheader("By Calibration Segment")
         for val, label in circuits:
             st.markdown(f"**{label}**")
-            _render_per_cell_table(circuit_dfs[val], odds_col, st)
+            _render_per_cell_table(circuit_dfs[val], odds_col, edge_flag, st)
 
     # --- Edge band table ---
     st.subheader("By Edge Band")
     for val, label in circuits:
         st.markdown(f"**{label}**")
-        _render_edge_bands(circuit_dfs[val], odds_col, edge_col, st)
+        _render_edge_bands(circuit_dfs[val], odds_col, edge_col, edge_flag, st)
 
     # By Probability Band
     if "prob_band" in resolved.columns:
@@ -630,7 +688,11 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
         for val, label in circuits:
             st.markdown(f"**{label}**")
             table = _aggregate_by(
-                circuit_dfs[val], "prob_band", odds_col, sort_order=_PROB_LABELS
+                circuit_dfs[val],
+                "prob_band",
+                odds_col,
+                edge_flag,
+                sort_order=_PROB_LABELS,
             ).rename({"prob_band": "Probability"})
             _style_breakdown(table, "Probability", st)
 
@@ -639,7 +701,11 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
     for val, label in circuits:
         st.markdown(f"**{label}**")
         table = _aggregate_by(
-            circuit_dfs[val], "odds_band", odds_col, sort_order=ODDS_LABELS
+            circuit_dfs[val],
+            "odds_band",
+            odds_col,
+            edge_flag,
+            sort_order=ODDS_LABELS,
         ).rename({"odds_band": "Odds Band"})
         _style_breakdown(table, "Odds Band", st)
 
@@ -650,7 +716,11 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
         for val, label in circuits:
             st.markdown(f"**{label}**")
             table = _aggregate_by(
-                circuit_dfs[val], "round", odds_col, sort_order=round_order
+                circuit_dfs[val],
+                "round",
+                odds_col,
+                edge_flag,
+                sort_order=round_order,
             ).rename({"round": "Round"})
             _style_breakdown(table, "Round", st)
 
@@ -659,9 +729,9 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
         st.subheader("By Surface")
         for val, label in circuits:
             st.markdown(f"**{label}**")
-            table = _aggregate_by(circuit_dfs[val], "surface", odds_col).rename(
-                {"surface": "Surface"}
-            )
+            table = _aggregate_by(
+                circuit_dfs[val], "surface", odds_col, edge_flag
+            ).rename({"surface": "Surface"})
             _style_breakdown(table, "Surface", st)
 
     # By Book (per-book closing odds)
@@ -669,10 +739,13 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
         st.subheader("By Book")
         for val, label in circuits:
             st.markdown(f"**{label}**")
-            table = _aggregate_books(circuit_dfs[val], books)
+            table = _aggregate_books(circuit_dfs[val], books, edge_flag)
             _style_breakdown(table, "Book", st)
 
-    # By Timing — per-threshold cross-book best / median / worst.
+    # By Timing — per-threshold cross-book best / median / worst. Reads the
+    # pre-filter frame: each cell already filters on its own threshold's edge
+    # column, and intersecting that with the selected basis would change the
+    # question the section answers.
     has_timing = any(
         f"pred_odds_{agg}_{h}h" in resolved.columns
         for agg, _ in _TIMING_AGGS
@@ -680,9 +753,19 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
     )
     if has_timing:
         st.subheader("By Timing")
+        if edge_flag is not None:
+            st.caption(
+                "Edge filter not applied — each cell filters on its own "
+                "threshold's edge column."
+            )
+        timing_circuits = _circuit_slices(unfiltered)
+        timing_dfs = {
+            val: unfiltered.filter(pl.col("circuit") == val)
+            for val, _ in timing_circuits
+        }
         for agg, agg_label in _TIMING_AGGS:
             st.markdown(f"### {agg_label}")
-            for val, label in circuits:
+            for val, label in timing_circuits:
                 st.markdown(f"**{label}**")
-                table = _aggregate_by_timing(circuit_dfs[val], agg)
+                table = _aggregate_by_timing(timing_dfs[val], agg)
                 _style_breakdown(table, "Threshold", st)
