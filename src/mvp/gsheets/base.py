@@ -98,9 +98,17 @@ FORMULA_COLUMNS = {c["name"] for c in COLUMN_SCHEMA if c["owner"] == "formula"}
 # formula back, rather than flattening them to a computed value.
 FORMULA_PRESERVE_COLUMNS = {"bankroll", "kelly_fraction", "max_pct"}
 # Formula columns that stay live while a bet is open but freeze to a literal
-# snapshot once the bet is placed (a stake is entered) — the recommended stake
-# should record what was advised at bet time, not keep recomputing afterward.
-FREEZE_AT_BET_COLUMNS = {"kelly_stake"}
+# snapshot once the bet is placed (a stake is entered).
+#   kelly_stake — should record what was advised at bet time, not keep
+#     recomputing afterward.
+#   pred_odds   — tracks the best current price while the bet is open, then
+#     becomes the line you actually got (hand-corrected when it differs), and
+#     that correction has to survive later syncs. Without the freeze entry it
+#     would fall through to write()'s fill-if-empty branch, which stops
+#     rewriting the formula as soon as the sheet computes a value — leaving
+#     pred_odds, and the fav_edge/bet_odds that reference it, stuck on
+#     whatever price was showing when the match was first seen.
+FREEZE_AT_BET_COLUMNS = {"kelly_stake", "pred_odds"}
 
 def _col_letter(index: int) -> str:
     """Convert 0-based column index to spreadsheet column letter(s)."""

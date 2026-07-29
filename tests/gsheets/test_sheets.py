@@ -115,6 +115,46 @@ class TestSheetsSync:
             col_idx = COLUMN_NAMES.index("to_win")
             assert data_row[col_idx] == "150.50"
 
+    def test_write_relives_pred_odds_while_bet_is_open(self):
+        """pred_odds tracks the current price until a bet is placed.
+
+        A previous sync leaves the sheet's computed price behind as a literal,
+        so re-emitting the formula only when the cell is empty would freeze
+        pred_odds on the first price ever seen.
+        """
+        with patch("mvp.gsheets.sheets.gspread"):
+            from mvp.gsheets.base import generate_formulas
+            from mvp.gsheets.sheets import SheetsSync
+
+            sync = SheetsSync.__new__(SheetsSync)
+            mock_ws = MagicMock()
+            sync._worksheet = mock_ws
+
+            data = {col: [""] for col in COLUMN_NAMES}
+            data["pred_odds"] = ["2.38"]  # stale literal from an earlier sync
+            sync.write(pl.DataFrame(data))
+
+            data_row = mock_ws.update.call_args.kwargs["values"][1]
+            col_idx = COLUMN_NAMES.index("pred_odds")
+            assert data_row[col_idx] == generate_formulas(2)["pred_odds"]
+
+    def test_write_freezes_pred_odds_once_bet_is_placed(self):
+        """A placed bet keeps its literal, so a hand-corrected line survives."""
+        with patch("mvp.gsheets.sheets.gspread"):
+            from mvp.gsheets.sheets import SheetsSync
+
+            sync = SheetsSync.__new__(SheetsSync)
+            mock_ws = MagicMock()
+            sync._worksheet = mock_ws
+
+            data = {col: [""] for col in COLUMN_NAMES}
+            data["pred_odds"] = ["1.95"]  # the line actually taken
+            data["bet_placed_at"] = ["2026-07-29 16:00"]
+            sync.write(pl.DataFrame(data))
+
+            data_row = mock_ws.update.call_args.kwargs["values"][1]
+            assert data_row[COLUMN_NAMES.index("pred_odds")] == "1.95"
+
     def test_write_header_is_sheet_headers(self):
         """Write puts SHEET_HEADERS as the header row (display names, not internal names)."""
         with patch("mvp.gsheets.sheets.gspread"):
