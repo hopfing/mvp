@@ -1,0 +1,57 @@
+# Alert rules for the live pipeline. Evaluated every run against every open
+# prediction (no stake entered, match not started); a prediction that triggers
+# a rule posts to the predictions Discord channel as a per-rule count.
+#
+# Each match fires each rule at most once — the ledger at
+# <data-root>/pipeline/alerts.jsonl keys on (rule name, match_uid). Renaming a
+# rule therefore re-fires it once for every open prediction that still
+# qualifies. Delete the ledger to replay everything currently open.
+#
+# A rule triggers when ALL of its `match` conditions hold. Rules are
+# independent; each fires on its own.
+#
+#   number          inclusive minimum         edge: 0.05      -> edge >= 0.05
+#   {min:, max:}    inclusive bounds          pred_odds: {max: 3.0}
+#   string          case-insensitive equality circuit: chal
+#   list            case-insensitive any-of   surface: [clay, grass]
+#
+# A blank or unparseable value never satisfies a condition, so a prediction
+# with no odds yet won't trigger an edge rule.
+#
+# Numeric fields:
+#   edge        pick's probability vs its best CURRENT price across books
+#               (pred_prob - 1/pred_odds; the same figure as the sheet's
+#               fav_edge column, recomputed each run as prices move)
+#   edge_open   same against the best OPENING price; frozen at first capture
+#   pred_prob   model probability on the pick
+#   pred_odds   best current decimal price on the pick
+#   consensus   voter agreement, 0.0-1.0 (1.0 means unanimous)
+#   cell_cal    signed calibration for the pick's circuit+round cell
+#   age_diff    picked player age minus opponent, in years (signed)
+#
+# String fields:
+#   circuit     tour | chal
+#   surface     Hard | Clay | Grass | Carpet
+#   court       indoor | outdoor
+#   round       e.g. F, SF, QF, R16, R32
+#   tournament  tournament name
+#   cal_tier    calibration tier label for the pick's cell
+#   book        book offering the best current price on the pick
+#   prediction  P1 | P2
+#
+# An unknown field name is rejected at load rather than silently never
+# matching, so a typo surfaces as a pipeline error instead of a quiet rule.
+#
+# Conditions can be combined to narrow a rule down, e.g.
+#
+#   - name: Clay challenger value
+#     match:
+#       edge: 0.05
+#       consensus: 1.0
+#       circuit: chal
+#       surface: [clay]
+
+rules:
+  - name: Edge >= 5%
+    match:
+      edge: 0.05

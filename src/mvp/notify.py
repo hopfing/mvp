@@ -46,3 +46,19 @@ def post_predictions(name: str, count: int) -> None:
         return
     content = f"**{name}** — {count} new predictions synced"
     _post(os.environ.get("DISCORD_PREDICTIONS_WEBHOOK_URL"), content)
+
+
+def post_alerts(name: str, counts: dict[str, int]) -> None:
+    """Post triggered alert-rule counts to ``DISCORD_PREDICTIONS_WEBHOOK_URL``.
+
+    ``counts`` maps rule name to the number of predictions newly triggering
+    it (see ``mvp.alerts``). The post deliberately carries no fixture detail —
+    it says which rules fired and how often, and the sheet holds the rest.
+    No-op when nothing triggered.
+    """
+    if not counts:
+        return
+    lines = [f"**{name} alerts**"]
+    for rule, count in counts.items():
+        lines.append(f"**{rule}** — {count} prediction{'' if count == 1 else 's'}")
+    _post(os.environ.get("DISCORD_PREDICTIONS_WEBHOOK_URL"), "\n".join(lines))

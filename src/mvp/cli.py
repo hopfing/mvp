@@ -19,7 +19,7 @@ warnings.filterwarnings("ignore", category=UserWarning, module="sklearn.utils.pa
 import polars as pl
 import yaml
 
-from mvp import notify
+from mvp import alerts, notify
 from mvp.common.base_job import get_data_root, get_local_data_root
 from mvp.common.enums import BOOK_DISPLAY_NAMES
 
@@ -3605,6 +3605,7 @@ def cmd_live(args: argparse.Namespace) -> int:
             errors.append(f"prediction display: {e}")
 
     # --- Stage 8: Sheets sync ---
+    merged_bets = None
     if predictions is not None and len(predictions) > 0:
         try:
             from mvp.gsheets.base import merge_predictions, prepare_predictions
@@ -3659,11 +3660,30 @@ def cmd_live(args: argparse.Namespace) -> int:
             print(f"Synced to Google Sheets ({n_new} new matches)")
             report.record_sheets_sync(success=True, count=n_new)
             notify.post_predictions("mvp-live", n_new)
+            merged_bets = merged
         except Exception as e:
             logger.error("Sheets sync failed: %s", e)
             print(f"Warning: Sheets sync failed ({e}). Predictions saved locally.")
             errors.append(f"sheets sync: {e}")
             report.record_sheets_sync(success=False, count=0, error=str(e))
+
+    # --- Stage 8b: Alert rules ---
+    # Runs off the synced frame, so alerts only ever describe rows the user can
+    # actually go look at. Own try/except: a bad rule must not read as a sheets
+    # sync failure.
+    if merged_bets is not None:
+        try:
+            counts = alerts.run(
+                merged_bets,
+                ledger_path=get_data_root() / "pipeline" / "alerts.jsonl",
+            )
+            if counts:
+                summary = ", ".join(f"{r}: {n}" for r, n in counts.items())
+                print(f"Alert rules triggered ({summary})")
+                notify.post_alerts("mvp-live", counts)
+        except Exception as e:
+            logger.error("Alert rules failed: %s", e)
+            errors.append(f"alert rules: {e}")
 
     # --- Stage 9: Analysis refresh ---
     try:

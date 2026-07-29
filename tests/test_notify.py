@@ -54,10 +54,44 @@ def test_post_predictions_targets_predictions_webhook(env_set):
     assert "5 new predictions" in kwargs["json"]["content"]
 
 
+def test_post_alerts_skips_empty(env_set):
+    with patch.object(notify.requests, "post") as mock_post:
+        notify.post_alerts("mvp-live", {})
+    mock_post.assert_not_called()
+
+
+def test_post_alerts_targets_predictions_webhook(env_set):
+    with patch.object(notify.requests, "post") as mock_post:
+        notify.post_alerts("mvp-live", {"Clay challenger value": 2})
+    mock_post.assert_called_once()
+    args, kwargs = mock_post.call_args
+    assert args[0] == "https://discord.test/predictions"
+    assert "Clay challenger value" in kwargs["json"]["content"]
+    assert "2 predictions" in kwargs["json"]["content"]
+
+
+def test_post_alerts_singular_count(env_set):
+    with patch.object(notify.requests, "post") as mock_post:
+        notify.post_alerts("mvp-live", {"Short prices": 1})
+    _, kwargs = mock_post.call_args
+    assert "1 prediction" in kwargs["json"]["content"]
+    assert "1 predictions" not in kwargs["json"]["content"]
+
+
+def test_post_alerts_lists_every_rule(env_set):
+    with patch.object(notify.requests, "post") as mock_post:
+        notify.post_alerts("mvp-live", {"Rule A": 2, "Rule B": 1})
+    _, kwargs = mock_post.call_args
+    content = kwargs["json"]["content"]
+    assert "Rule A" in content
+    assert "Rule B" in content
+
+
 def test_no_op_when_env_unset(env_unset):
     with patch.object(notify.requests, "post") as mock_post:
         notify.post_failure("mvp-live", "msg")
         notify.post_predictions("mvp-live", 5)
+        notify.post_alerts("mvp-live", {"Rule A": 1})
     mock_post.assert_not_called()
 
 
