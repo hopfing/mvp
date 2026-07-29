@@ -126,6 +126,40 @@ def consensus_selector(
     return None if selected == "All" else float(selected)
 
 
+ODDS_BASES: list[tuple[str, str, str]] = [
+    ("Open", "pred_odds_open", "model_edge_open"),
+    ("Formed", "pred_odds_market_formed", "model_edge_market_formed"),
+    ("Close", "pred_odds_best_close", "model_edge_best_close"),
+]
+
+
+def odds_basis_selector(ds: pl.DataFrame, key: str) -> tuple[str, str, str]:
+    """Render an odds-basis selectbox. Returns (label, odds_col, edge_col).
+
+    Defaults to Open. Only bases whose odds column is present in ``ds`` are
+    offered; falls back to the first basis in ODDS_BASES if none are.
+    """
+    import streamlit as st
+
+    available = [b for b in ODDS_BASES if b[1] in ds.columns]
+    if not available:
+        return ODDS_BASES[0]
+
+    labels = [label for label, _, _ in available]
+    state_key = f"odds_basis_{key}"
+    # Same guard as model_selector: a stale session_state value that is no
+    # longer an option would otherwise leave the lookup below with no match.
+    if state_key in st.session_state and st.session_state[state_key] not in labels:
+        st.session_state[state_key] = labels[0]
+
+    selected = st.sidebar.selectbox(
+        "Odds Basis",
+        options=labels,
+        key=state_key,
+    )
+    return next(b for b in available if b[0] == selected)
+
+
 def metric_card_data(
     label: str,
     value: float | int | None,
