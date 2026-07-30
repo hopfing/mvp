@@ -210,7 +210,17 @@ def generate_formulas(row: int) -> dict[str, str]:
     # before the column existed keep their old stakes. Only pred_prob is shrunk;
     # fav_edge/dog_edge still report the raw model edge, since those are read as
     # "what does the model think" rather than as staking inputs.
-    shrink_expr = f'IF({shrink_col}{r}="",1,{shrink_col}{r})'
+    # 0 is folded into the no-shrink fallback alongside blank, and deliberately
+    # so: `shrink` is a FORMULA_PRESERVE column meant to hold an inherit-from-
+    # above formula, and a cell containing `=<empty cell>` evaluates to 0 rather
+    # than blank in Sheets. A bare `=""` test would then read 0, not blank, and
+    # size every bet at p'=0.5 — which does NOT zero the stake the way
+    # kelly_fraction=0 would, because shrink scales a deviation from 0.5 rather
+    # than the whole expression. Any underdog above 2.0 would still be staked,
+    # off a coin flip. `shrink<0` in the outer guard cannot catch it either,
+    # since 0 is not negative. A deliberate s=0 has no coherent meaning, so
+    # nothing is lost by treating it as "no shrink".
+    shrink_expr = f'IF(OR({shrink_col}{r}="",{shrink_col}{r}=0),1,{shrink_col}{r})'
     shrunk_p = f'(0.5+{shrink_expr}*({pred_prob}{r}-0.5))'
     kelly_stake_formula = (
         f'=IF(OR({pred_prob}{r}="",{pred_odds_col}{r}="",{pred_odds_col}{r}<=1,'

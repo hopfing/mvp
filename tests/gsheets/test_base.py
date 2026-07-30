@@ -987,9 +987,19 @@ class TestGenerateFormulas:
         f = generate_formulas(row=2)["kelly_stake"]
         shrink = COL_LETTERS["shrink"]
         pred_prob = COL_LETTERS["pred_prob"]
-        assert f"(0.5+IF({shrink}2=\"\",1,{shrink}2)*({pred_prob}2-0.5))" in f
+        assert "0.5+" in f and f"{pred_prob}2-0.5" in f
+        assert f"{shrink}2" in f
         # The raw probability must not reach the Kelly numerator unshrunk.
         assert f"({pred_prob}2*{COL_LETTERS['pred_odds']}2-1)" not in f
+
+    def test_kelly_stake_treats_zero_shrink_as_no_shrink(self):
+        """A `=<empty cell>` inheritance formula evaluates to 0, not blank, in
+        Sheets. Left unhandled that sizes every bet at p'=0.5 — which still
+        stakes any underdog above 2.0, since shrink scales a deviation rather
+        than the whole expression. Both blank and 0 must fall back to 1.0."""
+        f = generate_formulas(row=2)["kelly_stake"]
+        shrink = COL_LETTERS["shrink"]
+        assert f'OR({shrink}2="",{shrink}2=0)' in f
 
     def test_kelly_stake_guards_negative_shrink(self):
         f = generate_formulas(row=2)["kelly_stake"]
