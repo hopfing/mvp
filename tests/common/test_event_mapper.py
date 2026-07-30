@@ -16,6 +16,7 @@ from mvp.common.event_mapper import (
     _match_by_date,
     _match_tournament,
     _parse_book_round,
+    _tournament_agrees,
 )
 
 
@@ -445,6 +446,225 @@ class TestSeasonIsAConstraintNotJustATiebreak:
         assert result.date_rejected == []
 
 
+class TestTournamentNameGate:
+    """A March Sao Paulo event took the pair's only open match — a July Liberec QF.
+
+    Every discriminating signal the mapper had was wired as a tiebreak among
+    candidates: the year filter and `_match_tournament` both only run when there
+    are two or more. With one candidate the pair WAS the key, and the tournament
+    text sitting on the row was never read. `_match_tournament` could not have
+    saved it either — it returns every candidate when none matches, so a total
+    disagreement is indistinguishable from a naming convention that never aligns.
+    """
+
+    def _odds(self, tournament, event_id_col="br_event_id"):
+        return pl.DataFrame({
+            event_id_col: ["e1", "e1"],
+            "player_name": ["Juan Bautista Torres", "Gonzalo Bueno"],
+            "tournament": [tournament, tournament],
+        })
+
+    def _lookup(self):
+        return {"juan bautista torres": "T0DM", "gonzalo bueno": "B0GR"}
+
+    def _only_liberec(self):
+        """The Sao Paulo meeting is completed, so it is not in the catalog at all
+        — `build_match_catalog` excludes finished matches. The pair's only open
+        match is the one four months away."""
+        return {
+            frozenset({"T0DM", "B0GR"}): [
+                {"match_uid": "2026_6795_SGL_QF_B0GR_T0DM", "tournament_id": "6795",
+                 "year": 2026, "tournament_name": "Liberec", "round": "QF",
+                 "p1_id": "T0DM"},
+            ],
+        }
+
+    @pytest.mark.parametrize("tournament", [
+        "São Paulo",                               # br
+        "Challenger - Sao Paulo",                  # dk
+        "ATP Challenger Sao Paulo (BRA) - Clay",   # mgm
+    ])
+    def test_stale_event_no_longer_takes_the_only_open_match(self, tournament):
+        result = map_book_events(
+            self._odds(tournament), "br_event_id", "br",
+            self._lookup(), self._only_liberec(),
+        )
+        assert result.event_matches == []
+        assert result.tournament_rejected == [
+            ("e1", "Juan Bautista Torres", "Gonzalo Bueno")
+        ]
+
+    def test_the_real_liberec_event_still_maps(self):
+        """The gate must not cost us the event it was protecting."""
+        result = map_book_events(
+            self._odds("ATP Challenger Liberec (CZE) - Clay"), "br_event_id", "br",
+            self._lookup(), self._only_liberec(),
+        )
+        assert [em.match_uid for em in result.event_matches] == [
+            "2026_6795_SGL_QF_B0GR_T0DM"
+        ]
+
+    @pytest.mark.parametrize("book_text,our_name", [
+        ("French Open", "Roland Garros"),          # alias
+        ("French Open Paris - Men", "Roland Garros"),
+        ("ATP Madrid 2026", "Madrid 1"),           # season year + our variant index
+        ("ATP Masters Rome (ITA) - Clay", "Rome 2"),
+        ("Shymkent Challenger 2026", "Shymkent 2"),  # circuit word as a suffix
+        ("ATP Quals. - Rome", "Rome 2"),
+        ("ATP Rome - Round 1", "Rome 2"),          # round token mid-string
+        ("Queens Semifinals", "London"),           # alias + round token
+        ("Challenger de Roma - ClasificaciÃ³n", "Rome 1"),   # mojibaked es. qualifying
+        ("ATP Marrakesh (MAR) - Clay", "Marrakech"),
+    ])
+    def test_names_that_diverge_but_agree(self, book_text, our_name):
+        """Each of these was a false rejection before the normalization was
+        extended. Measured over the full event map, the gate now keeps 98.7% of
+        healthy mappings while rejecting 84% of the stale ones."""
+        assert _tournament_agrees(book_text, {"tournament_name": our_name})
+
+    @pytest.mark.parametrize("book_text,our_name", [
+        ("ATP Masters Miami (USA) - Hard", "Washington"),
+        ("ATP Challenger Busan (KOR) - Hard", "Wuxi"),
+        ("ATP Challenger Quito (ECU) - Clay", "Bogota"),
+        ("São Paulo", "Oeiras 4"),
+    ])
+    def test_names_that_plainly_disagree(self, book_text, our_name):
+        assert not _tournament_agrees(book_text, {"tournament_name": our_name})
+
+    @pytest.mark.parametrize("book_text,our_name", [
+        ("Pau", "Sao Paulo"),          # "pau" sits inside "sao paulo"
+        ("Pau", "São Paulo"),
+        ("ATP Challenger Sao Paulo (BRA) - Clay", "Pau"),
+        ("Bol", "M15 Bologna"),
+    ])
+    def test_a_name_nested_inside_another_is_not_agreement(self, book_text, our_name):
+        """Containment is over whole tokens. A raw substring test reads Pau as
+        agreeing with Sao Paulo, and there are 381 such nesting pairs among the
+        tournaments seen since 2024 — enough to reintroduce the original bug in a
+        new disguise."""
+        assert not _tournament_agrees(book_text, {"tournament_name": our_name})
+
+    def test_a_genuine_token_prefix_still_agrees(self):
+        """The token rule must not cost us the real prefix relationships it was
+        chosen to keep."""
+        assert _tournament_agrees(
+            "ATP Hertogenbosch (NED) - Grass", {"tournament_name": "'s-Hertogenbosch"}
+        )
+
+    @pytest.mark.parametrize("book_text", ["", "   ", None])
+    def test_illegible_book_text_rejects_nothing(self, book_text):
+        """A book with no usable tournament string must be left exactly as it was,
+        not have every one of its events rejected."""
+        assert _tournament_agrees(book_text, {"tournament_name": "Liberec"})
+
+    def test_missing_catalog_name_rejects_nothing(self):
+        assert _tournament_agrees("ATP Challenger Liberec (CZE) - Clay", {})
+
+    def test_variant_index_is_the_tiebreaks_job_not_the_gates(self):
+        """The gate deliberately accepts both Madrid 1 and Madrid 2 — choosing
+        between them is `_match_tournament`'s, and collapsing that into the gate
+        would reject whichever the book did not spell out."""
+        for ours in ("Madrid 1", "Madrid 2"):
+            assert _tournament_agrees("ATP - Madrid", {"tournament_name": ours})
+
+    def test_caller_supplied_ids_win_over_our_strings(self):
+        """oddspapi resolves tournament identity itself, and none of its 184
+        tournament names match ours. Second-guessing a resolved id with a string
+        comparison would reject every one of its events."""
+        odds = pl.DataFrame({
+            "oap_event_id": ["e1", "e1"],
+            "player_name": ["Juan Bautista Torres", "Gonzalo Bueno"],
+            "tournament": ["Some Name We Never Match"] * 2,
+            "fetched_at": [datetime(2026, 7, 30, 12, 0)] * 2,
+            "tournament_ids": [["6795"], ["6795"]],
+        })
+        result = map_book_events(
+            odds, "oap_event_id", "oddspapi", self._lookup(), self._only_liberec(),
+        )
+        assert [em.match_uid for em in result.event_matches] == [
+            "2026_6795_SGL_QF_B0GR_T0DM"
+        ]
+        assert result.tournament_rejected == []
+
+
+class TestStalenessBackstop:
+    """The season constraint cannot see a same-season stale event: a March event
+    and a July match share a year. `max_date_gap_days` is the backstop, and it is
+    opt-in because a caller whose dates are not comparable must be unaffected.
+    """
+
+    def _odds(self, when):
+        return pl.DataFrame({
+            "br_event_id": ["e1", "e1"],
+            "player_name": ["Juan Bautista Torres", "Gonzalo Bueno"],
+            "tournament": ["ATP Challenger Liberec (CZE) - Clay"] * 2,
+            "fetched_at": [when, when],
+        })
+
+    def _lookup(self):
+        return {"juan bautista torres": "T0DM", "gonzalo bueno": "B0GR"}
+
+    def _catalog(self):
+        return {
+            frozenset({"T0DM", "B0GR"}): [
+                {"match_uid": "2026_6795_SGL_QF_B0GR_T0DM", "tournament_id": "6795",
+                 "year": 2026, "tournament_name": "Liberec", "p1_id": "T0DM",
+                 "effective_match_date": date(2026, 7, 31)},
+            ],
+        }
+
+    def test_same_season_stale_event_is_rejected(self):
+        """Same tournament name, same year, four months dead — the case the name
+        gate cannot catch on its own."""
+        result = map_book_events(
+            self._odds(datetime(2026, 3, 24, 16, 0)), "br_event_id", "br",
+            self._lookup(), self._catalog(), max_date_gap_days=14,
+        )
+        assert result.event_matches == []
+        assert len(result.date_rejected) == 1
+        assert result.date_rejected[0][4] == 129
+
+    def test_a_live_event_days_out_is_kept(self):
+        result = map_book_events(
+            self._odds(datetime(2026, 7, 29, 16, 0)), "br_event_id", "br",
+            self._lookup(), self._catalog(), max_date_gap_days=14,
+        )
+        assert len(result.event_matches) == 1
+        assert result.date_rejected == []
+
+    def test_tolerance_is_loose_enough_for_an_estimated_date(self):
+        """`effective_match_date` is estimated for rounds whose real date we lack,
+        so the backstop must not double as a disambiguator."""
+        result = map_book_events(
+            self._odds(datetime(2026, 7, 22, 16, 0)), "br_event_id", "br",
+            self._lookup(), self._catalog(), max_date_gap_days=14,
+        )
+        assert len(result.event_matches) == 1
+
+    def test_opt_in_default_leaves_existing_callers_alone(self):
+        result = map_book_events(
+            self._odds(datetime(2026, 3, 24, 16, 0)), "br_event_id", "br",
+            self._lookup(), self._catalog(),
+        )
+        assert len(result.event_matches) == 1
+        assert result.date_rejected == []
+
+    def test_inert_without_a_catalog_date(self):
+        """Most of the catalog predates the date column; absence is not evidence."""
+        undated = {
+            frozenset({"T0DM", "B0GR"}): [
+                {"match_uid": "2026_6795_SGL_QF_B0GR_T0DM", "tournament_id": "6795",
+                 "year": 2026, "tournament_name": "Liberec", "p1_id": "T0DM"},
+            ],
+        }
+        result = map_book_events(
+            self._odds(datetime(2026, 3, 24, 16, 0)), "br_event_id", "br",
+            self._lookup(), undated, max_date_gap_days=14,
+        )
+        assert len(result.event_matches) == 1
+        assert result.date_rejected == []
+
+
 class TestCatalogCarriesDate:
     def _df(self, with_date: bool):
         data = {
@@ -609,7 +829,35 @@ class TestMapBookEvents:
         assert result.no_match_found[0][0] == "e99"
 
     def test_ambiguous_match_collision(self):
-        """Multiple candidates that can't be disambiguated."""
+        """Multiple candidates that can't be disambiguated.
+
+        Both carry the tournament name the book gave, so the name gate passes
+        them through and the ambiguity is real: with no dates to separate them,
+        neither can be chosen.
+        """
+        odds = pl.DataFrame({
+            "dk_event_id": ["e1", "e1"],
+            "player_name": ["Roger Federer", "Rafael Nadal"],
+            "tournament": ["ATP - Miami Open", "ATP - Miami Open"],
+        })
+        catalog = {
+            frozenset({"A001", "B002"}): [
+                {"match_uid": "m1", "tournament_id": "403", "year": 2026,
+                 "tournament_name": "Miami Open"},
+                {"match_uid": "m2", "tournament_id": "580", "year": 2026,
+                 "tournament_name": "Miami Open"},
+            ],
+        }
+        result = map_book_events(
+            odds, "dk_event_id", "dk",
+            self._player_lookup(), catalog,
+        )
+        assert len(result.event_matches) == 0
+        assert len(result.collisions) == 1
+
+    def test_tournament_matching_none_of_the_candidates_is_rejected(self):
+        """Previously a collision: with no candidate in the book's tournament,
+        "we cannot tell which" was the wrong diagnosis — the answer is neither."""
         odds = pl.DataFrame({
             "dk_event_id": ["e1", "e1"],
             "player_name": ["Roger Federer", "Rafael Nadal"],
@@ -628,7 +876,8 @@ class TestMapBookEvents:
             self._player_lookup(), catalog,
         )
         assert len(result.event_matches) == 0
-        assert len(result.collisions) == 1
+        assert result.collisions == []
+        assert result.tournament_rejected == [("e1", "Roger Federer", "Rafael Nadal")]
 
     def test_disambiguation_by_tournament(self):
         """Multiple candidates narrowed to one by tournament name."""

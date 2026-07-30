@@ -35,6 +35,100 @@ _SUFFIX_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
+# Everything above only fires on prefixes and " - "-delimited suffixes. Books also
+# embed the same tokens mid-string ("Shymkent Challenger 2026", "ATP Madrid 2026",
+# "Queens Semifinals"), which left the residue that made name comparison unusable as
+# a gate. Stripped from BOTH sides so the comparison is symmetric.
+_NAME_NOISE = re.compile(
+    r"\b20\d\d\b"                                      # season year
+    r"|\bchallenger\b|\bmasters\b|\batp\b|\bwta\b|\bitf\b"
+    r"|\bmen\b|\bwomen\b"
+    r"|\bqualifiers?\b|\bqualifying\b|\bqualification\b|\bquals?\b"
+    # Spanish/Portuguese qualifying, prefix-matched: bet365 serves these
+    # mojibaked ("ClasificaciÃ³n"), so the tail is not reliably spellable.
+    r"|\bclasificaci\w*|\bqualificac\w*"
+    r"|\bround\s*\d+\b|\br\d+\b"
+    r"|\bsemi\s*finals?\b|\bquarter\s*finals?\b|\bfinals?\b"
+    r"|\bclay\b|\bhard\b|\bgrass\b|\bcarpet\b|\bindoor\b|\boutdoor\b",
+    re.IGNORECASE,
+)
+_PUNCT = re.compile(r"[-–—,()]+")
+
+# Our own back-to-back disambiguator ("Madrid 1", "Oeiras 3"), which no book carries.
+# Dropped for the AGREEMENT test only — picking between Madrid 1 and Madrid 2 is the
+# tiebreak's job (`_match_tournament`), not the gate's.
+_OUR_VARIANT_INDEX = re.compile(r"\s+\d+$")
+
+# Tournaments whose book name and ours genuinely differ, so no amount of token
+# stripping reconciles them. Keys and values are already normalized. Measured
+# against the full event map: these cover ~70% of the name disagreements on
+# otherwise-healthy mappings. Anything not listed is expected to match on tokens.
+#
+# Keep this small and only for genuine divergences. An alias for a name that also
+# exists in our own data is actively harmful: "centurion" -> "pretoria" looked
+# reasonable and broke 188 healthy mappings, because Centurion is a real
+# tournament of ours.
+_TOURNAMENT_ALIASES = {
+    "french open": "roland garros",
+    "french open paris": "roland garros",
+    "montemar": "alicante",
+    "marrakesh": "marrakech",
+    "queens": "london",
+    "napoli": "naples",
+    "bangalore": "bengaluru",
+    "de roma": "rome",
+}
+
+
+def _scrub(name: str) -> str:
+    """Strip noise tokens and punctuation, then normalize."""
+    return normalize_tournament(_PUNCT.sub(" ", _NAME_NOISE.sub(" ", name or "")))
+
+
+def normalize_book_tournament(book_tournament: str) -> str:
+    """Book tournament text -> comparable token string, aliases applied."""
+    scrubbed = _scrub(_strip_circuit_prefix(book_tournament or ""))
+    return _TOURNAMENT_ALIASES.get(scrubbed, scrubbed)
+
+
+def normalize_our_tournament(our_name: str) -> str:
+    """Our tournament_name -> comparable token string, variant index dropped."""
+    return _scrub(_OUR_VARIANT_INDEX.sub("", (our_name or "").strip()))
+
+
+def _tournament_agrees(book_tournament: str, candidate: dict) -> bool:
+    """Whether a book event's tournament text can refer to a candidate's tournament.
+
+    Containment is over WHOLE TOKENS, not raw substrings. A substring test reads
+    "Pau" as agreeing with "Sao Paulo" ("pau" sits inside "sao paulo"), and there
+    are 381 such nesting pairs among the tournaments we have seen since 2024 —
+    "Porto"/"Porto Alegre", "Paris"/"Paris Olympics", and every ATP city against
+    its "M15 <city>" ITF twin. Tokens kill the accidents while keeping the real
+    prefix relationships, which is what lets "Hertogenbosch" still reach our
+    "'s-Hertogenbosch".
+
+    Deliberately permissive: returns True whenever either side normalizes to
+    nothing, so a book that supplies no usable tournament text is left exactly as
+    it was rather than having every event rejected. It only returns False when
+    both sides are legible AND neither is a token-subset of the other — which is
+    the case this exists to catch (a "Sao Paulo" event resolving to Liberec).
+
+    Separating "Porto" from "Porto Alegre" is deliberately NOT its job, for the
+    same reason "Madrid 1" and "Madrid 2" both pass: choosing among tournaments
+    that genuinely share a name belongs to `_match_tournament` and the date.
+
+    That permissiveness is bounded and enumerated. Across the 1,261 tournaments
+    seen since 2024, 343 name pairs still nest under tokens; 332 involve an ITF
+    M##/W## event, leaving 11: Porto/Porto Alegre, Paris/Paris Olympics, the
+    Buenos Aires and Guangzhou venue variants, and Santa Cruz/Santa Cruz de la
+    Sierra.
+    """
+    book = set(normalize_book_tournament(book_tournament).split())
+    ours = set(normalize_our_tournament(candidate.get("tournament_name") or "").split())
+    if not book or not ours:
+        return True
+    return book <= ours or ours <= book
+
 
 @dataclass
 class MappingResult:
@@ -311,6 +405,22 @@ def _round_class(catalog_round: str | None) -> str | None:
 _DATE_MATCH_MAX_DAYS = 2
 _DATE_MATCH_MARGIN_DAYS = 2
 
+# Staleness backstop for the live path (`max_date_gap_days`). Far looser than
+# `_DATE_MATCH_MAX_DAYS` because that one picks between candidates while this one
+# only rejects the plainly-dead.
+#
+# Chosen from the measured distribution of |match_date - last prematch snapshot|
+# over the 18,622 name-agreeing mappings in the event map: p99 is 1 day and p99.9
+# is 8. Rejecting above 10 days costs 11 of those (0.06%) — identical to what a
+# 14-day threshold costs, so the extra headroom bought nothing. Tightening
+# further is not free: 7 days costs 21 and 5 days costs 43, over half of them
+# qualifying rounds, whose `effective_match_date` is estimated.
+#
+# This does NOT close back-to-back editions in one city (Buenos Aires 1 vs 2).
+# Those run days apart, so no affordable threshold separates them; the variant
+# index in `_match_tournament` is what handles that case.
+LIVE_MAX_DATE_GAP_DAYS = 10
+
 
 def _date_gap_days(fetched_at, candidate: dict) -> int | None:
     """Days between the event's date and a candidate's match date.
@@ -405,6 +515,7 @@ def map_book_events(
     player_lookup: dict[str, str],
     match_catalog: dict[frozenset, list[dict]],
     existing_event_ids: set[str] | None = None,
+    max_date_gap_days: int | None = None,
 ) -> MappingResult:
     """Map book odds events to internal match_uids.
 
@@ -416,6 +527,10 @@ def map_book_events(
         player_lookup: normalized_name -> player_id mapping.
         match_catalog: frozenset({pid1, pid2}) -> list of match records.
         existing_event_ids: Event IDs already in the event_map (skip these).
+        max_date_gap_days: Reject a resolved match sitting further than this from
+            the event's own timestamp. Requires `effective_match_date` in the
+            catalog; inert without it. None (default) disables the check, keeping
+            behaviour unchanged for callers whose dates aren't comparable.
 
     Returns:
         MappingResult with new event matches, unresolved names, and diagnostics.
@@ -514,6 +629,33 @@ def map_book_events(
                 continue
             candidates = round_filtered
 
+        # Tournament-name gate. `_match_tournament` below narrows but cannot
+        # reject — it returns every candidate when none matches, so a total
+        # disagreement and "this book's naming never aligns with ours" are
+        # indistinguishable to it. That made the pair the only real key: with one
+        # candidate the `else` branch never ran, and a Sao Paulo event took the
+        # pair's only open match, four months and a continent away.
+        #
+        # Applied before the single-vs-multi branch, like the round gate, because
+        # the single-candidate path is exactly where nothing else checks. Kept
+        # permissive on purpose (see `_tournament_agrees`) — its job is rejecting
+        # events that plainly belong to another tournament, not picking between
+        # Madrid 1 and Madrid 2, which is still `_match_tournament`'s.
+        #
+        # Skipped when the caller resolved `tournament_ids` above: an id the caller
+        # mapped itself beats our string comparison, and for oddspapi the strings
+        # never align anyway. This is the fallback for callers without ids — which
+        # is the live scrapers, and they are the ones that needed it.
+        if not tournament_ids:
+            name_filtered = [
+                c for c in candidates if _tournament_agrees(book_tournament, c)
+            ]
+            if not name_filtered:
+                result.tournament_rejected.append((eid, name_a, name_b))
+                skipped_no_match += 1
+                continue
+            candidates = name_filtered
+
         if len(candidates) == 1:
             match = candidates[0]
         else:
@@ -563,6 +705,22 @@ def map_book_events(
                 result.date_rejected.append(
                     (eid, name_a, name_b, match.get("match_uid", ""),
                      gap if gap is not None else -1)
+                )
+                skipped_no_match += 1
+                continue
+
+        # Same-season staleness. The season constraint above cannot see it: a
+        # March event and a July match share a year, so a book event that went
+        # dark months ago still resolved to the pair's next open match. The
+        # tolerance is deliberately loose — `effective_match_date` is estimated
+        # for rounds whose real date we don't have, and a tight window rejects
+        # same-season qualifying matches sitting days off their estimate. This is
+        # a staleness backstop, not a disambiguator.
+        if max_date_gap_days is not None:
+            gap = _date_gap_days(fetched_at, match)
+            if gap is not None and gap > max_date_gap_days:
+                result.date_rejected.append(
+                    (eid, name_a, name_b, match.get("match_uid", ""), gap)
                 )
                 skipped_no_match += 1
                 continue

@@ -3455,6 +3455,7 @@ def cmd_live(args: argparse.Namespace) -> int:
             save_event_mappings,
         )
         from mvp.common.event_mapper import (
+            LIVE_MAX_DATE_GAP_DAYS,
             build_match_catalog,
             build_player_lookup,
             map_book_events,
@@ -3481,7 +3482,7 @@ def cmd_live(args: argparse.Namespace) -> int:
                 matches_path,
                 columns=["match_uid", "player_id", "opp_id", "tournament_id",
                          "year", "tournament_name", "draw_type", "draw_p1_id",
-                         "round", "result_type"],
+                         "round", "result_type", "effective_match_date"],
             )
             uncompleted_uids = set(
                 catalog_df_all.filter(pl.col("result_type").is_null())["match_uid"]
@@ -3539,8 +3540,20 @@ def cmd_live(args: argparse.Namespace) -> int:
 
                     map_result = map_book_events(
                         unmapped_df, eid_col, book, book_lookup, match_catalog,
+                        max_date_gap_days=LIVE_MAX_DATE_GAP_DAYS,
                     )
                     report.record_unresolved_names(book, map_result.unresolved_names)
+                    for _eid, _na, _nb, _uid, _gap in map_result.date_rejected:
+                        logger.info(
+                            "Stale event rejected [%s] %s (%s vs %s): "
+                            "%s is %d days from the event",
+                            book.upper(), _eid, _na, _nb, _uid, _gap,
+                        )
+                    for _eid, _na, _nb in map_result.tournament_rejected:
+                        logger.info(
+                            "Tournament mismatch rejected [%s] %s (%s vs %s)",
+                            book.upper(), _eid, _na, _nb,
+                        )
                     if map_result.event_matches:
                         save_event_mappings(map_result.event_matches, book=book)
                         print(f"Event mapper: {len(map_result.event_matches)} new {book.upper()} mappings")
