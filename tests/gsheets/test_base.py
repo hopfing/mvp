@@ -21,8 +21,8 @@ from mvp.gsheets.base import (
 
 
 class TestColumnSchema:
-    def test_column_schema_has_46_columns(self):
-        assert len(COLUMN_SCHEMA) == 46
+    def test_column_schema_has_47_columns(self):
+        assert len(COLUMN_SCHEMA) == 47
 
     def test_fav_edge_open_precedes_fav_edge(self):
         i = COLUMN_NAMES.index("fav_edge_open")
@@ -475,7 +475,7 @@ class TestMergePredictions:
         })
         result = merge_predictions(existing, new, matches)
         assert list(result.columns) == COLUMN_NAMES
-        assert len(result.columns) == 46
+        assert len(result.columns) == 47
 
     def test_empty_existing_empty_new(self):
         existing = _sheet_df([])
@@ -508,7 +508,7 @@ class TestMergePredictions:
         })
         result = merge_predictions(existing, new, matches)
         assert len(result) == 0
-        assert len(result.columns) == 46
+        assert len(result.columns) == 47
         assert list(result.columns) == COLUMN_NAMES
 
     def test_fav_edge_open_populated_from_opening_odds(self):
@@ -981,3 +981,29 @@ class TestGenerateFormulas:
         formulas = generate_formulas(row=2)
         for name, formula in formulas.items():
             assert formula.startswith("="), f"{name} doesn't start with ="
+
+    def test_kelly_stake_uses_shrunk_probability(self):
+        """Kelly sizes off 0.5 + shrink*(p-0.5), not the raw model probability."""
+        f = generate_formulas(row=2)["kelly_stake"]
+        shrink = COL_LETTERS["shrink"]
+        pred_prob = COL_LETTERS["pred_prob"]
+        assert f"(0.5+IF({shrink}2=\"\",1,{shrink}2)*({pred_prob}2-0.5))" in f
+        # The raw probability must not reach the Kelly numerator unshrunk.
+        assert f"({pred_prob}2*{COL_LETTERS['pred_odds']}2-1)" not in f
+
+    def test_kelly_stake_guards_negative_shrink(self):
+        f = generate_formulas(row=2)["kelly_stake"]
+        assert f"{COL_LETTERS['shrink']}2<0" in f
+
+    def test_fav_edge_reports_raw_probability(self):
+        """fav_edge/dog_edge stay on the raw model edge -- they are read as the
+        model's view, not as staking inputs, so the shrink must not leak in."""
+        f = generate_formulas(row=2)
+        assert COL_LETTERS["shrink"] + "2" not in f["fav_edge"]
+        assert COL_LETTERS["shrink"] + "2" not in f["dog_edge"]
+
+    def test_shrink_is_a_user_owned_control(self):
+        from mvp.gsheets.base import FORMULA_PRESERVE_COLUMNS
+        assert "shrink" in USER_COLUMNS
+        assert "shrink" in FORMULA_PRESERVE_COLUMNS
+        assert COLUMN_NAMES.index("shrink") == COLUMN_NAMES.index("kelly_fraction") + 1

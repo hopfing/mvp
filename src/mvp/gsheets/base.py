@@ -63,6 +63,12 @@ COLUMN_SCHEMA = [
     # round-trip instead of flattening it to a computed value.
     {"name": "bankroll", "owner": "user"},
     {"name": "kelly_fraction", "owner": "user"},
+    # Probability shrink applied before the Kelly formula: p' = 0.5 + shrink*(p-0.5).
+    # Corrects the overconfidence a positive-edge filter induces on the bet set —
+    # selecting on edge over-samples the model's upward errors against the market,
+    # so `p` reads high on the bets you actually place even when the model is
+    # calibrated overall. Blank behaves as 1.0 (no shrink).
+    {"name": "shrink", "owner": "user"},
     {"name": "max_pct", "owner": "user"},
     # Meta columns — moved out of the way but kept for downstream analysis.
     # Raw per-side odds (auto-filled) feed pred_odds / fav_edge / dog_edge / bet_odds
@@ -96,7 +102,7 @@ FORMULA_COLUMNS = {c["name"] for c in COLUMN_SCHEMA if c["owner"] == "formula"}
 # User-maintained columns that may hold a formula (e.g. an inherit-from-above
 # bankroll). The sync reads these with FORMULA rendering and writes the raw
 # formula back, rather than flattening them to a computed value.
-FORMULA_PRESERVE_COLUMNS = {"bankroll", "kelly_fraction", "max_pct"}
+FORMULA_PRESERVE_COLUMNS = {"bankroll", "kelly_fraction", "shrink", "max_pct"}
 # Formula columns that stay live while a bet is open but freeze to a literal
 # snapshot once the bet is placed (a stake is entered).
 #   kelly_stake — should record what was advised at bet time, not keep
@@ -167,6 +173,7 @@ def generate_formulas(row: int) -> dict[str, str]:
     result_col = COL_LETTERS["result"]
     bankroll_col = COL_LETTERS["bankroll"]
     kelly_fraction_col = COL_LETTERS["kelly_fraction"]
+    shrink_col = COL_LETTERS["shrink"]
     max_pct_col = COL_LETTERS["max_pct"]
 
     # pred_odds: the picked player's price (raw p1/p2 odds live in the meta block)
@@ -194,16 +201,26 @@ def generate_formulas(row: int) -> dict[str, str]:
     # for decimal odds o and win prob p is (p*o - 1)/(o - 1); we scale that by
     # kelly_fraction, floor at 0 for non-positive edge, and cap at
     # max_pct * bankroll. Blanks until every input is set, and on any negative
-    # control value (odds/bankroll/fraction/max_pct) rather than emitting a
-    # nonsensical or negative stake.
+    # control value (odds/bankroll/fraction/shrink/max_pct) rather than emitting
+    # a nonsensical or negative stake.
+    #
+    # `p` here is the SHRUNK probability 0.5 + shrink*(pred_prob - 0.5), not the
+    # raw model output — see the schema note on `shrink`. A blank shrink cell is
+    # treated as 1.0, so the formula reduces to plain Kelly and rows written
+    # before the column existed keep their old stakes. Only pred_prob is shrunk;
+    # fav_edge/dog_edge still report the raw model edge, since those are read as
+    # "what does the model think" rather than as staking inputs.
+    shrink_expr = f'IF({shrink_col}{r}="",1,{shrink_col}{r})'
+    shrunk_p = f'(0.5+{shrink_expr}*({pred_prob}{r}-0.5))'
     kelly_stake_formula = (
         f'=IF(OR({pred_prob}{r}="",{pred_odds_col}{r}="",{pred_odds_col}{r}<=1,'
         f'{bankroll_col}{r}="",{bankroll_col}{r}<=0,'
         f'{kelly_fraction_col}{r}="",{kelly_fraction_col}{r}<0,'
+        f'{shrink_col}{r}<0,'
         f'{max_pct_col}{r}="",{max_pct_col}{r}<0),"",'
         f'MIN({max_pct_col}{r}*{bankroll_col}{r},'
         f'MAX(0,{kelly_fraction_col}{r}*{bankroll_col}{r}*'
-        f'({pred_prob}{r}*{pred_odds_col}{r}-1)/({pred_odds_col}{r}-1))))'
+        f'({shrunk_p}*{pred_odds_col}{r}-1)/({pred_odds_col}{r}-1))))'
     )
 
     return {
@@ -710,13 +727,13 @@ def merge_predictions(
             ])
         )
 
-    # 3c5. Seed Kelly control inputs (bankroll/kelly_fraction/max_pct) on rows
-    # appearing for the first time, from the `config` tab. ONLY new rows are
+    # 3c5. Seed Kelly control inputs (bankroll/kelly_fraction/shrink/max_pct) on
+    # rows appearing for the first time, from the `config` tab. ONLY new rows are
     # seeded — existing rows, even blank ones, are never touched, so an old
     # match never picks up today's bankroll. After seeding, a value changes only
     # when it is edited manually on the sheet.
     if len(merged) > 0 and control_defaults:
-        for col in ("bankroll", "kelly_fraction", "max_pct"):
+        for col in ("bankroll", "kelly_fraction", "shrink", "max_pct"):
             default = str(control_defaults.get(col, "")).strip()
             if not default:
                 continue
