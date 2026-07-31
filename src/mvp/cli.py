@@ -8,6 +8,7 @@ import os
 import shutil
 import sys
 import time
+import traceback
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -3378,8 +3379,17 @@ def cmd_live(args: argparse.Namespace) -> int:
                 )
                 errors.append(f"tournament {tid} ({year}): {error}")
     except Exception as e:
-        logger.error("Stage 1 (extract/aggregate) failed: %s", e)
+        # Stage 1 aborts the whole tick, and the message alone has proven too
+        # thin to locate a fault: a bare "max() iterable argument is empty"
+        # gives no call site, and stdout may not survive on the runner. Record
+        # the traceback into runs.jsonl (which persists to the data root) so
+        # the next occurrence is diagnosable from the report alone. Tail-end
+        # frames are the informative ones, so keep those and cap the size to
+        # avoid bloating a line of JSONL.
+        logger.exception("Stage 1 (extract/aggregate) failed: %s", e)
+        tb = "".join(traceback.format_exception(type(e), e, e.__traceback__))
         errors.append(f"extract/aggregate: {e}")
+        errors.append(f"extract/aggregate traceback: {tb[-4000:]}")
         report.set_errors(errors)
         report.save(get_data_root() / "pipeline" / "runs.jsonl")
         raise RuntimeError(
