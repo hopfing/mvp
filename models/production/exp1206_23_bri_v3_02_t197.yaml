@@ -1,0 +1,57 @@
+data:
+  date_range:
+    end: 2026-06-30
+    start: 2023-01-01
+  filters:
+    circuit:
+    - tour
+    - chal
+    draw_type: singles
+features:
+  include:
+  - opp_days_since_surface_singles
+  - opp_match_count(days=30)
+  - player_age_diff
+  - player_days_since_surface_singles
+  - player_days_since_surface_singles_diff
+  - player_elo_surface_indoor_diff
+  - player_games_margin_per_set_lost_diff(days=180)
+  - player_glicko_rd_diff
+  - player_match_count(days=30)
+  - player_match_count_diff(days=30)
+  - player_opp_elo_faced_avg_diff
+  - player_opp_elo_faced_avg_diff(days=730)
+  - player_surface_dominance_ratio_diff(days=730)
+  - player_surface_easy_hold_pct_diff(days=30)
+  - player_tourn_pts_service_lost_per_match_diff
+  - player_vs_opp_style_resid_diff
+metrics:
+    objective:
+        - brier_score
+model:
+  params:
+    colsample_bylevel: 0.5803988771732608
+    colsample_bynode: 0.6021101025236704
+    colsample_bytree: 0.5408966899099092
+    gamma: 7.17554562615851
+    grow_policy: lossguide
+    learning_rate: 0.01105266604229255
+    max_bin: 128
+    max_delta_step: 1
+    max_depth: 6
+    max_leaves: 112
+    min_child_weight: 7
+    n_estimators: 750
+    n_jobs: 4
+    random_state: 42
+    reg_alpha: 0.059160804247912896
+    reg_lambda: 0.14187425827709582
+    scale_pos_weight: 0.9286370887892574
+    subsample: 0.5131465157360352
+    tree_method: hist
+  type: xgboost
+target: won
+validation:
+  initial_train_months: 12
+  test_months: 6
+  type: date_expanding

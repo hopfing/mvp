@@ -1,17 +1,23 @@
 winner:
   active:
-    artifact: data/models/de1212_log_15f.joblib
-    config: models/production/de1212_log_15f.yaml
+    artifact: data/models/exp1206_23_bri_v3_02_t197.joblib
+    config: models/production/exp1206_23_bri_v3_02_t197.yaml
     filters:
       circuit:
       - tour
       - chal
       draw_type: singles
     train_date_range:
+      end: '2026-06-30'
+      start: '2023-01-01'
+    trained_at: '2026-07-31T13:52:41.735981+00:00'
+  history:
+  - artifact: data/models/de1212_log_15f.joblib
+    config: models/production/archive/de1212_log_15f.yaml
+    replaced_at: '2026-07-31'
+    train_date_range:
       end: '2025-12-31'
       start: '2021-01-01'
-    trained_at: '2026-07-15T21:18:40.227921+00:00'
-  history: []
   voters:
   - artifact: data/models/lr_fs_15f_260331.joblib
     config: models/voters/lr_fs_15f_260331.yaml
