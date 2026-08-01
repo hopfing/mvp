@@ -57,7 +57,7 @@ PRODUCTION_CONFIG_PATH = Path("production.yaml")
 # Columns the predictor needs beyond what features reference
 _PREDICTOR_EXTRA_COLS = [
     "won", "reason", "result_type", "sets_played", "best_of",
-    "circuit", "surface", "round", "draw_type",
+    "circuit", "surface", "round", "draw_type", "indoor",
     "tournament_id", "tournament_name",
     "player_first_name", "player_last_name",
     "opp_first_name", "opp_last_name",

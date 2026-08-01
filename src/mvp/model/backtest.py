@@ -276,6 +276,11 @@ def _build_bet_rows(
             "effective_match_date",
             "circuit",
             "surface",
+            # Court type rides alongside surface so slicing a backtest by
+            # indoor/outdoor needs no join back to matches.parquet. Guarded by
+            # the `c in predictions.columns` filter below, so this is inert
+            # until the predictor carries it.
+            "indoor",
             "round",
             "tournament_id",
             "p1_id",
