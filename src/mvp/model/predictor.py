@@ -697,26 +697,68 @@ class ProductionPredictor:
                     sub_preds = fold_model.predict_proba_per_model(
                         X_test_fold, df=test_df
                     )
-                    for s, sp in enumerate(sub_preds):
-                        per_sub_fold_predictions[s].append({
-                            "df": test_df,
-                            "y_true": y_test_fold,
-                            "y_prob": sp,
-                        })
                 else:
                     y_prob_test = fold_model.predict_proba(X_test_fold)
+                    sub_preds = []
+
+                # A model whose training distribution is deliberately skewed
+                # (group sample_weight toward one surface/court cell) serves a
+                # narrower population than it trains on. The FIT above stays on
+                # the whole weighted pool — that pooling is the point — but the
+                # calibrator maps raw score to probability, and that map is
+                # exactly what a specialist claims differs by cell. Fitting it
+                # on the full pool would average the specialisation away, with
+                # the target cell contributing only its corpus share.
+                #
+                # eval_filters already declares the cell (it is what FS scores
+                # on), so reuse it here: restrict the OOF buffer, never the fit.
+                # Mirrors runner.py's post-split test-fold restriction.
+                cal_df, cal_y, cal_prob = test_df, y_test_fold, y_prob_test
+                cal_sub = sub_preds
+                if config.data.eval_filters:
+                    idx_col = "_cal_row_idx"
+                    keep = apply_filters(
+                        test_df.with_row_index(idx_col), config.data.eval_filters
+                    )[idx_col].to_numpy()
+                    if len(keep) == 0:
+                        logger.info(
+                            "Temporal CV fold %d: 0/%d rows in the calibration "
+                            "domain — fold contributes no OOF",
+                            fold_idx + 1, len(test_df),
+                        )
+                        continue
+                    cal_df = test_df[keep]
+                    cal_y = y_test_fold[keep]
+                    cal_prob = y_prob_test[keep]
+                    cal_sub = [sp[keep] for sp in sub_preds]
+
+                for s, sp in enumerate(cal_sub):
+                    per_sub_fold_predictions[s].append({
+                        "df": cal_df,
+                        "y_true": cal_y,
+                        "y_prob": sp,
+                    })
 
                 fold_predictions.append({
-                    "df": test_df,
-                    "y_true": y_test_fold,
-                    "y_prob": y_prob_test,
+                    "df": cal_df,
+                    "y_true": cal_y,
+                    "y_prob": cal_prob,
                 })
                 logger.info(
-                    "Temporal CV fold %d: train=%d, test=%d",
+                    "Temporal CV fold %d: train=%d, test=%d%s",
                     fold_idx + 1, len(train_df), len(test_df),
+                    f", calibrating on {len(cal_y)}"
+                    if config.data.eval_filters else "",
                 )
 
             if not fold_predictions:
+                if config.data.eval_filters:
+                    raise RuntimeError(
+                        f"data.eval_filters {config.data.eval_filters} matched 0 "
+                        f"rows in every temporal CV fold — the calibrator would "
+                        f"have no data. Check the filter spec and that its "
+                        f"columns are present in the training frame."
+                    )
                 raise RuntimeError(
                     f"Temporal CV ({val_cfg.type}) produced no folds"
                 )
