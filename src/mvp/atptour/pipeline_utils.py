@@ -5,9 +5,59 @@ from pathlib import Path
 
 import polars as pl
 
-from mvp.atptour.mappings import is_placeholder_id
+from mvp.atptour.mappings import PLACEHOLDER_IDS, is_placeholder_id
 
 DAVIS_CUP_TIDS = {"8096", "8097", "8099"}
+
+
+def get_scheduled_pairs(
+    tournaments_stage_dir: Path,
+    run_tids: set[tuple[str, int]] | None = None,
+) -> pl.DataFrame:
+    """(player_id, match_uid, scheduled_datetime) for every scheduled singles match.
+
+    One row per player per match, so both sides of a match appear. Read from the
+    deduplicated `schedule.parquet` rather than per-snapshot files: `_dedup` in the
+    schedule transformer deliberately drops superseded draw entries, and fetching on
+    an entry ATP has already retracted is wasted work against a host that has flagged
+    this IP.
+
+    Rows with a null `match_uid` are dropped. That is not a data-quality filter -- a
+    null uid means at least one side is still a placeholder, and a match with an
+    unresolved player cannot be predicted, so there is nothing yet to keep current.
+    """
+    frames = []
+    want = ["tournament_id", "year", "draw_type", "match_uid",
+            "p1_id", "p2_id", "scheduled_datetime"]
+    for path in sorted(tournaments_stage_dir.rglob("schedule.parquet")):
+        available = pl.read_parquet_schema(path)
+        if "match_uid" not in available:
+            continue
+        df = pl.read_parquet(path, columns=[c for c in want if c in available])
+        df = df.filter((pl.col("draw_type") == "singles")
+                       & pl.col("match_uid").is_not_null())
+        if run_tids is not None:
+            keep = pl.struct("tournament_id", "year").map_elements(
+                lambda s: (s["tournament_id"], s["year"]) in run_tids,
+                return_dtype=pl.Boolean)
+            df = df.filter(keep)
+        if df.is_empty():
+            continue
+        frames.append(
+            pl.concat([
+                df.select("match_uid", "scheduled_datetime",
+                          pl.col(c).alias("player_id"))
+                for c in ("p1_id", "p2_id") if c in df.columns
+            ])
+        )
+    if not frames:
+        return pl.DataFrame(schema={"player_id": pl.String, "match_uid": pl.String,
+                                    "scheduled_datetime": pl.Datetime("us")})
+    out = pl.concat(frames).drop_nulls("player_id")
+    # Native `is_in` over the frozenset rather than a per-row UDF -- this runs every
+    # tick and polars warns loudly enough to bury the activity logs otherwise.
+    out = out.filter(~pl.col("player_id").is_in(list(PLACEHOLDER_IDS)))
+    return out.unique(["player_id", "match_uid"])
 
 
 def get_active_players(

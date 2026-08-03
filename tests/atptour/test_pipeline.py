@@ -491,6 +491,7 @@ class TestRunPlayerData:
         MockBioExt.return_value.run.return_value = ([], 1)
         MockBioStager.return_value.run.return_value = []
         MockActivityExt.return_value.run.return_value = []
+        MockActivityExt.return_value.run_for_pairs.return_value = ([], set())
         MockActivityStager.return_value.run.return_value = []
 
         run_tids = {("580", 2023)}
@@ -514,10 +515,12 @@ class TestRunPlayerData:
         from mvp.atptour.pipeline import run_player_data
 
         MockGetPlayers.return_value = {}
+        MockActivityExt.return_value.run_for_pairs.return_value = ([], set())
 
         result = run_player_data(run_tids={("580", 2023)}, data_root=None)
 
         MockBioExt.return_value.run.assert_not_called()
+        # The coverage-driven path stays unused; the live pair trigger is what runs.
         MockActivityExt.return_value.run.assert_not_called()
         assert result.has_failures is False
 
@@ -548,7 +551,7 @@ class TestRunPlayerData:
     @patch("mvp.atptour.pipeline.PlayerBioStager")
     @patch("mvp.atptour.pipeline.PlayerBioExtractor")
     @patch("mvp.atptour.pipeline.get_active_players")
-    def test_activity_skipped_without_refresh_players(
+    def test_activity_runs_without_refresh_players_via_pair_trigger(
         self, MockGetPlayers, MockBioExt, MockBioStager, MockBioTx,
         MockGetResults, MockActivityExt, MockActivityStager, MockActivityTx,
     ):
@@ -558,10 +561,14 @@ class TestRunPlayerData:
             "FEDERER_R": {("580", 2023)},
         }
         MockBioExt.return_value.run.return_value = ([], 0)
+        MockActivityExt.return_value.run_for_pairs.return_value = ([], set())
 
         result = run_player_data(run_tids={("580", 2023)}, data_root=None)
 
+        # Activity is no longer gated on refresh_players in live mode. The
+        # coverage-driven `run` stays unused; the pair trigger drives it, every tick.
         MockActivityExt.return_value.run.assert_not_called()
+        MockActivityExt.return_value.run_for_pairs.assert_called_once()
         assert result.failed_activity_fetch == []
 
     @patch("mvp.atptour.pipeline.PlayerActivityTransformer")

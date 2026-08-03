@@ -97,8 +97,13 @@ class PlayerActivityStager(BaseJob):
 
     def __init__(self, data_root: Path | None = None):
         super().__init__(domain="atptour", data_root=data_root)
+        # Players this run actually re-staged. The caller needs it to decide whether
+        # consolidation has anything to do -- the consolidate rebuilds from every
+        # per-player file, so running it when nothing changed is pure cost.
+        self.last_staged: set[str] = set()
 
     def run(self, player_ids: set[str] | None = None) -> list[tuple[str, str]]:
+        self.last_staged = set()
         raw_dir = self.build_path("raw", "activity")
         if player_ids is not None:
             raw_files = [
@@ -128,6 +133,7 @@ class PlayerActivityStager(BaseJob):
                 to_process.append(raw_path)
 
         to_process.sort(key=lambda p: p.stem)
+        self.last_staged = {p.stem for p in to_process}
         parsed_at = dt.datetime.now(dt.UTC).replace(tzinfo=None)
 
         failed: list[tuple[str, str]] = []

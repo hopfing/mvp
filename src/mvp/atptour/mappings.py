@@ -136,7 +136,7 @@ def map_player_id(raw: str) -> str:
     return result
 
 
-_PLACEHOLDER_IDS = frozenset({
+PLACEHOLDER_IDS = frozenset({
     "0", "AAA1", "AAA2", "AAA3", "AAA4", "AAA5", "AAA6", "AAA7", "AAA8",
     "X500", "X501", "X502", "X503", "X504", "X505", "X506", "X507", "X508",
     "X509", "X510", "X511", "X512", "X513", "X514", "X515", "X516", "X517",
@@ -146,7 +146,7 @@ _PLACEHOLDER_IDS = frozenset({
 
 def is_placeholder_id(player_id: str) -> bool:
     """Return True if the player ID is a placeholder (bye / TBD)."""
-    return player_id in _PLACEHOLDER_IDS
+    return player_id in PLACEHOLDER_IDS
 
 
 def normalize_flag_url(href: str) -> str:

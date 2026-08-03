@@ -7,6 +7,9 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+import polars as pl
+
+from mvp.atptour import activity_ledger
 from mvp.atptour.aggregators.tournament_matches import TournamentMatchesAggregator
 from mvp.atptour.extractors.match_centre import DataType, MatchCentreExtractor
 from mvp.atptour.extractors.match_stats import MatchStatsExtractor
@@ -16,7 +19,11 @@ from mvp.atptour.extractors.player_bio import PlayerBioExtractor
 from mvp.atptour.extractors.rankings import RankingsExtractor
 from mvp.atptour.extractors.results import ResultsExtractor
 from mvp.atptour.extractors.schedule import ScheduleExtractor
-from mvp.atptour.pipeline_utils import get_active_players, get_players_with_results
+from mvp.atptour.pipeline_utils import (
+    get_active_players,
+    get_players_with_results,
+    get_scheduled_pairs,
+)
 from mvp.atptour.schemas.stats_plus import SCHEMA_HASH as _STATS_PLUS_SCHEMA_HASH
 from mvp.atptour.transformers.match_beats import MatchBeatsTransformer
 from mvp.atptour.transformers.match_stats import MatchStatsTransformer
@@ -400,11 +407,35 @@ def run_player_data(
         else:
             logger.info("Player bios: no new fetches, skipping stager/transformer")
 
-    # Auto-refresh activity on Fri-Sun every 8 hours
-    if not refresh_players and player_tournaments:
-        if _should_auto_refresh_activity(default_root):
-            logger.info("Activity: auto-refresh triggered (Fri-Sun schedule)")
-            refresh_players = True
+    # Live: activity is triggered by a new (player, match) pair appearing on the
+    # schedule, every run. Not by a calendar.
+    #
+    # The two gates this replaces were not throttles, they were exclusions. The
+    # Fri-Sun window meant activity never refreshed Mon-Thu, when challenger main
+    # draws run; and `players_with_results` dropped any player who had already played
+    # at a run tournament -- which is, by definition, every player whose next-round
+    # match has just appeared. Together they retired a player from refreshing the
+    # moment they became interesting. Measured consequence: players scheduled today
+    # carrying activity fetched up to 145 days ago.
+    if live and not refresh_players:
+        pairs = get_scheduled_pairs(tournaments_stage_dir, run_tids)
+        failed, fetched_ok = PlayerActivityExtractor(
+            data_root=data_root
+        ).run_for_pairs(pairs)
+        result.failed_activity_fetch = failed
+        # Offer the stager every scheduled player, not just this run's fetches. Its
+        # skip logic is mtime/schema-hash based and costs one stat per player, and a
+        # fetch that landed on disk but crashed before staging would otherwise never
+        # be picked up -- the pair is already settled, so it is never re-fetched.
+        scheduled = set(pairs["player_id"].to_list()) if not pairs.is_empty() else set()
+        if scheduled:
+            stager = PlayerActivityStager(data_root=data_root)
+            result.failed_activity_stage = stager.run(player_ids=scheduled)
+            # Consolidate only if something re-staged. The transformer rebuilds
+            # `activity.parquet` from all ~12k per-player files, and most ticks change
+            # nothing.
+            if stager.last_staged:
+                PlayerActivityTransformer(data_root=data_root).run()
 
     if player_tournaments and refresh_players:
         players_with_results = get_players_with_results(
@@ -424,6 +455,23 @@ def run_player_data(
         result.failed_activity_fetch = PlayerActivityExtractor(
             data_root=data_root
         ).run(activity_tournaments)
+        # Settle the pairs this sweep covered, or the operator's recovery lever leaves
+        # every pair open and the next normal tick re-fetches players it just got.
+        succeeded = set(activity_tournaments) - {
+            pid for pid, _ in result.failed_activity_fetch
+        }
+        if succeeded:
+            covered = get_scheduled_pairs(tournaments_stage_dir, run_tids)
+            if not covered.is_empty():
+                for pid, uids in (
+                    covered.filter(pl.col("player_id").is_in(list(succeeded)))
+                    .group_by("player_id")
+                    .agg(pl.col("match_uid"))
+                    .iter_rows()
+                ):
+                    activity_ledger.record(
+                        default_root, pid, uids, activity_ledger.OK
+                    )
         result.failed_activity_stage = PlayerActivityStager(
             data_root=data_root
         ).run(player_ids=set(activity_tournaments))

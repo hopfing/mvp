@@ -127,20 +127,27 @@ class TestPlayerActivityExtractorFetch:
         assert failed[0][0] == "N409"
         assert "timeout" in failed[0][1]
 
-    def test_skips_empty_response(self, tmp_path):
+    def test_empty_response_is_reported_not_swallowed(self, tmp_path):
+        """An empty payload used to return None, indistinguishable from success.
+
+        Under the pair trigger that would settle the pair permanently and bank a
+        silent hole in the only source of ITF results.
+        """
         extractor = PlayerActivityExtractor(data_root=tmp_path)
         with patch.object(extractor, "fetch_json", return_value=None):
             failed = extractor.run({"N409": {("580", 2023)}})
-        assert len(failed) == 0
+        assert len(failed) == 1
+        assert failed[0][0] == "N409"
         saved = tmp_path / "raw" / "atptour" / "activity" / "N409.json"
         assert not saved.exists()
 
-    def test_skips_empty_activity_key(self, tmp_path):
+    def test_empty_activity_key_is_reported_not_swallowed(self, tmp_path):
         extractor = PlayerActivityExtractor(data_root=tmp_path)
         with patch.object(
             extractor, "fetch_json", return_value={"Activity": None}
         ):
             failed = extractor.run({"N409": {("580", 2023)}})
-        assert len(failed) == 0
+        assert len(failed) == 1
+        assert failed[0][0] == "N409"
         saved = tmp_path / "raw" / "atptour" / "activity" / "N409.json"
         assert not saved.exists()
