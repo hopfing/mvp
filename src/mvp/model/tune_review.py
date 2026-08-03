@@ -57,6 +57,21 @@ def _to_ranked(metric: str, use_cal: bool) -> str:
     return f"holdout_{metric}"
 
 
+# Short labels for the metrics that have an abbreviated leaderboard column;
+# anything else is referred to by its bare metric name.
+_METRIC_LABELS = {
+    "log_loss": "LL",
+    "brier_score": "brier",
+    "roc_auc": "AUC",
+    "accuracy": "acc",
+}
+
+
+def _metric_label(bare: str) -> str:
+    """Leaderboard-column label for a bare metric name."""
+    return _METRIC_LABELS.get(bare, bare)
+
+
 def _fold_spread_from(ua: dict, fold_key: str, metric: str) -> str:
     """Min..max of `metric` across the per-fold dicts stored under `fold_key`."""
     folds = ua.get(fold_key)
@@ -265,15 +280,30 @@ def format_leaderboard(
         )
     }
 
+    # The per-trial reference line reports the raw->calibrated gap and the outer-
+    # fold spread for the metric actually being RANKED on. It used to be pinned to
+    # log_loss regardless of `--sort`, so a brier-sorted leaderboard carried two
+    # numbers about a metric nobody asked for and none about the one it ranked by.
+    # Multi-metric sorts key off the primary. Calibration-invariant metrics get no
+    # raw->cal delta — Platt doesn't move them, so it would print as zero.
+    ref_metric = _direction_key(sort_by[0])
+    ref_label = _metric_label(ref_metric)
+    ref_invariant = ref_metric in CALIBRATION_INVARIANT_METRICS
+
     lines: list[str] = []
     sort_label = ", ".join(sort_by)
     lines.append(f"TOP {top_n} TRIALS (sorted by {sort_label})")
     if use_cal:
-        lines.append(
+        note = (
             "Probability metrics are deployment-frame: global Platt fit on the "
             "tuning OOF, applied to the held-out outer block (AUC is calibration-"
-            "invariant). 'raw LL' is the uncalibrated value, shown for reference."
+            "invariant)."
         )
+        if not ref_invariant:
+            note += (
+                f" 'raw {ref_label}' is the uncalibrated value, shown for reference."
+            )
+        lines.append(note)
     else:
         lines.append(
             "Metrics below reflect uncalibrated predictor quality. Calibration "
@@ -332,10 +362,9 @@ def format_leaderboard(
         elif use_cal:
             # Classification, deployment-frame view: probability-scale columns
             # come from the calibrated held-out block; AUC stays raw (invariant).
-            # A second line shows the raw→calibrated log_loss gap (the "looks
-            # better in tuning than it deploys" delta) and the outer-block spread.
+            # A second line shows the raw→calibrated gap for the ranked metric (the
+            # "looks better in tuning than it deploys" delta) and its outer spread.
             ll = ua.get("holdout_cal_log_loss", float("nan"))
-            raw_ll = ua.get("holdout_log_loss", float("nan"))
             brier = ua.get("holdout_cal_brier_score", float("nan"))
             auc = ua.get("holdout_roc_auc", float("nan"))
             acc = ua.get("holdout_cal_accuracy", float("nan"))
@@ -351,17 +380,25 @@ def format_leaderboard(
                 f"scal={scal * 100:+.2f}%  err80={err80 * 100:.1f}%  "
                 f"({duration:.0f}s · {trial_id})"
             )
-            spread = _fold_spread(ua, "log_loss", use_cal=True)
-            ref = f"      raw LL={raw_ll:.4f} (cal Δ{ll - raw_ll:+.4f})"
+            raw_key = f"holdout_{ref_metric}"
+            cal_key = _to_ranked(ref_metric, use_cal)
+            ref_parts: list[str] = []
+            if not ref_invariant and raw_key in ua and cal_key in ua:
+                raw_val, cal_val = ua[raw_key], ua[cal_key]
+                ref_parts.append(
+                    f"raw {ref_label}={raw_val:.4f} (cal Δ{cal_val - raw_val:+.4f})"
+                )
+            spread = _fold_spread(ua, ref_metric, use_cal=True)
             if spread:
-                ref += f"  ·  outer LL {spread}"
-            lines.append(ref)
+                ref_parts.append(f"outer {ref_label} {spread}")
+            if ref_parts:
+                lines.append("      " + "  ·  ".join(ref_parts))
             shown = {
                 "holdout_cal_log_loss", "holdout_cal_brier_score",
                 "holdout_roc_auc", "holdout_cal_accuracy",
                 "holdout_cal_calibration_error", "holdout_cal_calibration_error_max",
                 "holdout_cal_overconfidence_max", "holdout_cal_signed_calibration",
-                "holdout_cal_error_rate_80plus", "holdout_log_loss",
+                "holdout_cal_error_rate_80plus", raw_key, cal_key,
             }
         else:
             # Classification, raw view (pre-Phase-2 studies with no calibrated
