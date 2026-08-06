@@ -194,3 +194,67 @@ def test_real_promoted_config_hashes(tmp_path):
         pytest.skip("promoted totals config not present")
     cfg = IIDProjectionConfig.from_file(str(cfg_path))
     assert len(compute_iid_fingerprint(cfg, config_path=cfg_path)) == 12
+
+
+class TestServeModelFieldCoverage:
+    """Every `serve_model` field must reach the fingerprint.
+
+    The canonicalizer builds `serve_model` from an explicit allowlist. A field
+    in neither the allowlist nor `_IID_SERVE_MODEL_OPTIONAL_KEYS` is invisible
+    to the hash, so two configs differing ONLY in it land in the same
+    `projection_evaluations/<fp>/` and the second silently overwrites the
+    first's pmf, ledger and trained artifact — which is exactly what happened
+    when `surface_circuit_offset` was added.
+    """
+
+    def test_no_serve_model_field_is_invisible_to_the_hash(self):
+        from mvp.common.config_hash import _IID_SERVE_MODEL_OPTIONAL_KEYS
+        from mvp.projection.iid.config import ServeModelConfig
+
+        cfg = IIDProjectionConfig.model_validate(_make_base_config_dict())
+        canon = _canonicalize_iid_config(cfg)["serve_model"]
+        covered = set(canon) | {k for k, _ in _IID_SERVE_MODEL_OPTIONAL_KEYS}
+        missing = set(ServeModelConfig.model_fields) - covered
+        assert not missing, (
+            f"serve_model field(s) {sorted(missing)} reach neither the "
+            "canonical form nor the optional-keys list, so a config differing "
+            "only in them would collide on a fingerprint"
+        )
+
+    def test_the_offset_table_changes_the_fingerprint(self):
+        base = _make_base_config_dict()
+        corrected = copy.deepcopy(base)
+        corrected["serve_model"]["surface_circuit_offset"] = {"Hard/tour": 0.002}
+        a = IIDProjectionConfig.model_validate(base)
+        b = IIDProjectionConfig.model_validate(corrected)
+        assert compute_iid_fingerprint(a) != compute_iid_fingerprint(b)
+
+    def test_a_different_offset_table_is_a_different_fingerprint(self):
+        base = _make_base_config_dict()
+        one, two = copy.deepcopy(base), copy.deepcopy(base)
+        one["serve_model"]["surface_circuit_offset"] = {"Hard/tour": 0.002}
+        two["serve_model"]["surface_circuit_offset"] = {"Hard/tour": 0.005}
+        assert compute_iid_fingerprint(
+            IIDProjectionConfig.model_validate(one)
+        ) != compute_iid_fingerprint(IIDProjectionConfig.model_validate(two))
+
+    def test_a_default_valued_field_does_not_move_an_existing_fingerprint(self):
+        """The reason these keys are conditional: including them
+        unconditionally would rehash every config already on disk and orphan
+        its directory. A field left at its default cannot change the model, so
+        omitting it then is safe."""
+        base = _make_base_config_dict()
+        explicit = copy.deepcopy(base)
+        explicit["serve_model"]["surface_circuit_offset"] = {}
+        explicit["serve_model"]["posterior_draws"] = 200
+        assert compute_iid_fingerprint(
+            IIDProjectionConfig.model_validate(base)
+        ) == compute_iid_fingerprint(IIDProjectionConfig.model_validate(explicit))
+
+    def test_posterior_draws_changes_the_fingerprint_when_set(self):
+        base = _make_base_config_dict()
+        drawn = copy.deepcopy(base)
+        drawn["serve_model"]["posterior_draws"] = 50
+        assert compute_iid_fingerprint(
+            IIDProjectionConfig.model_validate(base)
+        ) != compute_iid_fingerprint(IIDProjectionConfig.model_validate(drawn))

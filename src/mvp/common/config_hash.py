@@ -200,6 +200,20 @@ def compute_fingerprint(
     return _hash_dict(canon)[:FINGERPRINT_LEN]
 
 
+# (key, default) for ServeModelConfig fields added after the first IID
+# fingerprints were written. See the loop in `_canonicalize_iid_config`.
+#
+# ANY new serve_model field belongs here or in the explicit block above. A field
+# in neither is invisible to the fingerprint, so two configs differing only in
+# it hash the same, land in the same `projection_evaluations/<fp>/`, and the
+# second silently overwrites the first's pmf, ledger and trained artifact.
+_IID_SERVE_MODEL_OPTIONAL_KEYS: tuple[tuple[str, object], ...] = (
+    ("surface_circuit_offset", {}),
+    ("posterior_draws", 200),
+    ("posterior_seed", 0),
+)
+
+
 def _canonicalize_iid_config(
     config: "IIDProjectionConfig",
     config_path: Path | None = None,
@@ -255,6 +269,24 @@ def _canonicalize_iid_config(
         "params": _canonicalize_params(sm.get("params")),
         "regressor": _deep_sort(sm.get("regressor")),
     }
+
+    # Fields added to ServeModelConfig after the first fingerprints were
+    # written. They enter the canonical form ONLY when set away from their
+    # default, because adding a key unconditionally changes every existing hash
+    # and orphans every dir already on disk — while omitting them entirely lets
+    # two configs that differ ONLY in one of these collide on a fingerprint and
+    # silently overwrite each other's artifacts, which is what happened when
+    # `surface_circuit_offset` landed.
+    #
+    # A default-valued field cannot change the model, so leaving it out when it
+    # is default is safe; a non-default value always changes the model, so
+    # including it then is necessary.
+    for key, default in _IID_SERVE_MODEL_OPTIONAL_KEYS:
+        value = sm.get(key)
+        if value is not None and value != default:
+            canon["serve_model"][key] = (
+                _deep_sort(value) if isinstance(value, dict) else value
+            )
 
     canon["validation"] = _deep_sort(dump.get("validation") or {})
     canon["metrics"] = _deep_sort(dump.get("metrics") or {})
