@@ -169,6 +169,7 @@ def _make_projection_output(n, serve_prob=0.62):
     from mvp.projection.iid.chain import (
         match_distribution,
         p_tiebreak_game_win,
+        set_score_distribution,
     )
 
     p_a = np.full(n, serve_prob)
@@ -187,6 +188,7 @@ def _make_projection_output(n, serve_prob=0.62):
         h_a=h_a,
         h_b=h_b,
         t_ab=t_ab,
+        set_score_pmf=set_score_distribution(h_a, h_b, t_ab),
     )
 
 

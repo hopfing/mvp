@@ -41,8 +41,48 @@ logger = logging.getLogger(__name__)
 
 PROJECTION_JSON = "projection.json"
 PMF_PARQUET = "total_games_pmf.parquet"
-BACKTEST_CSV = "backtest.csv"
+BACKTEST_PARQUET = "backtest.parquet"
+
+# Pre-cutover artifacts, kept named so the cutover can DELETE them from every
+# fingerprint dir. `_canonicalize_iid_config` hashes data / features / metrics /
+# serve_model / validation and knows nothing about the odds source, so a
+# post-cutover run writes into the same `<fp>/` as its predecessor — different
+# meaning, same path, indistinguishable afterwards. Everything else in a
+# fingerprint dir (projection.json, config.yaml, the pmf, serve_model.joblib) is
+# odds-independent and survives.
+#
+# `clv.json` was never written by anything in `src/` — it came from the POC
+# scorer that the cross-book layer retires. Only `rank.py` reads it.
+LEGACY_BACKTEST_CSV = "backtest.csv"
 CLV_JSON = "clv.json"
+
+# Artifacts a cutover must clear from a fingerprint dir before it is reused.
+STALE_AT_CUTOVER = (LEGACY_BACKTEST_CSV, CLV_JSON)
+
+
+def purge_stale_artifacts(*, dry_run: bool = True) -> list[Path]:
+    """Remove pre-cutover odds artifacts from every fingerprint dir.
+
+    Run ONCE at the cutover, not per run. The fingerprint hashes data /
+    features / metrics / serve_model / validation and knows nothing about the
+    odds source, so a post-cutover run lands in the same `<fp>/` as the run it
+    supersedes — a `backtest.csv` sitting next to a `backtest.parquet` is two
+    contracts at one path with nothing to tell a reader which is current.
+
+    Deliberately not called from `run_backtest`: deleting on every run would
+    also delete a file someone had just regenerated for comparison. Defaults to
+    a dry run so the caller sees the list before anything goes.
+    """
+    doomed = [
+        p
+        for fp_dir in discover_fp_dirs()
+        for name in STALE_AT_CUTOVER
+        if (p := fp_dir / name).exists()
+    ]
+    if not dry_run:
+        for p in doomed:
+            p.unlink()
+    return doomed
 SERVE_MODEL_JOBLIB = "serve_model.joblib"
 
 

@@ -28,7 +28,11 @@ from mvp.model.sweep_select import (
     select_top,
 )
 from mvp.model.tuning import _decode_params
-from mvp.projection.iid.artifacts import PMF_PARQUET, fp_dir_for
+from mvp.projection.iid.artifacts import (
+    BACKTEST_PARQUET,
+    PMF_PARQUET,
+    fp_dir_for,
+)
 from mvp.projection.iid.config import IIDProjectionConfig
 
 logger = logging.getLogger(__name__)
@@ -183,7 +187,7 @@ def run_entry(entry: SweepEntry, *, refresh: bool = False) -> str:
 
     Returns "ok" or "skip".
     """
-    from mvp.projection.iid.backtest import run_backtest
+    from mvp.projection.iid.evaluation import run_backtest
     from mvp.projection.iid.runner import IIDProjectionRunner
 
     fp_dir = get_data_root() / "projection_evaluations" / entry.fp
@@ -208,9 +212,16 @@ def run_entry(entry: SweepEntry, *, refresh: bool = False) -> str:
 
 
 def _is_complete(fp_dir: Path) -> bool:
+    """Every artifact a finished trial writes.
+
+    The ledger name is IMPORTED, not spelled. It was a bare "backtest.csv"
+    literal while the pmf name was a constant, so renaming the ledger would have
+    left this check looking for a file nothing writes — `_is_complete` never
+    true, and every sweep entry re-running forever including the finished ones.
+    """
     return all(
         (fp_dir / f).exists()
-        for f in ("projection.json", "backtest.csv", PMF_PARQUET)
+        for f in ("projection.json", BACKTEST_PARQUET, PMF_PARQUET)
     )
 
 

@@ -16,7 +16,13 @@ from textwrap import dedent
 import polars as pl
 import pytest
 
-from mvp.projection.iid import artifacts, backtest, runner, serve_model
+from mvp.projection.iid import (
+    artifacts,
+    evaluation,
+    projection_run,
+    runner,
+    serve_model,
+)
 from mvp.projection.iid.config import IIDProjectionConfig
 
 BASE_YAML = dedent("""
@@ -59,10 +65,10 @@ def data_root(tmp_path, monkeypatch):
 
 
 class TestSharedServeModelBuilder:
-    def test_runner_and_backtest_share_one_builder(self):
+    def test_runner_and_projection_run_share_one_builder(self):
         """The divergence was two copies of this function. One object, one behavior."""
         assert runner.build_serve_model is serve_model.build_serve_model
-        assert backtest.build_serve_model is serve_model.build_serve_model
+        assert projection_run.build_serve_model is serve_model.build_serve_model
 
     def test_gap_shrink_reaches_the_model(self, tmp_path):
         cfg_path = _write_config(
@@ -103,14 +109,16 @@ class TestArtifactPaths:
         b = IIDProjectionConfig.from_file(str(b_path))
 
         assert a_path.stem == b_path.stem  # the old key would have collided
-        assert backtest.artifact_path(a, a_path) != backtest.artifact_path(b, b_path)
-        assert backtest.output_path(a, a_path) != backtest.output_path(b, b_path)
+        assert projection_run.artifact_path(a, a_path) != projection_run.artifact_path(
+            b, b_path
+        )
+        assert evaluation.ledger_path(a, a_path) != evaluation.ledger_path(b, b_path)
 
     def test_artifacts_live_outside_model_evaluations(self, tmp_path, data_root):
         """model_evaluations/ is wiped weekly by the classification pipeline."""
         cfg_path = _write_config(tmp_path)
         cfg = IIDProjectionConfig.from_file(str(cfg_path))
-        parts = backtest.output_path(cfg, cfg_path).parts
+        parts = evaluation.ledger_path(cfg, cfg_path).parts
         assert "projection_evaluations" in parts
         assert "model_evaluations" not in parts
 
@@ -192,3 +200,52 @@ class TestClvJson:
     def test_read(self, tmp_path):
         (tmp_path / "clv.json").write_text(json.dumps({"avg_clvpin": 0.004}))
         assert artifacts.read_clv_json(tmp_path)["avg_clvpin"] == 0.004
+
+
+class TestCutoverPurge:
+    """The fingerprint dir is odds-source-blind, so a cutover leaves two
+    contracts at one path unless the old one is removed.
+
+    `_canonicalize_iid_config` hashes data / features / metrics / serve_model /
+    validation and knows nothing about which odds source produced the ledger, so
+    a post-cutover run lands in the same `<fp>/` as the run it supersedes.
+    """
+
+    def _fp(self, data_root, name="aaa111", files=()):
+        d = data_root / "projection_evaluations" / name
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "projection.json").write_text("{}", encoding="utf-8")
+        for f in files:
+            (d / f).write_text("x", encoding="utf-8")
+        return d
+
+    def test_dry_run_lists_without_deleting(self, data_root):
+        d = self._fp(data_root, files=("backtest.csv", "clv.json"))
+        found = artifacts.purge_stale_artifacts(dry_run=True)
+        assert {p.name for p in found} == {"backtest.csv", "clv.json"}
+        assert (d / "backtest.csv").exists()
+
+    def test_it_removes_only_the_pre_cutover_artifacts(self, data_root):
+        """Everything else in a fingerprint dir is odds-independent and must
+        survive — deleting the pmf or the trained model would force a retrain."""
+        d = self._fp(
+            data_root,
+            files=("backtest.csv", "clv.json", "total_games_pmf.parquet",
+                   "serve_model.joblib", "config.yaml"),
+        )
+        artifacts.purge_stale_artifacts(dry_run=False)
+        assert not (d / "backtest.csv").exists()
+        assert not (d / "clv.json").exists()
+        for keep in ("total_games_pmf.parquet", "serve_model.joblib",
+                     "config.yaml", "projection.json"):
+            assert (d / keep).exists()
+
+    def test_a_clean_dir_yields_nothing(self, data_root):
+        self._fp(data_root, files=("total_games_pmf.parquet",))
+        assert artifacts.purge_stale_artifacts(dry_run=True) == []
+
+    def test_the_new_ledger_is_never_purged(self, data_root):
+        d = self._fp(data_root, files=("backtest.parquet", "backtest.csv"))
+        artifacts.purge_stale_artifacts(dry_run=False)
+        assert (d / "backtest.parquet").exists()
+        assert not (d / "backtest.csv").exists()

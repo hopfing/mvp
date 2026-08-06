@@ -2926,7 +2926,7 @@ def cmd_iid_project(args: argparse.Namespace) -> int:
 
 def cmd_iid_backtest(args: argparse.Namespace) -> int:
     """Backtest the IID projector against captured 2026 totals/spread book lines."""
-    from mvp.projection.iid.backtest import (
+    from mvp.projection.iid.evaluation import (
         print_backtest_summary,
         run_backtest,
     )
@@ -3305,6 +3305,9 @@ def cmd_live(args: argparse.Namespace) -> int:
     from concurrent.futures import ThreadPoolExecutor
     from datetime import datetime
 
+    from mvp.atptour.aggregators.match_beats_points import (
+        MatchBeatsPointsAggregator,
+    )
     from mvp.atptour.aggregators.matches import MatchesAggregator
     from mvp.atptour.discovery import TournamentDiscovery
     from mvp.atptour.pipeline import (
@@ -3362,6 +3365,25 @@ def cmd_live(args: argparse.Namespace) -> int:
 
         logger.info("Running cross-tournament aggregation")
         MatchesAggregator().run()
+
+        # Point-level aggregate for the score-state serve model. Ordering is
+        # required: the aggregator joins match metadata and raises if
+        # matches.parquet is absent.
+        #
+        # Deliberately NOT left to stage 1's handler like its sibling above.
+        # MatchesAggregator is unprotected because matches.parquet is
+        # load-bearing for ProductionPredictor — if it fails the tick genuinely
+        # cannot continue. This one feeds research modelling only, so letting
+        # it abort a tick would stop predictions publishing over data nothing
+        # downstream of here reads. It degrades instead: record and carry on.
+        try:
+            points_agg = MatchBeatsPointsAggregator()
+            if points_agg.is_stale():
+                logger.info("Rebuilding point-level aggregate")
+                points_agg.run()
+        except Exception as e:
+            logger.exception("Point-level aggregation failed: %s", e)
+            errors.append(f"match_beats_points aggregation: {e}")
 
         if player_result.has_failures:
             logger.warning(

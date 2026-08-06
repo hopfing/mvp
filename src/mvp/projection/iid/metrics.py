@@ -11,7 +11,7 @@ import numpy as np
 import polars as pl
 
 from mvp.model.metrics import compute_metrics
-from mvp.projection.iid.chain import SET_SCORE_LABELS, set_score_distribution
+from mvp.projection.iid.chain import SET_SCORE_LABELS
 from mvp.projection.iid.projector import ProjectionOutput
 from mvp.projection.iid.serve_model import SERVE_PROB_MAX, SERVE_PROB_MIN
 from mvp.projection.metrics import compute_regression_metrics
@@ -286,8 +286,11 @@ def compute_set_score_diagnostics(
     """
     n_scores = len(SET_SCORE_LABELS)
 
-    # Predicted: per-match (N, 14) set score PMF.
-    pred_pmf = set_score_distribution(out.h_a, out.h_b, out.t_ab)
+    # Predicted: per-match (N, 14) set score PMF, produced by the projector.
+    # Not rebuilt here from `out.h_a`/`h_b`/`t_ab` — under a distributional
+    # serve model those are a reduction over draws, and the pmf of the reduced
+    # `p` is not the mixture over the posterior. See `ProjectionOutput`.
+    pred_pmf = out.set_score_pmf
 
     # Actual: extract per-set scores and build a frequency histogram.
     actual_counts = np.zeros(n_scores, dtype=np.float64)
@@ -313,7 +316,7 @@ def compute_set_score_diagnostics(
     # Predicted frequency: average the per-match PMFs, weighted by
     # number of sets each match actually played (so matches with more
     # sets contribute proportionally).
-    sets_per_match = np.zeros(len(out.h_a), dtype=np.float64)
+    sets_per_match = np.zeros(pred_pmf.shape[0], dtype=np.float64)
     for i in range(1, 6):
         pg = test_df[f"player_set{i}_games"].to_numpy().astype(np.float64)
         sets_per_match += np.isfinite(pg).astype(np.float64)
@@ -357,9 +360,9 @@ def compute_tiebreak_diagnostics(
     actual_rate = actual_tb / total_sets
 
     # Predicted tiebreak rate: indices 6 ("7-6") and 13 ("6-7") in the set PMF.
-    pred_pmf = set_score_distribution(out.h_a, out.h_b, out.t_ab)
+    pred_pmf = out.set_score_pmf
 
-    sets_per_match = np.zeros(len(out.h_a), dtype=np.float64)
+    sets_per_match = np.zeros(pred_pmf.shape[0], dtype=np.float64)
     for i in range(1, 6):
         pg = test_df[f"player_set{i}_games"].to_numpy().astype(np.float64)
         sets_per_match += np.isfinite(pg).astype(np.float64)

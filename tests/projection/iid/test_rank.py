@@ -7,7 +7,11 @@ import json
 import polars as pl
 import pytest
 
-from mvp.projection.iid.rank import collect_rows, format_rank_table
+from mvp.projection.iid.rank import (
+    SELECTION_POLICIES,
+    collect_rows,
+    format_rank_table,
+)
 
 
 @pytest.fixture
@@ -39,22 +43,30 @@ def _make_run(
         f"{source}\t{run_id or fp}\t2026-07-26T12:00:00\n", encoding="utf-8",
     )
     if with_backtest:
-        # One row per (match, market, line, side) — best-across-books happens at
-        # pricing time. m1 offers two total lines; only 21.5 is the main line.
-        # A spread row is included so the market split is exercised.
+        # The long ledger: one row per (match, book, market, points, side,
+        # anchor), negative-edge rows included, every selection left to read
+        # time. m1 has two totals rungs — 21.5 is its main line, 24.5 an
+        # alternate — plus a second book on the main line so the one-per-match
+        # collapse has something to choose between. A `close` row is present so
+        # the anchor filter is exercised: without it, the headline would silently
+        # average open and close together.
         pl.DataFrame({
-            "match_uid": ["m1", "m1", "m2", "m1"],
-            "market": ["total_games"] * 3 + ["game_spread"],
-            "line": [21.5, 24.5, 22.5, -3.5],
-            "side": ["over", "over", "under", "p1"],
-            "bet_type": ["over", "over", "under", "favorite"],
-            "is_main_line": [1, 0, 1, 1],
-            "open_odds": [2.00, 3.50, 1.85, 1.95],
-            "open_edge_novig": [0.03, 0.09, 0.02, 0.04],
-            "pnl_open": [1.00, -1.0, -1.0, 0.95],
-            "clv_open": [0.004, -0.02, 0.001, 0.010],
-            "won": [1, 0, 0, 1],
-        }).write_csv(d / "backtest.csv")
+            "match_uid": ["m1", "m1", "m1", "m2", "m1", "m1"],
+            "book":      ["dk", "dk", "br", "dk", "dk", "dk"],
+            "market":    ["total_games"] * 4 + ["game_spread", "total_games"],
+            "points":    [21.5, 24.5, 21.5, 22.5, -3.5, 21.5],
+            "side":      ["over", "over", "over", "under", "p1", "over"],
+            "anchor":    ["open", "open", "open", "open", "open", "close"],
+            "role":      ["entry"] * 6,
+            "is_main_line": [True, False, True, True, True, True],
+            "live_side": [True] * 6,
+            "odds":      [2.00, 3.50, 2.10, 1.85, 1.95, 2.40],
+            "model_p":   [0.53, 0.38, 0.53, 0.56, 0.55, 0.53],
+            "edge":      [0.03, 0.09, 0.05, 0.02, 0.04, 0.11],
+            "edge_novig": [0.02, 0.07, 0.04, 0.01, 0.03, 0.09],
+            "pnl":       [1.00, -1.0, 1.10, -1.0, 0.95, 1.40],
+            "won":       [True, False, True, False, True, True],
+        }).write_parquet(d / "backtest.parquet")
     if with_clv:
         (d / "clv.json").write_text(json.dumps({
             "n": 3800, "avg_clvpin": 0.0031, "positive_rate": 0.54,
@@ -91,7 +103,12 @@ class TestCollectRows:
 
 
 class TestBettingSummary:
-    def test_absent_without_backtest_csv(self, eval_root):
+    def _totals(self, eval_root, policy="main"):
+        _make_run(eval_root, "aaa111", with_backtest=True)
+        b = collect_rows()[0].betting
+        return b["markets"]["total_games"][policy]
+
+    def test_absent_without_a_ledger(self, eval_root):
         _make_run(eval_root, "aaa111")
         assert collect_rows()[0].betting is None
 
@@ -100,31 +117,66 @@ class TestBettingSummary:
         different books — a pooled ROI describes no runnable strategy."""
         _make_run(eval_root, "aaa111", with_backtest=True)
         b = collect_rows()[0].betting
-        assert set(b) == {"total_games", "game_spread"}
+        assert set(b["markets"]) == {"total_games", "game_spread"}
 
-    def test_reports_the_main_line_subset_per_market(self, eval_root):
-        """Alternate lines are where the fake edge lives, so the headline is the
-        main-line cut and n_all keeps the gap visible."""
+    def test_the_anchor_is_named_not_implied(self, eval_root):
+        """Without an anchor filter the close row joins the open ones and the
+        headline becomes a blend of entry moments nobody bets at."""
         _make_run(eval_root, "aaa111", with_backtest=True)
-        totals = collect_rows()[0].betting["total_games"]
-        assert totals["n_all"] == 3
-        assert totals["n_bets"] == 2       # the 24.5 alternate line drops out
-        assert totals["pl_units"] == pytest.approx(0.0)
+        b = collect_rows()[0].betting
+        assert b["anchor"] == "open"
+        # Four open totals rows: m1 at 21.5 on two books, m1's 24.5 alternate,
+        # and m2. The fifth totals row is at `close` and must not be among them.
+        assert b["markets"]["total_games"]["n_all"] == 4
+
+    def test_alternate_lines_are_excluded_from_the_headline(self, eval_root):
+        """The 24.5 rung carries the biggest edge (0.09) and is not a main line.
+        If it leaked in, `max_edge` would take it for m1."""
+        _make_run(eval_root, "aaa111", with_backtest=True)
+        b = collect_rows()[0].betting["markets"]["total_games"]
+        assert b["n_all"] == 4      # three main-line rungs + the alternate
+        assert b["n_main"] == 3     # the alternate drops out
+        # m1 -> best main-line edge 0.05 (br), m2 -> 0.02. Not the 0.09 alternate.
+        assert b["max_edge"]["avg_edge"] == pytest.approx(0.035)
+
+    def test_one_bet_per_match_not_one_per_book(self, eval_root):
+        """m1's main line is quoted by two books. Counting both would weight the
+        match twice and treat two correlated rows as independent bets."""
+        assert self._totals(eval_root)["n"] == 2   # m1 and m2, not three rows
+
+    def test_policies_pick_different_rungs(self, eval_root):
+        """`main` takes the consensus line at the best price (br at 2.10);
+        `max_edge` takes the largest edge, which is the same row here — the
+        point is that they are computed separately, not that they differ."""
+        _make_run(eval_root, "aaa111", with_backtest=True)
+        b = collect_rows()[0].betting["markets"]["total_games"]
+        assert set(b) >= {"main", "safest", "max_edge"}
+        # m1: br offers the better price on the consensus 21.5 line.
+        assert b["main"]["units_all"] == pytest.approx(1.10 - 1.0)
+
+    def test_gated_and_ungated_units_are_both_reported(self, eval_root):
+        """`U_all` prices the whole selection and is mostly vig; `U>=0` is the
+        gated subset. The gap between them is the edge signal, so reporting
+        either alone hides which is which."""
+        stats = self._totals(eval_root)
+        assert stats["n"] == 2
+        assert stats["units_all"] is not None
+        assert stats["units_gated"] is not None
 
     def test_spread_numbers_exclude_totals_rows(self, eval_root):
         _make_run(eval_root, "aaa111", with_backtest=True)
-        spread = collect_rows()[0].betting["game_spread"]
-        assert spread["n_bets"] == 1
-        assert spread["pl_units"] == pytest.approx(0.95)
-        assert spread["avg_clv"] == pytest.approx(0.010)
+        spread = collect_rows()[0].betting["markets"]["game_spread"]
+        stats = spread["main"]
+        assert stats["n"] == 1
+        assert stats["units_all"] == pytest.approx(0.95)
 
-    def test_settles_at_the_entry_price(self, eval_root):
-        """Entry is at open, so pnl_open is the settlement column."""
-        totals_only = collect_rows
+    def test_bet_type_is_derived_from_side(self, eval_root):
+        """The column is not stored. Deriving it is what stops `_by_bet_type`
+        silently returning {} when the schema drops it."""
         _make_run(eval_root, "aaa111", with_backtest=True)
-        totals = totals_only()[0].betting["total_games"]
-        assert totals["roi"] == pytest.approx(0.0)
-        assert totals["avg_clv"] == pytest.approx((0.004 + 0.001) / 2)
+        by_type = collect_rows()[0].betting["markets"]["total_games"]["main"]["by_type"]
+        assert set(by_type) <= {"over", "under"}
+        assert by_type
 
 
 class TestFormatting:
@@ -179,10 +231,31 @@ class TestFormatting:
         assert "totals_cfg (" not in out
 
     def test_run_appears_once_per_table(self, eval_root):
-        """4 market tables + the CLV table = 5 rows for one run."""
+        """One row per config per table — 2 distributional + 2 betting + CLV.
+
+        The betting tables put the selection policies in cell groups rather than
+        stacked blocks precisely so a config stays one row; a sweep of twenty
+        configs would otherwise render hundreds of rows and bury the ranking."""
         _make_run(eval_root, "aaa111", with_backtest=True, with_clv=True, run_id="run_a")
         body = [ln for ln in format_rank_table() if ln.strip().startswith("1 run_a")]
         assert len(body) == 5
+
+    def test_the_edge_curve_is_not_in_the_ranking_table(self, eval_root):
+        """Bands are a property of one config. A curve per config per policy is
+        eighteen rows per config, which buries the comparison the table exists
+        for — so the curve lives in the single-model view instead."""
+        _make_run(eval_root, "aaa111", with_backtest=True, run_id="run_a")
+        out = "\n".join(format_rank_table())
+        assert "2-5pp" not in out
+        assert "10pp+" not in out
+
+    def test_each_policy_is_a_cell_group(self, eval_root):
+        _make_run(eval_root, "aaa111", with_backtest=True, run_id="run_a")
+        out = "\n".join(format_rank_table())
+        for policy in SELECTION_POLICIES:
+            assert policy in out
+        # Gated beside ungated — the model/rank.py idiom.
+        assert "U>=0" in out and "U_all" in out
 
     def test_spread_table_omits_a_run_with_no_spread_bets(self, eval_root):
         _make_run(eval_root, "aaa111", with_backtest=True, run_id="run_a")
@@ -200,20 +273,31 @@ class TestFormatting:
         assert "3800" in clv_block
         assert " spread " not in clv_block
 
-    def test_sides_are_columns_per_market(self, eval_root):
-        """A tuning change often floods one side rather than moving ROI, so the
-        split gets real columns rather than a crammed string."""
+    def test_policy_groups_are_labelled_over_their_columns(self, eval_root):
+        """The band line centres each policy name over its cell group, so a
+        number can be attributed without counting columns.
+
+        The over/under split that used to occupy these columns moved to the
+        single-model view: the cell groups are the selection policies now, and
+        both axes will not fit."""
         _make_run(eval_root, "aaa111", with_backtest=True, run_id="run_a")
         lines = format_rank_table()
-        totals_band = next(ln for ln in lines if "over" in ln and "under" in ln)
-        spread_band = next(ln for ln in lines if "fav" in ln and "dog" in ln)
-        assert totals_band and spread_band
-        assert "over:" not in "\n".join(lines)   # not the old inline form
+        band = next(
+            ln for ln in lines if all(p in ln for p in SELECTION_POLICIES)
+        )
+        assert band
 
-    def test_states_the_betting_gate(self, eval_root):
+    def test_states_the_anchor_and_the_selection(self, eval_root):
+        """The anchor has to be on the page. Blending open and close silently
+        reports a closing-price number as if it were an entry one."""
         _make_run(eval_root, "aaa111", with_backtest=True, run_id="run_a")
         out = "\n".join(format_rank_table())
-        assert "Main line, open entry, no-vig edge>0" in out
+        assert "Anchor=open" in out
+        assert "main line only" in out
+        assert "one bet per match" in out
+        # The sort must be named, or the reader cannot tell whether configs were
+        # ranked on the gated number or the vig-dominated one.
+        assert "Sorted by max_edge U>=0 desc" in out
         assert "never pooled" in out
 
     def test_reports_what_is_missing(self, eval_root):
@@ -228,3 +312,51 @@ class TestFormatting:
         out = "\n".join(format_rank_table()).lower()
         assert "composite" not in out
         assert "overall score" not in out
+
+
+class TestSelectionPolicyTieBreak:
+    """`model_p` is a function of (match, line, side) and does NOT vary by book.
+
+    So every book quoting the same main line ties under `safest`, and without a
+    secondary key the policy takes whichever row sorted first — picking the
+    safest line and then not shopping it.
+    """
+
+    def _mains(self):
+        # Two books on the same line: identical model_p, different odds.
+        return pl.DataFrame({
+            "match_uid": ["m1", "m1"],
+            "market": ["total_games"] * 2,
+            "book": ["dk", "br"],
+            "points": [21.5, 21.5],
+            "side": ["over", "over"],
+            "odds": [2.00, 2.20],
+            "model_p": [0.53, 0.53],
+            "edge": [0.03, 0.08],
+            "pnl": [1.00, 1.20],
+            "won": [True, True],
+        })
+
+    def test_safest_takes_the_best_price_among_tied_lines(self):
+        from mvp.projection.iid.rank import _select_one_per_match
+
+        picked = _select_one_per_match(self._mains(), "safest")
+        assert picked.height == 1
+        assert picked["odds"][0] == pytest.approx(2.20)
+        assert picked["book"][0] == "br"
+
+    def test_max_edge_also_takes_the_better_price(self):
+        from mvp.projection.iid.rank import _select_one_per_match
+
+        picked = _select_one_per_match(self._mains(), "max_edge")
+        assert picked["odds"][0] == pytest.approx(2.20)
+
+
+class TestGateContribution:
+    def test_gated_units_are_a_subset_of_ungated(self, eval_root):
+        """`U>=0` selects from the same bets `U_all` totals, so its count can
+        never exceed it. If it did, the gate would be selecting rows the
+        ungated figure never saw."""
+        _make_run(eval_root, "aaa111", with_backtest=True)
+        stats = collect_rows()[0].betting["markets"]["total_games"]["main"]
+        assert stats["n_gated"] <= stats["n"]

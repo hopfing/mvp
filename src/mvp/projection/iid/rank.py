@@ -22,7 +22,7 @@ import polars as pl
 
 from mvp.model.tuning import _MAXIMIZE_METRICS
 from mvp.projection.iid.artifacts import (
-    BACKTEST_CSV,
+    BACKTEST_PARQUET,
     discover_fp_dirs,
     read_clv_json,
     read_projection_json,
@@ -30,6 +30,12 @@ from mvp.projection.iid.artifacts import (
 )
 
 logger = logging.getLogger(__name__)
+
+# The anchor the headline reports. Entry happens at the open — that is where the
+# open betting question lives, and where the sharp-CLV work located its signal.
+# The other anchors stay in the ledger; they answer the decay question, which is
+# a different report rather than a different weighting of this one.
+HEADLINE_ANCHOR = "open"
 
 
 @dataclass(frozen=True)
@@ -89,69 +95,231 @@ def _fold_spread(fold_metrics: list, metric: str) -> tuple[float, float] | None:
 
 
 def _by_bet_type(bets: pl.DataFrame) -> dict[str, dict[str, Any]]:
-    """Per bet_type split (over/under, favorite/underdog).
+    """Per bet_type split.
 
     H71 found tuning-metric effects surfacing as one side being flooded rather
     than as a change in overall ROI, so the side split is where that shows.
+
+    `bet_type` is DERIVED from `side` rather than stored. For totals the two are
+    the same thing, so a column would be redundant; for spreads it is
+    favourite/underdog/pickem from the sign of the line, which is real
+    information — but spreads are out of scope for this layer. Deriving it keeps
+    this split working without carrying a duplicate field, and the earlier
+    failure mode (drop the column, `_by_bet_type` silently returns `{}`, and the
+    one split where H71 found a clear positive quietly disappears) cannot recur.
     """
-    if "bet_type" not in bets.columns:
+    if "side" not in bets.columns:
         return {}
-    agg = bets.group_by("bet_type").agg(
+    typed = bets.with_columns(pl.col("side").alias("bet_type"))
+    agg = typed.group_by("bet_type").agg(
         pl.len().alias("n"),
-        pl.col("pnl_open").mean().alias("roi"),
-        pl.col("pnl_open").sum().alias("units"),
+        pl.col("pnl").mean().alias("roi"),
+        pl.col("pnl").sum().alias("units"),
+        pl.col("won").mean().alias("hit_rate"),
     )
     return {
-        r["bet_type"]: {"n": r["n"], "roi": r["roi"], "units": r["units"]}
+        r["bet_type"]: {
+            "n": r["n"], "roi": r["roi"], "units": r["units"],
+            "hit_rate": r["hit_rate"],
+        }
         for r in agg.iter_rows(named=True)
     }
 
 
-def _betting_summary(fp_dir: Path) -> dict[str, dict[str, Any]] | None:
-    """Headline bet-level numbers per market: main line, open entry, no-vig gate.
+# One bet per (match, market). The ledger has several correlated rows per match —
+# one per book, and one per side — which win or lose together. Averaging over them
+# weights a match by how many books happened to post a price and treats correlated
+# rows as independent bets, so the sample looks larger and less variable than it is.
+#
+# Three selection policies, deliberately reported side by side: their spread IS the
+# selection-bias measurement. If `max_edge` underperforms `main`, that is the
+# model's own edge ranking being wrong, visible directly rather than inferred.
+SELECTION_POLICIES = ("main", "safest", "max_edge")
 
-    The CSV is a broad ledger — every offered book x line x side, including
-    negative-edge rows — so the restrictions live here:
-      * open no-vig edge > 0 (entry happens at open, and the gate matches)
-      * main line only, via the `is_main_line` flag stamped at settle time
-      * per market, never pooled
+# Edge bands, so the threshold stays a read-time choice. Reporting at one gate
+# assumes the crossover instead of showing it.
+EDGE_BANDS: tuple[tuple[str, float, float], ...] = (
+    ("all", -1.0, 1.0),
+    # `<0` exists so the bands PARTITION `all`. Without it the negative-edge
+    # rows — 78% of the ledger, and the majority of any gate-free selection —
+    # sit in no band, and the rows beneath `all` silently fail to reconcile
+    # with it.
+    ("<0", -1.0, 0.0),
+    ("0-2pp", 0.0, 0.02),
+    ("2-5pp", 0.02, 0.05),
+    ("5-10pp", 0.05, 0.10),
+    ("10pp+", 0.10, 1.0),
+)
 
-    `n_all` keeps the all-lines count so the gap to the main-line set is visible.
+
+def _select_one_per_match(bets: pl.DataFrame, policy: str) -> pl.DataFrame:
+    """Collapse main-line rows to one bet per (match, market) under `policy`.
+
+    Candidates are main lines only, so each book contributes at most one rung and
+    there is no ladder to walk down — `safest` cannot degenerate to the deepest
+    rung that still shows a positive edge.
+
+      main     — the consensus line (the one most books have as their main),
+                 taken at the best price among books offering it. The neutral
+                 baseline: bet the number the market agrees on, shop the price.
+      safest   — highest `model_p`. Shorter odds, higher hit rate.
+      max_edge — largest edge. Longer odds, and the policy most exposed to the
+                 model being wrong about the price.
     """
-    from mvp.projection.iid.backtest import _select_main_line
+    if bets.is_empty():
+        return bets
+    # Ties are broken on `odds` for every policy. `model_p` in particular is a
+    # function of (match, line, side) alone — it does not vary by book — so
+    # every book quoting the same main line ties, and without the secondary key
+    # `safest` would take whichever row happened to sort first rather than the
+    # best price available on the line it chose. Picking the safest line and
+    # then not shopping it is not a strategy anyone would run.
+    if policy == "max_edge":
+        keys, desc = ["edge", "odds"], [True, True]
+    elif policy == "safest":
+        keys, desc = ["model_p", "odds"], [True, True]
+    elif policy == "main":
+        # Consensus line first (most books quoting it), then best price on it.
+        support = (
+            bets.group_by(["match_uid", "market", "points"])
+            .agg(pl.col("book").n_unique().alias("_support"))
+        )
+        bets = bets.join(support, on=["match_uid", "market", "points"], how="left")
+        return (
+            bets.sort(["_support", "odds"], descending=[True, True], nulls_last=True)
+            .group_by(["match_uid", "market"], maintain_order=True)
+            .first()
+            .drop("_support")
+        )
+    else:
+        raise ValueError(f"unknown selection policy: {policy!r}")
+    return (
+        bets.sort(keys, descending=desc, nulls_last=True)
+        .group_by(["match_uid", "market"], maintain_order=True)
+        .first()
+    )
 
-    csv_path = fp_dir / BACKTEST_CSV
-    if not csv_path.exists():
-        return None
-    df = pl.read_csv(csv_path)
-    if len(df) == 0 or "open_edge_novig" not in df.columns:
-        return None
-    priced = df.filter(pl.col("open_edge_novig") > 0)
 
-    out: dict[str, dict[str, Any]] = {}
-    for market in priced["market"].unique().sort().to_list():
-        sub = priced.filter(pl.col("market") == market)
-        n_all = len(sub)
-        bets = _select_main_line(sub)
-        if len(bets) == 0:
-            out[market] = {"n_bets": 0, "n_all": n_all, "hit_rate": None,
-                           "roi": None, "pl_units": 0.0, "avg_edge": None,
-                           "avg_clv": None, "clv_pos_rate": None, "by_type": {}}
+def _policy_stats(picked: pl.DataFrame, *, gate: float = 0.0) -> dict[str, Any]:
+    """One policy's numbers, gated and ungated.
+
+    `units_all` is every selected bet; `units_gated` and `roi` are the subset
+    clearing `gate`. Both are carried for the same reason `model/rank.py` puts
+    `Uo>=0` beside `Uo_all`: the ungated figure prices the whole board and is
+    mostly vig, and the gap between them IS the edge signal. Reporting either
+    alone hides which.
+
+    The band curve — how ROI moves as the threshold rises — belongs in the
+    single-model view, not here. This table exists to rank configs, and a curve
+    per config per policy buries that under its own rows.
+    """
+    if picked.is_empty():
+        return {"n": 0, "n_gated": 0, "hit_rate": None, "roi": None,
+                "units_gated": None, "units_all": None, "avg_edge": None}
+    gated = picked.filter(pl.col("edge") >= gate)
+    won = gated["won"].drop_nulls() if gated.height else None
+    clv = (
+        gated["clv"].drop_nulls()
+        if gated.height and "clv" in gated.columns else None
+    )
+    return {
+        "n": picked.height,
+        "n_gated": gated.height,
+        "hit_rate": float(won.mean()) if won is not None and won.len() else None,
+        "roi": float(gated["pnl"].mean()) if gated.height else None,
+        "units_gated": float(gated["pnl"].sum()) if gated.height else None,
+        "units_all": float(picked["pnl"].sum()),
+        "avg_edge": float(gated["edge"].mean()) if gated.height else None,
+        # CLV is the metric that separates a bias the market has already priced
+        # from one it has not, so it rides in the same cell as the money.
+        "avg_clv": float(clv.mean()) if clv is not None and clv.len() else None,
+        "clv_pos_rate": float((clv > 0).mean())
+        if clv is not None and clv.len() else None,
+        "n_clv": int(clv.len()) if clv is not None else 0,
+    }
+
+
+def _band_curve(bets: pl.DataFrame, *, on: str = "edge") -> dict[str, Any]:
+    """ROI by edge band — the single-model view's job, not the ranking table's."""
+    out: dict[str, Any] = {}
+    if on not in bets.columns:
+        return out
+    for name, lo, hi in EDGE_BANDS:
+        band = bets.filter((pl.col(on) >= lo) & (pl.col(on) < hi))
+        if band.is_empty():
             continue
-        clv = bets["clv_open"].drop_nulls() if "clv_open" in bets.columns else None
-        out[market] = {
-            "n_bets": len(bets),
-            "n_all": n_all,
-            "hit_rate": float(bets["won"].mean()),
-            "roi": float(bets["pnl_open"].mean()),
-            "pl_units": float(bets["pnl_open"].sum()),
-            "avg_edge": float(bets["open_edge_novig"].mean()),
-            "avg_clv": float(clv.mean()) if clv is not None and clv.len() else None,
-            "clv_pos_rate": float((clv > 0).mean())
-            if clv is not None and clv.len() else None,
-            "by_type": _by_bet_type(bets),
+        won = band["won"].drop_nulls()
+        out[name] = {
+            "n": band.height,
+            "hit_rate": float(won.mean()) if won.len() else None,
+            "roi": float(band["pnl"].mean()),
+            "pl_units": float(band["pnl"].sum()),
+            "avg_edge": float(band["edge"].mean()),
         }
-    return out or None
+    return out
+
+
+def _betting_summary(
+    fp_dir: Path, *, anchor: str = HEADLINE_ANCHOR
+) -> dict[str, Any] | None:
+    """Headline bet-level numbers per market, at ONE named anchor.
+
+    The ledger is the offer set — every entry book's every rung, both sides,
+    every anchor, negative edge included — so every restriction lives here.
+
+    **The anchor is named, not implied.** Without an anchor filter the row set
+    spans open, formed(2) and close together, and since close carries ~3x open's
+    board rows the reported ROI becomes mostly a closing-price number. Model
+    comparison would silently become comparison at a price nobody enters at.
+
+    **No edge gate.** Results are reported across `EDGE_BANDS` instead, so the
+    threshold is a read-time choice rather than an assumption baked into the
+    comparison — and the crossover is visible instead of guessed.
+
+    `n_all` keeps the all-rungs count so the gap to the main-line set stays
+    visible.
+    """
+    path = fp_dir / BACKTEST_PARQUET
+    if not path.exists():
+        return None
+    df = pl.read_parquet(path)
+    if df.is_empty():
+        return None
+    required = {"anchor", "is_main_line", "side", "edge", "pnl", "won", "market"}
+    missing = required - set(df.columns)
+    if missing:
+        logger.warning(
+            "%s: ledger missing %s — betting summary skipped",
+            fp_dir.name, sorted(missing),
+        )
+        return None
+
+    at_anchor = df.filter(pl.col("anchor") == anchor)
+    if at_anchor.is_empty():
+        logger.warning("%s: no rows at anchor %s", fp_dir.name, anchor)
+        return None
+    # Entry books only. Reference prices are on the board deliberately (they are
+    # the CLV benchmark) and are not takeable.
+    if "role" in at_anchor.columns:
+        at_anchor = at_anchor.filter(pl.col("role") == "entry")
+    # A side quoted but no longer live is a carried-forward price, not an offer.
+    if "live_side" in at_anchor.columns:
+        at_anchor = at_anchor.filter(pl.col("live_side").fill_null(True))
+    at_anchor = at_anchor.drop_nulls(["odds", "edge"])
+
+    out: dict[str, Any] = {"anchor": anchor, "markets": {}}
+    for market in at_anchor["market"].unique().sort().to_list():
+        sub = at_anchor.filter(pl.col("market") == market)
+        mains = sub.filter(pl.col("is_main_line").fill_null(False))
+        entry: dict[str, Any] = {"n_all": sub.height, "n_main": mains.height}
+        for policy in SELECTION_POLICIES:
+            picked = _select_one_per_match(mains, policy)
+            entry[policy] = {
+                **_policy_stats(picked),
+                "by_type": _by_bet_type(picked),
+            }
+        out["markets"][market] = entry
+    return out if out["markets"] else None
 
 
 def collect_rows(source: str | None = None) -> list[RankRow]:
@@ -262,57 +430,89 @@ def render_distributional(
     return lines
 
 
+def _market_of(row: RankRow, key: str) -> dict[str, Any] | None:
+    return ((row.betting or {}).get("markets") or {}).get(key)
+
+
+def _policy_cell(stats: dict[str, Any] | None) -> str:
+    """`ROI U>=0 U_all` for one policy — the gated pair beside the ungated total.
+
+    Mirrors `model/rank.py`'s backtest cells: the ROI sits next to the units it
+    describes, and `U_all` is carried so the gate's contribution is legible
+    rather than inferred.
+    """
+    s = stats or {}
+    roi = s.get("roi")
+    ug, ua, clv = s.get("units_gated"), s.get("units_all"), s.get("avg_clv")
+    roi_s = f"{roi*100:+.2f}" if roi is not None else "--"
+    ug_s = f"{ug:+.1f}" if ug is not None else "--"
+    ua_s = f"{ua:+.1f}" if ua is not None else "--"
+    clv_s = f"{clv*100:+.2f}" if clv is not None else "--"
+    return f"{roi_s:>6} {ug_s:>8} {ua_s:>8} {clv_s:>7}"
+
+
 def render_betting(
     rows: list[RankRow], spec: MarketSpec, table_no: int,
 ) -> list[str]:
-    """Betting for one market, with each side as its own column group."""
-    scored = [r for r in rows if (r.betting or {}).get(spec.key)]
+    """One row per config; each selection policy is a cell group.
+
+    `U>=0` is the units from bets clearing a zero edge gate; `U_all` is every
+    selected bet. The ungated figure prices the whole board and is mostly vig,
+    so the pair is what carries the signal — the same reason `model/rank.py`
+    prints `Uo>=0` next to `Uo_all`.
+
+    Sorted by the `max_edge` gated units, and the sort is named in the title
+    rather than left implicit: ranking on the ungated number would rank configs
+    by how much vig they paid.
+
+    The edge-band curve is deliberately NOT here. It is a property of one
+    config, and a curve per config per policy turns a ranking table into
+    eighteen rows per config. It lives in the single-model view
+    (`iid-backtest`'s summary).
+    """
+    scored = [r for r in rows if _market_of(r, spec.key)]
     lines = _banner(f"Table {table_no}: {spec.label} — betting")
     if not scored:
-        lines.append("No backtest artifacts for this market.")
+        lines.append("No backtest ledger for this market.")
         return lines
-    w = _name_width(scored)
-    lines.append(
-        "Main line, open entry, no-vig edge>0. N//all = main-line bets / all "
-        "lines clearing the gate; the gap is edge claimed on alternate lines."
-    )
-    side_w = 20
+    anchor = (scored[0].betting or {}).get("anchor", "?")
+    w = max(_name_width(scored), 12)
+    lines += [
+        f"Anchor={anchor}, main line only, entry books, one bet per match.",
+        "Policy cells: ROI% / U>=0 / U_all / CLV% (gate is edge>=0). Sorted by "
+        "max_edge U>=0 desc.",
+        "CLV is vs the reference book's de-vigged close and is negative by the "
+        "entry vig — compare it between configs, never read it as a level.",
+    ]
+    cell_sub = f"{'ROI%':>6} {'U>=0':>8} {'U_all':>8} {'CLV%':>7}"
+    group_w = len(cell_sub)
+    base_header = f"{'#':>2} {'Config':<{w}} {'N':>6} {'Hit%':>5}"
     band = (
-        " " * (2 + 1 + w + 1 + 5 + 1 + 6 + 1 + 5 + 1 + 6 + 1 + 7 + 1 + 6) + "  "
-        + "  ".join(lbl.center(side_w) for lbl in spec.side_labels)
+        " " * len(base_header) + " | "
+        + " | ".join(p.center(group_w) for p in SELECTION_POLICIES)
     )
     header = (
-        f"{'#':>2} {'Config':<{w}} {'N':>5} {'/all':>6} {'Hit%':>5} "
-        f"{'ROI%':>6} {'Units':>7} {'edge%':>6}  "
-        + "  ".join(
-            f"{'n':>5} {'ROI%':>6} {'U':>6}" for _ in spec.side_labels
-        )
-        + f"  {'fp':<12}"
+        base_header + " | "
+        + " | ".join(cell_sub for _ in SELECTION_POLICIES)
+        + f" | {'fp':<12}"
     )
     lines += [band, header, "-" * len(header)]
-    ordered = sorted(
-        scored,
-        key=lambda r: -(r.betting[spec.key]["pl_units"]
-                        if r.betting[spec.key]["pl_units"] is not None else -1e18),
-    )
-    for i, r in enumerate(ordered, 1):
-        b = r.betting[spec.key]
-        cells = []
-        for side in spec.sides:
-            d = b.get("by_type", {}).get(side)
-            cells.append(
-                f"{d['n']:>5} {_pct(d['roi']):>+6.2f} {d['units']:>+6.1f}"
-                if d else f"{'--':>5} {'--':>6} {'--':>6}"
-            )
+
+    def _rank_key(r: RankRow) -> float:
+        s = (_market_of(r, spec.key) or {}).get("max_edge") or {}
+        u = s.get("units_gated")
+        return u if u is not None else -1e18
+
+    for i, r in enumerate(sorted(scored, key=lambda x: -_rank_key(x)), 1):
+        blk = _market_of(r, spec.key) or {}
+        head = blk.get(SELECTION_POLICIES[0]) or {}
+        cells = " | ".join(_policy_cell(blk.get(p)) for p in SELECTION_POLICIES)
         lines.append(
             f"{i:>2} {_label_of(r)[:w]:<{w}} "
-            f"{b['n_bets']:>5} {b['n_all']:>6} "
-            f"{_fmt(_pct(b['hit_rate']), '.1f'):>5} "
-            f"{_fmt(_pct(b['roi']), '+.2f'):>6} "
-            f"{_fmt(b['pl_units'], '+.1f'):>7} "
-            f"{_fmt(_pct(b.get('avg_edge')), '+.2f'):>6}  "
-            + "  ".join(cells)
-            + f"  {r.fp:<12}"
+            f"{head.get('n', 0):>6,} "
+            f"{_fmt(_pct(head.get('hit_rate')), '.1f'):>5} | "
+            + cells
+            + f" | {r.fp:<12}"
         )
     return lines
 

@@ -43,6 +43,31 @@ class MatchBeatsPointsAggregator(BaseJob):
     def __init__(self, data_root: Path | None = None):
         super().__init__(domain="atptour", data_root=data_root)
 
+    def is_stale(self) -> bool:
+        """Whether the aggregate needs rebuilding from the staged tournaments.
+
+        Mirrors the pipeline's staging idiom (`pipeline._feed_stage_is_stale`):
+        rebuild when the output is missing or any staged input is newer than
+        it. Only metadata is touched — the inputs are stat'd, not read.
+
+        This exists because `run` is a FULL rebuild: it reads every staged
+        `match_beats.parquet` and concatenates them. On the live 15-minute
+        tick most runs have no newly-completed match with match-centre
+        coverage, so gating turns those into a no-op and the full concat runs
+        only when there is genuinely new point data.
+        """
+        stage_root = self.build_path("stage", "tournaments")
+        if not stage_root.exists():
+            return False
+        staged = list(stage_root.glob("**/match_beats.parquet"))
+        if not staged:
+            return False
+        output = self.build_path("aggregate", "match_beats_points.parquet")
+        if not output.exists():
+            return True
+        output_mtime = output.stat().st_mtime
+        return any(f.stat().st_mtime > output_mtime for f in staged)
+
     def run(self) -> pl.DataFrame | None:
         stage_root = self.build_path("stage", "tournaments")
         if not stage_root.exists():

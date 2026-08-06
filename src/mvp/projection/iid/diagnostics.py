@@ -15,7 +15,6 @@ import polars as pl
 from mvp.projection.iid.chain import (
     SET_SCORE_LABELS,
     MatchDistribution,
-    set_score_distribution,
 )
 from mvp.projection.iid.metrics import (
     compute_hold_diagnostics,
@@ -169,6 +168,7 @@ def _concat_outputs(outputs: list[ProjectionOutput]) -> ProjectionOutput:
         h_a=np.concatenate([o.h_a for o in outputs]),
         h_b=np.concatenate([o.h_b for o in outputs]),
         t_ab=np.concatenate([o.t_ab for o in outputs]),
+        set_score_pmf=np.concatenate([o.set_score_pmf for o in outputs], axis=0),
     )
 
 
@@ -185,7 +185,7 @@ def _add_pred_shape_buckets(
     indices `compute_set_score_diagnostics` aggregates. Buckets are
     equal-count quartiles via ordinal rank, so labels are MLflow-safe.
     """
-    pmf = set_score_distribution(out.h_a, out.h_b, out.t_ab)
+    pmf = out.set_score_pmf
     tight_idx = [
         i for i, lab in enumerate(SET_SCORE_LABELS) if lab in _TIGHT_LABELS
     ]
@@ -245,4 +245,5 @@ def _slice_output(out: ProjectionOutput, mask: np.ndarray) -> ProjectionOutput:
         h_a=out.h_a[mask],
         h_b=out.h_b[mask],
         t_ab=out.t_ab[mask],
+        set_score_pmf=out.set_score_pmf[mask],
     )
