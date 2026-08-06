@@ -9,14 +9,17 @@ import numpy as np
 import pytest
 
 from mvp.projection.iid.chain import (
+    _scalar_tiebreak_win_prob_a_first,
     match_distribution,
     p_service_game_win,
+    p_tiebreak_game_win,
     set_score_distribution,
 )
 from mvp.projection.iid.score_state import GAME_SCORE_STATES, ScoreState
 from mvp.projection.iid.stateful_chain import (
     build_game_state_ps_per_side,
     hold_from_state_fn,
+    tiebreak_win_from_state_fn,
     match_distribution_from_state_fn,
     set_score_distribution_from_state_fn,
 )
@@ -200,3 +203,95 @@ class TestMatchDistributionFromStateFn:
 
         with pytest.raises(ValueError, match="best_of"):
             match_distribution_from_state_fn(fn, fn, p, p, np.array([4], dtype=np.int64))
+
+
+class TestTiebreakFromStateFn:
+    """The stateful tiebreak DP, anchored to the scalar path it replaces."""
+
+    @staticmethod
+    def _const_fn(value):
+        def fn(state):
+            return np.full(1, value, dtype=np.float64)
+        return fn
+
+    def _run(self, p_a, p_b, *, a_serves_first=True, **kw):
+        return tiebreak_win_from_state_fn(
+            self._const_fn(p_a), self._const_fn(p_b),
+            sets_won_a=0, sets_won_b=0, best_of=3, n=1,
+            a_serves_first=a_serves_first, **kw,
+        )
+
+    @pytest.mark.parametrize(
+        "p_a,p_b",
+        [(0.6, 0.6), (0.65, 0.55), (0.5, 0.5), (0.74, 0.62), (0.55, 0.70)],
+    )
+    def test_constant_p_reproduces_the_scalar_recursion(self, p_a, p_b):
+        # The degradation guarantee: a state-blind serve model must give the
+        # same answer as before this DP existed. Compared against the scalar
+        # recursion rather than the 0.01-grid lookup table, which interpolates.
+        want = _scalar_tiebreak_win_prob_a_first(p_a, p_b)
+        got = self._run(p_a, p_b, a_serves_first=True)[0]
+        assert got == pytest.approx(want, abs=1e-9)
+
+    def test_swapping_first_server_mirrors_the_other_assignment(self):
+        # P(A wins | B serves first) == 1 - P(B wins | B serves first), and the
+        # latter is the same recursion with the players exchanged.
+        p_a, p_b = 0.68, 0.58
+        got = self._run(p_a, p_b, a_serves_first=False)[0]
+        want = 1.0 - _scalar_tiebreak_win_prob_a_first(p_b, p_a)
+        assert got == pytest.approx(want, abs=1e-9)
+
+    def test_averaging_both_assignments_matches_the_scalar_table(self):
+        p_a, p_b = 0.66, 0.60
+        avg = 0.5 * (
+            self._run(p_a, p_b, a_serves_first=True)[0]
+            + self._run(p_a, p_b, a_serves_first=False)[0]
+        )
+        assert avg == pytest.approx(
+            float(p_tiebreak_game_win(p_a, p_b)[0]), abs=2e-3
+        )
+
+    def test_equal_servers_give_an_even_tiebreak(self):
+        assert self._run(0.5, 0.5)[0] == pytest.approx(0.5, abs=1e-9)
+
+    def test_state_varying_p_actually_changes_the_answer(self):
+        # The point of the whole exercise: if `p` responds to the tiebreak
+        # score, the tiebreak probability must differ from the constant-`p`
+        # answer. A DP that ignored the score would return the same number.
+        def clutch(state):
+            # Server lifts when trailing in the tiebreak.
+            behind = state.tiebreak_point_diff() < 0
+            return np.full(1, 0.70 if behind else 0.60, dtype=np.float64)
+
+        varying = tiebreak_win_from_state_fn(
+            clutch, self._const_fn(0.60),
+            sets_won_a=0, sets_won_b=0, best_of=3, n=1, a_serves_first=True,
+        )[0]
+        flat = self._run(0.60, 0.60)[0]
+        assert varying > flat + 1e-4
+
+    def test_reads_the_tiebreak_score_not_a_regular_game_score(self):
+        seen: list[tuple] = []
+
+        def recorder(state):
+            seen.append(
+                (state.is_tiebreak, state.game_points_server(),
+                 state.game_points_returner())
+            )
+            return np.full(1, 0.6, dtype=np.float64)
+
+        tiebreak_win_from_state_fn(
+            recorder, recorder, sets_won_a=0, sets_won_b=0, best_of=3, n=1,
+            a_serves_first=True,
+        )
+        assert all(is_tb for is_tb, _, _ in seen)
+        assert all(s is not None and r is not None for _, s, r in seen)
+        # Scores well past a regular game's 4 points must be reachable and
+        # readable — that is precisely what the old encoding nulled out.
+        assert max(s for _, s, _ in seen) >= 7
+
+    def test_deep_states_are_bounded_by_the_truncation(self):
+        # max_points truncates at 0.5; drive it low enough to bind and confirm
+        # the DP terminates rather than recursing forever.
+        got = self._run(0.6, 0.6, max_points=8)[0]
+        assert 0.0 <= got <= 1.0

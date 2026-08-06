@@ -671,9 +671,18 @@ class TestScoreStateChainServeModel:
         """Match-level-only wrapped model through `match_distribution_from_state_fn`
         produces output identical to the scalar `match_distribution` path. This
         guarantees existing scalar behavior is preserved when the chain is
-        upgraded to state-aware mode."""
+        upgraded to state-aware mode.
+
+        The reference tiebreak is the EXACT recursion, not `p_tiebreak_game_win`.
+        That helper reads a 0.01-grid lookup and rounds to the nearest node
+        without interpolating — up to 1.5e-2 of error on these very inputs. The
+        stateful path walks the tiebreak point tree exactly, so holding it to
+        the table would be asserting that it reproduce a rounding artifact.
+        """
         from mvp.projection.iid.chain import (
-            match_distribution, p_service_game_win, p_tiebreak_game_win,
+            _scalar_tiebreak_win_prob_a_first,
+            match_distribution,
+            p_service_game_win,
         )
         from mvp.projection.iid.stateful_chain import match_distribution_from_state_fn
 
@@ -701,7 +710,13 @@ class TestScoreStateChainServeModel:
 
         h_a = p_service_game_win(p_a)
         h_b = p_service_game_win(p_b)
-        t_ab = p_tiebreak_game_win(p_a, p_b)
+        t_ab = np.array([
+            0.5 * (
+                _scalar_tiebreak_win_prob_a_first(float(a), float(b))
+                + (1.0 - _scalar_tiebreak_win_prob_a_first(float(b), float(a)))
+            )
+            for a, b in zip(p_a, p_b, strict=True)
+        ])
         scalar = match_distribution(h_a, h_b, t_ab, best_of)
 
         np.testing.assert_allclose(

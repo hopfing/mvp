@@ -9,10 +9,11 @@ hold probabilities as input rather than a single scalar per match.
 
 Vectorized over N matches, matching chain.py's array-per-match contract.
 
-For Phase 3, tiebreak handling uses the existing scalar `p_tiebreak_game_win`
-from chain.py — score-state variance within a tiebreak isn't captured by the
-current ScoreState (no tiebreak-score field). An "average serve" probability
-is passed in.
+Tiebreaks are walked as their own point tree (`tiebreak_win_from_state_fn`)
+rather than collapsed to chain.py's scalar `p_tiebreak_game_win`. The tiebreak
+score lives in `ScoreState.game_score_server`/`_returner` as a point count, so
+`p` varies within a tiebreak like it does anywhere else — which matters because
+tiebreak points are ~3% of all points and a far larger share of the leverage.
 """
 
 from __future__ import annotations
@@ -30,7 +31,6 @@ from mvp.projection.iid.chain import (
     _TIEBREAK_A_WIN_IDX,
     _TIEBREAK_B_WIN_IDX,
     MatchDistribution,
-    p_tiebreak_game_win,
 )
 from mvp.projection.iid.score_state import GAME_SCORE_STATES, ScoreState
 
@@ -138,6 +138,113 @@ def build_game_state_ps_per_side(
     return out
 
 
+def _first_server_serves_point(pt_number: int) -> bool:
+    """Does the player who opened the tiebreak serve point `pt_number`?
+
+    A 7-point tiebreak runs 1, then pairs: first server takes point 1, the
+    other takes 2-3, first takes 4-5, and so on. Same rule as
+    `chain._scalar_tiebreak_win_prob_a_first`, factored out so the stateful DP
+    and the scalar table cannot disagree about who is serving.
+    """
+    if pt_number == 1:
+        return True
+    return ((pt_number - 2) // 2) % 2 == 1
+
+
+def tiebreak_win_from_state_fn(
+    p_a_fn: ServeStateFn,
+    p_b_fn: ServeStateFn,
+    *,
+    sets_won_a: int,
+    sets_won_b: int,
+    best_of: int,
+    n: int,
+    a_serves_first: bool,
+    target: int = 7,
+    max_points: int = 50,
+) -> np.ndarray:
+    """P(A wins the tiebreak), with `p` evaluated at each tiebreak score.
+
+    The scalar path collapses a tiebreak to one number from two average serve
+    probabilities, which drops state-varying `p` exactly where leverage is
+    highest — a tiebreak is 3% of points and a disproportionate share of the
+    swing. This walks the point tree instead, asking the serve model for `p` at
+    every reachable score.
+
+    Two things this gets that the scalar path could not:
+
+    - The score is a real input. `ScoreState` in a tiebreak carries the point
+      count in `game_score_server`/`game_score_returner`, so `p` at 6-3 and `p`
+      at 3-6 are separate questions rather than one average.
+
+    - The first server is known, not averaged. At 6-6 the tiebreak opener is
+      whoever would have served game 13, which `a_serves_first` determines. The
+      scalar `p_tiebreak_game_win` averages the two assignments because it has
+      no way to know; the set DP does know.
+
+    Falls back to 0.5 past `max_points`, at the same depth as the scalar
+    recursion — deliberately, so constant-`p` equivalence is exact rather than
+    approximate. The truncation is only harmless because 0.5 is the right
+    answer for evenly-matched players; for a lopsided pair it is a real bias,
+    which is why the depth has to match rather than merely be "deep enough".
+
+    Degrades cleanly: a serve model that ignores state returns the same `p`
+    everywhere and this reduces to the scalar tiebreak exactly.
+    """
+    ones = np.ones(n, dtype=np.float64)
+    zeros = np.zeros(n, dtype=np.float64)
+    p_cache: dict[tuple[int, int], np.ndarray] = {}
+
+    def _p_a_wins_point(a: int, b: int) -> np.ndarray:
+        if (a, b) in p_cache:
+            return p_cache[(a, b)]
+        first_serves = _first_server_serves_point(a + b + 1)
+        a_serves = first_serves if a_serves_first else not first_serves
+        if a_serves:
+            # A serves: A is "server", so the state carries A's score first.
+            state = ScoreState(
+                serve_num=1,
+                game_score_server=str(a), game_score_returner=str(b),
+                is_tiebreak=True,
+                set_score_server_games=6, set_score_returner_games=6,
+                sets_won_server=sets_won_a, sets_won_returner=sets_won_b,
+                best_of=best_of,
+            )
+            val = np.asarray(p_a_fn(state), dtype=np.float64)
+        else:
+            # B serves: the state flips to B's perspective, and B winning the
+            # point is A losing it.
+            state = ScoreState(
+                serve_num=1,
+                game_score_server=str(b), game_score_returner=str(a),
+                is_tiebreak=True,
+                set_score_server_games=6, set_score_returner_games=6,
+                sets_won_server=sets_won_b, sets_won_returner=sets_won_a,
+                best_of=best_of,
+            )
+            val = 1.0 - np.asarray(p_b_fn(state), dtype=np.float64)
+        p_cache[(a, b)] = val
+        return val
+
+    memo: dict[tuple[int, int], np.ndarray] = {}
+
+    def _from(a: int, b: int) -> np.ndarray:
+        if a >= target and a - b >= 2:
+            return ones
+        if b >= target and b - a >= 2:
+            return zeros
+        if a + b >= max_points:
+            return 0.5 * ones
+        if (a, b) in memo:
+            return memo[(a, b)]
+        p = _p_a_wins_point(a, b)
+        result = p * _from(a + 1, b) + (1.0 - p) * _from(a, b + 1)
+        memo[(a, b)] = result
+        return result
+
+    return _from(0, 0)
+
+
 def set_score_distribution_from_state_fn(
     p_a_fn: ServeStateFn,
     p_b_fn: ServeStateFn,
@@ -150,23 +257,30 @@ def set_score_distribution_from_state_fn(
     """(N, 14) set-score distribution under state-conditional point probs.
 
     `p_a_fn` / `p_b_fn` provide per-point probability from each player's serving
-    perspective. `p_a_avg` / `p_b_avg` are the all-points-average serve win
-    probs used for the tiebreak-game prob (tiebreak score-state isn't in the
-    current ScoreState; we use the scalar approximation from chain.py).
+    perspective. `p_a_avg` / `p_b_avg` fix the per-match array length; the
+    tiebreak no longer reads them, because it now walks its own point tree via
+    `tiebreak_win_from_state_fn` rather than collapsing to a scalar.
 
     `sets_won_a` / `sets_won_b` / `best_of` set the MATCH context for deriving
     set-point / match-point flags inside each game.
     """
     n = len(p_a_avg)
 
-    # Tiebreak game win prob — scalar approximation.
-    t_ab = p_tiebreak_game_win(p_a_avg, p_b_avg)
-
+    # One tiebreak probability per first-server assignment rather than one
+    # average across both: at 6-6 the set DP knows who opens the tiebreak, so
+    # averaging would discard information it is holding.
+    tb_kwargs = dict(
+        sets_won_a=sets_won_a, sets_won_b=sets_won_b, best_of=best_of, n=n,
+    )
     pmf_a_first = _set_score_pmf_one_server_stateful(
-        p_a_fn, p_b_fn, t_ab, sets_won_a, sets_won_b, best_of, n, a_serves_first=True,
+        p_a_fn, p_b_fn,
+        tiebreak_win_from_state_fn(p_a_fn, p_b_fn, a_serves_first=True, **tb_kwargs),
+        sets_won_a, sets_won_b, best_of, n, a_serves_first=True,
     )
     pmf_b_first = _set_score_pmf_one_server_stateful(
-        p_a_fn, p_b_fn, t_ab, sets_won_a, sets_won_b, best_of, n, a_serves_first=False,
+        p_a_fn, p_b_fn,
+        tiebreak_win_from_state_fn(p_a_fn, p_b_fn, a_serves_first=False, **tb_kwargs),
+        sets_won_a, sets_won_b, best_of, n, a_serves_first=False,
     )
     return 0.5 * (pmf_a_first + pmf_b_first)
 
