@@ -23,6 +23,8 @@ from typing import Final
 
 import numpy as np
 
+from mvp.common.tennis_scoring import hold_probability
+
 
 # =============================================================================
 # Set score labels and per-score game/spread mappings
@@ -59,16 +61,11 @@ _SET_A_WINS: Final[np.ndarray] = _SET_SCORE_GAMES[:, 2].astype(bool)
 def p_service_game_win(p: np.ndarray | float) -> np.ndarray:
     """P(hold serve) given P(win point on serve) = p.
 
-    Closed-form sum over the tennis game scoring tree (4-0, 4-1, 4-2, deuce).
-    Vectorized analogue of `_iid_hold_probability` at
-    src/mvp/model/features/iid.py:22-38.
+    The array-typed face of `common.tennis_scoring.hold_probability`, which
+    holds the algebra. The `asarray` is the contract: callers here index and
+    broadcast the result, so a scalar `p` must still come back as an array.
     """
-    p_arr = np.asarray(p, dtype=np.float64)
-    q = 1.0 - p_arr
-    pre_deuce = p_arr ** 4 * (1.0 + 4.0 * q + 10.0 * q ** 2)
-    # p^2 + q^2 is in [0.5, 1] for p in [0, 1] — never zero
-    deuce_contrib = 20.0 * p_arr ** 5 * q ** 3 / (p_arr ** 2 + q ** 2)
-    return pre_deuce + deuce_contrib
+    return hold_probability(np.asarray(p, dtype=np.float64))
 
 
 def _scalar_tiebreak_win_prob_a_first(

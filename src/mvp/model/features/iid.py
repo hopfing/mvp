@@ -11,6 +11,7 @@ probability p. From this, we derive:
 import numpy as np
 import polars as pl
 
+from mvp.common.tennis_scoring import hold_probability
 from mvp.model.registry import feature, register_diff, register_sum
 
 
@@ -20,22 +21,18 @@ from mvp.model.registry import feature, register_diff, register_sum
 
 
 def _iid_hold_probability(p: float) -> float:
-    """Compute P(hold serve) given P(win point on serve) = p.
+    """P(hold serve) given P(win point on serve) = p.
 
-    Derived from the tennis game scoring tree:
-    - Win in 4 pts (40-0): p^4
-    - Win at 40-15: 4 * p^4 * (1-p)
-    - Win at 40-30: 10 * p^4 * (1-p)^2
-    - Reach deuce (3-3): 20 * p^3 * (1-p)^3, then win from deuce: p^2/(p^2 + (1-p)^2)
+    Algebra in `common.tennis_scoring.hold_probability`. The clamps stay here
+    rather than moving down with it: the shared formula is exact at 0 and 1, so
+    these are not endpoint corrections — they bound `p` supplied from OUTSIDE
+    [0, 1], where the closed form is meaningless rather than merely imprecise.
     """
     if p <= 0.0:
         return 0.0
     if p >= 1.0:
         return 1.0
-    q = 1 - p
-    pre_deuce = p ** 4 * (1 + 4 * q + 10 * q ** 2)
-    deuce_contrib = 20 * p ** 5 * q ** 3 / (p ** 2 + q ** 2)
-    return pre_deuce + deuce_contrib
+    return hold_probability(p)
 
 
 # =============================================================================
@@ -143,10 +140,10 @@ def iid_hold_prob(days: int | None = None) -> pl.Expr:
         p = pl.col("player_pts_service_won_pct")
     else:
         p = pl.col(f"player_pts_service_won_pct_{days}d")
-    q = 1 - p
-    pre_deuce = p ** 4 * (1 + 4 * q + 10 * q ** 2)
-    deuce_contrib = 20 * p ** 5 * q ** 3 / (p ** 2 + q ** 2)
-    return pre_deuce + deuce_contrib
+    # Same call as the scalar path above — a polars expression supports the
+    # arithmetic the closed form needs, so this stays one implementation rather
+    # than an expression that merely looks like it.
+    return hold_probability(p)
 
 
 register_diff("iid_hold_prob")
