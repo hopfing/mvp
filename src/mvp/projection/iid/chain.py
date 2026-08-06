@@ -134,16 +134,45 @@ for _i in range(_TIEBREAK_GRID_SIZE):
 def _lookup_tiebreak_a_first(
     p_a: np.ndarray, p_b: np.ndarray,
 ) -> np.ndarray:
-    """Vectorized lookup of P(A wins tiebreak | A serves first)."""
-    i = np.clip(
-        np.round(p_a * (_TIEBREAK_GRID_SIZE - 1)).astype(np.int64),
-        0, _TIEBREAK_GRID_SIZE - 1,
+    """P(A wins tiebreak | A serves first), bilinear over the 0.01 grid.
+
+    This previously took the NEAREST grid node (`np.round`), which reads as a
+    lookup but is a step function: every `p` inside a cell returned its corner's
+    answer. Serve probabilities do not land on hundredths, so the typical input
+    was half a cell from its node, and the error reached 1.5e-2 in tiebreak
+    probability — carried into the 7-6/6-7 set-score columns and from there into
+    the total-games pmf that gets priced.
+
+    Interpolating costs three extra table reads and takes the same grid to
+    ~1e-5. The table itself is unchanged; only how it is read.
+    """
+    scale = _TIEBREAK_GRID_SIZE - 1
+    pa = np.asarray(p_a, dtype=np.float64)
+    pb = np.asarray(p_b, dtype=np.float64)
+    # NaN propagates instead of indexing with it. Left alone, NaN survives the
+    # clip, and `floor(nan).astype(int64)` is INT64_MIN — which the previous
+    # nearest-node read clamped to 0, quietly returning the answer for a player
+    # who never wins a point. Infinities are left to the clip, which pins them
+    # to the grid edge, matching the documented out-of-range behaviour.
+    bad = np.isnan(pa) | np.isnan(pb)
+    x = np.clip(np.where(bad, 0.0, pa) * scale, 0.0, scale)
+    y = np.clip(np.where(bad, 0.0, pb) * scale, 0.0, scale)
+    i0 = np.floor(x).astype(np.int64)
+    j0 = np.floor(y).astype(np.int64)
+    # At the top edge i0 == scale, so clamp the upper corner onto it; the
+    # corresponding weight is zero there and the cell degenerates cleanly.
+    i1 = np.minimum(i0 + 1, scale)
+    j1 = np.minimum(j0 + 1, scale)
+    fx = x - i0
+    fy = y - j0
+    table = _TIEBREAK_WIN_PROB_TABLE_A_FIRST
+    out = (
+        table[i0, j0] * (1.0 - fx) * (1.0 - fy)
+        + table[i1, j0] * fx * (1.0 - fy)
+        + table[i0, j1] * (1.0 - fx) * fy
+        + table[i1, j1] * fx * fy
     )
-    j = np.clip(
-        np.round(p_b * (_TIEBREAK_GRID_SIZE - 1)).astype(np.int64),
-        0, _TIEBREAK_GRID_SIZE - 1,
-    )
-    return _TIEBREAK_WIN_PROB_TABLE_A_FIRST[i, j]
+    return np.where(bad, np.nan, out)
 
 
 def p_tiebreak_game_win(

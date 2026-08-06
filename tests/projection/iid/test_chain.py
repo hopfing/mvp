@@ -388,3 +388,78 @@ class TestMatchDistribution:
         assert 0.0 < dist.p_match_win_a[0] < 1.0
         # Better holder + better tiebreak â†’ A is favored
         assert dist.p_match_win_a[0] > 0.5
+
+
+class TestTiebreakTableAccuracy:
+    """The table is read by interpolation, not by snapping to a grid node."""
+
+    def test_exact_at_grid_nodes(self):
+        from mvp.projection.iid.chain import (
+            _lookup_tiebreak_a_first, _scalar_tiebreak_win_prob_a_first,
+        )
+        grid = np.arange(0, 101) / 100.0
+        got = _lookup_tiebreak_a_first(grid, np.full_like(grid, 0.60))
+        want = np.array([
+            _scalar_tiebreak_win_prob_a_first(float(v), 0.60) for v in grid
+        ])
+        np.testing.assert_allclose(got, want, atol=1e-12)
+
+    def test_between_nodes_tracks_the_exact_recursion(self):
+        from mvp.projection.iid.chain import (
+            _lookup_tiebreak_a_first, _scalar_tiebreak_win_prob_a_first,
+        )
+        # Deliberately off-grid, across the realistic serve range. Nearest-node
+        # lookup reached 1.5e-2 here; interpolation holds ~1e-4.
+        rng = np.random.default_rng(0)
+        pa = rng.uniform(0.50, 0.80, 500)
+        pb = rng.uniform(0.50, 0.80, 500)
+        got = _lookup_tiebreak_a_first(pa, pb)
+        want = np.array([
+            _scalar_tiebreak_win_prob_a_first(float(a), float(b))
+            for a, b in zip(pa, pb, strict=True)
+        ])
+        assert np.abs(got - want).max() < 5e-4
+
+    def test_is_not_a_step_function(self):
+        # The specific defect: every p inside one cell returned the same number.
+        from mvp.projection.iid.chain import _lookup_tiebreak_a_first
+        within_one_cell = np.array([0.6125, 0.6150, 0.6175])
+        out = _lookup_tiebreak_a_first(within_one_cell, np.full(3, 0.60))
+        assert len(np.unique(out)) == 3
+        assert np.all(np.diff(out) > 0)
+
+    def test_still_antisymmetric(self):
+        # p_tiebreak_game_win averages both first-server assignments, so the
+        # pair must still sum to 1 after the read changed.
+        pa = np.array([0.612, 0.5837, 0.7419])
+        pb = np.array([0.5991, 0.6644, 0.5238])
+        fwd = p_tiebreak_game_win(pa, pb)
+        rev = p_tiebreak_game_win(pb, pa)
+        np.testing.assert_allclose(fwd + rev, 1.0, atol=1e-12)
+
+    def test_clips_outside_the_unit_interval(self):
+        from mvp.projection.iid.chain import _lookup_tiebreak_a_first
+        assert np.isfinite(_lookup_tiebreak_a_first(
+            np.array([-0.2, 1.3]), np.array([0.5, 0.5])
+        )).all()
+
+    def test_nan_propagates_rather_than_indexing(self):
+        # NaN survives the clip and floor(nan).astype(int64) is INT64_MIN. The
+        # nearest-node read clamped that to 0 and returned the answer for a
+        # player who never wins a point; interpolating would index out of
+        # bounds. Neither is acceptable — NaN in, NaN out.
+        from mvp.projection.iid.chain import _lookup_tiebreak_a_first
+        out = _lookup_tiebreak_a_first(
+            np.array([np.nan, 0.62, 0.62]),
+            np.array([0.60, np.nan, 0.60]),
+        )
+        assert np.isnan(out[0]) and np.isnan(out[1])
+        assert np.isfinite(out[2])
+
+    def test_infinities_clip_to_the_grid_edge(self):
+        from mvp.projection.iid.chain import _lookup_tiebreak_a_first
+        out = _lookup_tiebreak_a_first(
+            np.array([np.inf, -np.inf]), np.array([0.6, 0.6])
+        )
+        assert np.isfinite(out).all()
+        assert out[0] > out[1]
