@@ -11,6 +11,22 @@ the flags used at inference match the flags the model was trained on.
 
 from dataclasses import dataclass
 
+# Points won, by displayed game score. The canonical scale for "how far into
+# this game are we", shared by the training-time polars derivations
+# (`score_state_features.py`) and the inference-time state mapping
+# (`serve_model.py`) so the two cannot drift apart.
+#
+# Points won rather than the displayed 0/15/30/40: the display is an ordinal
+# with an arbitrary spacing, and — decisively — it has no meaning in a
+# tiebreak, where the score IS a point count. On this scale a tiebreak score
+# needs no special case, it is already points won, so one column carries both
+# formats without a collision. Deuce is 3-3 and advantage 4-3, which is what
+# they are; the (server, returner) PAIR keeps 40-0 and 40-40 distinct even
+# though both put the server on 3.
+GAME_SCORE_POINTS: dict[str, int] = {
+    "0": 0, "15": 1, "30": 2, "40": 3, "D": 3, "AD": 4,
+}
+
 
 @dataclass(frozen=True)
 class ScoreState:
@@ -146,6 +162,51 @@ class ScoreState:
             and self._returner_wins_set_on_this_game()
             and (self.sets_won_returner + 1) >= self._sets_to_win()
         )
+
+    def game_points_server(self) -> int | None:
+        """Points won by the server in the current game, tiebreak or not.
+
+        `game_score_server` holds "0"/"15"/"30"/"40"/"D"/"AD" in a regular game
+        and a raw point count ("0".."22") in a tiebreak — the same field, two
+        vocabularies. Returns None for an unrecognized label rather than
+        defaulting to 0, because "the score is love" and "the score could not
+        be read" are different claims and only one of them is a real state.
+        """
+        return self._points(self.game_score_server)
+
+    def game_points_returner(self) -> int | None:
+        return self._points(self.game_score_returner)
+
+    def _points(self, label: str) -> int | None:
+        if self.is_tiebreak:
+            try:
+                return int(label)
+            except (TypeError, ValueError):
+                return None
+        return GAME_SCORE_POINTS.get(label)
+
+    def game_points_diff(self) -> int | None:
+        s, r = self.game_points_server(), self.game_points_returner()
+        return None if s is None or r is None else s - r
+
+    def tiebreak_point_diff(self) -> int:
+        """Server's tiebreak lead, 0 outside a tiebreak.
+
+        Zero off-tiebreak so a linear model can carry a tiebreak-specific
+        slope: the coefficient acts only where the feature is non-zero, which
+        is the interaction a linear model cannot otherwise form.
+        """
+        if not self.is_tiebreak:
+            return 0
+        d = self.game_points_diff()
+        return 0 if d is None else d
+
+    def tiebreak_points_played(self) -> int:
+        """Points completed in the current tiebreak, 0 outside one."""
+        if not self.is_tiebreak:
+            return 0
+        s, r = self.game_points_server(), self.game_points_returner()
+        return 0 if s is None or r is None else s + r
 
     def set_score_asymmetry(self) -> int:
         return self.set_score_server_games - self.set_score_returner_games

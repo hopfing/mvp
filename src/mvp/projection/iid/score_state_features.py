@@ -14,6 +14,8 @@ from collections.abc import Callable
 
 import polars as pl
 
+from mvp.projection.iid.score_state import GAME_SCORE_POINTS
+
 
 def _is_server_set_point() -> pl.Expr:
     """True if this is a set point AND the server is the one about to win the set."""
@@ -76,36 +78,66 @@ def _is_second_serve() -> pl.Expr:
     return pl.col("serve") == 2
 
 
-def _game_score_numeric_server() -> pl.Expr:
-    """Server's game score as numeric (0, 15, 30, 40, 45[D], 50[AD])."""
+def _points_won(col: str) -> pl.Expr:
+    """Points won in the current game by the side named in `col`.
+
+    One scale for both formats, per `GAME_SCORE_POINTS`. This replaces a
+    display-score mapping (0/15/30/40/45/50) that enumerated only regular-game
+    labels and sent everything else to null — which, on the 229,682 tiebreak
+    points where the label is a raw count, meant 91.5% of `game_score_diff` was
+    null. Those nulls were not inert: the logistic path drops non-finite rows,
+    so tiebreak points left training entirely, and the two counts that DID
+    parse ("0" and "15") landed on the regular-game values 0 and 15, encoding a
+    tiebreak at fifteen points identically to a game at 15-love.
+    """
+    tiebreak = pl.col("is_tiebreak").fill_null(False)
+    expr = pl.when(tiebreak).then(pl.col(col).cast(pl.Int64, strict=False))
+    for label, pts in GAME_SCORE_POINTS.items():
+        expr = expr.when(pl.col(col) == label).then(pl.lit(pts, dtype=pl.Int64))
+    # Still null for a label in neither vocabulary — a genuinely unreadable
+    # score, which is rare (~0.01% of regular points) and honestly unknown.
+    return expr.otherwise(pl.lit(None, dtype=pl.Int64)).cast(pl.Int64)
+
+
+def _game_points_server() -> pl.Expr:
+    return _points_won("game_score_server")
+
+
+def _game_points_returner() -> pl.Expr:
+    return _points_won("game_score_returner")
+
+
+def _game_points_diff() -> pl.Expr:
+    """Server's points lead within the current game (negative = trailing)."""
+    return _game_points_server() - _game_points_returner()
+
+
+def _tiebreak_point_diff() -> pl.Expr:
+    """Server's tiebreak lead, 0 outside a tiebreak.
+
+    Zero off-tiebreak rather than null so the feature is an interaction rather
+    than a hole: the coefficient acts only on tiebreak points, which is the
+    tiebreak-specific slope a linear model cannot otherwise express, and it
+    costs no rows in a path that drops non-finite ones.
+    """
     return (
-        pl.when(pl.col("game_score_server") == "0").then(0)
-        .when(pl.col("game_score_server") == "15").then(15)
-        .when(pl.col("game_score_server") == "30").then(30)
-        .when(pl.col("game_score_server") == "40").then(40)
-        .when(pl.col("game_score_server") == "D").then(45)
-        .when(pl.col("game_score_server") == "AD").then(50)
-        .otherwise(None)
+        pl.when(pl.col("is_tiebreak").fill_null(False))
+        .then(_game_points_diff())
+        .otherwise(pl.lit(0, dtype=pl.Int64))
+        .fill_null(0)
         .cast(pl.Int64)
     )
 
 
-def _game_score_numeric_returner() -> pl.Expr:
+def _tiebreak_points_played() -> pl.Expr:
+    """Points completed in the current tiebreak, 0 outside one."""
     return (
-        pl.when(pl.col("game_score_returner") == "0").then(0)
-        .when(pl.col("game_score_returner") == "15").then(15)
-        .when(pl.col("game_score_returner") == "30").then(30)
-        .when(pl.col("game_score_returner") == "40").then(40)
-        .when(pl.col("game_score_returner") == "D").then(45)
-        .when(pl.col("game_score_returner") == "AD").then(50)
-        .otherwise(None)
+        pl.when(pl.col("is_tiebreak").fill_null(False))
+        .then(_game_points_server() + _game_points_returner())
+        .otherwise(pl.lit(0, dtype=pl.Int64))
+        .fill_null(0)
         .cast(pl.Int64)
     )
-
-
-def _game_score_diff() -> pl.Expr:
-    """Numeric game-score lead of server within current game (- = trailing)."""
-    return _game_score_numeric_server() - _game_score_numeric_returner()
 
 
 def _is_surface_hard() -> pl.Expr:
@@ -129,11 +161,16 @@ DERIVED_POINT_FEATURES: dict[str, Callable[[], pl.Expr]] = {
     # Asymmetries
     "set_score_asymmetry": _set_score_asymmetry,
     "sets_won_asymmetry": _sets_won_asymmetry,
-    "game_score_diff": _game_score_diff,
+    "game_points_diff": _game_points_diff,
+    # Tiebreak state. Separate from the game-points columns above so a linear
+    # model gets a tiebreak-specific slope; a tree can reach the same thing by
+    # splitting on is_tiebreak, and gets these for free either way.
+    "tiebreak_point_diff": _tiebreak_point_diff,
+    "tiebreak_points_played": _tiebreak_points_played,
     # Raw convenience
     "is_second_serve": _is_second_serve,
-    "game_score_numeric_server": _game_score_numeric_server,
-    "game_score_numeric_returner": _game_score_numeric_returner,
+    "game_points_server": _game_points_server,
+    "game_points_returner": _game_points_returner,
     # Surface one-hots
     "is_surface_hard": _is_surface_hard,
     "is_surface_clay": _is_surface_clay,

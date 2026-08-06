@@ -36,6 +36,19 @@ SERVE_PROB_MAX: Final[float] = 0.90
 LEAGUE_MEAN_SERVE_PROB: Final[float] = 0.62
 
 
+def _nan_if_none(value: int | None) -> float:
+    """NaN for an unreadable score, rather than a plausible-looking number.
+
+    `ScoreState.game_points_*` returns None only when the score label is in
+    neither the regular-game nor the tiebreak vocabulary. The old code defaulted
+    that case to 0 — indistinguishable from love, which is a real state — so an
+    unparsed score entered the model as a confident claim about the score. NaN
+    carries the ignorance forward: XGBoost routes it as missing, and the
+    logistic path substitutes the training mean at predict time.
+    """
+    return float("nan") if value is None else float(value)
+
+
 def neutral_score_state() -> "ScoreState":  # type: ignore[name-defined]
     """The opening state: 0-0, first serve, no sets played, not a tiebreak.
 
@@ -323,16 +336,13 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
             "set_score_asymmetry", "sets_won_asymmetry",
             "set_score_server_games", "set_score_returner_games",
             "sets_won_server", "sets_won_returner",
-            "game_score_numeric_server", "game_score_numeric_returner",
-            "game_score_diff",
+            "game_points_server", "game_points_returner",
+            "game_points_diff",
+            "tiebreak_point_diff", "tiebreak_points_played",
             "serve", "is_second_serve",
             "set_num", "game_num",
         }
     )
-
-    _GAME_SCORE_NUMERIC: Final[dict[str, int]] = {
-        "0": 0, "15": 15, "30": 30, "40": 40, "D": 45, "AD": 50,
-    }
 
     # Source columns for known match-constant derivations. Used by
     # required_columns + _point_constant_values: if a configured point feature
@@ -842,11 +852,18 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
                 state.set_score_server_games + state.set_score_returner_games + 1
             ),
         }
-        gs_s = self._GAME_SCORE_NUMERIC.get(state.game_score_server, 0)
-        gs_r = self._GAME_SCORE_NUMERIC.get(state.game_score_returner, 0)
-        values["game_score_numeric_server"] = float(gs_s)
-        values["game_score_numeric_returner"] = float(gs_r)
-        values["game_score_diff"] = float(gs_s - gs_r)
+        # Delegated to ScoreState so training and inference read the score
+        # through one mapping. The previous inline table defaulted an
+        # unrecognized label to 0, which silently turned every tiebreak score
+        # into love at inference while training was nulling the same points —
+        # the two sides disagreed about the same state.
+        gs_s = state.game_points_server()
+        gs_r = state.game_points_returner()
+        values["game_points_server"] = _nan_if_none(gs_s)
+        values["game_points_returner"] = _nan_if_none(gs_r)
+        values["game_points_diff"] = _nan_if_none(state.game_points_diff())
+        values["tiebreak_point_diff"] = float(state.tiebreak_point_diff())
+        values["tiebreak_points_played"] = float(state.tiebreak_points_played())
         return values
 
     def predict(self, df: pl.DataFrame) -> tuple[np.ndarray, np.ndarray]:

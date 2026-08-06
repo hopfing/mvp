@@ -138,3 +138,71 @@ class TestScoreStateFlags:
         assert ("AD", "40") in GAME_SCORE_STATES
         assert ("40", "AD") in GAME_SCORE_STATES
         assert ("D", "D") in GAME_SCORE_STATES
+
+
+class TestGamePoints:
+    """The points-won scale, shared with the training-time derivations."""
+
+    @pytest.mark.parametrize(
+        "gs_s,gs_r,expected",
+        [
+            ("0", "0", 0), ("15", "0", 1), ("30", "15", 1), ("40", "0", 3),
+            ("40", "30", 1), ("40", "40", 0), ("AD", "40", 1), ("40", "AD", -1),
+        ],
+    )
+    def test_regular_game_diff(self, gs_s, gs_r, expected):
+        assert _state(gs_server=gs_s, gs_returner=gs_r).game_points_diff() == expected
+
+    def test_deuce_written_both_ways_agrees(self):
+        # The data writes deuce ("40","40"); the chain writes it ("D","D").
+        # Same state, so the same feature value — the old display mapping gave
+        # 40 and 45 respectively.
+        as_data = _state(gs_server="40", gs_returner="40")
+        as_chain = _state(gs_server="D", gs_returner="D")
+        assert as_data.game_points_server() == as_chain.game_points_server() == 3
+        assert as_data.game_points_diff() == as_chain.game_points_diff() == 0
+
+    def test_tiebreak_score_parses_as_a_count(self):
+        s = _state(gs_server="11", gs_returner="9", is_tiebreak=True)
+        assert s.game_points_server() == 11
+        assert s.game_points_returner() == 9
+        assert s.game_points_diff() == 2
+
+    def test_tiebreak_label_15_is_not_regular_15(self):
+        # The specific silent miscode: "15" in a tiebreak is fifteen POINTS.
+        tb = _state(gs_server="15", gs_returner="13", is_tiebreak=True)
+        reg = _state(gs_server="15", gs_returner="0")
+        assert tb.game_points_server() == 15
+        assert reg.game_points_server() == 1
+
+    def test_unreadable_label_is_none_not_zero(self):
+        s = _state(gs_server="GAME", gs_returner="40")
+        assert s.game_points_server() is None
+        assert s.game_points_diff() is None
+
+    def test_every_chain_game_state_is_readable(self):
+        # Whatever the DP can construct, the feature layer must be able to read.
+        for gs_s, gs_r in GAME_SCORE_STATES:
+            s = _state(gs_server=gs_s, gs_returner=gs_r)
+            assert s.game_points_diff() is not None, f"{gs_s}-{gs_r} unreadable"
+
+
+class TestTiebreakInteractionColumns:
+    def test_zero_outside_a_tiebreak(self):
+        s = _state(gs_server="40", gs_returner="15")
+        assert s.tiebreak_point_diff() == 0
+        assert s.tiebreak_points_played() == 0
+
+    def test_carries_the_score_inside_one(self):
+        s = _state(gs_server="5", gs_returner="3", is_tiebreak=True)
+        assert s.tiebreak_point_diff() == 2
+        assert s.tiebreak_points_played() == 8
+
+    def test_leverage_flags_stay_suppressed_in_a_tiebreak(self):
+        # Matches training exactly: all 229,682 tiebreak points in
+        # match_beats_points carry these flags at 0.0000, so inference must too.
+        s = _state(gs_server="6", gs_returner="5", is_tiebreak=True,
+                   set_server_games=6, set_returner_games=6)
+        assert s.is_break_point() is False
+        assert s.is_set_point() is False
+        assert s.is_match_point() is False
