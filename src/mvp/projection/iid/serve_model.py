@@ -36,6 +36,30 @@ SERVE_PROB_MAX: Final[float] = 0.90
 LEAGUE_MEAN_SERVE_PROB: Final[float] = 0.62
 
 
+def neutral_score_state() -> "ScoreState":  # type: ignore[name-defined]
+    """The opening state: 0-0, first serve, no sets played, not a tiebreak.
+
+    The reference point for every scalar `p` this module produces — the
+    tiebreak approximation's `p_a_avg / p_b_avg`, the serve diagnostics, and
+    the gap-shrink offsets. Defined once because three call sites previously
+    built their own copy, and a silent divergence between them would move the
+    shrink offsets relative to the probabilities they correct.
+
+    `ScoreState` is imported inside the function: this module is imported by
+    `score_state` transitively, and a top-level import closes the cycle.
+    """
+    from mvp.projection.iid.score_state import ScoreState
+
+    return ScoreState(
+        serve_num=1,
+        game_score_server="0", game_score_returner="0",
+        is_tiebreak=False,
+        set_score_server_games=0, set_score_returner_games=0,
+        sets_won_server=0, sets_won_returner=0,
+        best_of=3,
+    )
+
+
 def build_serve_model(cfg: Any, engine: Any = None) -> "ServeWinProbEstimator":
     """Construct the serve estimator described by a `ServeModelConfig`.
 
@@ -78,6 +102,9 @@ def build_serve_model(cfg: Any, engine: Any = None) -> "ServeWinProbEstimator":
             clip_min=cfg.clip_min,
             clip_max=cfg.clip_max,
             gap_shrink=cfg.gap_shrink,
+            surface_circuit_offset=dict(cfg.surface_circuit_offset),
+            posterior_draws=cfg.posterior_draws,
+            posterior_seed=cfg.posterior_seed,
         )
     raise ValueError(f"Unknown serve model type: {cfg.type}")
 
@@ -210,6 +237,63 @@ class ServeWinProbEstimator(ABC):
 
         return p_a_fn, p_b_fn
 
+    # ------------------------------------------------------------------
+    # Distributional output
+    #
+    # An estimator that knows how uncertain it is exposes that by emitting
+    # `n_draws` samples of `p` per match instead of one value. The projector
+    # runs the chain once per draw and averages the resulting outcome
+    # distributions, so what reaches pricing is the mixture over the posterior
+    # rather than the distribution at a single representative `p`.
+    #
+    # Draws are addressed BY INDEX rather than returned as one (n_draws, N)
+    # block, for two reasons: the projector only ever holds one draw's chain
+    # output at a time (a 200-draw run would otherwise carry 200 copies of the
+    # (N, 131) spread pmf), and an estimator that seeds its sampling on the
+    # draw index is reproducible — the same config re-run gives the same
+    # posterior, which a backtest depends on.
+    #
+    # The defaults below make a point estimator a one-draw distribution, so
+    # every existing estimator satisfies this interface unchanged and the
+    # projector needs no special case.
+    # ------------------------------------------------------------------
+
+    @property
+    def n_draws(self) -> int:
+        """Posterior draws emitted per match. 1 means a point estimate."""
+        return 1
+
+    def predict_draw(
+        self, df: pl.DataFrame, draw: int,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Predict (p_a, p_b) for posterior draw `draw` in [0, n_draws)."""
+        return self.predict(df)
+
+    def predict_state_fn_draw(
+        self, df: pl.DataFrame, draw: int,
+    ) -> tuple[ServeStateFn, ServeStateFn]:
+        """State-aware callables for posterior draw `draw` in [0, n_draws)."""
+        return self.predict_state_fn(df)
+
+    def predict_state_fn_and_neutral(
+        self, df: pl.DataFrame, draw: int,
+    ) -> tuple[ServeStateFn, ServeStateFn, np.ndarray, np.ndarray]:
+        """State callables AND the neutral-state scalars, for one draw.
+
+        The projector needs both: the callables drive the stateful DP, and the
+        scalars are the `p_a_avg / p_b_avg` the tiebreak approximation uses.
+        Requesting them together rather than as two calls matters for a
+        state-aware model, which rebuilds its entire per-match feature matrix
+        on every call — doing that twice per draw doubles the dominant cost of
+        a Monte-Carlo run, and the second build reassigns instance state that
+        the first call's closures are still reading. Same numbers either way,
+        but only because both calls pass the same `df` and `draw`; that is a
+        coincidence worth not depending on.
+        """
+        p_a_fn, p_b_fn = self.predict_state_fn_draw(df, draw)
+        p_a, p_b = self.predict_draw(df, draw)
+        return p_a_fn, p_b_fn, p_a, p_b
+
 
 class ScoreStateChainServeModel(ServeWinProbEstimator):
     """Score-state-dependent serve model wired into the stateful IID chain.
@@ -262,7 +346,9 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
 
     def __init__(
         self,
-        model_type: Literal["logistic", "xgboost"],
+        model_type: Literal[
+            "logistic", "xgboost", "bayesian_logistic", "hierarchical_boosted",
+        ],
         match_level_features: list[str],
         point_level_features: list[str],
         params: dict[str, Any] | None = None,
@@ -274,6 +360,9 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
         clip_min: float = SERVE_PROB_MIN,
         clip_max: float = SERVE_PROB_MAX,
         gap_shrink: float = 1.0,
+        surface_circuit_offset: dict[str, float] | None = None,
+        posterior_draws: int = 200,
+        posterior_seed: int = 0,
     ) -> None:
         if not match_level_features and not point_level_features:
             raise ValueError(
@@ -287,6 +376,17 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
         self.clip_min = clip_min
         self.clip_max = clip_max
         self.gap_shrink = gap_shrink
+        self.surface_circuit_offset = dict(surface_circuit_offset or {})
+        # How often the post-offset guard actually truncated a correction. The
+        # offsets are ~1-2pp against a p range measured well inside the clip, so
+        # this should stay at zero; a non-zero count means the correction is
+        # being silently reduced for extreme players and the number reported is
+        # not the number applied.
+        self.offset_clipped_count = 0
+        # Only consumed by distributional inner models; a point classifier
+        # ignores them and reports n_draws == 1.
+        self.posterior_draws = posterior_draws
+        self.posterior_seed = posterior_seed
         # Paths default to the standard data locations; tests can override.
         self._points_path = Path(points_path) if points_path is not None else None
         self._matches_path = Path(matches_path) if matches_path is not None else None
@@ -360,6 +460,11 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
             else:
                 cols.add(name)
         cols.add("best_of")
+        if self.surface_circuit_offset:
+            # Required, not optional: a configured correction that silently
+            # does nothing because the frame lacks the columns would leave the
+            # config named for a correction it never applied.
+            cols.update(("surface", "circuit"))
         return sorted(cols)
 
     def _resolve_match_feature_cols(self) -> list[str]:
@@ -498,6 +603,14 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
         feature_cols = self._match_feature_cols + self.point_level_features
         X = joined.select(feature_cols).to_numpy()
         y = joined["point_won_by_server"].cast(pl.Int64).to_numpy()
+        # Server identity per point, for models carrying a per-player
+        # parameter. Fit sees training matches only and `build_test_set` is
+        # date-disjoint, so an effect never sees the match it will predict.
+        groups = (
+            joined["server_id"].to_numpy()
+            if "server_id" in joined.columns
+            else None
+        )
 
         logger.info(
             "Fitting score-state %s model (%d samples, %d features)",
@@ -510,8 +623,10 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
             params=self.params,
             match_feature_names=self._match_feature_cols,
             point_feature_names=self.point_level_features,
+            n_draws=self.posterior_draws,
+            seed=self.posterior_seed,
         )
-        self._model.fit(X, y)
+        self._model.fit(X, y, groups=groups)
         logger.info(
             "Score-state fit complete in %.1fs", time.perf_counter() - t_fit,
         )
@@ -740,21 +855,211 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
         Used by the projector as the `p_a_avg / p_b_avg` input to the stateful
         chain's tiebreak approximation.
         """
-        from mvp.projection.iid.score_state import ScoreState  # local import
-
         p_a_fn, p_b_fn = self.predict_state_fn(df)
-        neutral = ScoreState(
-            serve_num=1,
-            game_score_server="0", game_score_returner="0",
-            is_tiebreak=False,
-            set_score_server_games=0, set_score_returner_games=0,
-            sets_won_server=0, sets_won_returner=0,
-            best_of=3,
-        )
+        neutral = neutral_score_state()
         return p_a_fn(neutral), p_b_fn(neutral)
+
+    @property
+    def n_draws(self) -> int:
+        """Posterior draws, taken from the inner point-grain classifier.
+
+        A classifier with no posterior (plain logistic, XGBoost) reports 1 and
+        this model behaves exactly as it always has.
+        """
+        return int(getattr(self._model, "n_draws", 1)) if self._model else 1
+
+    # Attributes added after artifacts were first pickled, with the value an
+    # older artifact should take. joblib restores `__dict__` directly and never
+    # calls `__init__`, so without this a cached `serve_model.joblib` written
+    # before a field existed raises AttributeError the moment anything reads it.
+    #
+    # The defaults are the honest reconstruction, not a patch: a model trained
+    # before the offset mechanism existed IS a no-offset model, and one trained
+    # before posterior draws IS a point estimator. The dangerous case — a config
+    # that ADDS a correction being served by a stale artifact that cannot apply
+    # it — is caught upstream, because adding the block changes the config text
+    # and `projection_run._load_artifact` retrains on any text mismatch.
+    _POST_PICKLE_DEFAULTS: Final[dict[str, Any]] = {
+        "surface_circuit_offset": {},
+        "offset_clipped_count": 0,
+        "posterior_draws": 200,
+        "posterior_seed": 0,
+    }
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        for name, default in self._POST_PICKLE_DEFAULTS.items():
+            state.setdefault(
+                name, dict(default) if isinstance(default, dict) else default
+            )
+        self.__dict__.update(state)
+
+    def _surface_circuit_offsets(self, df: pl.DataFrame) -> np.ndarray | None:
+        """Per-match offset from the `<surface>/<circuit>` table, or None.
+
+        Fitted per cell, never pooled: a pooled fit averages a clay/challenger
+        correction with a hard/tour one whose bias runs the OPPOSITE sign, so
+        it would apply the wrong-signed correction to both. The table is
+        per-cell by construction and this lookup keeps it that way — a cell
+        absent from the table gets 0.0 rather than a pooled fallback.
+        """
+        table = self.surface_circuit_offset
+        if not table:
+            return None
+        if "surface" not in df.columns or "circuit" not in df.columns:
+            logger.warning(
+                "surface_circuit_offset configured but df lacks surface/circuit; "
+                "no correction applied"
+            )
+            return None
+        keys = [
+            f"{s}/{c}" for s, c in zip(
+                df["surface"].to_list(), df["circuit"].to_list(), strict=True,
+            )
+        ]
+        offsets = np.array([table.get(k, 0.0) for k in keys], dtype=np.float64)
+        unmatched = sorted({k for k in keys if k not in table})
+        if unmatched:
+            logger.info(
+                "surface_circuit_offset: no entry for %s — those rows uncorrected",
+                unmatched,
+            )
+        return offsets
+
+    def _apply_offset(
+        self, p: np.ndarray, offsets: np.ndarray | None,
+    ) -> np.ndarray:
+        """Add the calibration offset, re-clipping only if it leaves the range.
+
+        Ordering is deliberate. The offset lands AFTER gap_shrink and after the
+        clip that follows it, so a measured +1.0pp gap is corrected by +1.0pp
+        rather than by `gap_shrink x 1.0pp`. Applied earlier it would be
+        compressed by a knob that is set in exactly one config, which would make
+        the same table mean different things in different configs.
+
+        The trailing clip is a GUARD, not part of the correction: with offsets
+        of ~1-2pp and a measured p range well inside [clip_min, clip_max] it
+        should never bind, and `offset_clipped_count` records it if it does —
+        because a silently truncated correction is not the correction that was
+        measured.
+        """
+        if offsets is None:
+            return p
+        shifted = p + offsets
+        out = np.clip(shifted, self.clip_min, self.clip_max)
+        n_clipped = int(np.count_nonzero(shifted != out))
+        if n_clipped:
+            self.offset_clipped_count += n_clipped
+        return out
+
+    def _resolve_draw(self, draw: int | None) -> int | None:
+        """Map a requested draw index onto the inner model's capability.
+
+        The projector always loops draws, so a point classifier is asked for
+        draw 0. For a model with a single draw, draw 0 IS the point estimate —
+        resolving it to `None` keeps that path on `predict_proba` and bit-
+        identical to the pre-posterior behaviour. Asking a point model for a
+        LATER draw is a real error and still raises.
+        """
+        if draw is None:
+            return None
+        n = self.n_draws
+        if not 0 <= draw < n:
+            raise ValueError(f"draw {draw} out of range [0, {n})")
+        return None if n == 1 else draw
+
+    def _proba(
+        self, X: np.ndarray, draw: int | None, groups: np.ndarray | None = None,
+    ) -> np.ndarray:
+        """Inner-model probability, at a posterior draw when one is requested.
+
+        `groups` is the server id per row, which a model with a per-player
+        parameter needs at predict time as well as at fit time. Models
+        without one accept and ignore it.
+        """
+        assert self._model is not None
+        if draw is None:
+            return self._model.predict_proba(X, groups)
+        predict_draw = getattr(self._model, "predict_proba_draw", None)
+        if predict_draw is None:
+            raise TypeError(
+                f"{type(self._model).__name__} emits a point estimate and cannot "
+                f"serve posterior draw {draw}; use a distributional score-state "
+                "model (e.g. bayesian_logistic, hierarchical_boosted)"
+            )
+        return predict_draw(X, draw, groups)
+
+    def predict_draw(
+        self, df: pl.DataFrame, draw: int,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Neutral-state (p_a, p_b) under posterior draw `draw`."""
+        p_a_fn, p_b_fn = self._build_state_fns(df, draw=draw)
+        neutral = neutral_score_state()
+        return p_a_fn(neutral), p_b_fn(neutral)
+
+    def predict_state_fn_and_neutral(
+        self, df: pl.DataFrame, draw: int,
+    ) -> tuple[ServeStateFn, ServeStateFn, np.ndarray, np.ndarray]:
+        """One feature-matrix build serving both the DP and the tiebreak input."""
+        p_a_fn, p_b_fn = self._build_state_fns(df, draw=draw)
+        neutral = neutral_score_state()
+        return p_a_fn, p_b_fn, p_a_fn(neutral), p_b_fn(neutral)
+
+    def predict_state_fn_draw(
+        self, df: pl.DataFrame, draw: int,
+    ) -> tuple[ServeStateFn, ServeStateFn]:
+        """State-aware callables under posterior draw `draw`."""
+        return self._build_state_fns(df, draw=draw)
+
+    def clip_mass(self, df: pl.DataFrame) -> dict[str, float]:
+        """How much posterior mass the `[clip_min, clip_max]` bound truncates.
+
+        Settles whether the clip is a live distortion or a vestigial safety
+        rail. For a point estimate the bound is rarely reached, so clipping is
+        harmless. For a posterior each draw is clipped individually, so mass
+        beyond the bound is truncated — and asymmetrically whenever the mean
+        sits off-centre between the bounds, which shifts the mixture mean on
+        top of the Jensen shift the chain already applies.
+
+        Evaluated at the neutral opening state, one prediction per (match,
+        draw, perspective), so the fractions are over that population rather
+        than over DP states (which would weight by how often the chain happens
+        to visit a state).
+
+        Returns fractions at each bound plus the observed range. If
+        `frac_clipped` is negligible the clip is not distorting the posterior
+        and the draw-vs-clip ordering is a note rather than a decision.
+        """
+        lows: list[np.ndarray] = []
+        for draw in range(self.n_draws):
+            p_a, p_b = self.predict_draw(df, draw)
+            lows.append(np.concatenate([p_a, p_b]))
+        allp = np.concatenate(lows)
+        n = float(len(allp))
+        if n == 0:
+            return {}
+        at_min = float(np.sum(allp <= self.clip_min))
+        at_max = float(np.sum(allp >= self.clip_max))
+        return {
+            "n_predictions": n,
+            "n_draws": float(self.n_draws),
+            "clip_min": float(self.clip_min),
+            "clip_max": float(self.clip_max),
+            "frac_at_min": at_min / n,
+            "frac_at_max": at_max / n,
+            "frac_clipped": (at_min + at_max) / n,
+            "p_min": float(np.min(allp)),
+            "p_max": float(np.max(allp)),
+            "p_std": float(np.std(allp)),
+        }
 
     def predict_state_fn(
         self, df: pl.DataFrame,
+    ) -> tuple[ServeStateFn, ServeStateFn]:
+        """Build state-aware callables from the point estimate."""
+        return self._build_state_fns(df, draw=None)
+
+    def _build_state_fns(
+        self, df: pl.DataFrame, *, draw: int | None,
     ) -> tuple[ServeStateFn, ServeStateFn]:
         """Build state-aware callables. Match-level features are cached once.
 
@@ -763,15 +1068,44 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
         Distinct ScoreStates with identical model-relevant values produce the
         same predict_proba output, so we cache per (perspective, key) where
         key is the tuple of state-derivable values the model actually uses.
+        (The cache is local to this call and keyed only on state, so it does
+        NOT amortize across draws — every draw re-evaluates every state.)
+
+        `draw` decides where the posterior sits relative to the two
+        transformations already on this boundary. The order is
+        DRAW -> clip -> shrink -> clip: each draw is passed through the same
+        post-processing a point estimate gets, rather than the post-processing
+        being applied once to the posterior mean. That is the honest choice —
+        what production emits is a clipped, shrunk probability, so a posterior
+        over production's output must be a posterior over clipped, shrunk
+        values. It also means the clip TRUNCATES the posterior rather than
+        merely bounding its centre, asymmetrically once the mean sits off-centre
+        between the bounds. `clip_mass` below measures whether that is
+        happening; if the posteriors come out narrow relative to
+        [clip_min, clip_max] the question is moot.
         """
         if self._model is None:
             raise RuntimeError(
                 "ScoreStateChainServeModel.predict_state_fn called before fit"
             )
+        draw = self._resolve_draw(draw)
         self._X_match_A = self._match_feature_values(df, swap=False)
         self._X_match_B = self._match_feature_values(df, swap=True)
         self._point_constants = self._point_constant_values(df)
         n = len(df)
+
+        # Server identity per perspective: in perspective A the row's own
+        # player is serving, in perspective B the opponent is. A model with a
+        # per-player effect needs this to look the right effect up; without
+        # it every row would silently fall back to the population level.
+        groups_a = (
+            df["player_id"].to_numpy() if "player_id" in df.columns else None
+        )
+        groups_b = df["opp_id"].to_numpy() if "opp_id" in df.columns else None
+
+        # Per-match calibration offset. Surface and circuit are properties of
+        # the MATCH, not of a player, so both perspectives share one array.
+        sc_offset = self._surface_circuit_offsets(df)
 
         # Subset of point_level_features whose value depends on ScoreState —
         # the cache key is the tuple of these values for the current state.
@@ -804,19 +1138,13 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
         # derived at the neutral opening state. Preserves each player's
         # state-dependent modulation; only narrows the between-player level gap.
         if self.gap_shrink != 1.0:
-            from mvp.projection.iid.score_state import ScoreState  # local import
-            _neutral = ScoreState(
-                serve_num=1, game_score_server="0", game_score_returner="0",
-                is_tiebreak=False, set_score_server_games=0,
-                set_score_returner_games=0, sets_won_server=0,
-                sets_won_returner=0, best_of=3,
-            )
+            _neutral = neutral_score_state()
             p_a0 = np.clip(
-                self._model.predict_proba(_X_for(self._X_match_A, _neutral)),
+                self._proba(_X_for(self._X_match_A, _neutral), draw, groups_a),
                 self.clip_min, self.clip_max,
             )
             p_b0 = np.clip(
-                self._model.predict_proba(_X_for(self._X_match_B, _neutral)),
+                self._proba(_X_for(self._X_match_B, _neutral), draw, groups_b),
                 self.clip_min, self.clip_max,
             )
             m0 = 0.5 * (p_a0 + p_b0)
@@ -835,8 +1163,9 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
             if cached is not None:
                 return cached
             X = _X_for(self._X_match_A, state)  # type: ignore[arg-type]
-            p = self._model.predict_proba(X) + shift_a  # type: ignore[union-attr]
+            p = self._proba(X, draw, groups_a) + shift_a
             p = np.clip(p, self.clip_min, self.clip_max)
+            p = self._apply_offset(p, sc_offset)
             cache_a[key] = p
             return p
 
@@ -846,8 +1175,9 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
             if cached is not None:
                 return cached
             X = _X_for(self._X_match_B, state)  # type: ignore[arg-type]
-            p = self._model.predict_proba(X) + shift_b  # type: ignore[union-attr]
+            p = self._proba(X, draw, groups_b) + shift_b
             p = np.clip(p, self.clip_min, self.clip_max)
+            p = self._apply_offset(p, sc_offset)
             cache_b[key] = p
             return p
 

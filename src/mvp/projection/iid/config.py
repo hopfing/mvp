@@ -29,12 +29,30 @@ class ServeModelConfig(BaseModel):
     # Compress the favorite-underdog serve gap toward the pair mean (1.0 = off).
     # Preserves serve levels; only narrows the between-player differential.
     gap_shrink: float = 1.0
+    # Per-(surface, circuit) calibration offset added to `p`, keyed
+    # "<surface>/<circuit>" e.g. {"Hard/tour": 0.011, "Clay/chal": -0.006}.
+    # A cell absent from the table gets no correction.
+    #
+    # Applied AFTER gap_shrink and after the clip that follows it, so a
+    # measured +1.0pp gap is corrected by +1.0pp rather than by
+    # gap_shrink x 1.0pp — otherwise the same table would deliver its full
+    # value where gap_shrink is off (the default) and a compressed value where
+    # it is on, making the correction's magnitude depend on an unrelated knob.
+    surface_circuit_offset: dict[str, float] = {}
     # Used only when type == "matchup"
     feature_columns: list[str] = []
     match_level_columns: list[str] = []
     regressor: MatchupServeRegressorConfig = MatchupServeRegressorConfig()
     # Used only when type == "score_state"
-    model_type: Literal["logistic", "xgboost"] = "logistic"
+    model_type: Literal[
+        "logistic", "xgboost", "bayesian_logistic", "hierarchical_boosted",
+    ] = "logistic"
+    # Posterior draws for distributional model types. `bayesian_logistic`
+    # emits this many samples of `p` per match; the projector runs the chain
+    # once per draw and averages, so cost is linear in this number. Ignored by
+    # the point model types, which always report a single draw.
+    posterior_draws: int = 200
+    posterior_seed: int = 0
     match_level_features: list[str] = []
     point_level_features: list[str] = []
     params: dict[str, Any] = {}

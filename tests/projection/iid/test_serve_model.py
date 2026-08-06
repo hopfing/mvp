@@ -313,7 +313,12 @@ class _ConstStubScoreStateModel:
         self.feature_names = list(match_feature_names) + list(point_feature_names)
         self._const = const
 
-    def predict_proba(self, X: np.ndarray) -> np.ndarray:
+    def predict_proba(
+        self, X: np.ndarray, groups: np.ndarray | None = None,
+    ) -> np.ndarray:
+        # `groups` (server id per row) is part of the ScoreStateServeModel
+        # contract for models with a per-player parameter. This stub has none,
+        # so it accepts and ignores it.
         return np.full(X.shape[0], self._const, dtype=np.float64)
 
 
@@ -340,7 +345,10 @@ class _XDependentStubScoreStateModel:
                 f"{len(self.feature_names)}"
             )
 
-    def predict_proba(self, X: np.ndarray) -> np.ndarray:
+    def predict_proba(
+        self, X: np.ndarray, groups: np.ndarray | None = None,
+    ) -> np.ndarray:
+        # See _ConstStubScoreStateModel: accepted and ignored.
         z = X.astype(np.float64) @ self._weights
         return 1.0 / (1.0 + np.exp(-z))
 
@@ -351,6 +359,7 @@ def _make_chain_with_stub(
     match_level_features: list[str] | None = None,
     point_level_features: list[str] | None = None,
     match_feature_cols: list[str] | None = None,
+    **chain_kwargs,
 ) -> "ScoreStateChainServeModel":
     """Build a ScoreStateChainServeModel and inject a post-fit state.
 
@@ -371,6 +380,7 @@ def _make_chain_with_stub(
         model_type="logistic",
         match_level_features=match_level,
         point_level_features=point_level,
+        **chain_kwargs,
     )
     chain_model._model = stub_model  # type: ignore[assignment]
     if match_feature_cols is not None:
@@ -864,3 +874,147 @@ class TestScoreStateChainServeModelE2E:
             chain_model.score_test_points(
                 pl.DataFrame({"match_uid": ["m000"], "best_of": [3]}),
             )
+
+
+class TestSurfaceCircuitOffset:
+    """A per-(surface, circuit) calibration correction applied to `p`.
+
+    Ordering is the whole point: the offset lands AFTER gap_shrink and after
+    the clip that follows it, so a measured +1.0pp gap is corrected by +1.0pp
+    rather than by `gap_shrink x 1.0pp`. Applied earlier, the same table would
+    deliver its full value where gap_shrink is off (the default) and a
+    compressed value where it is on.
+    """
+
+    def _df(self, surface="Hard", circuit="tour", n=2):
+        return pl.DataFrame({
+            "match_uid": [f"m{i}" for i in range(n)],
+            "best_of": [3] * n,
+            "surface": [surface] * n,
+            "circuit": [circuit] * n,
+        })
+
+    def _chain(self, offsets, *, gap_shrink=1.0, const=0.60):
+        stub = _ConstStubScoreStateModel(
+            match_feature_names=[],
+            point_feature_names=["is_break_point"],
+            const=const,
+        )
+        return _make_chain_with_stub(
+            stub,
+            point_level_features=["is_break_point"],
+            surface_circuit_offset=offsets,
+            gap_shrink=gap_shrink,
+        )
+
+    def test_offset_is_applied_at_full_size(self):
+        model = self._chain({"Hard/tour": 0.02})
+        p_a, _ = model.predict(self._df())
+        assert p_a[0] == pytest.approx(0.62)
+
+    def test_offset_is_not_compressed_by_gap_shrink(self):
+        """The failure this ordering prevents: applied before the shrink, a
+        +2pp correction would arrive as +1.4pp at gap_shrink=0.7 — and the
+        table would mean different things in different configs."""
+        plain = self._chain({"Hard/tour": 0.02}, gap_shrink=1.0)
+        shrunk = self._chain({"Hard/tour": 0.02}, gap_shrink=0.7)
+        a_plain, _ = plain.predict(self._df())
+        a_shrunk, _ = shrunk.predict(self._df())
+        # Both players are identical here, so gap_shrink has nothing to
+        # compress and the levels match; what matters is the offset survives
+        # intact in both.
+        assert a_plain[0] - 0.60 == pytest.approx(0.02)
+        assert a_shrunk[0] - 0.60 == pytest.approx(0.02)
+
+    def test_a_cell_absent_from_the_table_is_uncorrected(self):
+        """Never a pooled fallback: a clay/challenger correction applied to
+        hard/tour would carry the opposite sign to the bias there."""
+        model = self._chain({"Clay/chal": 0.02})
+        p_a, _ = model.predict(self._df(surface="Hard", circuit="tour"))
+        assert p_a[0] == pytest.approx(0.60)
+
+    def test_cells_are_corrected_independently(self):
+        model = self._chain({"Hard/tour": 0.02, "Clay/chal": -0.01})
+        hard, _ = model.predict(self._df("Hard", "tour"))
+        clay, _ = model.predict(self._df("Clay", "chal"))
+        assert hard[0] == pytest.approx(0.62)
+        assert clay[0] == pytest.approx(0.59)
+
+    def test_the_guard_keeps_p_in_range_and_counts_when_it_bites(self):
+        """With ~1-2pp offsets against a p range measured well inside the clip
+        this should never fire; the counter exists so a silently truncated
+        correction cannot pass for the correction that was measured."""
+        model = self._chain({"Hard/tour": 0.20}, const=0.88)
+        p_a, _ = model.predict(self._df())
+        assert p_a[0] == pytest.approx(0.90)      # clip_max, not 1.08
+        assert model.offset_clipped_count > 0
+
+    def test_no_table_leaves_p_untouched_and_the_counter_at_zero(self):
+        model = self._chain({})
+        p_a, _ = model.predict(self._df())
+        assert p_a[0] == pytest.approx(0.60)
+        assert model.offset_clipped_count == 0
+
+    def test_surface_and_circuit_become_required_columns(self):
+        """A configured correction that quietly does nothing because the frame
+        lacks the columns would leave a config named for a correction it never
+        applied."""
+        model = self._chain({"Hard/tour": 0.02})
+        assert "surface" in model.required_columns
+        assert "circuit" in model.required_columns
+
+
+class TestArtifactSchemaDrift:
+    """A cached `serve_model.joblib` predates fields added since it was written.
+
+    joblib restores `__dict__` directly and never calls `__init__`, so an
+    artifact pickled before a field existed comes back without it and raises
+    the first time anything reads it — which is what happened to
+    `required_columns` when the offset table landed.
+    """
+
+    def _stale(self, **missing_removed):
+        model = ScoreStateChainServeModel(
+            model_type="logistic",
+            match_level_features=[],
+            point_level_features=["is_break_point"],
+        )
+        state = dict(model.__dict__)
+        for name in missing_removed:
+            state.pop(name, None)
+        revived = ScoreStateChainServeModel.__new__(ScoreStateChainServeModel)
+        revived.__setstate__(state)
+        return revived
+
+    def test_an_artifact_without_the_offset_field_still_loads(self):
+        m = self._stale(surface_circuit_offset=None)
+        assert m.surface_circuit_offset == {}
+
+    def test_and_reads_as_a_no_offset_model_not_a_broken_one(self):
+        """The default is the honest reconstruction: a model trained before the
+        mechanism existed genuinely is a no-offset model."""
+        m = self._stale(surface_circuit_offset=None)
+        assert "surface" not in m.required_columns
+        assert m._surface_circuit_offsets(pl.DataFrame({"surface": ["Hard"]})) is None
+
+    def test_every_post_pickle_field_has_a_default(self):
+        m = self._stale(**{k: None for k in ScoreStateChainServeModel._POST_PICKLE_DEFAULTS})
+        for name in ScoreStateChainServeModel._POST_PICKLE_DEFAULTS:
+            assert hasattr(m, name), f"{name} missing after revive"
+
+    def test_a_present_value_is_not_overwritten_by_the_default(self):
+        model = ScoreStateChainServeModel(
+            model_type="logistic",
+            match_level_features=[],
+            point_level_features=["is_break_point"],
+            surface_circuit_offset={"Hard/tour": 0.02},
+        )
+        revived = ScoreStateChainServeModel.__new__(ScoreStateChainServeModel)
+        revived.__setstate__(dict(model.__dict__))
+        assert revived.surface_circuit_offset == {"Hard/tour": 0.02}
+
+    def test_the_mutable_default_is_not_shared_between_instances(self):
+        a = self._stale(surface_circuit_offset=None)
+        b = self._stale(surface_circuit_offset=None)
+        a.surface_circuit_offset["Hard/tour"] = 0.02
+        assert b.surface_circuit_offset == {}
