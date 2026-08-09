@@ -5,7 +5,12 @@ from unittest.mock import MagicMock, patch
 import polars as pl
 import pytest
 
-from mvp.gsheets.base import COLUMN_NAMES, SHEET_HEADERS, generate_formulas
+from mvp.gsheets.base import (
+    COLUMN_NAMES,
+    SHEET_HEADERS,
+    _col_letter,
+    generate_formulas,
+)
 
 
 class TestSheetsSync:
@@ -57,8 +62,10 @@ class TestSheetsSync:
             assert result["match_uid"].item() == "M1"
             assert result["p1"].item() == "John"
 
-    def test_write_clears_and_updates(self):
-        """Write clears the sheet then updates with header + data."""
+    def test_write_updates_then_clears_only_the_tail(self):
+        """Write overwrites the live range first, then clears only the rows
+        below it. Never a whole-tab clear: if the write that followed failed,
+        the tab would be left empty and every row of history lost."""
         with patch("mvp.gsheets.sheets.gspread"):
             from mvp.gsheets.sheets import SheetsSync
 
@@ -69,10 +76,15 @@ class TestSheetsSync:
             df = pl.DataFrame({col: ["val"] for col in COLUMN_NAMES})
             sync.write(df)
 
-            mock_ws.clear.assert_called_once()
+            mock_ws.clear.assert_not_called()
             mock_ws.update.assert_called_once()
             call_kwargs = mock_ws.update.call_args
             assert call_kwargs.kwargs["value_input_option"] == "USER_ENTERED"
+
+            # Header + one data row, so the tail starts at row 3.
+            mock_ws.batch_clear.assert_called_once()
+            (ranges,) = mock_ws.batch_clear.call_args.args
+            assert ranges == [f"A3:{_col_letter(len(COLUMN_NAMES) - 1)}"]
 
     def test_write_injects_formulas_when_empty(self):
         """Write injects formulas into empty formula cells."""

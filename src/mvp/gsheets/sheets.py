@@ -129,11 +129,20 @@ class SheetsSync:
             cell_rows.append(row_list)
 
         all_data = [SHEET_HEADERS] + cell_rows
+        last_col = _col_letter(len(COLUMN_NAMES) - 1)
 
-        self._worksheet.clear()
+        # Overwrite the live range first, then clear only the tail below it.
+        # Clearing the whole tab up front leaves it empty — header row and every
+        # row of history gone — if the write that follows fails, and the Sheets
+        # API does hand back transient 503s.
         self._worksheet.update(
-            range_name=f"A1:{_col_letter(len(COLUMN_NAMES) - 1)}{len(all_data)}",
+            range_name=f"A1:{last_col}{len(all_data)}",
             values=all_data,
             value_input_option="USER_ENTERED",
         )
+
+        # Rows left over from a previously longer sheet, which the write above
+        # didn't reach. Open-ended range: first unwritten row to the grid bottom.
+        self._worksheet.batch_clear([f"A{len(all_data) + 1}:{last_col}"])
+
         logger.info("Wrote %d rows to Google Sheets", len(cell_rows))
