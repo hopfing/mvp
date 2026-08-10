@@ -62,6 +62,45 @@ class TestSheetsSync:
             assert result["match_uid"].item() == "M1"
             assert result["p1"].item() == "John"
 
+    def test_read_existing_tolerates_display_padded_headers(self):
+        """A display-only number format must not halt the sync. Accounting pads
+        text with spaces via its `_(@_)` section, and get_all_values() renders
+        FORMATTED_VALUE, so the padding is in what we read — not what's stored.
+        """
+        padded = list(SHEET_HEADERS)
+        padded[COLUMN_NAMES.index("net")] = " net "
+
+        row = [""] * len(COLUMN_NAMES)
+        row[COLUMN_NAMES.index("match_uid")] = "M1"
+
+        with patch("mvp.gsheets.sheets.gspread"):
+            from mvp.gsheets.sheets import SheetsSync
+
+            sync = SheetsSync.__new__(SheetsSync)
+            mock_ws = MagicMock()
+            mock_ws.get_all_values.return_value = [padded, row]
+            sync._worksheet = mock_ws
+
+            result = sync.read_existing()
+            assert len(result) == 1
+            assert result["match_uid"].item() == "M1"
+
+    def test_read_existing_still_raises_on_real_mismatch(self):
+        """Stripping must not weaken the check into accepting a wrong header."""
+        wrong = list(SHEET_HEADERS)
+        wrong[COLUMN_NAMES.index("net")] = "profit"
+
+        with patch("mvp.gsheets.sheets.gspread"):
+            from mvp.gsheets.sheets import SheetsSync
+
+            sync = SheetsSync.__new__(SheetsSync)
+            mock_ws = MagicMock()
+            mock_ws.get_all_values.return_value = [wrong]
+            sync._worksheet = mock_ws
+
+            with pytest.raises(ValueError, match="Schema mismatch"):
+                sync.read_existing()
+
     def test_write_updates_then_clears_only_the_tail(self):
         """Write overwrites the live range first, then clears only the rows
         below it. Never a whole-tab clear: if the write that followed failed,

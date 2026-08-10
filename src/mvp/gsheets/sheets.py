@@ -66,8 +66,13 @@ class SheetsSync:
         if not data:
             return pl.DataFrame(schema={col: pl.Utf8 for col in COLUMN_NAMES})
 
+        # Compared stripped. get_all_values() renders FORMATTED_VALUE, so a
+        # display-only number format on a header cell shows up in what we read
+        # even though the stored value is fine — Accounting pads text with
+        # spaces via its `_(@_)` section, which would otherwise halt the sync
+        # over a cosmetic change. The error still reports the raw header.
         header = data[0]
-        if header != SHEET_HEADERS:
+        if [h.strip() for h in header] != SHEET_HEADERS:
             raise ValueError(
                 f"Schema mismatch: expected {SHEET_HEADERS}, got {header}"
             )
