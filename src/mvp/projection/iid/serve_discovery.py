@@ -62,12 +62,31 @@ from mvp.projection.iid.stateful_chain import match_distribution_from_state_fn
 
 logger = logging.getLogger(__name__)
 
-# Point features that cannot be represented in the chain DP: the deuce
-# closed-form in stateful_chain.hold_from_state_fn treats ("D","D") as a
-# single absorbing node, so features that distinguish deuce iterations
-# (point_num resets per game but advances through deuce cycles) would
-# invalidate the closed form. Excluded from the chain-path candidate pool.
-_CHAIN_INCOMPATIBLE_POINT_FEATURES = frozenset({"point_num"})
+# Point features the chain cannot represent. Two distinct mechanisms:
+#
+# `point_num` — the deuce closed-form in stateful_chain.hold_from_state_fn
+# treats ("D","D") as a single absorbing node, so a feature that advances
+# through deuce cycles (point_num resets per game but keeps counting through
+# deuce) would invalidate the closed form.
+#
+# `serve` / `is_second_serve` — the chain has no serve tree. A point is atomic,
+# and every ScoreState it builds hardcodes serve_num=1 (stateful_chain.py:206,
+# 218, 322, 332; serve_model.py:67). A model given serve number learns
+# P(win | 1st in) ≈ 0.69 separately from P(win | 2nd) ≈ 0.50, then is only ever
+# asked for the first — so the chain receives ~0.69 where it needs the blended
+# ~0.62, holds become near-certain and total games collapse. Measured in FS
+# round 1: CRPS 3.910 for both, against ~3.373 for every other candidate and
+# 3.366 base-only. They ranked last there, which is luck rather than
+# protection — nothing stopped them being selected.
+#
+# The fix for wanting serve-conditional behaviour is the two-level estimator
+# (mvp-docs/specs/2026-08-10-two-level-point-model.md), which composes the
+# branches into a single marginal `p` BEFORE the chain sees it. That makes
+# serve number a conditioner rather than a feature, and it does not change
+# this exclusion: within each branch's rows the flag is constant anyway.
+_CHAIN_INCOMPATIBLE_POINT_FEATURES = frozenset(
+    {"point_num", "serve", "is_second_serve"}
+)
 
 
 @dataclass

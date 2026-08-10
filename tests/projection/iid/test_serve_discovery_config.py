@@ -177,3 +177,56 @@ class TestServeDiscoveryConfig:
         assert loaded.validation.test_size == 5000
         # point_validation should never appear in the emitted dict.
         assert "point_validation" not in emitted
+
+
+class TestChainIncompatiblePointFeatures:
+    """Features the chain cannot represent must never reach a chain-metric pool.
+
+    Two mechanisms, one list. `point_num` breaks the deuce closed form. `serve`
+    and `is_second_serve` break something else: the chain has no serve tree and
+    hardcodes serve_num=1 at every ScoreState it builds, so a model that
+    conditions on serve number is only ever asked for the first-serve case and
+    hands the chain ~0.69 where it needs the blended ~0.62.
+
+    Measured rather than theorised: in FS round 1 both scored CRPS 3.910 against
+    ~3.373 for every other candidate. They placed last, so nothing was harmed —
+    but placing last is an outcome, not a guard, and the next pool or metric
+    could rank them anywhere.
+    """
+
+    def test_serve_number_features_are_excluded(self):
+        from mvp.projection.iid.serve_discovery import (
+            _CHAIN_INCOMPATIBLE_POINT_FEATURES,
+        )
+        assert "serve" in _CHAIN_INCOMPATIBLE_POINT_FEATURES
+        assert "is_second_serve" in _CHAIN_INCOMPATIBLE_POINT_FEATURES
+
+    def test_point_num_still_excluded(self):
+        from mvp.projection.iid.serve_discovery import (
+            _CHAIN_INCOMPATIBLE_POINT_FEATURES,
+        )
+        assert "point_num" in _CHAIN_INCOMPATIBLE_POINT_FEATURES
+
+    def test_excluded_names_exist_in_the_real_pool(self):
+        # A typo here would silently exclude nothing, which is the failure mode
+        # this list exists to prevent — so pin the names against the actual pool
+        # rather than trusting the strings.
+        from mvp.projection.iid.score_state_features import (
+            default_point_level_candidate_pool,
+        )
+        from mvp.projection.iid.serve_discovery import (
+            _CHAIN_INCOMPATIBLE_POINT_FEATURES,
+        )
+        pool = set(default_point_level_candidate_pool())
+        missing = _CHAIN_INCOMPATIBLE_POINT_FEATURES - pool
+        assert not missing, f"excluded names absent from the pool: {missing}"
+
+    def test_state_flags_that_ARE_representable_stay_in(self):
+        # The chain does carry game/set/match score state, so those must not be
+        # swept up by a broader exclusion.
+        from mvp.projection.iid.serve_discovery import (
+            _CHAIN_INCOMPATIBLE_POINT_FEATURES,
+        )
+        for keep in ("is_break_point", "is_tiebreak", "sets_won_asymmetry",
+                     "game_points_diff", "tiebreak_point_diff"):
+            assert keep not in _CHAIN_INCOMPATIBLE_POINT_FEATURES
