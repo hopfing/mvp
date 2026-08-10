@@ -387,3 +387,85 @@ class TestDateWindowsFrozenGeometry:
         assert subset_windows[0][2] != full_windows[0][2]  # test_start shifted
         # But the full-frame windows are the geometry stability selection uses.
         assert full_windows[0][2] == date(2022, 1, 1)
+
+
+class TestPartialFinalWindow:
+    """A final window the data ends inside is kept, not discarded.
+
+    The old condition (`test_end > upper`) required the last window to be
+    calendar-complete. On a Jan-2023 -> Dec-2025 range that silently cost a whole
+    fold: tennis has no tour/challenger Bo3 singles in December, so the data ends
+    2025-11-30 and the Jul->Dec window was dropped along with the ~13.5k matches
+    inside it. Emptiness was already handled downstream; the calendar test was
+    rejecting windows before those checks could see them.
+    """
+
+    @staticmethod
+    def _frame(start: date, end: date) -> pl.DataFrame:
+        days = (end - start).days
+        return pl.DataFrame({
+            "effective_match_date": [
+                start + timedelta(days=i) for i in range(days + 1)
+            ],
+            "v": list(range(days + 1)),
+        })
+
+    def test_expanding_keeps_the_five_of_six_month_window(self):
+        # The exact shape of the real case: data ends 30 Nov, so the final
+        # Jul->Dec window is five months of real rows.
+        df = self._frame(date(2023, 1, 1), date(2025, 11, 30))
+        sp = DateExpandingWindowSplitter(initial_train_months=12, test_months=6)
+        w = sp._bounds(date(2023, 1, 1), date(2025, 11, 30))
+        assert len(w) == 4, [(str(a), str(b)) for _, _, a, b in w]
+        assert w[-1][2] == date(2025, 7, 1)
+        assert w[-1][3] == date(2025, 12, 1)   # clamped, not 2026-01-01
+        assert len(list(sp.split(df))) == 4
+
+    def test_expanding_dropped_it_before(self):
+        # Pins the regression this fixes: a complete-window rule yields 3.
+        sp = DateExpandingWindowSplitter(initial_train_months=12, test_months=6)
+        w = sp._bounds(date(2023, 1, 1), date(2025, 11, 30))
+        complete_only = [x for x in w if x[3] == _add_months(x[2], 6)]
+        assert len(complete_only) == 3 and len(w) == 4
+
+    def test_sliding_keeps_it_too(self):
+        df = self._frame(date(2023, 1, 1), date(2025, 11, 30))
+        sp = DateSlidingWindowSplitter(train_months=12, test_months=6)
+        w = sp._bounds(date(2023, 1, 1), date(2025, 11, 30))
+        assert w[-1][3] == date(2025, 12, 1)
+        assert len(list(sp.split(df))) == len(w)
+
+    def test_a_window_starting_past_the_data_is_still_dropped(self):
+        # The loop must still terminate on windows with no rows at all.
+        sp = DateExpandingWindowSplitter(initial_train_months=12, test_months=6)
+        w = sp._bounds(date(2023, 1, 1), date(2024, 6, 15))
+        for _, _, test_start, test_end in w:
+            assert test_start < test_end <= date(2024, 7, 1)
+
+    def test_complete_final_window_is_unchanged(self):
+        # Data ending exactly on a window boundary must behave as before —
+        # no clamping, same fold count.
+        sp = DateExpandingWindowSplitter(initial_train_months=12, test_months=6)
+        w = sp._bounds(date(2023, 1, 1), date(2025, 12, 31))
+        assert len(w) == 4
+        assert w[-1][3] == date(2026, 1, 1)
+
+    def test_empty_final_window_yields_no_fold(self):
+        # Clamping produces the window; the downstream emptiness check is what
+        # removes it when no rows land inside. Data stops 1 Jul, so the final
+        # window is a single day with no rows after it.
+        df = self._frame(date(2023, 1, 1), date(2025, 7, 1)).filter(
+            pl.col("effective_match_date") < date(2025, 7, 1)
+        )
+        sp = DateExpandingWindowSplitter(initial_train_months=12, test_months=6)
+        folds = list(sp.split(df))
+        for _, test_idx in folds:
+            assert test_idx, "a fold with an empty test set was yielded"
+
+    def test_short_final_logs_once(self, caplog):
+        sp = DateExpandingWindowSplitter(initial_train_months=12, test_months=6)
+        with caplog.at_level("INFO", logger="mvp.model.splitters"):
+            sp._bounds(date(2023, 1, 1), date(2025, 11, 30))
+            sp._bounds(date(2023, 1, 1), date(2025, 11, 30))
+        hits = [r for r in caplog.records if "Final test fold short" in r.message]
+        assert len(hits) == 1, f"expected one warning, got {len(hits)}"

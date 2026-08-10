@@ -3,11 +3,14 @@
 
 from __future__ import annotations
 
+import logging
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from datetime import date
 
 import polars as pl
+
+logger = logging.getLogger(__name__)
 
 
 class BaseSplitter(ABC):
@@ -228,14 +231,38 @@ class DateSlidingWindowSplitter(BaseSplitter):
         i = 0
         while True:
             test_start = _add_months(first_test_start, i * self.test_months)
-            test_end = _add_months(test_start, self.test_months)
-            if test_end > upper:
+            # Stop when the window would START past the data, not when it would
+            # END past it. See DateExpandingWindowSplitter._bounds for why.
+            if test_start >= upper:
                 break
+            test_end = min(_add_months(test_start, self.test_months), upper)
             train_start = _add_months(test_start, -self.train_months)
             train_end = test_start
             windows.append((train_start, train_end, test_start, test_end))
             i += 1
+        self._log_short_final(windows)
         return windows
+
+    def _log_short_final(
+        self, windows: list[tuple[date, date, date, date]],
+    ) -> None:
+        """Announce a truncated final fold once per splitter instance.
+
+        A short final fold carries fewer rows but counts equally in a mean fold
+        score, so keeping it silently trades a silent discard for a silent
+        dilution. `_bounds` is called once per candidate during forward
+        selection, hence the once-per-instance guard rather than a log here.
+        """
+        if getattr(self, "_warned_short_final", False) or not windows:
+            return
+        _, _, test_start, test_end = windows[-1]
+        expected = _add_months(test_start, self.test_months)
+        if test_end < expected:
+            self._warned_short_final = True
+            logger.info(
+                "Final test fold short: %s to %s (full window ends %s)",
+                test_start, test_end, expected,
+            )
 
     def date_windows(
         self, df: pl.DataFrame
@@ -321,12 +348,51 @@ class DateExpandingWindowSplitter(BaseSplitter):
         i = 0
         while True:
             test_start = _add_months(first_test_start, i * self.test_months)
-            test_end = _add_months(test_start, self.test_months)
-            if test_end > upper:
+            # Stop when the window would START past the data, not when it would
+            # END past it.
+            #
+            # The previous condition (`test_end > upper`) required the final
+            # window to be CALENDAR-complete, so a window holding five of six
+            # months of real matches was discarded whole. On a 2023-01 -> 2025-12
+            # config that cost an entire fold: tennis has no tour/challenger
+            # Bo3 singles in December, so the data ends 2025-11-30, `upper`
+            # lands on 2025-12-01, and the Jul->Dec 2025 window was dropped —
+            # roughly 13.5k matches thrown away because one month does not
+            # exist in the sport's calendar.
+            #
+            # Emptiness is already handled downstream and always was:
+            # `date_windows` filters on has_train/has_test and `split` yields
+            # only when both index lists are non-empty. Those checks never got
+            # to see a partial window because this stricter calendar test
+            # rejected it first.
+            if test_start >= upper:
                 break
+            test_end = min(_add_months(test_start, self.test_months), upper)
             windows.append((anchor, test_start, test_start, test_end))
             i += 1
+        self._log_short_final(windows)
         return windows
+
+    def _log_short_final(
+        self, windows: list[tuple[date, date, date, date]],
+    ) -> None:
+        """Announce a truncated final fold once per splitter instance.
+
+        A short final fold carries fewer rows but counts equally in a mean fold
+        score, so keeping it silently would trade a silent discard for a silent
+        dilution. `_bounds` runs once per candidate during forward selection,
+        hence the once-per-instance guard.
+        """
+        if getattr(self, "_warned_short_final", False) or not windows:
+            return
+        _, _, test_start, test_end = windows[-1]
+        expected = _add_months(test_start, self.test_months)
+        if test_end < expected:
+            self._warned_short_final = True
+            logger.info(
+                "Final test fold short: %s to %s (full window ends %s)",
+                test_start, test_end, expected,
+            )
 
     def date_windows(
         self, df: pl.DataFrame
