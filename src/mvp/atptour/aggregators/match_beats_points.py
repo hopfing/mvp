@@ -99,6 +99,7 @@ class MatchBeatsPointsAggregator(BaseJob):
         )
 
         combined = self._derive_server_perspective(combined)
+        combined = self._derive_rally_shots(combined)
         combined = self._derive_set_and_match_scores(combined)
         combined = self._join_match_metadata(combined)
         combined = self._derive_set_and_match_points(combined)
@@ -119,6 +120,13 @@ class MatchBeatsPointsAggregator(BaseJob):
                 "sets_won_server", "sets_won_returner",
                 "is_tiebreak", "is_break_point", "is_set_point", "is_match_point",
                 "serve", "serve_speed",
+                # Rally shape. Present in the staged data since 2022 and dropped
+                # here until now, which is why no feature has been able to reach
+                # it — the signal could not enter the model while the aggregate
+                # discarded it. Null where the feed is unusable; see
+                # `_derive_rally_shots`.
+                "rally_shots_server", "rally_shots_returner", "rally_shots_total",
+                "rally_length_missing",
                 # Target
                 "point_won_by_server",
             ]
@@ -154,6 +162,47 @@ class MatchBeatsPointsAggregator(BaseJob):
                 pl.when(is_p1_serving).then(pl.col("p2_id")).otherwise(pl.col("p1_id")).alias("returner_id"),
                 pl.when(is_p1_serving).then(pl.col("p1_game_score_pre")).otherwise(pl.col("p2_game_score_pre")).alias("game_score_server"),
                 pl.when(is_p1_serving).then(pl.col("p2_game_score_pre")).otherwise(pl.col("p1_game_score_pre")).alias("game_score_returner"),
+                pl.when(is_p1_serving).then(pl.col("p1_rally_shots")).otherwise(pl.col("p2_rally_shots")).alias("_rally_shots_server_raw"),
+                pl.when(is_p1_serving).then(pl.col("p2_rally_shots")).otherwise(pl.col("p1_rally_shots")).alias("_rally_shots_returner_raw"),
+            ]
+        )
+
+    # Per-player shot counts outside this range are the feed's sentinel space,
+    # not rallies. The bound is deliberately loose: the 99th percentile of an
+    # unflagged count is 9 and the median total rally is 2, so 100 cannot
+    # exclude a real point, while the observed junk runs to -43,204 and 316,229.
+    _RALLY_MIN_SHOTS = 0
+    _RALLY_MAX_SHOTS = 100
+
+    def _derive_rally_shots(self, df: pl.DataFrame) -> pl.DataFrame:
+        """Server-oriented rally shot counts, nulled where the feed is unusable.
+
+        `rally_length_missing` cannot carry this on its own. It marks 34.6% of
+        points, and NONE of the 516,799 points holding a negative shot count are
+        among them — the two sets are disjoint. Passing the flag through and
+        trusting it would admit values from -43,204 to 316,229 into whatever
+        rolling mean consumes these, which is not a subtle failure mode.
+
+        So validity is derived here, at the boundary where the columns enter the
+        aggregate, rather than left to each downstream consumer to rediscover.
+        Invalid counts become NULL rather than 0: a rally of length zero is a
+        real thing (an ace, a double fault) and must not be confused with one
+        the feed could not report. `rally_length_missing` is still carried
+        through, so a consumer can distinguish "the feed declared it missing"
+        from "we rejected the value".
+        """
+        lo, hi = self._RALLY_MIN_SHOTS, self._RALLY_MAX_SHOTS
+        s = pl.col("_rally_shots_server_raw")
+        r = pl.col("_rally_shots_returner_raw")
+        usable = (
+            ~pl.col("rally_length_missing").fill_null(True)
+            & s.is_between(lo, hi) & r.is_between(lo, hi)
+        )
+        return df.with_columns(
+            [
+                pl.when(usable).then(s).otherwise(None).cast(pl.Int32).alias("rally_shots_server"),
+                pl.when(usable).then(r).otherwise(None).cast(pl.Int32).alias("rally_shots_returner"),
+                pl.when(usable).then(s + r).otherwise(None).cast(pl.Int32).alias("rally_shots_total"),
             ]
         )
 

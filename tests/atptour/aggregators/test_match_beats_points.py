@@ -66,6 +66,9 @@ def _point_row(
     is_tiebreak: bool = False,
     is_break_point: bool = False,
     is_doubles: bool = False,
+    p1_rally_shots: int = 0,
+    p2_rally_shots: int = 0,
+    rally_length_missing: bool = True,
 ) -> dict:
     return {
         "tournament_id": "999",
@@ -91,9 +94,9 @@ def _point_row(
         "serve": serve,
         "serve_speed": None,
         "fault_serve_speed": None,
-        "p1_rally_shots": 0,
-        "p2_rally_shots": 0,
-        "rally_length_missing": True,
+        "p1_rally_shots": p1_rally_shots,
+        "p2_rally_shots": p2_rally_shots,
+        "rally_length_missing": rally_length_missing,
         "is_break_point": is_break_point,
         "break_points_in_game": 0,
         "break_points_lost": 0,
@@ -342,3 +345,96 @@ class TestMatchBeatsPointsAggregator:
         row = result.filter((pl.col("game_num") == 10) & (pl.col("point_num") == 8)).to_dicts()[0]
         assert row["game_score_server"] == "AD"
         assert row["is_set_point"] is True
+
+
+class TestRallyShots:
+    """Rally shape reaches the aggregate, oriented and sanitised.
+
+    These columns existed in the staged data since 2022 and were dropped by the
+    final `.select()`, so nothing downstream could consume them. The sanitising
+    is not defensive padding: in the corpus, `rally_length_missing` marks 34.6%
+    of points and NONE of the 516,799 points carrying a negative shot count are
+    among them — the flag and the garbage are disjoint sets, and unflagged
+    values run from -43,204 to 316,229.
+    """
+
+    def _run(self, tmp_path, rows):
+        _write_stage(tmp_path, _df(rows))
+        _write_matches(tmp_path, [_match_meta_row()])
+        return MatchBeatsPointsAggregator(data_root=tmp_path).run()
+
+    def test_oriented_to_server_when_p1_serves(self, tmp_path):
+        out = self._run(tmp_path, [_point_row(
+            point_num=1, server="1", scorer="1",
+            p1_rally_shots=5, p2_rally_shots=3, rally_length_missing=False,
+        )])
+        assert out["rally_shots_server"][0] == 5
+        assert out["rally_shots_returner"][0] == 3
+        assert out["rally_shots_total"][0] == 8
+
+    def test_orientation_swaps_when_p2_serves(self, tmp_path):
+        # The whole point of a server-oriented table: p2 serving must put p2's
+        # shot count in the server column, not p1's.
+        out = self._run(tmp_path, [_point_row(
+            point_num=1, server="2", scorer="2",
+            p1_rally_shots=5, p2_rally_shots=3, rally_length_missing=False,
+        )])
+        assert out["rally_shots_server"][0] == 3
+        assert out["rally_shots_returner"][0] == 5
+
+    def test_zero_length_rally_is_kept_not_nulled(self, tmp_path):
+        # An ace or double fault is a real zero-shot rally and must survive as
+        # 0. Conflating it with "unreported" would bias every rally-length mean
+        # toward longer points on exactly the players who ace most.
+        out = self._run(tmp_path, [_point_row(
+            point_num=1, p1_rally_shots=0, p2_rally_shots=0,
+            rally_length_missing=False,
+        )])
+        assert out["rally_shots_server"][0] == 0
+        assert out["rally_shots_total"][0] == 0
+
+    def test_flagged_missing_is_null(self, tmp_path):
+        out = self._run(tmp_path, [_point_row(
+            point_num=1, p1_rally_shots=4, p2_rally_shots=2,
+            rally_length_missing=True,
+        )])
+        assert out["rally_shots_server"][0] is None
+        assert out["rally_shots_total"][0] is None
+
+    def test_negative_is_null_even_when_not_flagged(self, tmp_path):
+        # The disjoint-set case, and the reason the feed's flag cannot be
+        # trusted on its own.
+        out = self._run(tmp_path, [_point_row(
+            point_num=1, p1_rally_shots=-43201, p2_rally_shots=2,
+            rally_length_missing=False,
+        )])
+        assert out["rally_shots_server"][0] is None
+        assert out["rally_shots_returner"][0] is None
+
+    def test_absurd_is_null_even_when_not_flagged(self, tmp_path):
+        out = self._run(tmp_path, [_point_row(
+            point_num=1, p1_rally_shots=316229, p2_rally_shots=2,
+            rally_length_missing=False,
+        )])
+        assert out["rally_shots_server"][0] is None
+
+    def test_either_side_invalid_nulls_both(self, tmp_path):
+        # A total needs both halves; keeping one side would make
+        # rally_shots_total silently mean "one player's shots".
+        out = self._run(tmp_path, [_point_row(
+            point_num=1, p1_rally_shots=6, p2_rally_shots=-1,
+            rally_length_missing=False,
+        )])
+        assert out["rally_shots_server"][0] is None
+        assert out["rally_shots_returner"][0] is None
+        assert out["rally_shots_total"][0] is None
+
+    def test_feed_flag_is_carried_through(self, tmp_path):
+        # So a consumer can tell "the feed declared it missing" from "we
+        # rejected the value".
+        out = self._run(tmp_path, [_point_row(
+            point_num=1, p1_rally_shots=-1, p2_rally_shots=2,
+            rally_length_missing=False,
+        )])
+        assert out["rally_length_missing"][0] is False
+        assert out["rally_shots_server"][0] is None
