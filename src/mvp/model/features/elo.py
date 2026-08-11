@@ -183,6 +183,15 @@ def surface_adj() -> pl.Expr:
 
 
 @feature(
+    name="venue_adj",
+    description="Venue-selected Elo adjustment (indoor adj indoors, 0 outdoors)",
+    mirror=True,
+)
+def venue_adj() -> pl.Expr:
+    return indoor_adj_expr("player")
+
+
+@feature(
     name="first_serve_power",
     description="First serve power rating",
     mirror=True,

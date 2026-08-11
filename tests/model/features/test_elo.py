@@ -121,6 +121,27 @@ class TestSurfaceAndIndoorComposites:
         df = self._df("Hard", indoor=True)
         assert df.select(indoor_adj_expr("player").alias("v"))["v"].to_list() == [40.0]
 
+    def test_venue_adj_gated_on_indoor(self):
+        from mvp.model.features.elo import venue_adj
+
+        out = self._df("Hard", indoor=False).select(venue_adj().alias("v"))
+        assert out["v"].to_list() == [0.0]
+        ind = self._df("Hard", indoor=True).select(venue_adj().alias("v"))
+        assert ind["v"].to_list() == [40.0]
+
+    def test_venue_adj_partitions_elo_surface_indoor(self):
+        from mvp.model.features.elo import elo, elo_surface_indoor, surface_adj, venue_adj
+
+        # elo + surface_adj + venue_adj reconstructs elo_surface_indoor exactly,
+        # on indoor and outdoor rows alike.
+        for surface, indoor in (("Hard", True), ("Clay", False)):
+            df = self._df(surface, indoor=indoor)
+            parts = df.select(
+                (elo() + surface_adj() + venue_adj()).alias("v")
+            )["v"].to_list()
+            whole = df.select(elo_surface_indoor().alias("v"))["v"].to_list()
+            assert parts == whole
+
     def test_elo_indoor_folds_only_indoors(self):
         from mvp.model.features.elo import elo_indoor
 
@@ -149,7 +170,7 @@ class TestSurfaceAndIndoorComposites:
     def test_new_features_registered(self):
         reg = get_registry()
         for name in (
-            "surface_adj", "elo_indoor", "elo_surface_indoor",
+            "surface_adj", "venue_adj", "elo_indoor", "elo_surface_indoor",
             "surface_adj_diff", "elo_indoor_diff", "elo_surface_indoor_diff",
         ):
             assert name in reg.list_features()
