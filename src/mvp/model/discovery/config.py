@@ -279,6 +279,29 @@ class ValidationConfig(BaseModel):
         return self
 
 
+class OffsetConfig(BaseModel):
+    """Freeze one feature's level contribution as a per-row ``base_margin``.
+
+    An offset model is fit on ``feature`` alone (train rows only, per fold) and
+    its raw log-odds become every candidate fit's starting point. Trees can then
+    only learn the correction on top, so no split can re-earn what the offset
+    already explains.
+
+    ``feature`` must ALSO be listed in ``discovery.features.base``. Seeding is
+    what keeps the feature usable as a *conditioning* variable: its level is
+    already priced, so a split on it alone gains ~nothing, but interactions with
+    other features stay expressible. Without the seed the feature leaves the
+    model entirely and composite x candidate interactions become unrepresentable
+    — which defeats the point of running an offset at all.
+    """
+
+    feature: str
+    type: Literal["logistic"] = "logistic"
+    # Passed to sklearn LogisticRegression. Default is slope + intercept, which
+    # matches the functional form Elo/Glicko composites are constructed around.
+    params: dict[str, Any] = {}
+
+
 class DiscoveryConfig(BaseModel):
     """Complete discovery configuration."""
 
@@ -296,6 +319,57 @@ class DiscoveryConfig(BaseModel):
     # FS the stop metric is the discovery `metric`; xgboost + date-splitter + non-MTL
     # + non-stability only (see validate_early_stopping_compatibility).
     early_stopping: EarlyStoppingConfig | None = None
+    # Top-level for the same reason as early_stopping: the offset spans model
+    # (base_margin threading), validation (fit per fold, train rows only) and
+    # features (the offset feature must be seeded). See validate_offset_compatibility.
+    offset: OffsetConfig | None = None
+
+    @model_validator(mode="after")
+    def validate_offset_compatibility(self) -> "DiscoveryConfig":
+        """Offset FS is wired only for the plain XGBoost scorer path, and only
+        with the offset feature seeded. Reject everything else at load time,
+        before the expensive precompute."""
+        off = self.offset
+        if off is None:
+            return self
+        if self.model.type != "xgboost":
+            raise ValueError(
+                f"offset is only supported for model.type='xgboost' (base_margin "
+                f"is an XGBoost mechanism); got {self.model.type!r}"
+            )
+        if self.mtl is not None:
+            raise ValueError(
+                "offset is not supported with MTL (vector-leaf / custom "
+                "objective takes a different fit signature). Run one or the other."
+            )
+        if self.early_stopping is not None and self.early_stopping.enabled:
+            raise ValueError(
+                "offset is not supported with early_stopping: two_stage_fit "
+                "carves its own sub/watch split inside the fold and takes no "
+                "base_margin, so margins would go unsliced. Run one or the other."
+            )
+        if self.discovery.stability_selection is not None:
+            raise ValueError(
+                "offset is not supported with stability_selection: resample_folds "
+                "compacts the fold list, so per-fold margins would silently "
+                "misalign with the folds they were fit on. Run one or the other."
+            )
+        feats = self.discovery.features
+        if off.feature not in feats.base:
+            raise ValueError(
+                f"offset.feature={off.feature!r} must also appear in "
+                "discovery.features.base. Seeding is what keeps it available as a "
+                "conditioning variable once its level is frozen; without it, "
+                "interactions with the offset feature cannot be represented at all."
+            )
+        if off.feature in feats.compute_only:
+            raise ValueError(
+                f"offset.feature={off.feature!r} must not be in "
+                "discovery.features.compute_only — compute_only strips it from the "
+                "candidate pool, so it never reaches the feature matrix and the "
+                "seeded base set would score as inf."
+            )
+        return self
 
     @model_validator(mode="after")
     def validate_mtl_compatibility(self) -> "DiscoveryConfig":

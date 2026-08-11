@@ -533,6 +533,20 @@ class FeatureDiscovery:
                 f"{len(exclude_feats)} features from {len(feat_cfg.exclude_base)} base(s)"
             )
 
+        # `base` is never unioned into the pool — FeatureSelector takes all_features
+        # as-is — so a seed the filters above dropped stays in base_features while
+        # vanishing from the feature matrix. Forward selection would not notice
+        # (`remaining` is unaffected), but the offset fit indexes col_to_idx
+        # directly and would raise mid-precompute. Config validators can't catch
+        # this: it depends on the resolved pool, not on config fields.
+        offset_cfg = self.config.offset
+        if offset_cfg is not None and offset_cfg.feature not in all_features:
+            raise ValueError(
+                f"offset.feature={offset_cfg.feature!r} is not in the resolved "
+                "candidate pool — discovery.features include/exclude/exclude_base/"
+                "paramed_only dropped it. Seeding it in `base` does not add it back."
+            )
+
         return all_features
 
     def run_stability(self) -> StabilityResult:

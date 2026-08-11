@@ -327,6 +327,55 @@ class TestDiscoveryResult:
         assert result.sweep_result is None
 
 
+class TestOffsetPoolMembership:
+    """`base` is never unioned into the candidate pool, so a seeded offset feature
+    the pool filters dropped would vanish from the feature matrix while forward
+    selection carried on unaware. Config validators can't see this — it depends on
+    the registry-resolved pool, not on config fields."""
+
+    def _config(self, tmp_path, **features):
+        import mvp.model.features  # noqa: F401
+
+        config_dict = {
+            "data": {"date_range": {"start": "2020-01-01", "end": "2025-12-31"}},
+            "model": {"type": "xgboost"},
+            "validation": {"n_splits": 2, "min_train_size": 1000, "test_size": 500},
+            "discovery": {
+                "sweep_params": False,
+                "segment_analysis": False,
+                "features": {"base": ["player_elo_diff"], **features},
+            },
+            "offset": {"feature": "player_elo_diff"},
+        }
+        config_path = tmp_path / "offset_pool.yaml"
+        with open(config_path, "w") as f:
+            yaml.dump(config_dict, f)
+        return config_path
+
+    def test_offset_feature_in_pool_passes(self, tmp_path):
+        discovery = FeatureDiscovery(config_path=self._config(tmp_path), verbose=False)
+
+        pool = discovery._build_candidate_pool()
+
+        assert "player_elo_diff" in pool
+
+    def test_offset_feature_excluded_from_pool_raises(self, tmp_path):
+        config_path = self._config(tmp_path, exclude=["player_elo_diff"])
+        discovery = FeatureDiscovery(config_path=config_path, verbose=False)
+
+        with pytest.raises(ValueError, match="not in the resolved candidate pool"):
+            discovery._build_candidate_pool()
+
+    def test_include_list_omitting_offset_feature_raises(self, tmp_path):
+        """The realistic version: an `include` list copied from an older run that
+        predates the feature being promoted to a seed."""
+        config_path = self._config(tmp_path, include=["player_win_pct_diff"])
+        discovery = FeatureDiscovery(config_path=config_path, verbose=False)
+
+        with pytest.raises(ValueError, match="not in the resolved candidate pool"):
+            discovery._build_candidate_pool()
+
+
 class TestFeatureDiscovery:
     """Tests for FeatureDiscovery class."""
 

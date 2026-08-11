@@ -251,6 +251,10 @@ class FastForwardSelector:
         # of blanket median-filling. See _resolve_column_impute.
         self.fill_strategies: list[str] = []
         self.fill_constants: np.ndarray | None = None
+        # Per-fold offset margins (raw log-odds), each a full-length row-aligned
+        # array over X_wide. None unless config.offset is set; see
+        # _compute_fold_margins.
+        self.fold_margins: list[np.ndarray] | None = None
 
     def precompute(
         self,
@@ -694,6 +698,51 @@ class FastForwardSelector:
             self.fold_medians.append(medians)
         logger.info("Per-fold medians computed in %.1fs", time.perf_counter() - t0)
 
+        if self.config.offset is not None:
+            self._compute_fold_margins(self.config.offset)
+
+    def _compute_fold_margins(self, offset_cfg) -> None:
+        """Fit the offset model per fold and store row-aligned raw margins.
+
+        One fit per fold, here rather than in the scorer: the offset depends only
+        on the fold's train rows and one fixed column, not on which candidates are
+        being scored, so doing it per candidate would repeat identical work
+        thousands of times per round.
+
+        Margins are stored FULL-LENGTH (one value per row of X_wide) and sliced by
+        train_idx / test_idx at use. eval_filters narrows test_idx before the
+        scorer's gather, so a pre-sliced vector would misalign there while a
+        row-aligned one indexes correctly.
+        """
+        col_name = get_feature_columns([offset_cfg.feature])[0]
+        if col_name not in self.col_to_idx:
+            raise ValueError(
+                f"offset.feature={offset_cfg.feature!r} resolves to column "
+                f"{col_name!r}, which is not in the feature matrix. A seeded "
+                "feature is not automatically part of the candidate pool — check "
+                "that discovery.features include/exclude/exclude_base don't drop it."
+            )
+        col = self.col_to_idx[col_name]
+        lr_params = {"max_iter": 1000, **(offset_cfg.params or {})}
+
+        logger.info(
+            "Fitting %s offset on %s for %d folds",
+            offset_cfg.type, col_name, len(self.folds),
+        )
+        t0 = time.perf_counter()
+        self.fold_margins = []
+        for fold_idx, (train_idx, _test_idx) in enumerate(self.folds):
+            # Train-only fill: this fold's median, applied to every row. Using a
+            # median computed over train+test would leak the test distribution
+            # into the offset and therefore into every candidate's score.
+            x = self.X_wide[:, col].astype(np.float64)
+            x = np.where(np.isnan(x), self.fold_medians[fold_idx][col], x)
+            lr = LogisticRegression(**lr_params)
+            lr.fit(x[train_idx].reshape(-1, 1), self.y[train_idx])
+            # decision_function is the raw log-odds — exactly base_margin's space.
+            self.fold_margins.append(lr.decision_function(x.reshape(-1, 1)))
+        logger.info("Offset margins computed in %.1fs", time.perf_counter() - t0)
+
     def create_scorer(
         self,
         metric: str,
@@ -721,6 +770,19 @@ class FastForwardSelector:
         sample_weights = self.sample_weights
         eval_mask = self.eval_mask
         col_to_idx = self.col_to_idx
+        fold_margins = self.fold_margins
+        # Margins are indexed by position in `folds`. A caller-supplied fold list
+        # (stability's resample_folds) is COMPACTED — windows failing min_fold_rows
+        # are dropped — so those positions no longer match the margins fit here,
+        # and a resample would need its offset refit on the thinned train rows
+        # anyway. Config rejects offset + stability_selection; this is the
+        # backstop for any other caller that passes its own folds.
+        if fold_margins is not None and folds is not None:
+            raise ValueError(
+                "offset margins are aligned to the full-frame folds; a "
+                "caller-supplied fold list would misalign them. Refit the offset "
+                "for those folds instead of reusing these margins."
+            )
         folds = self.folds if folds is None else folds
         fold_medians = self.fold_medians if fold_medians is None else fold_medians
         fill_strategies = self.fill_strategies
@@ -981,8 +1043,20 @@ class FastForwardSelector:
                     fit_kwargs: dict = {}
                     if sample_weights is not None:
                         fit_kwargs["sample_weight"] = sample_weights[train_idx]
+                    predict_kwargs: dict = {}
+                    if fold_margins is not None:
+                        # Same offset on both sides: the fit starts every train row
+                        # at its margin, and the prediction must start every test
+                        # row at its own or the held-out probabilities are wrong.
+                        # fold_margins is indexed by FOLD; each entry is indexed by
+                        # ROW. So the eval_mask narrowing of test_idx above needs no
+                        # special handling here — the narrowed test_idx still holds
+                        # global row positions, which is exactly what margins wants.
+                        margins = fold_margins[fold_idx]
+                        fit_kwargs["base_margin"] = margins[train_idx]
+                        predict_kwargs["base_margin"] = margins[test_idx]
                     model.fit(X_train, y_train, **fit_kwargs)
-                    y_prob = model.predict_proba(X_test)
+                    y_prob = model.predict_proba(X_test, **predict_kwargs)
 
                 # MTL combined: score the full multi-task loss (primary log_loss
                 # + weighted standardized aux MSE). MTL primary and single-task

@@ -117,6 +117,185 @@ def discovery_config_logistic(tmp_path: Path) -> Path:
     return config_path
 
 
+@pytest.fixture
+def discovery_config_offset(tmp_path: Path) -> Path:
+    """Offset config. The offset feature is seeded, which the validator requires."""
+    config_dict = {
+        "data": {
+            "date_range": {
+                "start": "2024-01-01",
+                "end": "2024-12-31",
+            },
+        },
+        "model": {"type": "xgboost"},
+        "validation": {
+            "type": "walk_forward",
+            "n_splits": 2,
+            "min_train_size": 50,
+            "test_size": 25,
+        },
+        "discovery": {
+            "metric": "log_loss",
+            "direction": "minimize",
+            "features": {"base": ["player_ranking_points_diff"]},
+        },
+        "offset": {"feature": "player_ranking_points_diff"},
+    }
+    config_path = tmp_path / "discovery_offset.yaml"
+    with open(config_path, "w") as f:
+        yaml.dump(config_dict, f)
+    return config_path
+
+
+def _offset_config_dict() -> dict:
+    """Minimal valid offset config as a dict, for validator tests."""
+    return {
+        "data": {"date_range": {"start": "2024-01-01", "end": "2024-12-31"}},
+        "model": {"type": "xgboost"},
+        "validation": {"type": "walk_forward", "n_splits": 2},
+        "discovery": {"features": {"base": ["player_ranking_points_diff"]}},
+        "offset": {"feature": "player_ranking_points_diff"},
+    }
+
+
+class TestOffsetConfigValidation:
+    """Config-time rejection of unsupported offset combinations."""
+
+    def test_valid_config_parses(self):
+        config = DiscoveryConfig.model_validate(_offset_config_dict())
+        assert config.offset is not None
+        assert config.offset.feature == "player_ranking_points_diff"
+        assert config.offset.type == "logistic"
+
+    def test_unseeded_offset_feature_rejected(self):
+        cfg = _offset_config_dict()
+        cfg["discovery"]["features"]["base"] = []
+        with pytest.raises(ValueError, match="must also appear in"):
+            DiscoveryConfig.model_validate(cfg)
+
+    def test_compute_only_offset_feature_rejected(self):
+        cfg = _offset_config_dict()
+        cfg["discovery"]["features"]["compute_only"] = ["player_ranking_points_diff"]
+        with pytest.raises(ValueError, match="must not be in"):
+            DiscoveryConfig.model_validate(cfg)
+
+    def test_non_xgboost_rejected(self):
+        cfg = _offset_config_dict()
+        cfg["model"]["type"] = "logistic"
+        with pytest.raises(ValueError, match="model.type='xgboost'"):
+            DiscoveryConfig.model_validate(cfg)
+
+    def test_mtl_rejected(self):
+        cfg = _offset_config_dict()
+        cfg["mtl"] = {"auxiliary_targets": ["game_margin"]}
+        with pytest.raises(ValueError, match="not supported with MTL"):
+            DiscoveryConfig.model_validate(cfg)
+
+    def test_early_stopping_rejected(self):
+        cfg = _offset_config_dict()
+        cfg["early_stopping"] = {"enabled": True}
+        with pytest.raises(ValueError, match="not supported with early_stopping"):
+            DiscoveryConfig.model_validate(cfg)
+
+    def test_stability_selection_rejected(self):
+        cfg = _offset_config_dict()
+        cfg["discovery"]["stability_selection"] = {"n_resamples": 2}
+        with pytest.raises(ValueError, match="not supported with stability_selection"):
+            DiscoveryConfig.model_validate(cfg)
+
+
+class TestOffsetMargins:
+    """Per-fold offset fitting and base_margin threading."""
+
+    def _fast(self, config_path: Path, matches: Path, cache: Path):
+        fast = FastForwardSelector(
+            config=DiscoveryConfig.from_file(config_path),
+            all_feature_specs=["player_ranking_points_diff"],
+            matches_path=matches,
+            cache_dir=cache,
+        )
+        fast.precompute()
+        return fast
+
+    def test_no_offset_leaves_margins_none(
+        self, discovery_config: Path, sample_matches: Path, tmp_path: Path
+    ):
+        fast = self._fast(discovery_config, sample_matches, tmp_path / "cache")
+        assert fast.fold_margins is None
+
+    def test_margins_row_aligned_one_per_fold(
+        self, discovery_config_offset: Path, sample_matches: Path, tmp_path: Path
+    ):
+        """Margins are full-length so train_idx/test_idx slice them directly —
+        eval_filters narrows test_idx before the scorer's gather."""
+        fast = self._fast(discovery_config_offset, sample_matches, tmp_path / "cache")
+
+        assert fast.fold_margins is not None
+        assert len(fast.fold_margins) == len(fast.folds)
+        for margins in fast.fold_margins:
+            assert margins.shape == (fast.X_wide.shape[0],)
+
+    def test_offset_ignores_held_out_outcomes(
+        self, discovery_config_offset: Path, sample_matches: Path, tmp_path: Path
+    ):
+        """The leakage guard. The final test window is in no fold's train slice,
+        so flipping its outcomes must not move a single margin. If the offset were
+        fit over the whole frame, every fold's margins would shift."""
+        fast = self._fast(discovery_config_offset, sample_matches, tmp_path / "cache")
+        before = [m.copy() for m in fast.fold_margins]
+
+        _train_idx, last_test_idx = fast.folds[-1]
+        fast.y[last_test_idx] = 1 - fast.y[last_test_idx]
+        fast._compute_fold_margins(fast.config.offset)
+
+        for fold_idx, (was, now) in enumerate(zip(before, fast.fold_margins)):
+            np.testing.assert_allclose(
+                now, was, err_msg=f"fold {fold_idx} margins moved with test-row outcomes"
+            )
+
+    def test_offset_ignores_held_out_feature_values(
+        self, discovery_config_offset: Path, sample_matches: Path, tmp_path: Path
+    ):
+        """The other half of the leakage guard. The outcome test covers y; this
+        covers X. Perturbing the offset column on the final test window — a window
+        no fold trains on — must leave every train-row margin untouched. A fit over
+        all rows instead of train_idx would shift the coefficients and move them."""
+        fast = self._fast(discovery_config_offset, sample_matches, tmp_path / "cache")
+        before = [m.copy() for m in fast.fold_margins]
+
+        col = fast.col_to_idx["player_ranking_points_diff"]
+        _train_idx, last_test_idx = fast.folds[-1]
+        fast.X_wide[last_test_idx, col] = 1e6
+        fast._compute_fold_margins(fast.config.offset)
+
+        for fold_idx, (train_idx, _test_idx) in enumerate(fast.folds):
+            np.testing.assert_allclose(
+                fast.fold_margins[fold_idx][train_idx],
+                before[fold_idx][train_idx],
+                err_msg=f"fold {fold_idx} train margins moved with test-row values",
+            )
+
+    def test_scorer_returns_finite_score_with_offset(
+        self, discovery_config_offset: Path, sample_matches: Path, tmp_path: Path
+    ):
+        fast = self._fast(discovery_config_offset, sample_matches, tmp_path / "cache")
+        scorer = fast.create_scorer("log_loss")
+
+        score = scorer(["player_ranking_points_diff"])
+
+        assert np.isfinite(score)
+
+    def test_scorer_rejects_caller_supplied_folds(
+        self, discovery_config_offset: Path, sample_matches: Path, tmp_path: Path
+    ):
+        """Stability's resample_folds compacts the fold list, which would silently
+        misalign margins fit against the full-frame folds."""
+        fast = self._fast(discovery_config_offset, sample_matches, tmp_path / "cache")
+
+        with pytest.raises(ValueError, match="misalign"):
+            fast.create_scorer("log_loss", folds=fast.folds)
+
+
 class TestFastForwardSelector:
     """Tests for FastForwardSelector."""
 

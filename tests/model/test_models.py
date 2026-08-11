@@ -722,3 +722,82 @@ class TestModelTraining:
         model = get_model("neural_net", {})
         assert model.opp_embedding_col_idx is None
         assert not model._has_opp_embeddings
+
+
+class TestBaseMarginGuard:
+    """fit/predict_proba must agree on whether an offset was used.
+
+    Omitting base_margin at predict time does not fail -- it shifts every
+    probability by the offset -- so the mismatch is refused rather than scored.
+    """
+
+    @staticmethod
+    def _data(n: int = 200):
+        rng = np.random.RandomState(0)
+        X = rng.randn(n, 3)
+        y = (X[:, 0] + rng.randn(n) * 0.5 > 0).astype(int)
+        margin = X[:, 0] * 0.8
+        return X, y, margin
+
+    @staticmethod
+    def _model():
+        return get_model("xgboost", {"n_estimators": 5, "max_depth": 2})
+
+    def test_no_offset_round_trip(self):
+        X, y, _ = self._data()
+        model = self._model()
+        model.fit(X, y)
+
+        assert model.predict_proba(X).shape == (len(y),)
+
+    def test_offset_round_trip(self):
+        X, y, margin = self._data()
+        model = self._model()
+        model.fit(X, y, base_margin=margin)
+
+        assert model.predict_proba(X, base_margin=margin).shape == (len(y),)
+
+    def test_fit_with_offset_predict_without_raises(self):
+        X, y, margin = self._data()
+        model = self._model()
+        model.fit(X, y, base_margin=margin)
+
+        with pytest.raises(ValueError, match="requires one"):
+            model.predict_proba(X)
+
+    def test_fit_without_offset_predict_with_raises(self):
+        X, y, margin = self._data()
+        model = self._model()
+        model.fit(X, y)
+
+        with pytest.raises(ValueError, match="fit without one"):
+            model.predict_proba(X, base_margin=margin)
+
+    def test_flag_survives_joblib_round_trip(self, tmp_path):
+        """Production artifacts are joblib.dump'd whole. If the flag did not
+        persist, a model saved with an offset would load claiming it had none
+        and silently predict unshifted -- the exact failure the guard exists to
+        prevent, reintroduced through serialization."""
+        import joblib
+
+        X, y, margin = self._data()
+        model = self._model()
+        model.fit(X, y, base_margin=margin)
+        path = tmp_path / "model.joblib"
+        joblib.dump({"model": model}, path)
+
+        loaded = joblib.load(path)["model"]
+
+        with pytest.raises(ValueError, match="requires one"):
+            loaded.predict_proba(X)
+        assert loaded.predict_proba(X, base_margin=margin).shape == (len(y),)
+
+    def test_legacy_artifact_without_flag_predicts(self):
+        """Artifacts pickled before the attribute existed must stay loadable.
+        None were fit with an offset, so absent means False."""
+        X, y, _ = self._data()
+        model = self._model()
+        model.fit(X, y)
+        del model._fit_with_base_margin
+
+        assert model.predict_proba(X).shape == (len(y),)

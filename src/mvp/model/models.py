@@ -297,6 +297,7 @@ class XGBoostModel(BaseModel):
         eval_set: list[tuple[np.ndarray, np.ndarray]] | None = None,
         early_stopping_rounds: int | None = 10,
         eval_metric: Any | None = None,
+        base_margin: np.ndarray | None = None,
     ) -> None:
         import xgboost as xgb
 
@@ -324,6 +325,15 @@ class XGBoostModel(BaseModel):
         # set it explicitly. No-op off the early-stopping path.
         self._model._estimator_type = "classifier"
         fit_kwargs: dict[str, Any] = {"sample_weight": sample_weight}
+        # Per-row starting log-odds. Trees learn only the correction on top, so
+        # whatever the offset already explains cannot be re-earned by a split.
+        # Must be supplied again at predict time or the prediction is wrong.
+        if base_margin is not None:
+            fit_kwargs["base_margin"] = base_margin
+        # Recorded so predict_proba can refuse to score without one. Omitting it
+        # does not fail — it shifts every probability by the offset — so the
+        # model has to remember, not the caller.
+        self._fit_with_base_margin = base_margin is not None
         if eval_set is not None:
             fit_kwargs["eval_set"] = eval_set
             fit_kwargs["verbose"] = False
@@ -340,9 +350,28 @@ class XGBoostModel(BaseModel):
             return None
         return getattr(self._model, "best_iteration", None)
 
-    def predict_proba(self, X: np.ndarray) -> np.ndarray:
+    def predict_proba(
+        self, X: np.ndarray, base_margin: np.ndarray | None = None
+    ) -> np.ndarray:
         if self._model is None:
             raise RuntimeError("Model not fitted")
+        # base_margin must match what fit() was given, per row. getattr default
+        # False keeps artifacts pickled before this attribute existed loadable —
+        # none of them were fit with an offset.
+        fit_with_margin = getattr(self, "_fit_with_base_margin", False)
+        if fit_with_margin and base_margin is None:
+            raise ValueError(
+                "This model was fit with a base_margin offset, so predict_proba "
+                "requires one. Scoring without it does not fail — it shifts every "
+                "probability by the offset — so it is refused here. Supply the "
+                "same offset model's raw margin for these rows."
+            )
+        if not fit_with_margin and base_margin is not None:
+            raise ValueError(
+                "base_margin was passed to predict_proba but this model was fit "
+                "without one; the prediction would be shifted by the offset."
+            )
+        margin_kw = {} if base_margin is None else {"base_margin": base_margin}
         # With a custom objective, XGBClassifier's predict_proba returns raw
         # margin (logits) rather than probabilities, because XGB no longer
         # knows the output space. Apply sigmoid ourselves in that case.
@@ -352,9 +381,9 @@ class XGBoostModel(BaseModel):
         lambda_over = getattr(self, "_lambda_over", None)
         center_k = getattr(self, "_center_k", None)
         if lambda_over is not None or center_k is not None:
-            raw = self._model.predict(X, output_margin=True)
+            raw = self._model.predict(X, output_margin=True, **margin_kw)
             return _sigmoid(raw)
-        return self._model.predict_proba(X)[:, 1]
+        return self._model.predict_proba(X, **margin_kw)[:, 1]
 
 
 class XGBoostMTLModel(BaseModel):
