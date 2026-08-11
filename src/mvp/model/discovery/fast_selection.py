@@ -25,6 +25,7 @@ from mvp.model.features._score_helpers import (
 from mvp.model.imputation import build_imputation
 from mvp.model.metrics import compute_metrics
 from mvp.model.models import XGBoostMTLModel, _sigmoid, get_model
+from mvp.model.offset import fit_offset, offset_margin
 from mvp.model.registry import FeatureRegistry, get_registry
 from mvp.model.splitters import make_splitter
 
@@ -723,7 +724,6 @@ class FastForwardSelector:
                 "that discovery.features include/exclude/exclude_base don't drop it."
             )
         col = self.col_to_idx[col_name]
-        lr_params = {"max_iter": 1000, **(offset_cfg.params or {})}
 
         logger.info(
             "Fitting %s offset on %s for %d folds",
@@ -735,12 +735,14 @@ class FastForwardSelector:
             # Train-only fill: this fold's median, applied to every row. Using a
             # median computed over train+test would leak the test distribution
             # into the offset and therefore into every candidate's score.
-            x = self.X_wide[:, col].astype(np.float64)
+            x = self.X_wide[:, [col]].astype(np.float64)
             x = np.where(np.isnan(x), self.fold_medians[fold_idx][col], x)
-            lr = LogisticRegression(**lr_params)
-            lr.fit(x[train_idx].reshape(-1, 1), self.y[train_idx])
-            # decision_function is the raw log-odds — exactly base_margin's space.
-            self.fold_margins.append(lr.decision_function(x.reshape(-1, 1)))
+            # Shared with the training/production paths (mvp.model.offset) so an
+            # offset fit here and one fit there behave identically on the same
+            # data — notably the unregularized C, without which the fitted
+            # strength would depend on whether the column had been scaled.
+            model = fit_offset(x[train_idx], 0, self.y[train_idx], offset_cfg)
+            self.fold_margins.append(offset_margin(model, x, 0))
         logger.info("Offset margins computed in %.1fs", time.perf_counter() - t0)
 
     def create_scorer(

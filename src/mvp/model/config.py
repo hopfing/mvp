@@ -117,6 +117,25 @@ class FeaturesConfig(_StrictModel):
     compute_only: list[str] = []
 
 
+class OffsetConfig(_StrictModel):
+    """Freeze one feature's level contribution as a per-row ``base_margin``.
+
+    An offset model is fit on ``feature`` alone -- per fold, train rows only --
+    and its raw log-odds become the model's starting point, so no split can
+    re-earn what the offset already explains. The feature stays an ordinary
+    column, so it remains usable as a conditioning variable in interactions.
+
+    Mirrors ``discovery.config.OffsetConfig``; a feature set discovered under an
+    offset is trained under the same one. See ExperimentConfig.validate_offset.
+    """
+
+    feature: str
+    type: Literal["logistic"] = "logistic"
+    # Passed to sklearn LogisticRegression. Slope + intercept by default, which
+    # matches the functional form Elo/Glicko composites are constructed around.
+    params: dict[str, Any] = {}
+
+
 class EnsembleBaseModelRef(_StrictModel):
     """Reference to a base model in an ensemble."""
 
@@ -437,6 +456,55 @@ class ExperimentConfig(_StrictModel):
     calibration: CalibrationConfig | None = None
     mtl: MTLConfig | None = None
     early_stopping: EarlyStoppingConfig | None = None
+    offset: OffsetConfig | None = None
+
+    @model_validator(mode="after")
+    def validate_offset(self) -> "ExperimentConfig":
+        """Offset training is wired for the plain XGBoost path only, and the
+        offset feature must reach the feature matrix.
+
+        Rejected combinations mirror the discovery-side validator. The two
+        structural checks exist because `compute_only` features are pulled for
+        filter evaluation but never added to `feature_cols` (predictor.py
+        389-396, 1326-1330), so an offset feature listed there would be absent
+        from X at both fit and predict time.
+        """
+        off = self.offset
+        if off is None:
+            return self
+        if self.model.type != "xgboost":
+            # Also covers 'ensemble': EnsembleModel.fit takes no base_margin and
+            # no **kwargs, and its predict_proba fans out to sub-models.
+            raise ValueError(
+                f"offset requires model.type='xgboost' (base_margin is an "
+                f"XGBoost mechanism); got {self.model.type!r}"
+            )
+        if self.mtl is not None:
+            raise ValueError(
+                "offset is not supported with MTL (vector-leaf / custom "
+                "objective takes a different fit signature). Run one or the other."
+            )
+        if self.early_stopping is not None and self.early_stopping.enabled:
+            raise ValueError(
+                "offset is not supported with early_stopping: two_stage_fit "
+                "carves its own sub/watch split inside the fold and takes no "
+                "base_margin, so margins would go unsliced."
+            )
+        feats = self.features
+        if feats is None or off.feature not in feats.include:
+            raise ValueError(
+                f"offset.feature={off.feature!r} must be listed in "
+                "features.include -- it has to be in the trained feature matrix, "
+                "both so the offset can be fit and so the column is available to "
+                "compute margins at predict time."
+            )
+        if off.feature in feats.compute_only:
+            raise ValueError(
+                f"offset.feature={off.feature!r} must not be in "
+                "features.compute_only: compute_only columns are loaded for "
+                "filter evaluation only and never reach feature_cols."
+            )
+        return self
 
     @model_validator(mode="after")
     def validate_features_required(self) -> "ExperimentConfig":

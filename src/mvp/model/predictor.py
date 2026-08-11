@@ -43,6 +43,7 @@ from mvp.model.features._score_helpers import (
 from mvp.model.features.elo import surface_elo_expr
 from mvp.model.imputation import apply_imputation, build_imputation, fit_imputation
 from mvp.model.models import EnsembleModel, XGBoostMTLModel, get_model
+from mvp.model.offset import fit_offset, offset_margin, resolve_offset_col
 from mvp.model.registry import get_registry
 from mvp.model.splitters import make_splitter
 from mvp.model.weighting import sample_weights_from_frame
@@ -72,6 +73,27 @@ _PREDICTOR_EXTRA_COLS = [
 PREDICTION_TOLERANCE = 1e-4
 # Threshold for drift alerts (5% probability swing)
 DRIFT_THRESHOLD = 0.05
+
+
+def _offset_margin_kwargs(
+    artifact: dict, feature_cols: list[str], X: np.ndarray
+) -> dict:
+    """`{"base_margin": ...}` when the artifact carries an offset, else `{}`.
+
+    Both inference paths -- `predict()` for the lead model and `_predict_raw`
+    for voters -- are separate implementations of the same pipeline, so this
+    exists to keep them from drifting. `X` must be the matrix about to be
+    scored: post-imputation, post-scaling with the artifact's own scaler, and
+    truncated to `feature_cols`.
+
+    Artifacts predating offsets carry no key, so `.get` returns None and the
+    call is unaffected.
+    """
+    offset_model = artifact.get("offset_model")
+    if offset_model is None:
+        return {}
+    col = resolve_offset_col(feature_cols, artifact["offset_feature"])
+    return {"base_margin": offset_margin(offset_model, X, col)}
 
 
 def _resolve_artifact_path(raw: str | Path) -> Path:
@@ -575,7 +597,23 @@ class ProductionPredictor:
         if is_ensemble and base_model_specs is not None:
             assert isinstance(model, EnsembleModel)
             model.configure(base_model_specs)
-        model.fit(X, y_for_fit, sample_weight=sample_weights)
+        # Offset: fit on the final model's X -- post-imputation, post-scaling
+        # (line ~528) -- so it matches the scaler persisted in the artifact and
+        # reapplied by both inference paths. This is the offset that ships; the
+        # per-fold OOF offsets below are transient and independent of it.
+        offset_cfg = config.offset
+        offset_model = None
+        offset_col = None
+        if offset_cfg is not None:
+            offset_col = resolve_offset_col(feature_cols, offset_cfg.feature)
+            offset_model = fit_offset(X, offset_col, y_for_fit, offset_cfg)
+            model.fit(
+                X, y_for_fit,
+                sample_weight=sample_weights,
+                base_margin=offset_margin(offset_model, X, offset_col),
+            )
+        else:
+            model.fit(X, y_for_fit, sample_weight=sample_weights)
 
         # Fit Platt calibrator on OOF predictions. Prefer the same temporal CV
         # that `mvp model` uses (per the validation block in the model YAML)
@@ -686,9 +724,31 @@ class ProductionPredictor:
                 if is_ensemble and base_model_specs is not None:
                     assert isinstance(fold_model, EnsembleModel)
                     fold_model.configure(base_model_specs)
-                fold_model.fit(
-                    X_train_fold, y_train_fold_for_fit, sample_weight=fold_weights
-                )
+                # Each OOF fold gets its OWN offset, fit on that fold's train
+                # rows from that fold's X (this loop uses a fresh per-fold
+                # scaler, not the global one). Reusing the final model's offset
+                # here would leak the whole training set into the calibrator's
+                # input.
+                fold_margin_train = fold_margin_test = None
+                if offset_cfg is not None:
+                    fold_offset = fit_offset(
+                        X_train_fold, offset_col, y_train_fold_for_fit, offset_cfg
+                    )
+                    fold_margin_train = offset_margin(
+                        fold_offset, X_train_fold, offset_col
+                    )
+                    fold_margin_test = offset_margin(
+                        fold_offset, X_test_fold, offset_col
+                    )
+                    fold_model.fit(
+                        X_train_fold, y_train_fold_for_fit,
+                        sample_weight=fold_weights,
+                        base_margin=fold_margin_train,
+                    )
+                else:
+                    fold_model.fit(
+                        X_train_fold, y_train_fold_for_fit, sample_weight=fold_weights
+                    )
                 if is_ensemble:
                     assert isinstance(fold_model, EnsembleModel)
                     y_prob_test = fold_model.predict_proba(
@@ -697,6 +757,11 @@ class ProductionPredictor:
                     sub_preds = fold_model.predict_proba_per_model(
                         X_test_fold, df=test_df
                     )
+                elif offset_cfg is not None:
+                    y_prob_test = fold_model.predict_proba(
+                        X_test_fold, base_margin=fold_margin_test
+                    )
+                    sub_preds = []
                 else:
                     y_prob_test = fold_model.predict_proba(X_test_fold)
                     sub_preds = []
@@ -878,10 +943,28 @@ class ProductionPredictor:
                     assert isinstance(fold_model, EnsembleModel)
                     fold_model.configure(base_model_specs)
                 fold_weights = sample_weights[train_idx] if sample_weights is not None else None
+                # Own offset per fold, same reasoning as the temporal-CV loop.
+                # This loop reuses the globally-scaled X, so the offset is fit on
+                # the same representation the final model's is -- but it is still
+                # a separate fit, on train_idx rows only.
+                kfold_margin_val = None
+                if offset_cfg is not None:
+                    kfold_offset = fit_offset(
+                        X[train_idx], offset_col, y_for_fit[train_idx], offset_cfg
+                    )
+                    kfold_margin_val = offset_margin(
+                        kfold_offset, X[val_idx], offset_col
+                    )
                 # MTL: y_for_fit is 2D; slicing by train_idx preserves shape.
                 # Single-task: y_for_fit is 1D primary (aliased to y).
                 fold_model.fit(
                     X[train_idx], y_for_fit[train_idx], sample_weight=fold_weights,
+                    **(
+                        {"base_margin": offset_margin(
+                            kfold_offset, X[train_idx], offset_col
+                        )}
+                        if offset_cfg is not None else {}
+                    ),
                 )
                 if is_ensemble and n_subs > 0:
                     assert isinstance(fold_model, EnsembleModel)
@@ -892,6 +975,10 @@ class ProductionPredictor:
                     # For now stash raw average; will be overwritten if sub-cal
                     # is configured.
                     oof_probs[val_idx] = np.mean(sub_preds, axis=0)
+                elif offset_cfg is not None:
+                    oof_probs[val_idx] = fold_model.predict_proba(
+                        X[val_idx], base_margin=kfold_margin_val
+                    )
                 else:
                     oof_probs[val_idx] = fold_model.predict_proba(X[val_idx])
 
@@ -975,6 +1062,12 @@ class ProductionPredictor:
             "calibrator": calibrator,
             "aux_base_col_names": build_result.aux_base_col_names,
             "target": self.target,
+            # None unless config.offset is set. Both inference paths must supply
+            # margins from this when present -- the model was fit with them, and
+            # XGBoostModel.predict_proba refuses to score without them rather
+            # than returning probabilities shifted by the offset.
+            "offset_model": offset_model,
+            "offset_feature": offset_cfg.feature if offset_cfg is not None else None,
             # Backward compat: keep medians for old code paths
             "medians": impute_state.global_medians[:n_model],
         }
@@ -1163,7 +1256,15 @@ class ProductionPredictor:
 
         # df is passed for ensemble models with segmented sub calibrators
         # (ignored by single models and ensembles with no/non-segmented sub cals)
-        probs = model.predict_proba(X, df=canonical) if isinstance(model, EnsembleModel) else model.predict_proba(X)
+        # Offset: recompute margins from the saved offset model, on the same X
+        # the model is about to score -- post-imputation, post-scaling with the
+        # artifact's own scaler, truncated to feature_cols.
+        margin_kw = _offset_margin_kwargs(artifact, feature_cols, X)
+        probs = (
+            model.predict_proba(X, df=canonical)
+            if isinstance(model, EnsembleModel)
+            else model.predict_proba(X, **margin_kw)
+        )
         if calibrator is not None:
             if isinstance(
                 calibrator,
@@ -1433,7 +1534,12 @@ class ProductionPredictor:
             probs = model.predict_proba(X, df=pending)
             per_sub_probs = model.predict_proba_per_model(X, df=pending)
         else:
-            probs = model.predict_proba(X)
+            # This is the LEAD model's live-serving path (and the one backtest
+            # drives per fold). It is a separate implementation from
+            # _predict_raw, which serves voters -- both need the offset.
+            probs = model.predict_proba(
+                X, **_offset_margin_kwargs(artifact, feature_cols, X)
+            )
         if calibrator is not None:
             if isinstance(
                 calibrator,

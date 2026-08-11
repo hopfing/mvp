@@ -265,6 +265,9 @@ class TestOffsetMargins:
 
         col = fast.col_to_idx["player_ranking_points_diff"]
         _train_idx, last_test_idx = fast.folds[-1]
+        # X_wide is a read-only zero-copy view of the polars frame (the scorer
+        # relies on that), so perturb a copy rather than mutating in place.
+        fast.X_wide = fast.X_wide.copy()
         fast.X_wide[last_test_idx, col] = 1e6
         fast._compute_fold_margins(fast.config.offset)
 

@@ -46,6 +46,7 @@ from mvp.model.imputation import apply_imputation, build_imputation, fit_imputat
 from mvp.model.metrics import compute_metrics, metric_direction
 from mvp.model.mlflow_logger import ExperimentLogger
 from mvp.model.models import EnsembleModel, XGBoostMTLModel, get_model
+from mvp.model.offset import fit_offset, offset_margin, resolve_offset_col
 from mvp.model.registry import get_registry
 from mvp.model.splitters import BaseSplitter, make_splitter
 from mvp.model.weighting import sample_weights_from_frame
@@ -573,6 +574,10 @@ class ExperimentRunner:
         # Resolve ensemble or standard features
         is_ensemble = self.config.model.type == "ensemble"
         is_mtl = self.config.mtl is not None
+        # Offset: config validation already rejects it alongside ensemble, MTL
+        # and early stopping, so only the plain xgboost branch below needs to
+        # handle it.
+        offset_cfg = self.config.offset
 
         # When the model is trained with asymmetric_logloss, mirror its
         # lambda_over into compute_metrics so the tune metric evaluates the
@@ -1211,6 +1216,29 @@ class ExperimentRunner:
                             es, metric=self.config.metrics.objective[0],
                             lambda_over=params.get("lambda_over"), is_mtl=is_mtl,
                         )
+                    elif offset_cfg is not None:
+                        # Offset: fit on this fold's TRAIN rows only, from the
+                        # same X_train the model is about to see (post-impute,
+                        # post-scale). Both predict_proba calls below must be
+                        # given their own margins -- omitting either now raises
+                        # rather than silently shifting probabilities.
+                        offset_col = resolve_offset_col(
+                            feature_cols, offset_cfg.feature
+                        )
+                        offset_model = fit_offset(
+                            X_train, offset_col, y_train_for_fit, offset_cfg
+                        )
+                        fold_margin_train = offset_margin(
+                            offset_model, X_train, offset_col
+                        )
+                        fold_margin_test = offset_margin(
+                            offset_model, X_test, offset_col
+                        )
+                        model.fit(
+                            X_train, y_train_for_fit,
+                            sample_weight=train_weights,
+                            base_margin=fold_margin_train,
+                        )
                     else:
                         model.fit(X_train, y_train_for_fit, sample_weight=train_weights)
 
@@ -1225,6 +1253,13 @@ class ExperimentRunner:
                     y_prob = np.mean(per_model, axis=0)
                     per_model_train = model.predict_proba_per_model(X_train)
                     y_prob_train = np.mean(per_model_train, axis=0)
+                elif offset_cfg is not None:
+                    y_prob = model.predict_proba(
+                        X_test, base_margin=fold_margin_test
+                    )
+                    y_prob_train = model.predict_proba(
+                        X_train, base_margin=fold_margin_train
+                    )
                 else:
                     y_prob = model.predict_proba(X_test)
                     y_prob_train = model.predict_proba(X_train)
