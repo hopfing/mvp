@@ -22,7 +22,7 @@ class MatchupServeRegressorConfig(BaseModel):
 class ServeModelConfig(BaseModel):
     """Serve win prob estimator configuration."""
 
-    type: Literal["identity", "matchup", "score_state"] = "identity"
+    type: Literal["identity", "matchup", "score_state", "two_level"] = "identity"
     window: int | None = 90
     clip_min: float = 0.30
     clip_max: float = 0.90
@@ -56,6 +56,31 @@ class ServeModelConfig(BaseModel):
     match_level_features: list[str] = []
     point_level_features: list[str] = []
     params: dict[str, Any] = {}
+
+    # Used only when type == "two_level". Three components of the serve tree,
+    # each carrying its OWN feature set so each can be an independent FS
+    # target. Deliberately not folded into match_level_features/
+    # point_level_features: sharing one list across the components would
+    # hardwire the assumption the decomposition exists to test, and
+    # `first_in`'s variation is measured orthogonal to blended p
+    # (r = -0.032), so it is the component most likely to want a different set.
+    #
+    # `first_in` is fit at (match, server) grain and is state-invariant by
+    # measurement (+0.19pp on the sets-won axis at t=1.8, against +5.42pp at
+    # t=50.3 for win_first on the same rows). It therefore takes no
+    # STATE-DERIVABLE point features — there is no ScoreState to evaluate them
+    # at — but it does take the MATCH-CONSTANT ones. That distinction is not a
+    # nicety: the surface one-hots live only in the point pool (no registered
+    # match-level surface indicator exists), they are constant within a match,
+    # and first-serve rate plausibly varies by surface. Excluding the whole
+    # point list would silently starve the component of its one route to them.
+    first_in_match_features: list[str] = []
+    first_in_point_features: list[str] = []
+    first_in_params: dict[str, Any] = {}
+    win_first_match_features: list[str] = []
+    win_first_point_features: list[str] = []
+    win_second_match_features: list[str] = []
+    win_second_point_features: list[str] = []
 
 
 def _as_metric_list(v: Any) -> Any:

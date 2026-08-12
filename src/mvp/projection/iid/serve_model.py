@@ -119,6 +119,35 @@ def build_serve_model(cfg: Any, engine: Any = None) -> "ServeWinProbEstimator":
             posterior_draws=cfg.posterior_draws,
             posterior_seed=cfg.posterior_seed,
         )
+    if cfg.type == "two_level":
+        from mvp.projection.iid.two_level_serve_model import TwoLevelServeModel
+
+        configured = (
+            cfg.first_in_match_features or cfg.first_in_point_features
+            or cfg.win_first_match_features or cfg.win_first_point_features
+            or cfg.win_second_match_features or cfg.win_second_point_features
+        )
+        if not configured:
+            raise ValueError(
+                "serve_model type=two_level needs at least one of "
+                "first_in_* / win_first_* / win_second_* to be non-empty"
+            )
+        return TwoLevelServeModel(
+            model_type=cfg.model_type,
+            first_in_match_features=cfg.first_in_match_features,
+            first_in_point_features=cfg.first_in_point_features,
+            win_first_match_features=cfg.win_first_match_features,
+            win_first_point_features=cfg.win_first_point_features,
+            win_second_match_features=cfg.win_second_match_features,
+            win_second_point_features=cfg.win_second_point_features,
+            params=dict(cfg.params),
+            first_in_params=dict(cfg.first_in_params) or dict(cfg.params),
+            engine=engine,
+            clip_min=cfg.clip_min,
+            clip_max=cfg.clip_max,
+            gap_shrink=cfg.gap_shrink,
+            surface_circuit_offset=dict(cfg.surface_circuit_offset),
+        )
     raise ValueError(f"Unknown serve model type: {cfg.type}")
 
 
@@ -373,6 +402,7 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
         surface_circuit_offset: dict[str, float] | None = None,
         posterior_draws: int = 200,
         posterior_seed: int = 0,
+        serve_branch: int | None = None,
     ) -> None:
         if not match_level_features and not point_level_features:
             raise ValueError(
@@ -397,6 +427,21 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
         # ignores them and reports n_draws == 1.
         self.posterior_draws = posterior_draws
         self.posterior_seed = posterior_seed
+        # Restrict FITTING to one branch of the serve tree (1 = first serve in,
+        # 2 = second serve). None trains on every point, which is the
+        # single-level behaviour. Used by TwoLevelServeModel to get its two
+        # win-rate branches from one implementation rather than two.
+        #
+        # The filter is applied AFTER the preloaded-vs-read selection, never at
+        # the read. ServeDiscoverySelector passes `preloaded_points`, so a
+        # filter attached to the parquet read alone would leave FS silently
+        # training both branches on all rows — a wrong model that raises
+        # nothing and scores plausibly.
+        if serve_branch is not None and serve_branch not in (1, 2):
+            raise ValueError(
+                f"serve_branch must be 1, 2 or None; got {serve_branch!r}"
+            )
+        self.serve_branch = serve_branch
         # Paths default to the standard data locations; tests can override.
         self._points_path = Path(points_path) if points_path is not None else None
         self._matches_path = Path(matches_path) if matches_path is not None else None
@@ -486,6 +531,23 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
         self._match_feature_is_diff = is_diff_flags
         return cols
 
+    def _apply_serve_branch(self, points: pl.DataFrame) -> pl.DataFrame:
+        """Restrict rows to this model's branch of the serve tree.
+
+        Deliberately a method called at both point-loading sites rather than an
+        argument to the read: `fit` and `score_test_points` each take a
+        `preloaded_points` frame from the FS selector, and a filter applied only
+        to the parquet read would be skipped exactly when FS is driving.
+        """
+        if self.serve_branch is None:
+            return points
+        if "serve" not in points.columns:
+            raise ValueError(
+                "serve_branch set but the point frame has no `serve` column; "
+                "the branch filter cannot be applied silently"
+            )
+        return points.filter(pl.col("serve") == self.serve_branch)
+
     def fit(
         self,
         df: pl.DataFrame,
@@ -535,11 +597,14 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
             points = pl.read_parquet(points_path).filter(
                 pl.col("match_uid").is_in(train_uids)
             )
+        points = self._apply_serve_branch(points)
         if len(points) == 0:
             raise ValueError("no points rows matched the training match_uids")
         logger.info(
-            "Loaded %d points for %d train matches (%.1fs)",
-            len(points), len(train_uids), time.perf_counter() - t0,
+            "Loaded %d points for %d train matches%s (%.1fs)",
+            len(points), len(train_uids),
+            "" if self.serve_branch is None else f" [serve=={self.serve_branch}]",
+            time.perf_counter() - t0,
         )
 
         self._match_feature_cols = self._resolve_match_feature_cols()
@@ -687,6 +752,7 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
             points = pl.read_parquet(points_path).filter(
                 pl.col("match_uid").is_in(test_uids)
             )
+        points = self._apply_serve_branch(points)
         if len(points) == 0:
             return {}
 
@@ -901,6 +967,9 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
         "offset_clipped_count": 0,
         "posterior_draws": 200,
         "posterior_seed": 0,
+        # None = train on every point, which is what every artifact written
+        # before the two-level work did.
+        "serve_branch": None,
     }
 
     def __setstate__(self, state: dict[str, Any]) -> None:

@@ -211,6 +211,19 @@ _IID_SERVE_MODEL_OPTIONAL_KEYS: tuple[tuple[str, object], ...] = (
     ("surface_circuit_offset", {}),
     ("posterior_draws", 200),
     ("posterior_seed", 0),
+    # type == "two_level" only. Each is a per-component feature set, and two
+    # two-level configs differing in ANY of them are different models — so all
+    # of them have to reach the hash or the second run silently overwrites the
+    # first's artifacts. Feature-list order is meaningful (it fixes the model's
+    # column order), so `_deep_sort` must not reach these; the loop below sorts
+    # only dicts, which is why they are safe here as lists.
+    ("first_in_match_features", []),
+    ("first_in_point_features", []),
+    ("first_in_params", {}),
+    ("win_first_match_features", []),
+    ("win_first_point_features", []),
+    ("win_second_match_features", []),
+    ("win_second_point_features", []),
 )
 
 
