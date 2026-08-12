@@ -503,4 +503,19 @@ class DiscoveryConfig(BaseModel):
             result["mtl"] = self.mtl.model_dump()
         if self.early_stopping is not None:
             result["early_stopping"] = self.early_stopping.model_dump()
+        if self.offset is not None:
+            # Without this, a completed offset run emits a config with no offset
+            # in it: the features were selected against a frozen level, and
+            # anything trained or tuned from the file would silently be a plain
+            # model. The post-selection final metric has the same problem.
+            #
+            # Fields listed explicitly rather than model_dump()'d -- the
+            # discovery-side OffsetConfig can carry selection-only fields that
+            # have no meaning at training time (a `pin` flag is planned), and
+            # ExperimentConfig's OffsetConfig is strict about unknown keys.
+            result["offset"] = {
+                "feature": self.offset.feature,
+                "type": self.offset.type,
+                "params": self.offset.params,
+            }
         return result

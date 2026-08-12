@@ -1255,3 +1255,73 @@ class TestEarlyStopping:
             r for r in caplog.records if "ES best_iteration/fold" in r.getMessage()
         ]
         assert len(summaries) == 1
+
+
+class TestOffsetSurvivesConfigEmission:
+    """A completed offset run must emit a config that still carries the offset.
+
+    to_experiment_config_dict feeds both the post-selection final metric and the
+    saved config. Dropping the offset there means the features are selected
+    against a frozen level and then trained without one -- silently, since a
+    plain model is a perfectly valid config.
+    """
+
+    def _discovery_config(self, **offset_over):
+        cfg = _offset_config_dict()
+        cfg["offset"].update(offset_over)
+        return DiscoveryConfig.model_validate(cfg)
+
+    def test_offset_carried_into_emitted_dict(self):
+        config = self._discovery_config()
+
+        emitted = config.to_experiment_config_dict(
+            ["player_ranking_points_diff", "player_win_pct_diff"]
+        )
+
+        assert emitted["offset"]["feature"] == "player_ranking_points_diff"
+        assert emitted["offset"]["type"] == "logistic"
+
+    def test_offset_params_carried(self):
+        config = self._discovery_config(params={"C": 10.0})
+
+        emitted = config.to_experiment_config_dict(["player_ranking_points_diff"])
+
+        assert emitted["offset"]["params"] == {"C": 10.0}
+
+    def test_no_offset_emits_no_key(self):
+        cfg = _offset_config_dict()
+        cfg.pop("offset")
+        cfg["discovery"]["features"].pop("base")
+
+        emitted = DiscoveryConfig.model_validate(cfg).to_experiment_config_dict(
+            ["player_ranking_points_diff"]
+        )
+
+        assert "offset" not in emitted
+
+    def test_emitted_dict_validates_as_experiment_config(self):
+        """The real contract: the emitted dict is fed to ExperimentConfig, whose
+        own offset validator requires the feature to be in features.include."""
+        from mvp.model.config import ExperimentConfig
+
+        config = self._discovery_config()
+        emitted = config.to_experiment_config_dict(
+            ["player_ranking_points_diff", "player_win_pct_diff"]
+        )
+
+        experiment = ExperimentConfig.model_validate(emitted)
+
+        assert experiment.offset is not None
+        assert experiment.offset.feature == "player_ranking_points_diff"
+
+    def test_emitted_dict_rejected_when_offset_feature_not_selected(self):
+        """Guards the unpinned case: if the offset feature is not among the
+        selected features it is absent from the trained matrix, so the offset
+        cannot be computed. Fails at config load rather than deep in a fit."""
+        from mvp.model.config import ExperimentConfig
+
+        config = self._discovery_config()
+        emitted = config.to_experiment_config_dict(["player_win_pct_diff"])
+
+        with pytest.raises(ValueError, match="must be listed in features.include"):
+            ExperimentConfig.model_validate(emitted)
