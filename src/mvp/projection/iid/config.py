@@ -202,6 +202,26 @@ class ServeDiscoveryConfig(BaseModel):
     # config. The projection runner operates on one row per match.
     validation: ValidationConfig = ValidationConfig()
     features: ServeDiscoveryFeaturesConfig = ServeDiscoveryFeaturesConfig()
+    # Two-level FS: which component of the serve tree this run selects for.
+    #
+    # None (default) selects for the single-level score-state model — existing
+    # behaviour, untouched. When set, FS builds the TWO-LEVEL estimator and
+    # perturbs ONLY the named component's feature list, holding the other two at
+    # whatever `serve_model` below specifies. The score stays the configured
+    # metric (the chain metric in practice), so each component is selected
+    # against the thing that actually gets scored rather than a per-branch
+    # proxy: the components multiply, so three locally-good fits can compose
+    # into a worse whole.
+    #
+    # Each component's result is therefore CONDITIONAL on the other two's
+    # current sets. Re-running a component after the others have moved is
+    # legitimate and expected; `serve_model` is what carries their latest
+    # selected sets between runs.
+    serve_component: Literal["first_in", "win_first", "win_second"] | None = None
+    # The two-level estimator this run selects a component of. Ignored when
+    # `serve_component` is None. Its non-selected components supply the fixed
+    # sets; the selected component's lists are overridden per candidate.
+    serve_model: ServeModelConfig | None = None
     # Model form used to score candidates during FS (kept simple/fast).
     scoring_model: ScoreStateModelConfig = ScoreStateModelConfig(type="logistic")
     # All forms to compare on the final selected feature set (inherits params from model_params
@@ -293,6 +313,47 @@ class ServeDiscoveryConfig(BaseModel):
                     include_specs.append(s)
                     seen.add(s)
 
+        if self.serve_component is None:
+            serve_block: dict[str, Any] = {
+                "type": "score_state",
+                "model_type": model_type,
+                "match_level_features": selected_match_level,
+                "point_level_features": selected_point_level,
+                "params": model_params or {},
+            }
+        else:
+            serve_block = self._two_level_serve_block(
+                selected_match_level, selected_point_level,
+                model_type, model_params,
+            )
+            # The engine has to compute EVERY component's match features, not
+            # just the selected component's — the non-selected components are
+            # carried forward and their features are read at predict time. An
+            # include list built from the selected component alone would emit a
+            # config that loads, then fails at predict on a missing column.
+            from mvp.model.engine import parse_feature_spec as _parse
+
+            for spec in (
+                serve_block["first_in_match_features"]
+                + serve_block["win_first_match_features"]
+                + serve_block["win_second_match_features"]
+            ):
+                prefix, base_name, full_name, params = _parse(spec)
+                swap = (
+                    f"opp_{base_name}" if prefix == "player"
+                    else f"player_{base_name}" if prefix == "opp"
+                    else full_name
+                )
+                if params:
+                    ps = ", ".join(f"{k}={v}" for k, v in params.items())
+                    pair = (f"{full_name}({ps})", f"{swap}({ps})")
+                else:
+                    pair = (full_name, swap)
+                for s in pair:
+                    if s not in seen:
+                        include_specs.append(s)
+                        seen.add(s)
+
         return {
             "description": (
                 self.description
@@ -304,15 +365,51 @@ class ServeDiscoveryConfig(BaseModel):
             # promoted config states nothing about what its features were selected
             # against, and `mvp tune` would have to be told per invocation.
             "metrics": {"objective": [self.metric]},
-            "serve_model": {
-                "type": "score_state",
-                "model_type": model_type,
-                "match_level_features": selected_match_level,
-                "point_level_features": selected_point_level,
-                "params": model_params or {},
-            },
+            "serve_model": serve_block,
             "validation": self.validation.model_dump(),
         }
+
+    def _two_level_serve_block(
+        self,
+        selected_match_level: list[str],
+        selected_point_level: list[str],
+        model_type: str,
+        model_params: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Promoted `serve_model` for a per-component FS run.
+
+        Takes the run's `serve_model` as the base — which holds the other two
+        components' current sets — and substitutes the selected lists into the
+        component this run was selecting for. Emitting `type: score_state` here
+        (the single-level default) would silently discard the component
+        structure and the other two components entirely, producing a config that
+        runs but is not the model FS just scored.
+
+        Substitution mirrors `ServeDiscoverySelector._build_candidate_model`
+        exactly; the two must agree or FS would select against one model and
+        promote another.
+        """
+        if self.serve_model is None:
+            raise ValueError(
+                "serve_component is set but serve_model is missing — there is "
+                "nothing to carry the non-selected components forward"
+            )
+        block = self.serve_model.model_dump()
+        block["type"] = "two_level"
+        block["model_type"] = model_type
+        block["params"] = model_params or {}
+        if self.serve_component == "first_in":
+            block["first_in_match_features"] = list(selected_match_level)
+            block["first_in_point_features"] = list(selected_point_level)
+        elif self.serve_component == "win_first":
+            block["win_first_match_features"] = list(selected_match_level)
+            block["win_first_point_features"] = list(selected_point_level)
+        elif self.serve_component == "win_second":
+            block["win_second_match_features"] = list(selected_match_level)
+            block["win_second_point_features"] = list(selected_point_level)
+        else:  # pragma: no cover - Literal-constrained
+            raise ValueError(f"unknown serve_component: {self.serve_component!r}")
+        return block
 
 
 class IIDDiscoveryFeaturesConfig(BaseModel):

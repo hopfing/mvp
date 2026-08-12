@@ -635,6 +635,90 @@ class ServeDiscoverySelector:
             return a < b
         return a > b
 
+    def _build_candidate_model(
+        self,
+        match_level: list[str],
+        point_level: list[str],
+        scoring_params: dict,
+    ) -> "ScoreStateChainServeModel | Any":
+        """The estimator a candidate feature set is scored through.
+
+        Single-level (`serve_component is None`) keeps the existing behaviour
+        exactly: a `ScoreStateChainServeModel` over the candidate lists.
+
+        Two-level routes through `build_serve_model`, with ONLY the named
+        component's lists replaced by the candidate set and the other two held
+        at their configured values. Going through the factory rather than
+        constructing here is deliberate — this call site previously hardcoded
+        the single-level class, which meant a `serve_model.type` of anything
+        else was silently ignored and FS selected features for a model the user
+        was not going to run.
+        """
+        from mvp.projection.iid.serve_model import build_serve_model
+
+        component = self.config.serve_component
+        if component is None:
+            return ScoreStateChainServeModel(
+                model_type=self.config.scoring_model.type,
+                match_level_features=list(match_level),
+                point_level_features=list(point_level),
+                params=scoring_params,
+                points_path=self.points_path,
+                matches_path=self.matches_path,
+                cache_dir=self.cache_dir,
+                engine=self._engine,
+            )
+
+        base = self.config.serve_model
+        if base is None:
+            raise ValueError(
+                "serve_component is set but serve_model is missing — the "
+                "non-selected components have no feature sets to hold fixed, "
+                "and defaulting them to empty would score the named component "
+                "against a model unlike the one being built"
+            )
+        cfg = base.model_copy(deep=True)
+        cfg.type = "two_level"
+        cfg.model_type = self.config.scoring_model.type
+        cfg.params = dict(scoring_params)
+        if component == "first_in":
+            # first_in is fit at (match, server) grain with no ScoreState, so a
+            # STATE-DERIVABLE point feature has nothing to be evaluated at and
+            # would be silently ignored — refuse instead.
+            #
+            # MATCH-CONSTANT point features are fine and are not refused: the
+            # surface one-hots live only in the point pool (there is no
+            # registered match-level surface indicator), they do not vary by
+            # state, and first-serve rate plausibly varies by surface. Blocking
+            # the whole list would starve the component of its only route to
+            # them, which is the same silent-wrong the refusal exists to stop.
+            #
+            # The boundary is `ScoreStateChainServeModel._STATE_DERIVABLE`
+            # itself, not a copy — the narrowing is only safe if it is exactly
+            # the set the win branches already route on, so it must not be
+            # restated here where the two could drift.
+            bad = sorted(
+                set(point_level) & ScoreStateChainServeModel._STATE_DERIVABLE
+            )
+            if bad:
+                raise ValueError(
+                    f"serve_component=first_in cannot take state-derivable "
+                    f"point candidates (got {bad}); it is fit at match grain "
+                    "with no ScoreState. Match-constant point features (the "
+                    "surface one-hots) are accepted."
+                )
+            cfg.first_in_match_features = list(match_level)
+            cfg.first_in_point_features = list(point_level)
+        elif component == "win_first":
+            cfg.win_first_match_features = list(match_level)
+            cfg.win_first_point_features = list(point_level)
+        elif component == "win_second":
+            cfg.win_second_match_features = list(match_level)
+            cfg.win_second_point_features = list(point_level)
+        else:  # pragma: no cover - Literal-constrained
+            raise ValueError(f"unknown serve_component: {component!r}")
+        return build_serve_model(cfg, engine=self._engine)
+
     def _score_cv(
         self,
         df: pl.DataFrame,
@@ -842,15 +926,8 @@ class ServeDiscoverySelector:
             # validator caps n_parallel_candidates * n_jobs at the cpu count.
             if self.config.scoring_model.type != "logistic" and "n_jobs" not in scoring_params:
                 scoring_params["n_jobs"] = 1
-            model = ScoreStateChainServeModel(
-                model_type=self.config.scoring_model.type,
-                match_level_features=list(match_level),
-                point_level_features=list(point_level),
-                params=scoring_params,
-                points_path=self.points_path,
-                matches_path=self.matches_path,
-                cache_dir=self.cache_dir,
-                engine=self._engine,
+            model = self._build_candidate_model(
+                match_level, point_level, scoring_params,
             )
             model.fit(train_df, preloaded_match_features=preloaded_feats, preloaded_points=preloaded_pts)
             p_a_fn, p_b_fn = model.predict_state_fn(test_df)

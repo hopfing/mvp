@@ -213,3 +213,147 @@ class TestFingerprint:
 
     def test_identical_configs_agree(self):
         assert self._fp(_cfg()) == self._fp(_cfg())
+
+
+class TestPromotedConfig:
+    """FS must promote the model it selected against, not a single-level one."""
+
+    def _disco(self, component):
+        from mvp.projection.iid.config import ServeDiscoveryConfig
+
+        return ServeDiscoveryConfig(
+            data={"date_range": {"start": "2023-01-01", "end": "2026-01-01"},
+                  "filters": {"draw_type": "singles"}},
+            metric="iid_crps_total_games",
+            serve_component=component,
+            serve_model=_cfg(
+                first_in_match_features=["player_age_diff"],
+                win_first_match_features=["player_glicko_rd_diff"],
+                win_first_point_features=["sets_won_asymmetry"],
+                win_second_match_features=["player_height_diff"],
+                win_second_point_features=["set_score_asymmetry"],
+            ),
+        )
+
+    def test_single_level_run_still_emits_score_state(self):
+        from mvp.projection.iid.config import ServeDiscoveryConfig
+
+        cfg = ServeDiscoveryConfig(
+            data={"date_range": {"start": "2023-01-01", "end": "2026-01-01"},
+                  "filters": {"draw_type": "singles"}},
+        )
+        out = cfg.to_iid_projection_config_dict(["player_age_diff"], ["is_tiebreak"])
+        assert out["serve_model"]["type"] == "score_state"
+
+    def test_two_level_run_emits_two_level(self):
+        out = self._disco("win_first").to_iid_projection_config_dict(
+            ["player_svc_elo_matchup"], ["is_break_point"],
+        )
+        assert out["serve_model"]["type"] == "two_level"
+
+    def test_selected_lists_land_on_the_named_component(self):
+        out = self._disco("win_second").to_iid_projection_config_dict(
+            ["player_svc_elo_matchup"], ["is_break_point"],
+        )
+        sm = out["serve_model"]
+        assert sm["win_second_match_features"] == ["player_svc_elo_matchup"]
+        assert sm["win_second_point_features"] == ["is_break_point"]
+
+    def test_non_selected_components_are_carried_forward(self):
+        # The silent-loss case: promoting only the selected component would
+        # drop the other two, emitting a config that runs but is not the model
+        # FS scored.
+        out = self._disco("win_second").to_iid_projection_config_dict(
+            ["player_svc_elo_matchup"], ["is_break_point"],
+        )
+        sm = out["serve_model"]
+        assert sm["first_in_match_features"] == ["player_age_diff"]
+        assert sm["win_first_match_features"] == ["player_glicko_rd_diff"]
+        assert sm["win_first_point_features"] == ["sets_won_asymmetry"]
+
+    def test_first_in_takes_only_the_match_list(self):
+        out = self._disco("first_in").to_iid_projection_config_dict(
+            ["player_svc_elo_matchup"], [],
+        )
+        assert out["serve_model"]["first_in_match_features"] == ["player_svc_elo_matchup"]
+
+    def test_include_covers_every_component_not_just_the_selected_one(self):
+        # The engine must compute the non-selected components' features too, or
+        # the promoted config loads and then fails at predict on a missing col.
+        out = self._disco("win_second").to_iid_projection_config_dict(
+            ["player_svc_elo_matchup"], ["is_break_point"],
+        )
+        inc = set(out["features"]["include"])
+        for spec in ("player_age_diff", "player_glicko_rd_diff",
+                     "player_svc_elo_matchup"):
+            assert spec in inc, f"{spec} missing from features.include"
+
+    def test_component_without_serve_model_raises(self):
+        from mvp.projection.iid.config import ServeDiscoveryConfig
+
+        cfg = ServeDiscoveryConfig(
+            data={"date_range": {"start": "2023-01-01", "end": "2026-01-01"},
+                  "filters": {"draw_type": "singles"}},
+            serve_component="win_first",
+        )
+        with pytest.raises(ValueError, match="serve_model"):
+            cfg.to_iid_projection_config_dict(["player_age_diff"], [])
+
+
+class TestFirstInPointFeatureBoundary:
+    """first_in takes match-constant point features, refuses state-derivable ones.
+
+    The narrowing is only safe if the boundary is EXACTLY the set the win
+    branches route on. These pin that, because a boundary that drifts either
+    starves first_in of surface (its only route to it) or silently accepts a
+    feature that has no ScoreState to be evaluated at.
+    """
+
+    def _selector_cfg(self):
+        from mvp.projection.iid.config import ServeDiscoveryConfig
+
+        return ServeDiscoveryConfig(
+            data={"date_range": {"start": "2023-01-01", "end": "2026-01-01"},
+                  "filters": {"draw_type": "singles"}},
+            metric="iid_crps_total_games",
+            serve_component="first_in",
+            serve_model=_cfg(),
+        )
+
+    def _build(self, point_level):
+        from mvp.projection.iid.serve_discovery import ServeDiscoverySelector
+
+        sel = ServeDiscoverySelector.__new__(ServeDiscoverySelector)
+        sel.config = self._selector_cfg()
+        sel.points_path = None
+        sel.matches_path = None
+        sel.cache_dir = None
+        sel._engine = None
+        return sel._build_candidate_model(["player_age_diff"], point_level, {})
+
+    def test_surface_flags_are_accepted(self):
+        est = self._build(["is_surface_hard", "is_surface_clay"])
+        assert est.first_in_point_features == ["is_surface_hard", "is_surface_clay"]
+
+    def test_state_derivable_is_refused(self):
+        with pytest.raises(ValueError, match="state-derivable"):
+            self._build(["is_break_point"])
+
+    def test_the_boundary_is_the_win_branches_own_set(self):
+        # Not a restated list: the refusal keys off _STATE_DERIVABLE itself, so
+        # a feature the win branches treat as state must be refused here, and a
+        # feature they treat as match-constant must be accepted.
+        derivable = ScoreStateChainServeModel._STATE_DERIVABLE
+        assert "is_break_point" in derivable
+        assert "sets_won_asymmetry" in derivable
+        for surface in ("is_surface_hard", "is_surface_clay", "is_surface_grass"):
+            assert surface not in derivable, (
+                f"{surface} became state-derivable; first_in would now refuse "
+                "its only route to surface"
+            )
+
+    def test_mixed_list_refuses_and_names_only_the_bad_ones(self):
+        with pytest.raises(ValueError) as exc:
+            self._build(["is_surface_hard", "sets_won_asymmetry"])
+        assert "sets_won_asymmetry" in str(exc.value)
+        assert "is_surface_hard" not in str(exc.value)
