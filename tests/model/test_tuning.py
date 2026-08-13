@@ -2,6 +2,8 @@
 
 import importlib
 import logging
+import sys
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -578,6 +580,84 @@ validation:
         # recorded search params (it isn't a tuned dimension).
         for trial in tuner.study.trials:
             assert "n_jobs" not in trial.params
+
+    def test_run_progress_bar(
+        self, sample_config, sample_matches, tmp_path, monkeypatch, caplog
+    ):
+        """verbose=False on a TTY drives one progress bar instead of the
+        per-trial lines: one update per trial, running best in the postfix,
+        bar closed on the way out."""
+        import mlflow
+        mlflow.set_tracking_uri((tmp_path / "mlruns").as_uri())
+
+        bars = []
+
+        class FakeBar:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+                self.updates = 0
+                self.postfix = {}
+                self.closed = False
+                bars.append(self)
+
+            def update(self, n=1):
+                self.updates += n
+
+            def set_postfix(self, refresh=False, **fields):
+                self.postfix = fields
+
+            def close(self):
+                self.closed = True
+
+        class TTYStream:
+            """Real stderr that claims to be a TTY, so run() takes the bar path."""
+
+            def __init__(self, wrapped):
+                self._wrapped = wrapped
+
+            def isatty(self):
+                return True
+
+            def __getattr__(self, name):
+                return getattr(self._wrapped, name)
+
+        entered = []
+
+        @contextmanager
+        def fake_redirect():
+            entered.append("in")
+            yield
+            entered.append("out")
+
+        monkeypatch.setattr("mvp.model.tuning.tqdm", FakeBar)
+        monkeypatch.setattr("mvp.model.tuning.logging_redirect_tqdm", fake_redirect)
+        monkeypatch.setattr(sys, "stderr", TTYStream(sys.stderr))
+
+        tuner = HyperparamTuner(
+            config_path=sample_config,
+            matches_path=sample_matches,
+            cache_dir=tmp_path / "cache",
+            state_dir=tmp_path / "tuning",
+            outer_folds=1,
+        )
+        with caplog.at_level(logging.INFO, logger="mvp.model.tuning"):
+            tuner.run(n_trials=2, verbose=False)
+
+        assert len(bars) == 1
+        bar = bars[0]
+        assert bar.kwargs["total"] == 2
+        assert bar.updates == 2
+        assert bar.closed
+        assert tuner._bar is None
+        # Log records are routed through tqdm.write for the whole optimize
+        # section, so a mid-run line prints above the bar instead of stranding it.
+        assert entered == ["in", "out"]
+        # Fresh study: both trials are this session's, so the best is starred.
+        assert bar.postfix["best"].endswith("*")
+        assert float(bar.postfix["best"].rstrip("*")) > 0
+        assert not [
+            r for r in caplog.records if r.getMessage().startswith("Trial ")
+        ]
 
     def test_run_enqueues_baseline(self, sample_config, sample_matches, tmp_path):
         """First trial uses the baseline params from config."""

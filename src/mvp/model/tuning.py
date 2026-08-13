@@ -2,9 +2,12 @@
 
 import gc
 import logging
+import sys
 import tempfile
+import threading
 import time
 import warnings
+from contextlib import nullcontext
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -12,6 +15,8 @@ from typing import Any
 import optuna
 import yaml
 from optuna.exceptions import ExperimentalWarning
+from tqdm import tqdm
+from tqdm.contrib.logging import logging_redirect_tqdm
 
 from mvp.common.base_job import get_data_root
 from mvp.model.metrics import (
@@ -358,6 +363,17 @@ class HyperparamTuner:
         self._per_trial_n_jobs: int | None = None
         # One-shot guard for the calibrated-frame fallback warning (below).
         self._cal_fallback_warned = False
+        # Progress-bar state (set in run() when the bar is used; see
+        # _progress_trial_callback). The lock guards the bar because
+        # parallel_trials > 1 fires the callback from Optuna worker threads.
+        self._bar: Any | None = None
+        self._bar_lock = threading.Lock()
+        # Best is seeded from the study (all-time, not session), so mark whether
+        # this session is the one that set it — an unstarred value that never
+        # moves is the search failing to beat its own incumbent.
+        self._bar_best: float | None = None
+        self._bar_best_is_session = False
+        self._bar_pruned = 0
 
         with open(self.config_path) as f:
             self.base_config = yaml.safe_load(f)
@@ -987,6 +1003,12 @@ class HyperparamTuner:
     ) -> optuna.Study:
         """Run Bayesian optimization for n_trials.
 
+        verbose=True logs the full per-trial line (params | metrics | duration).
+        verbose=False shows a single tqdm bar instead — the study DB keeps every
+        trial either way, so nothing is lost, just scrollback. The bar needs a
+        TTY; redirected output falls back to the per-trial lines rather than
+        going silent.
+
         parallel_trials (K): run K trials concurrently via Optuna's thread pool.
         Each concurrent trial's xgb gets ``T // K`` threads (T = the config's
         n_jobs, else the cpu-2 default), so the total thread budget is unchanged
@@ -1011,62 +1033,151 @@ class HyperparamTuner:
         # Suppress Optuna's own trial-level logging; we log ourselves
         optuna.logging.set_verbosity(optuna.logging.WARNING)
 
+        # The bar is the default display; it needs a TTY to be worth anything,
+        # so a redirected run keeps the per-trial lines instead of emitting a
+        # few thousand carriage returns into a log file.
+        use_bar = not verbose and sys.stderr.isatty()
+
         callbacks = []
-        if verbose:
+        if use_bar:
+            self._bar = tqdm(
+                total=n_trials,
+                desc=f"{self.config_path.stem} [{self._objective_label()}]",
+                ncols=120,
+            )
+            self._bar_best = self._best_objective_so_far()
+            self._bar_best_is_session = False
+            self._bar_pruned = 0
+            self._set_bar_postfix()
+            callbacks.append(self._progress_trial_callback)
+        else:
             callbacks.append(self._log_trial_callback)
 
         # Quiet the per-fold runner/engine logs for the whole tune. Done ONCE
         # here (not per-trial in _run_one) so concurrent trials under
-        # parallel_trials>1 don't race on these shared logger levels. The
-        # early_stopping logger is intentionally left alone so its per-fold
-        # best_iteration lines still show.
-        _quiet = [
-            logging.getLogger(name) for name in (
-                "mvp.model.runner", "mvp.model.engine",
-                "mvp.projection.runner", "mvp.projection.iid.runner",
-            )
+        # parallel_trials>1 don't race on these shared logger levels. Under the
+        # bar, early_stopping is quieted too — its per-fold best_iteration lines
+        # are useful alongside the verbose trial lines but shred a progress bar.
+        _quiet_names = [
+            "mvp.model.runner", "mvp.model.engine",
+            "mvp.projection.runner", "mvp.projection.iid.runner",
         ]
+        if use_bar:
+            _quiet_names.append("mvp.model.early_stopping")
+        _quiet = [logging.getLogger(name) for name in _quiet_names]
         _prev_levels = [lg.level for lg in _quiet]
         for lg in _quiet:
             lg.setLevel(logging.WARNING)
+        # Route log records through tqdm.write while the bar is live: a plain
+        # handler writes straight to stderr mid-render, which terminates the
+        # bar's line and strands it (the next refresh then redraws on a fresh
+        # line). Redirected, each record clears the bar, prints above it, and
+        # the bar redraws underneath.
+        redirect = logging_redirect_tqdm() if use_bar else nullcontext()
         try:
-            if parallel_trials > 1:
-                # Split the config's thread budget across the K concurrent trials.
-                budget = self._get_base_params().get("n_jobs")
-                if budget is None:
-                    budget = _default_n_jobs()
-                self._per_trial_n_jobs = max(1, int(budget) // parallel_trials)
-                logger.info(
-                    "Parallel trials: K=%d, per-trial n_jobs=%d (budget %s)",
-                    parallel_trials, self._per_trial_n_jobs, budget,
-                )
-                # Warm the feature/transform cache with ONE synchronous trial
-                # before fanning out, so K cold-start trials don't each recompute
-                # the whole-matrix transform self-join concurrently.
-                self.study.optimize(self._objective, n_trials=1, callbacks=callbacks)
-                remaining = max(0, n_trials - 1)
-                if remaining:
+            with redirect:
+                if parallel_trials > 1:
+                    # Split the config's thread budget across the K concurrent trials.
+                    budget = self._get_base_params().get("n_jobs")
+                    if budget is None:
+                        budget = _default_n_jobs()
+                    self._per_trial_n_jobs = max(1, int(budget) // parallel_trials)
+                    logger.info(
+                        "Parallel trials: K=%d, per-trial n_jobs=%d (budget %s)",
+                        parallel_trials, self._per_trial_n_jobs, budget,
+                    )
+                    # Warm the feature/transform cache with ONE synchronous trial
+                    # before fanning out, so K cold-start trials don't each recompute
+                    # the whole-matrix transform self-join concurrently.
+                    self.study.optimize(
+                        self._objective, n_trials=1, callbacks=callbacks
+                    )
+                    remaining = max(0, n_trials - 1)
+                    if remaining:
+                        self.study.optimize(
+                            self._objective,
+                            n_trials=remaining,
+                            n_jobs=parallel_trials,
+                            callbacks=callbacks,
+                        )
+                else:
                     self.study.optimize(
                         self._objective,
-                        n_trials=remaining,
-                        n_jobs=parallel_trials,
+                        n_trials=n_trials,
                         callbacks=callbacks,
                     )
-            else:
-                self.study.optimize(
-                    self._objective,
-                    n_trials=n_trials,
-                    callbacks=callbacks,
-                )
         finally:
             for lg, lvl in zip(_quiet, _prev_levels):
                 lg.setLevel(lvl)
+            if self._bar is not None:
+                self._bar.close()
+                self._bar = None
 
         logger.info(
             "Tuning complete: %d total trials in %s",
             len(self.study.trials), self.db_path,
         )
         return self.study
+
+    def _objective_label(self) -> str:
+        """Name of the value the bar tracks — the study's first objective in its
+        search frame. A calibrated-frame study optimizes the calibrated value of
+        a probability-scale metric, so label it cal_* to match the user_attr the
+        trials carry (and to not read as the raw metric the verbose line shows)."""
+        metric = self.metrics[0]
+        if self.search_calibrated and metric not in CALIBRATION_INVARIANT_METRICS:
+            return f"cal_{metric}"
+        return metric
+
+    def _maximizing(self) -> bool:
+        """Direction of the first (bar-displayed) objective."""
+        return self.study.directions[0] == optuna.study.StudyDirection.MAXIMIZE
+
+    def _best_objective_so_far(self) -> float | None:
+        """Best first-objective value among trials already in the study, so a
+        resumed run's bar opens with the study's real best rather than
+        restarting from the first trial of this session."""
+        values = [
+            t.values[0] for t in self.study.trials
+            if t.state == optuna.trial.TrialState.COMPLETE and t.values
+        ]
+        if not values:
+            return None
+        return max(values) if self._maximizing() else min(values)
+
+    def _set_bar_postfix(self) -> None:
+        """Study-wide best (starred when THIS session set it) and the pruned
+        count. Caller holds the bar lock; refresh is left to the update() that
+        follows."""
+        fields: dict[str, Any] = {}
+        if self._bar_best is not None:
+            star = "*" if self._bar_best_is_session else ""
+            fields["best"] = f"{self._bar_best:.4f}{star}"
+        if self._bar_pruned:
+            fields["pruned"] = self._bar_pruned
+        if fields:
+            self._bar.set_postfix(refresh=False, **fields)
+
+    def _progress_trial_callback(
+        self, study: optuna.Study, trial: optuna.trial.FrozenTrial
+    ) -> None:
+        """Advance the bar in place of the per-trial log line. Params and every
+        metric still land in the study DB for `tune-review`."""
+        with self._bar_lock:
+            if self._bar is None:
+                return
+            if trial.state == optuna.trial.TrialState.PRUNED:
+                self._bar_pruned += 1
+            elif trial.values:
+                value = trial.values[0]
+                if self._bar_best is None or (
+                    value > self._bar_best if self._maximizing()
+                    else value < self._bar_best
+                ):
+                    self._bar_best = value
+                    self._bar_best_is_session = True
+            self._set_bar_postfix()
+            self._bar.update(1)
 
     def _log_trial_callback(
         self, study: optuna.Study, trial: optuna.trial.FrozenTrial

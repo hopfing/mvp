@@ -991,6 +991,15 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
             "fold noise when checking rerun-stability."
         ),
     )
+    tune_parser.add_argument(
+        "--verbose", "-v", action="store_true",
+        help=(
+            "Log the full per-trial line (params | metrics | duration) instead "
+            "of the progress bar. Every trial is in the study DB either way — "
+            "`tune-review` reads from there. Redirected output (no TTY) uses "
+            "these lines regardless."
+        ),
+    )
 
     # tune-review subcommand
     tune_review_parser = subparsers.add_parser(
@@ -1440,7 +1449,11 @@ def cmd_tune(args: argparse.Namespace) -> int:
     else:
         n_trials = args.limit
 
-    study = tuner.run(n_trials=n_trials, parallel_trials=args.parallel_trials)
+    study = tuner.run(
+        n_trials=n_trials,
+        verbose=args.verbose,
+        parallel_trials=args.parallel_trials,
+    )
     logger.info("Results saved to %s", tuner.db_path)
     end_counts = _state_counts(study)
     logger.info(
