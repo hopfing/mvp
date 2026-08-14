@@ -2395,6 +2395,28 @@ def _stamp_run_dir(run_dir: Path) -> None:
         logger.warning("Could not stamp run dir %s: %s", run_dir, e)
 
 
+def _finalize_run(checkpoint_path: Path) -> None:
+    """Completion housekeeping shared by every discovery family.
+
+    Drops the resume checkpoint and archives the working dir under its
+    completion date. Call this only once the deliverable config is on disk, not
+    when forward selection ends: a failure in the tail (final fit, save) must
+    leave the run resumable rather than orphaned.
+
+    Leaving it out is not cosmetic. A finished run that keeps its checkpoint
+    makes the next run under the same --output resume from a stale mid-run
+    state instead of starting fresh, and reports restored rounds while doing
+    it — so it reads as progress rather than as the no-op it is.
+    """
+    run_dir = checkpoint_path.parent
+    checkpoint_path.unlink(missing_ok=True)
+    # Guard the shared parent: every caller passes a checkpoint inside
+    # fs_runs/<output_stem>/, and stamping fs_runs/ itself would rename the
+    # whole tree. Cheap insurance against that coupling changing upstream.
+    if run_dir.name and run_dir.name != "fs_runs":
+        _stamp_run_dir(run_dir)
+
+
 def _cmd_experiment_classification(
     args: argparse.Namespace, config_path: Path, checkpoint_path: Path,
 ) -> int:
@@ -2428,13 +2450,8 @@ def _cmd_experiment_classification(
         print(f"\nSaved config to: {output_path}")
         print(f"Run with: poetry run py -m mvp model {output_path.stem}")
         # Only now is the run truly complete — the config (the deliverable)
-        # exists on disk. Remove the resume checkpoint here, not when forward
-        # selection finished, so any failure in the tail (sweep / final fit /
-        # save) leaves the run resumable instead of orphaned.
-        checkpoint_path.unlink(missing_ok=True)
-        # Archive the working dir under its completion date (fs_runs/<name>/ ->
-        # fs_runs/<YYYYMMDD>_<name>/) so re-using a name keeps the old run.
-        _stamp_run_dir(checkpoint_path.parent)
+        # exists on disk.
+        _finalize_run(checkpoint_path)
     else:
         print("\nNo features selected - no config saved")
 
@@ -2467,6 +2484,7 @@ def _cmd_experiment_projection(
         discovery.save_config(output_path, result)
         print(f"\nSaved config to: {output_path}")
         print(f"Run with: poetry run py -m mvp project {output_path.stem}")
+        _finalize_run(checkpoint_path)
     else:
         print("\nNo features selected - no config saved")
 
@@ -2498,6 +2516,7 @@ def _cmd_experiment_lines(
         discovery.save_config(output_path, result)
         print(f"\nSaved config to: {output_path}")
         print(f"Run with: poetry run py -m mvp iid-project {output_path.stem}")
+        _finalize_run(checkpoint_path)
     else:
         print("\nNo features selected - no config saved")
 
@@ -2508,9 +2527,9 @@ def _cmd_experiment_iid(
     args: argparse.Namespace, config_path: Path, checkpoint_path: Path,
 ) -> int:
     """Run IID matchup serve model feature discovery."""
-    # checkpoint_path is reserved for future IID discovery checkpoint
-    # support; currently only classification forward selection uses it.
-    del checkpoint_path
+    # IID discovery has no checkpoint of its own yet, so nothing here writes to
+    # checkpoint_path — but the run dir it names is still created by the
+    # dispatcher and still needs archiving, so it is no longer discarded.
     from mvp.projection.iid.discovery import IIDProjectionDiscovery
 
     # Normalize output path: always in projections/, add .yaml if needed
@@ -2541,6 +2560,7 @@ def _cmd_experiment_iid(
         discovery.save_config(output_path, result)
         print(f"\nSaved config to: {output_path}")
         print(f"Run with: poetry run py -m mvp iid-project {output_path.stem}")
+        _finalize_run(checkpoint_path)
     else:
         print("\nNo features selected - no config saved")
 
@@ -2600,6 +2620,10 @@ def _cmd_experiment_serve(
         _yaml.safe_dump(emitted, f, sort_keys=False)
     print(f"\nSaved config to: {output_path}")
     print(f"Run with: poetry run py -m mvp iid-project {output_path.stem}")
+    # Unconditional, unlike the other families: the serve path always emits a
+    # config (there is no "no features selected" branch to guard against), so
+    # reaching here IS the success condition.
+    _finalize_run(checkpoint_path)
 
     return 0
 
