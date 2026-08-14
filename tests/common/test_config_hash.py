@@ -203,6 +203,102 @@ def test_classification_fingerprint_is_frozen():
     assert compute_fingerprint(cfg) == "e629c878c73e"
 
 
+def test_offset_absent_is_omitted_from_canonical_form():
+    """No offset -> no key, so every pre-existing fingerprint is unchanged."""
+    cfg = _from_dict(_make_base_config_dict())
+    assert "offset" not in canonicalize_config(cfg)
+
+
+def test_offset_changes_fingerprint():
+    """An offset changes what the trees fit, so it must change the hash.
+
+    Without this, an offset run and an otherwise-identical control run collide
+    to the same fingerprint and overwrite each other in model_evaluations/ --
+    and the snapshot collision check does not catch it, because neither
+    snapshot carried the block.
+    """
+    base = _make_base_config_dict()
+    plain = _from_dict(base)
+
+    with_offset = copy.deepcopy(base)
+    with_offset["offset"] = {"feature": "player_glicko_diff", "type": "logistic"}
+
+    assert compute_fingerprint(_from_dict(with_offset)) != compute_fingerprint(plain)
+
+
+def test_offset_survives_into_canonical_form():
+    """<fp>/config.yaml is loaded and retrained from, so the block must be there.
+
+    Regression: the canonical form dropped `offset`, so retraining from the
+    snapshot silently produced a level-free model. Every OddsPapi POC run of the
+    offset arm was affected.
+    """
+    base = _make_base_config_dict()
+    base["offset"] = {"feature": "player_glicko_diff", "type": "logistic"}
+
+    canon = canonicalize_config(_from_dict(base))
+    assert canon["offset"]["feature"] == "player_glicko_diff"
+    assert canon["offset"]["type"] == "logistic"
+
+    # and it must round-trip back into a config that still carries the offset
+    reloaded = ExperimentConfig(**{**base, **{"offset": canon["offset"]}})
+    assert reloaded.offset is not None
+    assert reloaded.offset.feature == "player_glicko_diff"
+
+
+def test_mtl_changes_fingerprint():
+    """MTL swaps in a vector-leaf/custom objective, so it must change the hash."""
+    base = _make_base_config_dict()
+    with_mtl = copy.deepcopy(base)
+    with_mtl["mtl"] = {"auxiliary_targets": ["game_margin"]}
+
+    assert "mtl" not in canonicalize_config(_from_dict(base))
+    assert compute_fingerprint(_from_dict(with_mtl)) != compute_fingerprint(_from_dict(base))
+
+
+def _base_with_objective() -> dict:
+    """Base config carrying metrics.objective.
+
+    `early_stopping.enabled` is rejected without it, and objective is itself in
+    the canonical form -- so it has to be present on BOTH sides of any
+    early-stopping comparison or the fingerprint moves for the wrong reason.
+    """
+    d = _make_base_config_dict()
+    d["metrics"]["objective"] = ["log_loss"]
+    return d
+
+
+def test_early_stopping_changes_fingerprint_only_when_enabled():
+    """two_stage_fit carves its own watch split and lands on a different round
+    count -- but only when enabled. An `enabled: false` block trains identically
+    to no block at all, so it must NOT split one run across two fingerprints."""
+    base = _base_with_objective()
+    fp_base = compute_fingerprint(_from_dict(base))
+
+    off = copy.deepcopy(base)
+    off["early_stopping"] = {"enabled": False}
+    assert compute_fingerprint(_from_dict(off)) == fp_base
+    assert "early_stopping" not in canonicalize_config(_from_dict(off))
+
+    on = copy.deepcopy(base)
+    on["early_stopping"] = {"enabled": True}
+    assert compute_fingerprint(_from_dict(on)) != fp_base
+
+
+def test_fit_altering_blocks_are_independent():
+    """offset / mtl / early_stopping must not alias onto each other's hashes."""
+    base = _base_with_objective()
+    variants = {
+        "none": base,
+        "offset": {**copy.deepcopy(base),
+                   "offset": {"feature": "player_glicko_diff", "type": "logistic"}},
+        "mtl": {**copy.deepcopy(base), "mtl": {"auxiliary_targets": ["game_margin"]}},
+        "es": {**copy.deepcopy(base), "early_stopping": {"enabled": True}},
+    }
+    fps = {k: compute_fingerprint(_from_dict(v)) for k, v in variants.items()}
+    assert len(set(fps.values())) == len(fps), fps
+
+
 def test_fingerprint_length():
     cfg = _from_dict(_make_base_config_dict())
     fp = compute_fingerprint(cfg)

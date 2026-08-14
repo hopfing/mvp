@@ -180,6 +180,42 @@ def _canonicalize_config(
     metrics = dump.get("metrics") or {}
     canon["metrics_objective"] = metrics.get("objective")
 
+    # Optional blocks that CHANGE THE FIT. Each defaults to None, so each is
+    # emitted only when configured and every existing fingerprint that does not
+    # use it is unchanged.
+    #
+    # Leaving one out is not cosmetic: two configs differing only in that block
+    # hash identically, land in the same model_evaluations/<fp>/ dir, and
+    # `write_config_snapshot`'s collision check passes -- because neither
+    # snapshot carried the field to differ on. The snapshot is also loaded and
+    # retrained from (the OddsPapi POC does exactly this), so an omitted block
+    # silently trains a DIFFERENT model than the config asked for. That happened
+    # with `offset`: a whole arm of experiment runs trained level-free.
+    #
+    #   offset          -- a logistic on one feature whose log-odds become
+    #                      base_margin; the trees fit the residual from there.
+    #   mtl             -- vector-leaf / custom objective, different aux targets.
+    #   early_stopping  -- two_stage_fit carves its own sub/watch split inside
+    #                      the fold and settles on a different round count.
+    #
+    # (`ExperimentConfig.validate_offset` rejects offset+mtl and offset+early_stopping
+    # precisely because each rewrites the fit path -- same reason all three belong here.)
+    #
+    # `offset` and `mtl` each have a REQUIRED field (feature / auxiliary_targets),
+    # so any instance is meaningful and truthiness is the right test. EarlyStopping
+    # is all-defaults, so `{enabled: false, ...}` dumps truthy while training
+    # identically to omitting the block -- gate it on `enabled`, matching how
+    # validate_offset decides whether early stopping is actually on. Otherwise the
+    # same run splits across two fingerprints depending on how it was written.
+    for key in ("offset", "mtl"):
+        block = dump.get(key)
+        if block:
+            canon[key] = _deep_sort(block)
+
+    es = dump.get("early_stopping")
+    if es and es.get("enabled"):
+        canon["early_stopping"] = _deep_sort(es)
+
     return canon
 
 
