@@ -754,3 +754,404 @@ def ret_clutch_matchup() -> pl.Expr:
     High value = player wins BP battles when returning.
     """
     return pl.col("player_return_clutch") - pl.col("opp_serve_clutch")
+
+
+# =============================================================================
+# Serve / return surface and venue adjustments
+# =============================================================================
+#
+# Serve Elo is one number per player; overall Elo is not — it carries surface
+# and indoor adjustments on top. That gap is why a player who serves very
+# differently by surface had it averaged away.
+#
+# The raw adjustments are registered individually AS WELL AS inside composites,
+# mirroring how hard_adj/clay_adj/grass_adj are. That is not symmetry for its
+# own sake: forward selection here fits shallow trees, which cannot un-sum a
+# precomputed composite to threshold on one component, so a component only
+# competes if it is a candidate in its own right.
+
+
+def svc_surface_adj_expr(prefix: str) -> pl.Expr:
+    """Surface-selected serve adjustment (no base rating).
+
+    Mirrors surface_adj_expr. 0.0 on any surface the ratings do not model.
+    """
+    return (
+        pl.when(pl.col("surface") == "Hard").then(pl.col(f"{prefix}_svc_hard_adj"))
+        .when(pl.col("surface") == "Clay").then(pl.col(f"{prefix}_svc_clay_adj"))
+        .when(pl.col("surface") == "Grass").then(pl.col(f"{prefix}_svc_grass_adj"))
+        .otherwise(0.0)
+    )
+
+
+def ret_surface_adj_expr(prefix: str) -> pl.Expr:
+    """Surface-selected return adjustment (no base rating)."""
+    return (
+        pl.when(pl.col("surface") == "Hard").then(pl.col(f"{prefix}_ret_hard_adj"))
+        .when(pl.col("surface") == "Clay").then(pl.col(f"{prefix}_ret_clay_adj"))
+        .when(pl.col("surface") == "Grass").then(pl.col(f"{prefix}_ret_grass_adj"))
+        .otherwise(0.0)
+    )
+
+
+def svc_indoor_adj_expr(prefix: str) -> pl.Expr:
+    """Indoor serve adjustment, on indoor HARD matches only.
+
+    Narrower than indoor_adj_expr, which applies on any indoor match. The serve
+    indoor correction is measured for hard courts alone — indoor clay and indoor
+    grass are too rare to support their own population baseline, so the rating
+    never trains those and reading it here would be reading an untrained zero.
+    """
+    return (
+        pl.when(pl.col("indoor") & (pl.col("surface") == "Hard"))
+        .then(pl.col(f"{prefix}_svc_indoor_adj"))
+        .otherwise(0.0)
+    )
+
+
+def ret_indoor_adj_expr(prefix: str) -> pl.Expr:
+    """Indoor return adjustment, on indoor HARD matches only."""
+    return (
+        pl.when(pl.col("indoor") & (pl.col("surface") == "Hard"))
+        .then(pl.col(f"{prefix}_ret_indoor_adj"))
+        .otherwise(0.0)
+    )
+
+
+def svc_elo_surface_expr(prefix: str) -> pl.Expr:
+    """Serve rating plus its surface adjustment."""
+    return pl.col(f"{prefix}_serve_elo") + svc_surface_adj_expr(prefix)
+
+
+def ret_elo_surface_expr(prefix: str) -> pl.Expr:
+    """Return rating plus its surface adjustment."""
+    return pl.col(f"{prefix}_return_elo") + ret_surface_adj_expr(prefix)
+
+
+def svc_elo_surface_indoor_expr(prefix: str) -> pl.Expr:
+    """Serve rating plus surface and venue adjustments — the full stack."""
+    return svc_elo_surface_expr(prefix) + svc_indoor_adj_expr(prefix)
+
+
+def ret_elo_surface_indoor_expr(prefix: str) -> pl.Expr:
+    """Return rating plus surface and venue adjustments."""
+    return ret_elo_surface_expr(prefix) + ret_indoor_adj_expr(prefix)
+
+
+# --- registered features -----------------------------------------------
+
+@feature(
+    name="svc_hard_adj",
+    params=[],
+    description="Serve Elo hard adjustment",
+    mirror=True,
+)
+def svc_hard_adj() -> pl.Expr:
+    return pl.col("player_svc_hard_adj")
+
+
+@feature(
+    name="svc_hard_rd",
+    params=[],
+    description="Serve Elo hard rating deviation",
+    mirror=True,
+)
+def svc_hard_rd() -> pl.Expr:
+    return pl.col("player_svc_hard_rd")
+
+@feature(
+    name="svc_clay_adj",
+    params=[],
+    description="Serve Elo clay adjustment",
+    mirror=True,
+)
+def svc_clay_adj() -> pl.Expr:
+    return pl.col("player_svc_clay_adj")
+
+
+@feature(
+    name="svc_clay_rd",
+    params=[],
+    description="Serve Elo clay rating deviation",
+    mirror=True,
+)
+def svc_clay_rd() -> pl.Expr:
+    return pl.col("player_svc_clay_rd")
+
+@feature(
+    name="svc_grass_adj",
+    params=[],
+    description="Serve Elo grass adjustment",
+    mirror=True,
+)
+def svc_grass_adj() -> pl.Expr:
+    return pl.col("player_svc_grass_adj")
+
+
+@feature(
+    name="svc_grass_rd",
+    params=[],
+    description="Serve Elo grass rating deviation",
+    mirror=True,
+)
+def svc_grass_rd() -> pl.Expr:
+    return pl.col("player_svc_grass_rd")
+
+@feature(
+    name="svc_indoor_adj",
+    params=[],
+    description="Serve Elo indoor adjustment",
+    mirror=True,
+)
+def svc_indoor_adj() -> pl.Expr:
+    return pl.col("player_svc_indoor_adj")
+
+
+@feature(
+    name="svc_indoor_rd",
+    params=[],
+    description="Serve Elo indoor rating deviation",
+    mirror=True,
+)
+def svc_indoor_rd() -> pl.Expr:
+    return pl.col("player_svc_indoor_rd")
+
+@feature(
+    name="ret_hard_adj",
+    params=[],
+    description="Return Elo hard adjustment",
+    mirror=True,
+)
+def ret_hard_adj() -> pl.Expr:
+    return pl.col("player_ret_hard_adj")
+
+
+@feature(
+    name="ret_hard_rd",
+    params=[],
+    description="Return Elo hard rating deviation",
+    mirror=True,
+)
+def ret_hard_rd() -> pl.Expr:
+    return pl.col("player_ret_hard_rd")
+
+@feature(
+    name="ret_clay_adj",
+    params=[],
+    description="Return Elo clay adjustment",
+    mirror=True,
+)
+def ret_clay_adj() -> pl.Expr:
+    return pl.col("player_ret_clay_adj")
+
+
+@feature(
+    name="ret_clay_rd",
+    params=[],
+    description="Return Elo clay rating deviation",
+    mirror=True,
+)
+def ret_clay_rd() -> pl.Expr:
+    return pl.col("player_ret_clay_rd")
+
+@feature(
+    name="ret_grass_adj",
+    params=[],
+    description="Return Elo grass adjustment",
+    mirror=True,
+)
+def ret_grass_adj() -> pl.Expr:
+    return pl.col("player_ret_grass_adj")
+
+
+@feature(
+    name="ret_grass_rd",
+    params=[],
+    description="Return Elo grass rating deviation",
+    mirror=True,
+)
+def ret_grass_rd() -> pl.Expr:
+    return pl.col("player_ret_grass_rd")
+
+@feature(
+    name="ret_indoor_adj",
+    params=[],
+    description="Return Elo indoor adjustment",
+    mirror=True,
+)
+def ret_indoor_adj() -> pl.Expr:
+    return pl.col("player_ret_indoor_adj")
+
+
+@feature(
+    name="ret_indoor_rd",
+    params=[],
+    description="Return Elo indoor rating deviation",
+    mirror=True,
+)
+def ret_indoor_rd() -> pl.Expr:
+    return pl.col("player_ret_indoor_rd")
+
+@feature(
+    name="svc_elo_surface",
+    params=[],
+    description="Serve Elo adjusted for surface",
+    mirror=True,
+)
+def svc_elo_surface() -> pl.Expr:
+    return svc_elo_surface_expr("player")
+
+
+@feature(
+    name="svc_elo_surface_diff",
+    params=[],
+    description="Serve Elo (surface) difference",
+    mirror=False,
+)
+def svc_elo_surface_diff() -> pl.Expr:
+    return svc_elo_surface_expr("player") - svc_elo_surface_expr("opp")
+
+
+@feature(
+    name="svc_elo_surface_matchup",
+    params=[],
+    description="Player serve vs opponent return, both surface adjusted",
+    mirror=True,
+    impute=None,
+)
+def svc_elo_surface_matchup() -> pl.Expr:
+    return svc_elo_surface_expr("player") - ret_elo_surface_expr("opp")
+
+@feature(
+    name="svc_elo_surface_indoor",
+    params=[],
+    description="Serve Elo adjusted for surface and indoor",
+    mirror=True,
+)
+def svc_elo_surface_indoor() -> pl.Expr:
+    return svc_elo_surface_indoor_expr("player")
+
+
+@feature(
+    name="svc_elo_surface_indoor_diff",
+    params=[],
+    description="Serve Elo (surface+indoor) difference",
+    mirror=False,
+)
+def svc_elo_surface_indoor_diff() -> pl.Expr:
+    return svc_elo_surface_indoor_expr("player") - svc_elo_surface_indoor_expr("opp")
+
+
+@feature(
+    name="svc_elo_surface_indoor_matchup",
+    params=[],
+    description="Player serve vs opponent return, both surface+indoor adjusted",
+    mirror=True,
+    impute=None,
+)
+def svc_elo_surface_indoor_matchup() -> pl.Expr:
+    return svc_elo_surface_indoor_expr("player") - ret_elo_surface_indoor_expr("opp")
+
+@feature(
+    name="ret_elo_surface",
+    params=[],
+    description="Return Elo adjusted for surface",
+    mirror=True,
+)
+def ret_elo_surface() -> pl.Expr:
+    return ret_elo_surface_expr("player")
+
+
+@feature(
+    name="ret_elo_surface_diff",
+    params=[],
+    description="Return Elo (surface) difference",
+    mirror=False,
+)
+def ret_elo_surface_diff() -> pl.Expr:
+    return ret_elo_surface_expr("player") - ret_elo_surface_expr("opp")
+
+
+@feature(
+    name="ret_elo_surface_matchup",
+    params=[],
+    description="Player return vs opponent serve, both surface adjusted",
+    mirror=True,
+    impute=None,
+)
+def ret_elo_surface_matchup() -> pl.Expr:
+    return ret_elo_surface_expr("player") - svc_elo_surface_expr("opp")
+
+@feature(
+    name="ret_elo_surface_indoor",
+    params=[],
+    description="Return Elo adjusted for surface and indoor",
+    mirror=True,
+)
+def ret_elo_surface_indoor() -> pl.Expr:
+    return ret_elo_surface_indoor_expr("player")
+
+
+@feature(
+    name="ret_elo_surface_indoor_diff",
+    params=[],
+    description="Return Elo (surface+indoor) difference",
+    mirror=False,
+)
+def ret_elo_surface_indoor_diff() -> pl.Expr:
+    return ret_elo_surface_indoor_expr("player") - ret_elo_surface_indoor_expr("opp")
+
+
+@feature(
+    name="ret_elo_surface_indoor_matchup",
+    params=[],
+    description="Player return vs opponent serve, both surface+indoor adjusted",
+    mirror=True,
+    impute=None,
+)
+def ret_elo_surface_indoor_matchup() -> pl.Expr:
+    return ret_elo_surface_indoor_expr("player") - svc_elo_surface_indoor_expr("opp")
+
+@feature(
+    name="svc_clay_specialist",
+    params=[],
+    description="Serve clay adjustment minus hard adjustment (clay preference)",
+    mirror=True,
+)
+def svc_clay_specialist() -> pl.Expr:
+    """Both terms already have the population surface baseline removed, so the
+    difference is a clean read on preference rather than a mix of the two."""
+    return pl.col("player_svc_clay_adj") - pl.col("player_svc_hard_adj")
+
+@feature(
+    name="svc_grass_specialist",
+    params=[],
+    description="Serve grass adjustment minus hard adjustment (grass preference)",
+    mirror=True,
+)
+def svc_grass_specialist() -> pl.Expr:
+    """Both terms already have the population surface baseline removed, so the
+    difference is a clean read on preference rather than a mix of the two."""
+    return pl.col("player_svc_grass_adj") - pl.col("player_svc_hard_adj")
+
+@feature(
+    name="ret_clay_specialist",
+    params=[],
+    description="Return clay adjustment minus hard adjustment (clay preference)",
+    mirror=True,
+)
+def ret_clay_specialist() -> pl.Expr:
+    """Both terms already have the population surface baseline removed, so the
+    difference is a clean read on preference rather than a mix of the two."""
+    return pl.col("player_ret_clay_adj") - pl.col("player_ret_hard_adj")
+
+@feature(
+    name="ret_grass_specialist",
+    params=[],
+    description="Return grass adjustment minus hard adjustment (grass preference)",
+    mirror=True,
+)
+def ret_grass_specialist() -> pl.Expr:
+    """Both terms already have the population surface baseline removed, so the
+    difference is a clean read on preference rather than a mix of the two."""
+    return pl.col("player_ret_grass_adj") - pl.col("player_ret_hard_adj")

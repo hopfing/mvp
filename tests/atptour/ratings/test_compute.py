@@ -5,7 +5,7 @@ from datetime import date, timedelta
 import polars as pl
 import pytest
 
-from mvp.atptour.elo.constants import SERVE_SEED_SHRINK
+from mvp.atptour.elo.constants import DEFAULT_RD, SERVE_SEED_SHRINK
 from mvp.atptour.elo.ratings import initialize_player
 from mvp.atptour.glicko.constants import (
     GLICKO_REVERSION_RATE,
@@ -276,6 +276,143 @@ class TestServeRDIsIndependentOfBaseRD:
         df = _serve_history_df([True, True, False, False, False, False])
         serve = self._serve_rds(df)
         assert serve[3] < serve[4] < serve[5], serve
+
+
+def _conditions_df(spec: list[tuple[str, bool, int | None]]) -> pl.DataFrame:
+    """A vs B every 7 days under given (surface, indoor, serve pts won of 100).
+
+    None for the third element means the match carries no serve statistics.
+    """
+    rows = []
+    for n, (surf, indoor, won_pts) in enumerate(spec):
+        d = date(2020, 1, 6) + timedelta(days=7 * n)
+        for pid, oid, w in (("A", "B", True), ("B", "A", False)):
+            rows.append({
+                "match_uid": f"m{n}", "player_id": pid, "opp_id": oid, "won": w,
+                "surface": surf, "indoor": indoor, "round": "R32",
+                "round_order": 7, "tournament_start_date": d,
+                "tournament_level": "250", "effective_match_date": d,
+                "player_rank": 50, "opp_rank": 60,
+                "pts_service_pts_won": won_pts,
+                "pts_service_pts_played": None if won_pts is None else 100,
+                "opp_pts_service_pts_won": won_pts,
+                "opp_pts_service_pts_played": None if won_pts is None else 100,
+                "pts_return_pts_won": None, "pts_return_pts_played": None,
+            })
+    return pl.DataFrame(rows, strict=False)
+
+
+def _last(df: pl.DataFrame, col: str) -> float:
+    """Pre-match value of `col` for player A at the final row."""
+    out = compute_all_ratings(df, stamp=True)
+    return out.filter(pl.col("player_id") == "A").sort("match_uid")[col][-1]
+
+
+class TestSurfaceServeAdjustments:
+    """Serve/return residuals per surface, and the venue axis alongside them.
+
+    Their existence is measured, not assumed: a player's surface-specific serve
+    history alone predicts their next performance on that surface WORSE than
+    their overall history does, but a BLEND of the two beats either. An
+    adjustment on top of a base rating is that blend.
+    """
+
+    def test_play_on_one_surface_leaves_the_others_untouched(self):
+        df = _conditions_df([("Clay", False, 75)] * 6)
+        assert _last(df, "player_svc_clay_adj") > 0.0
+        assert _last(df, "player_svc_grass_adj") == 0.0
+        assert _last(df, "player_svc_hard_adj") == 0.0
+
+    def test_indoor_hard_trains_both_the_surface_and_the_venue(self):
+        """Indoor rides ALONGSIDE the surface rather than replacing it."""
+        df = _conditions_df([("Hard", True, 72)] * 6)
+        assert _last(df, "player_svc_hard_adj") > 0.0
+        assert _last(df, "player_svc_indoor_adj") > 0.0
+
+    def test_indoor_clay_does_not_train_the_venue_axis(self):
+        """The indoor correction is measured for Hard only.
+
+        Indoor clay and indoor grass are too rare to support their own
+        population baseline, and without one the adjustment would absorb a venue
+        constant as player skill.
+        """
+        df = _conditions_df([("Clay", True, 72)] * 6)
+        assert _last(df, "player_svc_clay_adj") > 0.0
+        assert _last(df, "player_svc_indoor_adj") == 0.0
+
+    def test_carpet_trains_no_axis(self):
+        """Matches base Elo, whose surface map has no Carpet key either."""
+        df = _conditions_df([("Carpet", False, 72)] * 6)
+        for ax in ("hard", "clay", "grass", "indoor"):
+            assert _last(df, f"player_svc_{ax}_adj") == 0.0
+
+    def test_rd_tightens_only_on_the_surface_played(self):
+        df = _conditions_df([("Hard", False, 66)] * 8)
+        assert _last(df, "player_svc_hard_rd") < DEFAULT_RD
+        assert _last(df, "player_svc_clay_rd") == DEFAULT_RD
+        assert _last(df, "player_svc_grass_rd") == DEFAULT_RD
+
+    def test_matches_without_serve_stats_train_nothing(self):
+        """The adjustment stops learning and its rd grows back.
+
+        Compared WITHIN one run: the pre-match value at the first statless
+        match against the last. Across two runs of different length the
+        comparison would be against a different number of completed updates.
+
+        It may still shrink, because reversion is gated on the axis having ever
+        landed an update rather than on this match landing one — the same
+        treatment base Elo gives its own adjustments, since drift toward the
+        mean is a property of elapsed time, not of observation.
+        """
+        df = _conditions_df(
+            [("Hard", False, 66)] * 3 + [("Hard", False, None)] * 3
+        )
+        out = compute_all_ratings(df, stamp=True)
+        a = out.filter(pl.col("player_id") == "A").sort("match_uid")
+        adj = a["player_svc_hard_adj"].to_list()
+        rd = a["player_svc_hard_rd"].to_list()
+
+        # Rows 3..5 carry no stats, so nothing after row 3 may add to the axis.
+        assert adj[5] <= adj[3] + 1e-12, adj
+        assert adj[3] > 0.0, "the earlier stat-bearing matches should have trained it"
+        # And its confidence decays back toward the ceiling on its own clock.
+        assert rd[5] > rd[3], rd
+
+    def test_adjustments_and_rds_ship_in_the_live_output(self):
+        """These are features, not diagnostics — gating them defeats the point.
+
+        Pass one's observation counters are correctly held back: nothing
+        consumes them. These exist to be selectable by feature selection, so
+        withholding them would mean the dimension they were built for could
+        never be chosen. The rds ship for the same reason — rating deviation is
+        already a feature category here (elo_rd, serve_elo_rd, elo_rd_sum,
+        svc_elo_matchup_rd), so an exception for these would have no principle
+        behind it.
+        """
+        df = _conditions_df([("Hard", True, 66)] * 3)
+        live = compute_all_ratings(df)
+        for ax in ("hard", "clay", "grass", "indoor"):
+            for side in ("svc", "ret"):
+                assert f"player_{side}_{ax}_adj" in live.columns
+                assert f"player_{side}_{ax}_rd" in live.columns
+
+    def test_clocks_never_reach_the_output(self):
+        """Their effect is already fully expressed in the rd they drive."""
+        df = _conditions_df([("Hard", True, 66)] * 3)
+        # Named explicitly rather than matched on "_date": the input frame
+        # carries its own date columns straight through the orchestrator.
+        clocks = [
+            f"{who}_last_{side}_{ax}_date"
+            for who in ("player", "opp")
+            for side in ("svc", "ret")
+            for ax in ("hard", "clay", "grass", "indoor")
+        ] + [
+            f"{who}_last_{k}_update_date"
+            for who in ("player", "opp") for k in ("serve", "return")
+        ]
+        for out in (compute_all_ratings(df),
+                    compute_all_ratings(df, stamp=True)):
+            assert [c for c in clocks if c in out.columns] == []
 
 
 class TestServeSeedAndReversion:

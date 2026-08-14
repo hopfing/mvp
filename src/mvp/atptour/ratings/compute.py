@@ -12,6 +12,7 @@ from mvp.atptour.elo.constants import (
     DEFAULT_SERVE_ELO_CONFIG,
     INDOOR_K_MULT,
     REVERSION_RATE,
+    SERVE_SURFACE_K_MULT,
     SURFACE_K_MULT,
     ServeEloConfig,
 )
@@ -20,6 +21,7 @@ from mvp.atptour.elo.ratings import (
     apply_inactivity_rd,
     get_k_factor,
     k_factor_from,
+    serve_surprise,
     initialize_player,
     update_ace_resistance,
     update_elo,
@@ -106,7 +108,29 @@ SERVE_COUNT_COLUMNS = [
     "opp_serve_match_count", "opp_return_match_count",
 ]
 
-ALL_RATING_COLUMNS = ELO_COLUMNS + GLICKO_COLUMNS
+# Surface/venue serve adjustments and their rds. These SHIP LIVE, unlike
+# pass one's counters. The counters were diagnostic — nothing consumed
+# them — whereas these exist to be selectable features, and gating them
+# would mean feature selection could never see the dimension they were
+# built for. The rds ship for the same reason: this codebase already
+# treats rating deviation as a feature category (elo_rd, serve_elo_rd,
+# elo_rd_sum, svc_elo_matchup_rd), so holding these back would be an
+# exception without a principle. Only the date clocks stay internal —
+# nothing analogous to a raw date is a feature, and their effect is
+# already fully expressed in the rd they drive.
+SERVE_ADJ_COLUMNS = [
+    "player_svc_hard_adj", "player_svc_hard_rd", "player_ret_hard_adj", "player_ret_hard_rd", "player_svc_clay_adj", "player_svc_clay_rd", "player_ret_clay_adj", "player_ret_clay_rd", "player_svc_grass_adj", "player_svc_grass_rd", "player_ret_grass_adj", "player_ret_grass_rd", "player_svc_indoor_adj", "player_svc_indoor_rd", "player_ret_indoor_adj", "player_ret_indoor_rd", "opp_svc_hard_adj", "opp_svc_hard_rd", "opp_ret_hard_adj", "opp_ret_hard_rd", "opp_svc_clay_adj", "opp_svc_clay_rd", "opp_ret_clay_adj", "opp_ret_clay_rd", "opp_svc_grass_adj", "opp_svc_grass_rd", "opp_ret_grass_adj", "opp_ret_grass_rd", "opp_svc_indoor_adj", "opp_svc_indoor_rd", "opp_ret_indoor_adj", "opp_ret_indoor_rd",
+]
+
+ALL_RATING_COLUMNS = ELO_COLUMNS + SERVE_ADJ_COLUMNS + GLICKO_COLUMNS
+
+
+SERVE_AXES = ("hard", "clay", "grass", "indoor")
+
+
+def _bump(rating: PlayerRating, field: str, delta: float) -> None:
+    """Add to a named adjustment field. Keeps the axis loops readable."""
+    setattr(rating, field, getattr(rating, field) + delta)
 
 
 def _capture_elo_values(rating: PlayerRating) -> dict[str, float]:
@@ -136,6 +160,25 @@ def _capture_elo_values(rating: PlayerRating) -> dict[str, float]:
         # is decided by which columns `output` was built with.
         "serve_match_count": rating.serve_match_count,
         "return_match_count": rating.return_match_count,
+        # Surface/venue adjustments and their own rds. Captured always so they
+        # ride the per-match cache; emitted only under stamp. The date clocks
+        # are deliberately absent — their effect is fully expressed in the rd.
+        "svc_hard_adj": rating.svc_hard_adj,
+        "svc_hard_rd": rating.svc_hard_rd,
+        "ret_hard_adj": rating.ret_hard_adj,
+        "ret_hard_rd": rating.ret_hard_rd,
+        "svc_clay_adj": rating.svc_clay_adj,
+        "svc_clay_rd": rating.svc_clay_rd,
+        "ret_clay_adj": rating.ret_clay_adj,
+        "ret_clay_rd": rating.ret_clay_rd,
+        "svc_grass_adj": rating.svc_grass_adj,
+        "svc_grass_rd": rating.svc_grass_rd,
+        "ret_grass_adj": rating.ret_grass_adj,
+        "ret_grass_rd": rating.ret_grass_rd,
+        "svc_indoor_adj": rating.svc_indoor_adj,
+        "svc_indoor_rd": rating.svc_indoor_rd,
+        "ret_indoor_adj": rating.ret_indoor_adj,
+        "ret_indoor_rd": rating.ret_indoor_rd,
     }
 
 
@@ -363,6 +406,17 @@ def compute_all_ratings(
                 opp_rating.return_rd,
                 opp_rating.last_return_update_date, match_date,
             )
+            # Each surface/venue adjustment grows from its OWN clock too. A
+            # player who has not been on grass for two years should show low
+            # confidence in their grass adjustment however much they have played
+            # elsewhere.
+            for r in (player_rating, opp_rating):
+                for ax in SERVE_AXES:
+                    for side in ("svc", "ret"):
+                        setattr(r, f"{side}_{ax}_rd", apply_inactivity_rd(
+                            getattr(r, f"{side}_{ax}_rd"),
+                            getattr(r, f"last_{side}_{ax}_date"), match_date,
+                        ))
 
         # Glicko-2 inactivity
         glicko_p = glicko_ratings[player_id]
@@ -475,6 +529,10 @@ def compute_all_ratings(
         # update_serve_elo, not from the two sides having equal K. Averaging the
         # two sides is what the previous code already did one level up.
 
+        # Which adjustment axes these conditions train. A function of the
+        # match, not of the player, so it is resolved once.
+        axes = player_rating.serve_axes(surface, indoor)
+
         # Sub-game 1: player serves, opponent returns
         serve_won = col_pts_service_pts_won[i]
         serve_played = col_pts_service_pts_played[i]
@@ -493,16 +551,31 @@ def compute_all_ratings(
             )
         ) / 2 * svc_cfg.k_mult
 
-        player_rating.serve_elo, opp_rating.return_elo = update_serve_elo(
-            player_rating.serve_elo, opp_rating.return_elo,
-            player_serve_pct, surface, k_sub1, svc_cfg,
+        # Expectation uses EFFECTIVE ratings (base plus whichever surface/venue
+        # adjustments these conditions engage); the delta then lands on the base
+        # and on each engaged adjustment at its own step size. Same split as
+        # update_elo, which takes an effective rating but returns a base delta.
+        surprise1 = serve_surprise(
+            player_serve_pct, surface,
+            player_rating.effective_serve_elo(surface, indoor),
+            opp_rating.effective_return_elo(surface, indoor),
+            svc_cfg, indoor,
         )
-        if player_serve_pct is not None:
+        if surprise1 is not None:
+            player_rating.serve_elo += k_sub1 * surprise1
+            opp_rating.return_elo -= k_sub1 * surprise1
+            k_adj1 = k_sub1 * SERVE_SURFACE_K_MULT
+            for ax in axes:
+                _bump(player_rating, f"svc_{ax}_adj", k_adj1 * surprise1)
+                _bump(opp_rating, f"ret_{ax}_adj", -k_adj1 * surprise1)
             player_rating.serve_match_count += 1
             opp_rating.return_match_count += 1
             if isinstance(match_date, date):
                 player_rating.last_serve_update_date = match_date
                 opp_rating.last_return_update_date = match_date
+                for ax in axes:
+                    setattr(player_rating, f"last_svc_{ax}_date", match_date)
+                    setattr(opp_rating, f"last_ret_{ax}_date", match_date)
 
         # Sub-game 2: opponent serves, player returns
         opp_serve_won = col_opp_pts_service_pts_won[i]
@@ -522,16 +595,30 @@ def compute_all_ratings(
             )
         ) / 2 * svc_cfg.k_mult
 
-        opp_rating.serve_elo, player_rating.return_elo = update_serve_elo(
-            opp_rating.serve_elo, player_rating.return_elo,
-            opp_serve_pct, surface, k_sub2, svc_cfg,
+        # No snapshot needed between the sub-games: this one reads the
+        # opponent's SERVE side and the player's RETURN side, neither of which
+        # sub-game 1 wrote.
+        surprise2 = serve_surprise(
+            opp_serve_pct, surface,
+            opp_rating.effective_serve_elo(surface, indoor),
+            player_rating.effective_return_elo(surface, indoor),
+            svc_cfg, indoor,
         )
-        if opp_serve_pct is not None:
+        if surprise2 is not None:
+            opp_rating.serve_elo += k_sub2 * surprise2
+            player_rating.return_elo -= k_sub2 * surprise2
+            k_adj2 = k_sub2 * SERVE_SURFACE_K_MULT
+            for ax in axes:
+                _bump(opp_rating, f"svc_{ax}_adj", k_adj2 * surprise2)
+                _bump(player_rating, f"ret_{ax}_adj", -k_adj2 * surprise2)
             opp_rating.serve_match_count += 1
             player_rating.return_match_count += 1
             if isinstance(match_date, date):
                 opp_rating.last_serve_update_date = match_date
                 player_rating.last_return_update_date = match_date
+                for ax in axes:
+                    setattr(opp_rating, f"last_svc_{ax}_date", match_date)
+                    setattr(player_rating, f"last_ret_{ax}_date", match_date)
 
         # Update style dimensions for BOTH players
 
@@ -708,6 +795,31 @@ def compute_all_ratings(
                 ret_rev = REVERSION_RATE * (r.return_rd / DEFAULT_RD)
                 r.return_elo += ret_rev * (DEFAULT_ELO - r.return_elo)
 
+            # NOTE this reversion fires per MATCH PLAYED on any axis, not per
+            # unit of elapsed time — unlike apply_inactivity_rd, which scales
+            # by days. So a player on a lopsided schedule sees an adjustment
+            # for a surface they rarely play decay faster in calendar terms
+            # than an evenly-scheduled player with identical history on it.
+            # Every other reversion in this codebase behaves the same way, so
+            # this is not new here — recorded so it is not rediscovered as if
+            # it were.
+            #
+            # Adjustments revert toward zero, scaled by THEIR OWN rd rather than
+            # the player's overall rd. Base Elo's surface reversion uses the
+            # overall rd only because it has no per-surface rd to use; now that
+            # one exists, using it is the point of tracking it. Gated on the
+            # axis having landed a real update, so an untouched adjustment is
+            # left at zero rather than being repeatedly reverted from it.
+            for ax in SERVE_AXES:
+                for side in ("svc", "ret"):
+                    if getattr(r, f"last_{side}_{ax}_date") is None:
+                        continue
+                    rev = REVERSION_RATE * (
+                        getattr(r, f"{side}_{ax}_rd") / DEFAULT_RD
+                    )
+                    setattr(r, f"{side}_{ax}_adj",
+                            getattr(r, f"{side}_{ax}_adj") * (1 - rev))
+
         # Update RD (decreases after match). Serve and return decay only when
         # their own update actually landed — a match with no point-level serve
         # stats teaches those dimensions nothing, so reporting increased
@@ -720,6 +832,19 @@ def compute_all_ratings(
         if opp_serve_pct is not None:
             opp_rating.serve_rd = update_rd(opp_rating.serve_rd)
             player_rating.return_rd = update_rd(player_rating.return_rd)
+        # Adjustment rds decay only for the axes this match actually trained,
+        # and only on the side whose sub-game landed.
+        for ax in axes:
+            if player_serve_pct is not None:
+                setattr(player_rating, f"svc_{ax}_rd",
+                        update_rd(getattr(player_rating, f"svc_{ax}_rd")))
+                setattr(opp_rating, f"ret_{ax}_rd",
+                        update_rd(getattr(opp_rating, f"ret_{ax}_rd")))
+            if opp_serve_pct is not None:
+                setattr(opp_rating, f"svc_{ax}_rd",
+                        update_rd(getattr(opp_rating, f"svc_{ax}_rd")))
+                setattr(player_rating, f"ret_{ax}_rd",
+                        update_rd(getattr(player_rating, f"ret_{ax}_rd")))
 
         # === GLICKO-2 UPDATES ===
         # Snapshot pre-update values (both use pre-match state)

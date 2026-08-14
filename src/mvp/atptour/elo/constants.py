@@ -57,6 +57,36 @@ RD_GROWTH_PER_DAY = 0.5
 
 # Serve/return baselines by surface
 SERVE_BASELINE = {"Hard": 0.62, "Clay": 0.60, "Grass": 0.64}
+
+# Indoor courts play faster and serve% runs higher on them. Measured on singles
+# with SURFACE HELD FIXED: indoor-hard 0.6368 (n=73,746) against outdoor-hard
+# 0.6243 (n=163,033), so +1.25pp.
+#
+# Holding surface fixed is load-bearing, not fussiness. Pooling all surfaces
+# gives +2.25pp — nearly double — because "outdoor" then includes clay, whose
+# own baseline is 2pp lower, so the comparison charges the clay/hard difference
+# to indoor. Building on that figure would bake a ~1pp phantom effect into every
+# indoor player's rating.
+#
+# Applied to Hard only. Indoor clay and indoor grass barely exist at tour and
+# challenger level, so neither supports its own measured baseline — the same
+# reason Carpet gets no surface adjustment at all.
+INDOOR_SERVE_BOOST = 0.0125
+
+# Step size for the serve/return surface and indoor adjustments, as a multiple
+# of the sub-game's K. Small for the same reason SURFACE_K_MULT is: these are
+# residuals on top of an already-fitted rating, learned from a fraction of a
+# player's matches, and they revert toward zero between updates.
+#
+# One shared value across Hard/Clay/Grass/indoor-hard rather than per-axis
+# constants. A split-half reliability check does suggest an ordering — the
+# optimal static blend weight on surface-specific history ran grass 0.45,
+# hard/clay 0.35, indoor 0.20 — but a static blend weight over complete history
+# is not the same quantity as the step size of a process accumulating from zero,
+# and treating it as one is the mistake that made an earlier K sweep look
+# monotone forever. Differentiate only if measurement says the shared value is
+# insufficient.
+SERVE_SURFACE_K_MULT = 0.3
 RETURN_BASELINE = {"Hard": 0.38, "Clay": 0.40, "Grass": 0.36}
 
 # Fraction of the rank-based Elo seed carried into serve/return Elo. 1.0 = the

@@ -27,6 +27,7 @@ from mvp.atptour.elo.constants import (
     SEED_UNRANKED,
     SERVE_BASELINE,
     SERVE_CLUTCH_BASELINE,
+    INDOOR_SERVE_BOOST,
     STYLE_SCALE,
     TB_CLUTCH_BASELINE,
     TOURNAMENT_IMPORTANCE,
@@ -71,6 +72,73 @@ class PlayerRating:
     return_match_count: int = 0
     last_serve_update_date: date | None = None
     last_return_update_date: date | None = None
+
+    # Surface and venue residuals on top of the global serve/return ratings.
+    # Their existence was gated on measurement rather than assumed: split-half
+    # reliability says a player's surface-specific serve history alone predicts
+    # their next performance on that surface WORSE than their overall history
+    # does (hard -0.014, clay -0.016), but a blend of the two beats either
+    # (+0.006 hard, +0.007 clay, +0.061 grass, +0.011 indoor). An adjustment on
+    # top of a base rating IS that blend, which is why the residual form is the
+    # right one and an independent per-surface rating would not be.
+    #
+    # Indoor is Hard-only. Indoor clay and indoor grass are too rare to support
+    # a measured population baseline, and without one the adjustment would
+    # absorb a venue constant as player skill.
+    svc_hard_adj: float = 0.0
+    svc_clay_adj: float = 0.0
+    svc_grass_adj: float = 0.0
+    svc_indoor_adj: float = 0.0
+    ret_hard_adj: float = 0.0
+    ret_clay_adj: float = 0.0
+    ret_grass_adj: float = 0.0
+    ret_indoor_adj: float = 0.0
+    # Own rd per axis, on the same principle as serve_rd: confidence has to
+    # reflect what THAT axis has seen, not how often the player appeared.
+    svc_hard_rd: float = DEFAULT_RD
+    svc_clay_rd: float = DEFAULT_RD
+    svc_grass_rd: float = DEFAULT_RD
+    svc_indoor_rd: float = DEFAULT_RD
+    ret_hard_rd: float = DEFAULT_RD
+    ret_clay_rd: float = DEFAULT_RD
+    ret_grass_rd: float = DEFAULT_RD
+    ret_indoor_rd: float = DEFAULT_RD
+    # Own clocks. Internal only — never emitted, since their effect is already
+    # fully expressed in the rd they drive.
+    last_svc_hard_date: date | None = None
+    last_svc_clay_date: date | None = None
+    last_svc_grass_date: date | None = None
+    last_svc_indoor_date: date | None = None
+    last_ret_hard_date: date | None = None
+    last_ret_clay_date: date | None = None
+    last_ret_grass_date: date | None = None
+    last_ret_indoor_date: date | None = None
+
+    def serve_axes(self, surface: str, indoor: bool) -> tuple[str, ...]:
+        """Which adjustment axes this match updates.
+
+        A surface the base ratings do not model (Carpet) contributes to neither,
+        matching get_surface_adj's own map. Indoor rides alongside the surface
+        axis rather than replacing it, so an indoor hard match trains both.
+        """
+        axes = []
+        if surface in ("Hard", "Clay", "Grass"):
+            axes.append(surface.lower())
+        if indoor and surface == "Hard":
+            axes.append("indoor")
+        return tuple(axes)
+
+    def effective_serve_elo(self, surface: str, indoor: bool = False) -> float:
+        """Serve rating plus every adjustment this match's conditions engage."""
+        return self.serve_elo + sum(
+            getattr(self, f"svc_{a}_adj") for a in self.serve_axes(surface, indoor)
+        )
+
+    def effective_return_elo(self, surface: str, indoor: bool = False) -> float:
+        """Return rating plus every adjustment this match's conditions engage."""
+        return self.return_elo + sum(
+            getattr(self, f"ret_{a}_adj") for a in self.serve_axes(surface, indoor)
+        )
 
     def get_surface_adj(self, surface: str) -> float:
         """Return surface adjustment for the given surface.
@@ -130,8 +198,22 @@ def expected_score(player_elo: float, opponent_elo: float) -> float:
     return 1.0 / (1.0 + 10.0 ** ((opponent_elo - player_elo) / 400.0))
 
 
+def serve_baseline_for(surface: str, indoor: bool = False) -> float:
+    """Population serve% for these conditions, which the update differences out.
+
+    Indoor is a correction ON TOP of the surface baseline rather than a surface
+    of its own: it only has a measured value for Hard, because indoor clay and
+    indoor grass are too rare to support one.
+    """
+    base = SERVE_BASELINE.get(surface, 0.62)
+    if indoor and surface == "Hard":
+        base += INDOOR_SERVE_BOOST
+    return base
+
+
 def normalize_serve_score(
     serve_pct: float, surface: str, cfg: ServeEloConfig | None = None,
+    indoor: bool = False,
 ) -> float:
     """Map raw serve% to a (0,1) score centred at 0.5 for the surface baseline.
 
@@ -141,12 +223,13 @@ def normalize_serve_score(
     and the update could not tell a good serving day from an overwhelming one.
     """
     slope = (cfg or DEFAULT_SERVE_ELO_CONFIG).score_slope
-    baseline = SERVE_BASELINE.get(surface, 0.62)
+    baseline = serve_baseline_for(surface, indoor)
     return 1.0 / (1.0 + math.exp(-(serve_pct - baseline) / slope))
 
 
 def denormalize_serve_score(
     score: float, surface: str, cfg: ServeEloConfig | None = None,
+    indoor: bool = False,
 ) -> float:
     """Inverse of `normalize_serve_score` — a score back to an implied serve%.
 
@@ -155,7 +238,7 @@ def denormalize_serve_score(
     drift; a saturated score has no finite inverse, hence the guard.
     """
     slope = (cfg or DEFAULT_SERVE_ELO_CONFIG).score_slope
-    baseline = SERVE_BASELINE.get(surface, 0.62)
+    baseline = serve_baseline_for(surface, indoor)
     eps = 1e-12
     s = min(max(score, eps), 1.0 - eps)
     return baseline + slope * math.log(s / (1.0 - s))
@@ -235,6 +318,27 @@ def apply_inactivity_rd(
     return min(MAX_RD, new_rd)
 
 
+def serve_surprise(
+    serve_pct: float | None,
+    surface: str,
+    effective_serve_elo: float,
+    effective_return_elo: float,
+    cfg: ServeEloConfig | None = None,
+    indoor: bool = False,
+) -> float | None:
+    """Signed surprise for one service sub-game, or None if it cannot be scored.
+
+    Split out so the caller can apply one surprise to several places at once —
+    the base rating and whichever surface/venue adjustments the conditions
+    engage — each at its own step size. Mirrors how update_elo takes an
+    effective rating for the expectation but returns a delta for the base.
+    """
+    if serve_pct is None:
+        return None
+    score = normalize_serve_score(serve_pct, surface, cfg, indoor)
+    return score - expected_score(effective_serve_elo, effective_return_elo)
+
+
 def update_serve_elo(
     server_serve_elo: float,
     returner_return_elo: float,
@@ -242,6 +346,7 @@ def update_serve_elo(
     surface: str,
     k: float,
     cfg: ServeEloConfig | None = None,
+    indoor: bool = False,
 ) -> tuple[float, float]:
     """Update serve and return Elo for a serve sub-game.
 
@@ -252,12 +357,11 @@ def update_serve_elo(
     Returns:
         Tuple of (new_server_serve_elo, new_returner_return_elo).
     """
-    if serve_pct is None:
+    surprise = serve_surprise(
+        serve_pct, surface, server_serve_elo, returner_return_elo, cfg, indoor,
+    )
+    if surprise is None:
         return server_serve_elo, returner_return_elo
-
-    score = normalize_serve_score(serve_pct, surface, cfg)
-    expected = expected_score(server_serve_elo, returner_return_elo)
-    surprise = score - expected
 
     return (
         server_serve_elo + k * surprise,
@@ -272,6 +376,7 @@ def update_return_elo(
     surface: str,
     k: float,
     cfg: ServeEloConfig | None = None,
+    indoor: bool = False,
 ) -> tuple[float, float]:
     """Update return and serve Elo for a return sub-game.
 
@@ -285,7 +390,8 @@ def update_return_elo(
         return returner_return_elo, server_serve_elo
 
     new_server, new_returner = update_serve_elo(
-        server_serve_elo, returner_return_elo, opp_serve_pct, surface, k, cfg
+        server_serve_elo, returner_return_elo, opp_serve_pct, surface, k, cfg,
+        indoor,
     )
     return new_returner, new_server
 
