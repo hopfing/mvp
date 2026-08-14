@@ -288,8 +288,10 @@ def _conditions_df(spec: list[tuple[str, bool, int | None]]) -> pl.DataFrame:
         d = date(2020, 1, 6) + timedelta(days=7 * n)
         for pid, oid, w in (("A", "B", True), ("B", "A", False)):
             rows.append({
-                "match_uid": f"m{n}", "player_id": pid, "opp_id": oid, "won": w,
-                "surface": surf, "indoor": indoor, "round": "R32",
+                # Zero-padded: these frames are sorted by match_uid as a
+                # STRING, so "m10" would order before "m2".
+                "match_uid": f"m{n:02d}", "player_id": pid, "opp_id": oid,
+                "won": w, "surface": surf, "indoor": indoor, "round": "R32",
                 "round_order": 7, "tournament_start_date": d,
                 "tournament_level": "250", "effective_match_date": d,
                 "player_rank": 50, "opp_rank": 60,
@@ -377,6 +379,48 @@ class TestSurfaceServeAdjustments:
         assert adj[3] > 0.0, "the earlier stat-bearing matches should have trained it"
         # And its confidence decays back toward the ceiling on its own clock.
         assert rd[5] > rd[3], rd
+
+    def test_playing_elsewhere_does_not_erode_an_untrained_axis(self):
+        """Reversion must fire on the same cadence its rd decays.
+
+        A grass adjustment is scaled by svc_grass_rd, which only decays on
+        grass. If reversion fired on every match while its strength came from
+        that narrowly-decaying rd, a rarely-played axis would be pulled toward
+        zero on almost every match in between — ~39% of its magnitude between
+        consecutive grass seasons. Base Elo looks like it does this, but its
+        reversion is scaled by the overall rd, which decays every match too, so
+        strength and firing share one cadence there.
+        """
+        grass_then_hard = _conditions_df(
+            [("Grass", False, 75)] * 4 + [("Hard", False, 66)] * 12
+        )
+        out = compute_all_ratings(grass_then_hard, stamp=True)
+        a = out.filter(pl.col("player_id") == "A").sort("match_uid")
+        grass_adj = a["player_svc_grass_adj"].to_list()
+
+        # Values are PRE-match, so the grass training is fully reflected from
+        # index 4 — the first hard match — onward.
+        on_hard = grass_adj[4:]
+        assert on_hard[0] > 0.0, "the grass matches should have trained the axis"
+        # Every hard match after it must leave the value bit-identical.
+        assert on_hard == pytest.approx(
+            [on_hard[0]] * len(on_hard), abs=1e-12
+        ), grass_adj
+
+    def test_a_frozen_axis_still_loses_confidence(self):
+        """Freezing the value must not freeze the staleness signal too.
+
+        The rd keeps growing on its own clock while the player is away, so a
+        stale adjustment is still marked stale — the belief holds, the
+        confidence in it decays. That separation is the point.
+        """
+        df = _conditions_df(
+            [("Grass", False, 75)] * 4 + [("Hard", False, 66)] * 12
+        )
+        out = compute_all_ratings(df, stamp=True)
+        a = out.filter(pl.col("player_id") == "A").sort("match_uid")
+        rd = a["player_svc_grass_rd"].to_list()
+        assert rd[-1] > rd[4], rd
 
     def test_adjustments_and_rds_ship_in_the_live_output(self):
         """These are features, not diagnostics — gating them defeats the point.

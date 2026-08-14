@@ -795,31 +795,6 @@ def compute_all_ratings(
                 ret_rev = REVERSION_RATE * (r.return_rd / DEFAULT_RD)
                 r.return_elo += ret_rev * (DEFAULT_ELO - r.return_elo)
 
-            # NOTE this reversion fires per MATCH PLAYED on any axis, not per
-            # unit of elapsed time — unlike apply_inactivity_rd, which scales
-            # by days. So a player on a lopsided schedule sees an adjustment
-            # for a surface they rarely play decay faster in calendar terms
-            # than an evenly-scheduled player with identical history on it.
-            # Every other reversion in this codebase behaves the same way, so
-            # this is not new here — recorded so it is not rediscovered as if
-            # it were.
-            #
-            # Adjustments revert toward zero, scaled by THEIR OWN rd rather than
-            # the player's overall rd. Base Elo's surface reversion uses the
-            # overall rd only because it has no per-surface rd to use; now that
-            # one exists, using it is the point of tracking it. Gated on the
-            # axis having landed a real update, so an untouched adjustment is
-            # left at zero rather than being repeatedly reverted from it.
-            for ax in SERVE_AXES:
-                for side in ("svc", "ret"):
-                    if getattr(r, f"last_{side}_{ax}_date") is None:
-                        continue
-                    rev = REVERSION_RATE * (
-                        getattr(r, f"{side}_{ax}_rd") / DEFAULT_RD
-                    )
-                    setattr(r, f"{side}_{ax}_adj",
-                            getattr(r, f"{side}_{ax}_adj") * (1 - rev))
-
         # Update RD (decreases after match). Serve and return decay only when
         # their own update actually landed — a match with no point-level serve
         # stats teaches those dimensions nothing, so reporting increased
@@ -832,6 +807,38 @@ def compute_all_ratings(
         if opp_serve_pct is not None:
             opp_rating.serve_rd = update_rd(opp_rating.serve_rd)
             player_rating.return_rd = update_rd(player_rating.return_rd)
+        # Adjustments revert toward zero on EXACTLY the same cadence their rd
+        # decays: the axes this match trained, on the side whose sub-game
+        # landed. Reverting more broadly than that is what suppressed thin
+        # axes — grass is ~3% of matches, so an ungated reversion pulled a
+        # grass adjustment toward zero on ~97% of the matches in between,
+        # costing roughly 39% of its magnitude between consecutive grass
+        # seasons ((1 - 0.005)^100).
+        #
+        # Base Elo reverts its surface adjustments on every match, which looks
+        # like the same thing but is not: base Elo scales reversion by the
+        # overall rd, and that rd decays every match too, so the strength and
+        # the firing share one cadence. Pass two scales by a per-axis rd that
+        # decays narrowly, so firing broadly leaves the two mismatched.
+        #
+        # A frozen adjustment does not lose its staleness signal: the axis's rd
+        # keeps growing on its own clock while the player is away, so
+        # confidence decays even though the value holds. Separating "what we
+        # believe" from "how sure we are" is the point — letting confidence
+        # decay leak into the belief is what this fixes.
+        for ax in axes:
+            for r, side, landed in (
+                (player_rating, "svc", player_serve_pct),
+                (opp_rating, "ret", player_serve_pct),
+                (opp_rating, "svc", opp_serve_pct),
+                (player_rating, "ret", opp_serve_pct),
+            ):
+                if landed is None:
+                    continue
+                rev = REVERSION_RATE * (getattr(r, f"{side}_{ax}_rd") / DEFAULT_RD)
+                setattr(r, f"{side}_{ax}_adj",
+                        getattr(r, f"{side}_{ax}_adj") * (1 - rev))
+
         # Adjustment rds decay only for the axes this match actually trained,
         # and only on the side whose sub-game landed.
         for ax in axes:
