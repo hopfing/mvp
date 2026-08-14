@@ -127,21 +127,38 @@ class FastLinesSelector:
             & pl.col("best_of").is_in([3, 5])
         )
 
-        # Dedup for symmetric / canonical-perspective targets; keep both
-        # perspectives for player_games (doubled-data symmetric training).
         target = self.config.discovery.target
-        if target in ("total", "spread"):
-            df = df.sort(["match_uid", "player_id"]).unique(
-                subset=["match_uid"], keep="first", maintain_order=True,
-            )
-
         logger.info(
             "Filtered to %d rows (target=%s); loading %d feature specs from cache",
             len(df), target, len(self.all_feature_specs),
         )
         check_memory("precompute: after filtering")
 
+        # Features load BEFORE the canonical-perspective dedup, and that order is
+        # load-bearing. Most `opp_*` columns do not exist in matches.parquet —
+        # FeatureEngine._mirror_features builds them by self-joining the frame
+        # (match_uid, opp_id) -> (match_uid, player_id), so the OPPONENT'S OWN ROW
+        # has to still be present. Deduping first removes it: the left join misses,
+        # every mirrored `opp_*` column comes back null, imputation fills it with a
+        # constant, and the spec becomes an inert candidate that scores exactly
+        # what the model scores without it. Nothing raises and the run completes.
+        # Measured on the run that exposed this: 1,576 of the 1,606 `opp_*` specs
+        # tied on a single score. Only specs whose `opp_` counterpart already
+        # exists survived — raw parquet columns, and the transforms that emit both
+        # sides themselves.
         df = engine.load_features_numpy(self.all_feature_specs, df, cache_key)
+
+        # Dedup for symmetric / canonical-perspective targets; keep both
+        # perspectives for player_games (doubled-data symmetric training).
+        # Placed after the load for the reason above, and before apply_filters so
+        # a perspective-dependent filter (e.g. `player_svc_elo_matchup: {abs_min}`)
+        # still applies to the canonical row only, exactly as it did before.
+        if target in ("total", "spread"):
+            df = df.sort(["match_uid", "player_id"]).unique(
+                subset=["match_uid"], keep="first", maintain_order=True,
+            )
+            logger.info("Deduped to %d canonical-perspective rows", len(df))
+
         if self.config.data.filters:
             df = apply_filters(df, self.config.data.filters)
 
