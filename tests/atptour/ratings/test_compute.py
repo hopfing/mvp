@@ -1,11 +1,11 @@
 """Tests for the shared rating orchestrator."""
 
-from datetime import date
+from datetime import date, timedelta
 
 import polars as pl
 import pytest
 
-from mvp.atptour.elo.compute import ELO_COLUMNS, compute_elo_ratings
+from mvp.atptour.elo.constants import SERVE_SEED_SHRINK
 from mvp.atptour.elo.ratings import initialize_player
 from mvp.atptour.glicko.constants import (
     GLICKO_REVERSION_RATE,
@@ -47,23 +47,14 @@ def _make_match_df() -> pl.DataFrame:
     })
 
 
-class TestEloRegression:
-    """Orchestrator must produce identical Elo columns to standalone compute."""
+class TestRatingColumns:
+    """Column contract of the orchestrator's output.
 
-    def test_elo_columns_match_standalone(self):
-        df = _make_match_df()
-        standalone = compute_elo_ratings(df)
-        combined = compute_all_ratings(df)
-
-        for col in ELO_COLUMNS:
-            standalone_vals = standalone[col].to_list()
-            combined_vals = combined[col].to_list()
-            for i, (s, c) in enumerate(zip(standalone_vals, combined_vals)):
-                if s is None and c is None:
-                    continue
-                assert s == pytest.approx(c, abs=1e-10), (
-                    f"Column {col} row {i}: standalone={s}, combined={c}"
-                )
+    Previously this class also pinned the orchestrator equal to a duplicate
+    implementation in mvp.atptour.elo.compute. That module has been deleted --
+    it had drifted (flat vs RD-scaled reversion, no config threading) and its
+    remaining behavioural tests were repointed here rather than dropped.
+    """
 
     def test_all_rating_columns_present(self):
         df = _make_match_df()
@@ -214,20 +205,104 @@ class TestGlickoMeanReversion:
         assert a_next != pytest.approx(a_post, abs=1e-9)
 
 
-class TestGlickoEloIndependence:
-    def test_elo_unchanged_after_glicko_added(self):
-        df = _make_match_df()
-        standalone = compute_elo_ratings(df)
-        combined = compute_all_ratings(df)
-        for col in ELO_COLUMNS:
-            standalone_vals = standalone[col].to_list()
-            combined_vals = combined[col].to_list()
-            for i, (s, c) in enumerate(
-                zip(standalone_vals, combined_vals)
-            ):
-                if s is None and c is None:
-                    continue
-                assert s == pytest.approx(c, abs=1e-10), (
-                    f"Column {col} row {i}: "
-                    f"standalone={s}, combined={c}"
-                )
+def _serve_history_df(stats_present: list[bool]) -> pl.DataFrame:
+    """A vs B every 7 days; `stats_present[i]` says if match i carries serve stats.
+
+    Dates stay tight on purpose. RD is capped at MAX_RD, so a long gap pushes
+    both the base and the serve RD back to the ceiling and hides exactly the
+    divergence these tests exist to detect.
+    """
+    rows = []
+    for n, present in enumerate(stats_present):
+        d = date(2020, 1, 6) + timedelta(days=7 * n)
+        won, played = (60, 100) if present else (None, None)
+        for pid, oid, w in (("A", "B", True), ("B", "A", False)):
+            rows.append({
+                "match_uid": f"m{n}", "player_id": pid, "opp_id": oid,
+                "won": w, "surface": "Hard", "round": "R32", "round_order": 7,
+                "tournament_start_date": d, "tournament_level": "250",
+                "effective_match_date": d, "player_rank": 50, "opp_rank": 60,
+                "pts_service_pts_won": won, "pts_service_pts_played": played,
+                "opp_pts_service_pts_won": won,
+                "opp_pts_service_pts_played": played,
+                "pts_return_pts_won": None, "pts_return_pts_played": None,
+                "indoor": False,
+            })
+    return pl.DataFrame(rows)
+
+
+class TestServeRDIsIndependentOfBaseRD:
+    """serve_rd tracks what the SERVE rating has learned, not match count.
+
+    Before this, serve_rd and return_rd were decayed by the same unconditional
+    rule as the base rd on every match — including matches carrying no serve
+    stats, where the serve rating did not move at all. The three columns were
+    bit-identical across the entire corpus, so nothing could distinguish a
+    measured serve rating from an untouched one.
+    """
+
+    def _serve_rds(self, df: pl.DataFrame) -> list[float]:
+        out = compute_all_ratings(df)
+        a = out.filter(pl.col("player_id") == "A").sort("match_uid")
+        return a["player_serve_elo_rd"].to_list()
+
+    def _base_rds(self, df: pl.DataFrame) -> list[float]:
+        out = compute_all_ratings(df)
+        a = out.filter(pl.col("player_id") == "A").sort("match_uid")
+        return a["player_elo_rd"].to_list()
+
+    def test_tracks_base_rd_while_every_match_has_stats(self):
+        """Control: with stats throughout, the two should still agree."""
+        df = _serve_history_df([True] * 5)
+        assert self._serve_rds(df) == pytest.approx(self._base_rds(df), abs=1e-9)
+
+    def test_stops_decaying_once_serve_stats_stop(self):
+        df = _serve_history_df([True, True, False, False, False, False])
+        serve = self._serve_rds(df)
+        base = self._base_rds(df)
+
+        # Identical while both are learning.
+        assert serve[:3] == pytest.approx(base[:3], abs=1e-9)
+        # Base keeps falling; serve does not.
+        assert base[-1] < base[2]
+        assert serve[-1] > serve[2]
+
+    def test_grows_on_its_own_clock_during_a_stats_drought(self):
+        """The player keeps playing, so last_match_date keeps refreshing.
+
+        Keyed to that clock, serve_rd would freeze rather than grow — the same
+        lie as decaying it, relocated to the inactivity side.
+        """
+        df = _serve_history_df([True, True, False, False, False, False])
+        serve = self._serve_rds(df)
+        assert serve[3] < serve[4] < serve[5], serve
+
+
+class TestServeSeedAndReversion:
+    def test_serve_elo_seeded_from_rank_not_flat(self):
+        """The rank seed reaches serve Elo, scaled by SERVE_SEED_SHRINK.
+
+        Flat 1500 was the old behaviour and left a quarter of singles rows with
+        a serve rating carrying no information at all.
+        """
+        df = _serve_history_df([True])
+        out = compute_all_ratings(df)
+        a = out.filter(pl.col("player_id") == "A")
+        serve_elo = a["player_serve_elo"][0]
+        elo = a["player_elo"][0]
+        assert serve_elo > 1500.0
+        assert serve_elo == pytest.approx(
+            1500.0 + SERVE_SEED_SHRINK * (elo - 1500.0), abs=1e-6
+        )
+
+    def test_unmeasured_serve_rating_is_not_reverted(self):
+        """Reversion must not erase a seed before serve data can test it.
+
+        Reversion scales with rd and a fresh seed sits at the rd ceiling, so
+        ungated it would pull hardest exactly when the rating knows least.
+        """
+        df = _serve_history_df([False, False, False])
+        out = compute_all_ratings(df)
+        a = out.filter(pl.col("player_id") == "A").sort("match_uid")
+        vals = a["player_serve_elo"].to_list()
+        assert vals[0] == pytest.approx(vals[-1], abs=1e-9), vals

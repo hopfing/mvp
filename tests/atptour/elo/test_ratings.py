@@ -9,11 +9,13 @@ from mvp.atptour.elo.constants import (
     HIGH_RD_K_MULT,
     MIN_RD,
     NEW_PLAYER_K_MULT,
+    SERVE_SEED_SHRINK,
     TOURNAMENT_IMPORTANCE,
 )
 from mvp.atptour.elo.ratings import (
     PlayerRating,
     apply_inactivity_rd,
+    denormalize_serve_score,
     expected_score,
     get_k_factor,
     normalize_serve_score,
@@ -341,22 +343,36 @@ class TestNormalizeServeScore:
         assert normalize_serve_score(0.62, "Hard") == 0.5
 
     def test_above_baseline_returns_above_half(self):
-        # (0.645 - 0.62) / 0.10 + 0.5 = 0.75
-        score = normalize_serve_score(0.645, "Hard")
-        assert score == pytest.approx(0.75)
+        assert normalize_serve_score(0.645, "Hard") > 0.5
 
     def test_below_baseline_returns_below_half(self):
-        # (0.595 - 0.62) / 0.10 + 0.5 = 0.25
-        score = normalize_serve_score(0.595, "Hard")
-        assert score == pytest.approx(0.25)
+        assert normalize_serve_score(0.595, "Hard") < 0.5
 
-    def test_clamped_at_one(self):
-        score = normalize_serve_score(0.85, "Hard")
-        assert score == 1.0
+    def test_never_saturates(self):
+        """The map is logistic, so extremes stay strictly inside (0, 1).
 
-    def test_clamped_at_zero(self):
-        score = normalize_serve_score(0.40, "Hard")
-        assert score == 0.0
+        The previous linear ramp reached the endpoints at only +/-5pp from
+        baseline, and 59.8% of real matches landed there — the update could not
+        tell a good serving day from an overwhelming one.
+        """
+        assert 0.0 < normalize_serve_score(0.40, "Hard") < 0.5
+        assert 0.5 < normalize_serve_score(0.85, "Hard") < 1.0
+
+    def test_strictly_increasing_across_the_range(self):
+        scores = [
+            normalize_serve_score(p, "Hard")
+            for p in (0.35, 0.45, 0.55, 0.62, 0.70, 0.80, 0.90)
+        ]
+        assert scores == sorted(scores)
+        assert len(set(scores)) == len(scores)
+
+    def test_round_trips_through_its_inverse(self):
+        """Evaluation inverts this map to compare against observed serve%."""
+        for pct in (0.42, 0.55, 0.62, 0.71, 0.83):
+            score = normalize_serve_score(pct, "Hard")
+            assert denormalize_serve_score(score, "Hard") == pytest.approx(
+                pct, abs=1e-9
+            )
 
     def test_clay_baseline(self):
         assert normalize_serve_score(0.60, "Clay") == 0.5
@@ -537,12 +553,45 @@ class TestInitializePlayer:
         assert rating.clay_adj == 0.0
         assert rating.grass_adj == 0.0
 
-    def test_serve_return_default(self):
+    def test_serve_return_seeded_from_rank(self):
+        """Serve and return take the rank seed, scaled by SERVE_SEED_SHRINK.
+
+        Flat 1500 left a quarter of singles rows with a serve rating carrying no
+        information, worst for the new and challenger players a downstream model
+        most needs a number for. How much of the rank seed to carry was then
+        measured rather than argued: correlation with observed serve% rises
+        monotonically with the seed, so the shrink landed at 1.0.
+
+        Asserted against the constant rather than a literal, so the relationship
+        stays pinned if that value is revisited.
+        """
         from mvp.atptour.elo.ratings import initialize_player
 
         rating = initialize_player(ranking=100)
-        assert rating.serve_elo == 1500.0
-        assert rating.return_elo == 1500.0
+        assert rating.serve_elo > 1500.0
+        assert rating.serve_elo == pytest.approx(
+            1500.0 + SERVE_SEED_SHRINK * (rating.elo - 1500.0)
+        )
+        assert rating.return_elo == rating.serve_elo
+
+    def test_serve_seed_scales_with_the_shrink_config(self):
+        """A smaller shrink must pull the seed back toward 1500."""
+        from mvp.atptour.elo.constants import ServeEloConfig
+        from mvp.atptour.elo.ratings import initialize_player
+
+        full = initialize_player(ranking=100)
+        half = initialize_player(ranking=100, cfg=ServeEloConfig(seed_shrink=0.5))
+        assert 1500.0 < half.serve_elo < full.serve_elo
+        assert half.elo == full.elo, "the base rating must not move"
+
+    def test_serve_return_counters_start_empty(self):
+        from mvp.atptour.elo.ratings import initialize_player
+
+        rating = initialize_player(ranking=100)
+        assert rating.serve_match_count == 0
+        assert rating.return_match_count == 0
+        assert rating.last_serve_update_date is None
+        assert rating.last_return_update_date is None
 
 
 class TestStyleDimensionConstants:
@@ -806,7 +855,7 @@ class TestEMAConvergence:
         """Applying the same serve observation vs fixed opponent converges."""
         server_elo = DEFAULT_ELO
         opp_return_elo = DEFAULT_ELO
-        # Use 0.655 (within non-clamped range for DEVIATION_SCALE=0.10)
+        # Use 0.655 (well inside the sigmoid's responsive range at SERVE_SCORE_SLOPE=0.05)
         for _ in range(500):
             server_elo, opp_return_elo = update_serve_elo(
                 server_elo, opp_return_elo, 0.655, "Hard", 16.0
@@ -825,7 +874,7 @@ class TestEMAConvergence:
         """Applying the same return observation vs fixed opponent converges."""
         returner_elo = DEFAULT_ELO
         server_elo = DEFAULT_ELO
-        # Use 0.585 (within non-clamped range for DEVIATION_SCALE=0.10)
+        # Use 0.585 (well inside the sigmoid's responsive range at SERVE_SCORE_SLOPE=0.05)
         for _ in range(500):
             returner_elo, server_elo = update_return_elo(
                 returner_elo, server_elo, 0.585, "Hard", 16.0
@@ -861,7 +910,7 @@ class TestEMAConvergence:
     def test_different_match_counts_same_stats_converge(self):
         """Two players with identical stats but different match counts
         end up at similar ratings."""
-        # Use 0.645 (within non-clamped range for DEVIATION_SCALE=0.10)
+        # Use 0.645 (well inside the sigmoid's responsive range at SERVE_SCORE_SLOPE=0.05)
         # Player A: 200 matches vs fixed opponent
         server_a = DEFAULT_ELO
         opp_a = DEFAULT_ELO

@@ -7,6 +7,7 @@ from mvp.atptour.elo.constants import (
     BASE_K,
     DEFAULT_ELO,
     DEFAULT_RD,
+    DEFAULT_SERVE_ELO_CONFIG,
     EMA_ALPHA,
     FIRST_SERVE_POWER_BASELINE,
     HIGH_RD_K_MULT,
@@ -26,10 +27,10 @@ from mvp.atptour.elo.constants import (
     SEED_UNRANKED,
     SERVE_BASELINE,
     SERVE_CLUTCH_BASELINE,
-    SERVE_RETURN_DEVIATION_SCALE,
     STYLE_SCALE,
     TB_CLUTCH_BASELINE,
     TOURNAMENT_IMPORTANCE,
+    ServeEloConfig,
 )
 
 
@@ -57,6 +58,19 @@ class PlayerRating:
     indoor_adj: float = 0.0
     match_count: int = 0
     last_match_date: date | None = None
+    # Serve and return carry their own experience counters and clocks because
+    # they learn from a different event than the base rating does. A match with
+    # no point-level serve stats still moves `elo` and still refreshes
+    # `last_match_date`, but leaves serve and return untouched — so keying their
+    # decay or their inactivity growth off the match-level fields reports
+    # confidence the serve rating has not earned. The two sides are tracked
+    # separately, not as one "serve/return" pair: a player's RETURN rating
+    # updates from the OPPONENT'S serve stats, so the two can land on different
+    # matches. Mirrors the per-surface clocks GlickoRating already keeps.
+    serve_match_count: int = 0
+    return_match_count: int = 0
+    last_serve_update_date: date | None = None
+    last_return_update_date: date | None = None
 
     def get_surface_adj(self, surface: str) -> float:
         """Return surface adjustment for the given surface.
@@ -75,16 +89,26 @@ class PlayerRating:
         return self.elo + self.get_surface_adj(surface)
 
 
-def get_k_factor(player: PlayerRating, round_name: str, tournament_level: str = "250") -> float:
-    """Calculate dynamic K-factor based on player state and match importance."""
+def k_factor_from(
+    rd: float,
+    match_count: int,
+    round_name: str,
+    tournament_level: str = "250",
+) -> float:
+    """K-factor for one rating dimension, from that dimension's own state.
+
+    Split out of `get_k_factor` so serve and return can use their own rd and
+    experience count without a second copy of the thresholds and multipliers.
+    A fork would let the two drift apart the next time these are retuned.
+    """
     k = BASE_K
 
     # New player multiplier
-    if player.match_count < NEW_PLAYER_THRESHOLD:
+    if match_count < NEW_PLAYER_THRESHOLD:
         k *= NEW_PLAYER_K_MULT
 
     # High uncertainty multiplier
-    if player.rd > HIGH_RD_THRESHOLD:
+    if rd > HIGH_RD_THRESHOLD:
         k *= HIGH_RD_K_MULT
 
     # Match importance multipliers
@@ -94,19 +118,47 @@ def get_k_factor(player: PlayerRating, round_name: str, tournament_level: str = 
     return k
 
 
+def get_k_factor(player: PlayerRating, round_name: str, tournament_level: str = "250") -> float:
+    """K-factor for the BASE rating, from overall rd and match count."""
+    return k_factor_from(
+        player.rd, player.match_count, round_name, tournament_level
+    )
+
+
 def expected_score(player_elo: float, opponent_elo: float) -> float:
     """Calculate expected score (win probability) using Elo formula."""
     return 1.0 / (1.0 + 10.0 ** ((opponent_elo - player_elo) / 400.0))
 
 
-def normalize_serve_score(serve_pct: float, surface: str) -> float:
-    """Normalize raw serve% to a [0,1] score centered at 0.5 for baseline.
+def normalize_serve_score(
+    serve_pct: float, surface: str, cfg: ServeEloConfig | None = None,
+) -> float:
+    """Map raw serve% to a (0,1) score centred at 0.5 for the surface baseline.
 
-    Uses surface-specific baselines. Clamps to [0, 1].
+    Logistic rather than a clipped linear ramp, so the map is strictly
+    increasing everywhere and no two performances of different quality collapse
+    onto the same score. Under the old ramp 59.8% of matches sat at 0.0 or 1.0
+    and the update could not tell a good serving day from an overwhelming one.
     """
+    slope = (cfg or DEFAULT_SERVE_ELO_CONFIG).score_slope
     baseline = SERVE_BASELINE.get(surface, 0.62)
-    score = (serve_pct - baseline) / SERVE_RETURN_DEVIATION_SCALE + 0.5
-    return max(0.0, min(1.0, score))
+    return 1.0 / (1.0 + math.exp(-(serve_pct - baseline) / slope))
+
+
+def denormalize_serve_score(
+    score: float, surface: str, cfg: ServeEloConfig | None = None,
+) -> float:
+    """Inverse of `normalize_serve_score` — a score back to an implied serve%.
+
+    Exists so evaluation can compare `expected_score` against an observed serve
+    percentage on one scale. Kept next to the forward map so the two cannot
+    drift; a saturated score has no finite inverse, hence the guard.
+    """
+    slope = (cfg or DEFAULT_SERVE_ELO_CONFIG).score_slope
+    baseline = SERVE_BASELINE.get(surface, 0.62)
+    eps = 1e-12
+    s = min(max(score, eps), 1.0 - eps)
+    return baseline + slope * math.log(s / (1.0 - s))
 
 
 def update_elo(
@@ -189,6 +241,7 @@ def update_serve_elo(
     serve_pct: float | None,
     surface: str,
     k: float,
+    cfg: ServeEloConfig | None = None,
 ) -> tuple[float, float]:
     """Update serve and return Elo for a serve sub-game.
 
@@ -202,7 +255,7 @@ def update_serve_elo(
     if serve_pct is None:
         return server_serve_elo, returner_return_elo
 
-    score = normalize_serve_score(serve_pct, surface)
+    score = normalize_serve_score(serve_pct, surface, cfg)
     expected = expected_score(server_serve_elo, returner_return_elo)
     surprise = score - expected
 
@@ -218,6 +271,7 @@ def update_return_elo(
     opp_serve_pct: float | None,
     surface: str,
     k: float,
+    cfg: ServeEloConfig | None = None,
 ) -> tuple[float, float]:
     """Update return and serve Elo for a return sub-game.
 
@@ -231,12 +285,14 @@ def update_return_elo(
         return returner_return_elo, server_serve_elo
 
     new_server, new_returner = update_serve_elo(
-        server_serve_elo, returner_return_elo, opp_serve_pct, surface, k
+        server_serve_elo, returner_return_elo, opp_serve_pct, surface, k, cfg
     )
     return new_returner, new_server
 
 
-def initialize_player(ranking: int | None) -> PlayerRating:
+def initialize_player(
+    ranking: int | None, cfg: ServeEloConfig | None = None,
+) -> PlayerRating:
     """Initialize a new player's rating, optionally seeded from ranking.
 
     Mapping: #1 -> ~2400, #100 -> ~1800, #500 -> ~1400, unranked -> 1300
@@ -247,15 +303,30 @@ def initialize_player(ranking: int | None) -> PlayerRating:
     else:
         elo = SEED_UNRANKED
 
+    # Serve and return start from a SHRUNK version of the rank seed rather than
+    # flat DEFAULT_ELO. Flat left a quarter of singles rows carrying a serve
+    # rating of exactly 1500 — no information at all for precisely the new and
+    # challenger players a downstream model most needs a number for. Shrunk
+    # rather than transplanted because rank measures overall strength, and a
+    # full copy would import more general skill than serving evidence supports.
+    #
+    # Note this fires once, at a player's first appearance anywhere, which for
+    # an ITF-graduate is their ITF debut when their rank is weak or absent. The
+    # seed is correspondingly weak for that population; it is not re-anchored
+    # when they reach tour level, because that initialization point is shared
+    # with every other rating dimension.
+    shrink = (cfg or DEFAULT_SERVE_ELO_CONFIG).seed_shrink
+    serve_seed = DEFAULT_ELO + shrink * (elo - DEFAULT_ELO)
+
     return PlayerRating(
         elo=elo,
         rd=DEFAULT_RD,
         hard_adj=0.0,
         clay_adj=0.0,
         grass_adj=0.0,
-        serve_elo=DEFAULT_ELO,
+        serve_elo=serve_seed,
         serve_rd=DEFAULT_RD,
-        return_elo=DEFAULT_ELO,
+        return_elo=serve_seed,
         return_rd=DEFAULT_RD,
         first_serve_power=DEFAULT_ELO,
         second_serve_reliability=DEFAULT_ELO,

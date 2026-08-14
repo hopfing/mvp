@@ -1,10 +1,20 @@
-"""Tests for Elo computation on DataFrames."""
+"""Elo behaviour, exercised through the live orchestrator.
+
+These tests were written against mvp.atptour.elo.compute, a superseded
+duplicate that has been deleted. The behaviours they pin -- zero-sum base
+Elo, per-player K, row-order independence, style columns -- are real and
+still live, so they are repointed rather than dropped.
+"""
 
 from datetime import date
 
 import polars as pl
 
-from mvp.atptour.elo.compute import ELO_COLUMNS, STYLE_COLUMNS, compute_elo_ratings
+from mvp.atptour.ratings.compute import (
+    ELO_COLUMNS,
+    STYLE_COLUMNS,
+    compute_all_ratings as compute_elo_ratings,
+)
 from mvp.atptour.elo.constants import BASE_K, DEFAULT_ELO, REVERSION_RATE
 
 

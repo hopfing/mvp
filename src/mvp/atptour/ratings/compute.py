@@ -6,19 +6,20 @@ from datetime import date
 
 import polars as pl
 
-from mvp.atptour.elo.compute import ELO_COLUMNS
 from mvp.atptour.elo.constants import (
     DEFAULT_ELO,
     DEFAULT_RD,
+    DEFAULT_SERVE_ELO_CONFIG,
     INDOOR_K_MULT,
     REVERSION_RATE,
-    SERVE_RETURN_K_MULT,
     SURFACE_K_MULT,
+    ServeEloConfig,
 )
 from mvp.atptour.elo.ratings import (
     PlayerRating,
     apply_inactivity_rd,
     get_k_factor,
+    k_factor_from,
     initialize_player,
     update_ace_resistance,
     update_elo,
@@ -47,11 +48,62 @@ from mvp.atptour.glicko.ratings import (
 
 logger = logging.getLogger(__name__)
 
+STYLE_COLUMNS = [
+    "player_first_serve_power",
+    "player_second_serve_reliability",
+    "player_ace_resistance",
+    "player_serve_clutch",
+    "player_return_clutch",
+    "player_tb_clutch",
+    "player_overall_clutch",
+    "player_indoor_adj",
+    "opp_first_serve_power",
+    "opp_second_serve_reliability",
+    "opp_ace_resistance",
+    "opp_serve_clutch",
+    "opp_return_clutch",
+    "opp_tb_clutch",
+    "opp_overall_clutch",
+    "opp_indoor_adj",
+]
+
+ELO_COLUMNS = [
+    "player_elo",
+    "player_elo_rd",
+    "player_hard_adj",
+    "player_clay_adj",
+    "player_grass_adj",
+    "player_serve_elo",
+    "player_serve_elo_rd",
+    "player_return_elo",
+    "player_return_elo_rd",
+    "opp_elo",
+    "opp_elo_rd",
+    "opp_hard_adj",
+    "opp_clay_adj",
+    "opp_grass_adj",
+    "opp_serve_elo",
+    "opp_serve_elo_rd",
+    "opp_return_elo",
+    "opp_return_elo_rd",
+] + STYLE_COLUMNS
+
 GLICKO_COLUMNS = [
     "player_glicko_mu", "player_glicko_rd", "player_glicko_sigma",
     "player_glicko_hard_rd", "player_glicko_clay_rd", "player_glicko_grass_rd",
     "opp_glicko_mu", "opp_glicko_rd", "opp_glicko_sigma",
     "opp_glicko_hard_rd", "opp_glicko_clay_rd", "opp_glicko_grass_rd",
+]
+
+# Emitted only under `stamp`, never into the live matches.parquet. They exist
+# so a sweep cell can segment on the SAME count that gated its K factor rather
+# than on a reconstruction, which is an analysis need — not a reason to carry
+# four more columns across 1.35M rows on every 15-minute pipeline run. Whether
+# serve experience is worth having as a production feature is a separate
+# question, and a feature-selection one.
+SERVE_COUNT_COLUMNS = [
+    "player_serve_match_count", "player_return_match_count",
+    "opp_serve_match_count", "opp_return_match_count",
 ]
 
 ALL_RATING_COLUMNS = ELO_COLUMNS + GLICKO_COLUMNS
@@ -80,6 +132,10 @@ def _capture_elo_values(rating: PlayerRating) -> dict[str, float]:
         "tb_clutch": rating.tb_clutch,
         "overall_clutch": rating.overall_clutch,
         "indoor_adj": rating.indoor_adj,
+        # Captured so they ride the per-match cache; whether they are EMITTED
+        # is decided by which columns `output` was built with.
+        "serve_match_count": rating.serve_match_count,
+        "return_match_count": rating.return_match_count,
     }
 
 
@@ -102,8 +158,15 @@ def _append_ratings_to_output(
     glicko_player: dict[str, float],
     glicko_opp: dict[str, float],
 ) -> None:
-    """Append pre-match rating values to the output dict."""
+    """Append pre-match rating values to the output dict.
+
+    Keys absent from `output` are skipped rather than raising: the serve/return
+    counters are captured on every run but only emitted for stamped ones, so
+    the caller decides the column set and this stays agnostic to it.
+    """
     for key in elo_player:
+        if f"player_{key}" not in output:
+            continue
         output[f"player_{key}"].append(elo_player[key])
         output[f"opp_{key}"].append(elo_opp[key])
     for key in glicko_player:
@@ -124,7 +187,11 @@ def _count_tiebreaks(player_tbs: list, opp_tbs: list) -> tuple[int, int]:
 
 
 
-def compute_all_ratings(df: pl.DataFrame) -> pl.DataFrame:
+def compute_all_ratings(
+    df: pl.DataFrame,
+    serve_config: ServeEloConfig | None = None,
+    stamp: bool = False,
+) -> pl.DataFrame:
     """Add all rating columns to matches DataFrame.
 
     Iterates through matches chronologically, tracking player ratings
@@ -132,10 +199,20 @@ def compute_all_ratings(df: pl.DataFrame) -> pl.DataFrame:
 
     Args:
         df: DataFrame with matches, must have effective_match_date column.
+        serve_config: serve/return knobs to run under. None keeps the module
+            defaults, so the live pipeline is unaffected. Passed explicitly
+            rather than patched into the constants module because these values
+            are imported by name at load time — patching would leave the old
+            bindings in place and silently produce the previous configuration.
+        stamp: emit the resolved serve config as constant columns, so a sweep
+            cell's output carries proof of what it actually ran under and
+            cannot be mislabelled. Off by default to keep matches.parquet as
+            it is.
 
     Returns:
         DataFrame with additional rating columns.
     """
+    svc_cfg = serve_config or DEFAULT_SERVE_ELO_CONFIG
     # Deterministic total order. On a same-day collision tournament_start_date
     # sorts the finishing event ahead of the one just starting; round_order then
     # keeps same-day rounds within a tournament in sequence — the earlier round
@@ -202,7 +279,8 @@ def compute_all_ratings(df: pl.DataFrame) -> pl.DataFrame:
 
     elo_ratings: dict[str, PlayerRating] = {}
     glicko_ratings: dict[str, GlickoRating] = {}
-    output: dict[str, list[float | None]] = {col: [] for col in ALL_RATING_COLUMNS}
+    cols = ALL_RATING_COLUMNS + (SERVE_COUNT_COLUMNS if stamp else [])
+    output: dict[str, list[float | None]] = {col: [] for col in cols}
     processed_matches: set[str] = set()
     # Cache pre-match ratings for each match_uid to handle both rows consistently
     match_ratings_cache: dict[str, dict[str, dict[str, float]]] = {}
@@ -213,7 +291,10 @@ def compute_all_ratings(df: pl.DataFrame) -> pl.DataFrame:
         # Guard against None match_uid — would cause cache collisions
         if match_uid is None:
             logger.warning("Skipping row with None match_uid: %s", col_player_id[i])
-            for col in ALL_RATING_COLUMNS:
+            # `cols`, not ALL_RATING_COLUMNS: under stamp the output carries the
+            # serve-count columns too, and padding only the base set would leave
+            # those four lists one short of every other.
+            for col in cols:
                 output[col].append(None)
             continue
 
@@ -229,14 +310,14 @@ def compute_all_ratings(df: pl.DataFrame) -> pl.DataFrame:
         # Initialize players if new
         if player_id not in elo_ratings:
             ranking = col_player_rank[i]
-            elo_ratings[player_id] = initialize_player(ranking)
+            elo_ratings[player_id] = initialize_player(ranking, svc_cfg)
             # Seed Glicko mu from the rank-based Elo seed (same Elo-point scale),
             # not flat INITIAL_MU — flat seeding overrates weak entrants and is a
             # primary driver of mu inflation.
             glicko_ratings[player_id] = GlickoRating(mu=elo_ratings[player_id].elo)
         if opp_id not in elo_ratings:
             opp_ranking = col_opp_rank[i]
-            elo_ratings[opp_id] = initialize_player(opp_ranking)
+            elo_ratings[opp_id] = initialize_player(opp_ranking, svc_cfg)
             glicko_ratings[opp_id] = GlickoRating(mu=elo_ratings[opp_id].elo)
 
         player_rating = elo_ratings[player_id]
@@ -259,20 +340,28 @@ def compute_all_ratings(df: pl.DataFrame) -> pl.DataFrame:
             player_rating.rd = apply_inactivity_rd(
                 player_rating.rd, player_rating.last_match_date, match_date
             )
+            # Serve and return grow from their OWN clocks. Keyed to
+            # last_match_date they would stop growing during a run of matches
+            # that carry no serve stats — the rating stands still while its
+            # stated uncertainty does too, which is the same lie as decaying it.
             player_rating.serve_rd = apply_inactivity_rd(
-                player_rating.serve_rd, player_rating.last_match_date, match_date
+                player_rating.serve_rd,
+                player_rating.last_serve_update_date, match_date,
             )
             player_rating.return_rd = apply_inactivity_rd(
-                player_rating.return_rd, player_rating.last_match_date, match_date
+                player_rating.return_rd,
+                player_rating.last_return_update_date, match_date,
             )
             opp_rating.rd = apply_inactivity_rd(
                 opp_rating.rd, opp_rating.last_match_date, match_date
             )
             opp_rating.serve_rd = apply_inactivity_rd(
-                opp_rating.serve_rd, opp_rating.last_match_date, match_date
+                opp_rating.serve_rd,
+                opp_rating.last_serve_update_date, match_date,
             )
             opp_rating.return_rd = apply_inactivity_rd(
-                opp_rating.return_rd, opp_rating.last_match_date, match_date
+                opp_rating.return_rd,
+                opp_rating.last_return_update_date, match_date,
             )
 
         # Glicko-2 inactivity
@@ -374,9 +463,17 @@ def compute_all_ratings(df: pl.DataFrame) -> pl.DataFrame:
             player_rating.indoor_adj = new_indoor_adj
             opp_rating.indoor_adj = opp_new_indoor_adj
 
-        # Update serve/return Elo — two sub-games per match
-        # Averaged K keeps serve/return zero-sum
-        k_serve = (k_player + k_opp) / 2 * SERVE_RETURN_K_MULT
+        # Update serve/return Elo — two sub-games per match.
+        #
+        # K comes from the serve and return dimensions' OWN rd and experience,
+        # not the base rating's. A player with 200 career matches but few
+        # carrying serve stats has a wide, honest serve_rd; deriving K from
+        # `match_count` would update them at an established player's rate and
+        # make that honesty decorative.
+        #
+        # Zero-sum survives because it comes from passing ONE k to
+        # update_serve_elo, not from the two sides having equal K. Averaging the
+        # two sides is what the previous code already did one level up.
 
         # Sub-game 1: player serves, opponent returns
         serve_won = col_pts_service_pts_won[i]
@@ -385,10 +482,27 @@ def compute_all_ratings(df: pl.DataFrame) -> pl.DataFrame:
         if serve_won is not None and serve_played and serve_played > 0:
             player_serve_pct = serve_won / serve_played
 
+        k_sub1 = (
+            k_factor_from(
+                player_rating.serve_rd, player_rating.serve_match_count,
+                round_name, tournament_level,
+            )
+            + k_factor_from(
+                opp_rating.return_rd, opp_rating.return_match_count,
+                round_name, tournament_level,
+            )
+        ) / 2 * svc_cfg.k_mult
+
         player_rating.serve_elo, opp_rating.return_elo = update_serve_elo(
             player_rating.serve_elo, opp_rating.return_elo,
-            player_serve_pct, surface, k_serve,
+            player_serve_pct, surface, k_sub1, svc_cfg,
         )
+        if player_serve_pct is not None:
+            player_rating.serve_match_count += 1
+            opp_rating.return_match_count += 1
+            if isinstance(match_date, date):
+                player_rating.last_serve_update_date = match_date
+                opp_rating.last_return_update_date = match_date
 
         # Sub-game 2: opponent serves, player returns
         opp_serve_won = col_opp_pts_service_pts_won[i]
@@ -397,10 +511,27 @@ def compute_all_ratings(df: pl.DataFrame) -> pl.DataFrame:
         if opp_serve_won is not None and opp_serve_played and opp_serve_played > 0:
             opp_serve_pct = opp_serve_won / opp_serve_played
 
+        k_sub2 = (
+            k_factor_from(
+                opp_rating.serve_rd, opp_rating.serve_match_count,
+                round_name, tournament_level,
+            )
+            + k_factor_from(
+                player_rating.return_rd, player_rating.return_match_count,
+                round_name, tournament_level,
+            )
+        ) / 2 * svc_cfg.k_mult
+
         opp_rating.serve_elo, player_rating.return_elo = update_serve_elo(
             opp_rating.serve_elo, player_rating.return_elo,
-            opp_serve_pct, surface, k_serve,
+            opp_serve_pct, surface, k_sub2, svc_cfg,
         )
+        if opp_serve_pct is not None:
+            opp_rating.serve_match_count += 1
+            player_rating.return_match_count += 1
+            if isinstance(match_date, date):
+                opp_rating.last_serve_update_date = match_date
+                player_rating.last_return_update_date = match_date
 
         # Update style dimensions for BOTH players
 
@@ -564,13 +695,31 @@ def compute_all_ratings(df: pl.DataFrame) -> pl.DataFrame:
             r.grass_adj *= 1 - reversion
             r.indoor_adj *= 1 - reversion
 
-        # Update RD (decreases after match)
+            # Serve and return drift too and had no reversion at all: mean
+            # serve_elo climbed from 1500 to ~1718 by 2020. Scaled by each
+            # dimension's OWN rd, and skipped entirely until that dimension has
+            # landed at least one real update — otherwise reversion fires at
+            # full strength on a freshly seeded rating whose rd is still at the
+            # ceiling, erasing the seed before any serve data can test it.
+            if r.serve_match_count > 0:
+                svc_rev = REVERSION_RATE * (r.serve_rd / DEFAULT_RD)
+                r.serve_elo += svc_rev * (DEFAULT_ELO - r.serve_elo)
+            if r.return_match_count > 0:
+                ret_rev = REVERSION_RATE * (r.return_rd / DEFAULT_RD)
+                r.return_elo += ret_rev * (DEFAULT_ELO - r.return_elo)
+
+        # Update RD (decreases after match). Serve and return decay only when
+        # their own update actually landed — a match with no point-level serve
+        # stats teaches those dimensions nothing, so reporting increased
+        # confidence in them would be false.
         player_rating.rd = update_rd(player_rating.rd)
-        player_rating.serve_rd = update_rd(player_rating.serve_rd)
-        player_rating.return_rd = update_rd(player_rating.return_rd)
         opp_rating.rd = update_rd(opp_rating.rd)
-        opp_rating.serve_rd = update_rd(opp_rating.serve_rd)
-        opp_rating.return_rd = update_rd(opp_rating.return_rd)
+        if player_serve_pct is not None:
+            player_rating.serve_rd = update_rd(player_rating.serve_rd)
+            opp_rating.return_rd = update_rd(opp_rating.return_rd)
+        if opp_serve_pct is not None:
+            opp_rating.serve_rd = update_rd(opp_rating.serve_rd)
+            player_rating.return_rd = update_rd(player_rating.return_rd)
 
         # === GLICKO-2 UPDATES ===
         # Snapshot pre-update values (both use pre-match state)
@@ -629,6 +778,14 @@ def compute_all_ratings(df: pl.DataFrame) -> pl.DataFrame:
     # Add columns to DataFrame
     for col_name, values in output.items():
         df = df.with_columns(pl.Series(name=col_name, values=values))
+
+    if stamp:
+        # The values actually in force, read off the instance used — never
+        # re-derived from the constants module, which would reintroduce the
+        # ambiguity about which source was authoritative.
+        df = df.with_columns([
+            pl.lit(v).alias(f"_serve_cfg_{k}") for k, v in svc_cfg.stamp().items()
+        ])
 
     logger.info(
         "Computed ratings for %d players across %d unique matches (%d rows)",
