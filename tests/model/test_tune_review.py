@@ -5,11 +5,14 @@ import pytest
 
 from mvp.model.tune_review import (
     _is_new_pipeline_study,
+    _objective_key,
     _robust_pick,
     _to_ranked,
     format_best_trial,
     format_leaderboard,
     format_param_importance,
+    resolve_sort_keys,
+    sort_trials,
 )
 
 
@@ -167,17 +170,20 @@ def legacy_study(tmp_path):
     return study
 
 
+def _first_row(lines: list[str]) -> str:
+    """The top-ranked trial's row. Found by its rank prefix, not a line index —
+    the header is a variable number of one-line bullets."""
+    return next(l for l in lines if l.strip().startswith("1."))
+
+
 class TestFormatLeaderboard:
     """Tests for leaderboard formatting."""
 
     def test_default_sorts_by_holdout_log_loss(self, populated_study):
         """Leaderboard sorts by holdout_log_loss by default (best holdout LL first)."""
         lines = format_leaderboard(populated_study, top_n=3)
-        output = "\n".join(lines)
-        # Best holdout_log_loss is 0.62 (trial C=1.0) — should appear in first row.
-        # Header now spans 3 lines (title + raw-mode note + separator). First
-        # trial row is at index 3.
-        assert "LL=0.6200" in output.split("\n")[3]
+        # Best holdout_log_loss is 0.62 (trial C=1.0) — should lead.
+        assert "LL=0.6200" in _first_row(lines)
 
     def test_bare_sort_auto_prefixes_to_holdout(self, populated_study):
         """`--sort log_loss` is auto-prefixed to `holdout_log_loss`.
@@ -188,26 +194,23 @@ class TestFormatLeaderboard:
         trial leads regardless of the in-fold ordering.
         """
         lines = format_leaderboard(populated_study, sort_by=["log_loss"], top_n=3)
-        output = "\n".join(lines)
-        assert "LL=0.6200" in output.split("\n")[3]
+        assert "LL=0.6200" in _first_row(lines)
 
     def test_bare_sort_by_calibration_auto_prefixes(self, populated_study):
         """`--sort calibration_error` ranks by holdout_calibration_error."""
         lines = format_leaderboard(
             populated_study, sort_by=["calibration_error"], top_n=3
         )
-        output = "\n".join(lines)
         # Best holdout cal is 0.012 = 1.20% (trial C=10.0) — should lead.
-        assert "cal=1.20%" in output.split("\n")[3]
+        assert "cal=1.20%" in _first_row(lines)
 
     def test_already_holdout_prefixed_sort_passes_through(self, populated_study):
         """`--sort holdout_brier_score` works literally (no double-prefix)."""
         lines = format_leaderboard(
             populated_study, sort_by=["holdout_brier_score"], top_n=3
         )
-        output = "\n".join(lines)
         # Best holdout brier is 0.21 (trial C=1.0) — should lead.
-        assert "brier=0.2100" in output.split("\n")[3]
+        assert "brier=0.2100" in _first_row(lines)
 
     def test_top_n_limits_rows(self, populated_study):
         """Leaderboard respects top_n limit."""
@@ -299,17 +302,17 @@ class TestFormatLeaderboard:
         """Default sort ranks by holdout_cal_log_loss, not raw. The calibrated
         winner (C=1.0, cal LL 0.60) differs from the raw winner (C=0.1, raw LL
         0.62), so the calibrated value must determine the order."""
-        first_row = "\n".join(
-            format_leaderboard(populated_cal_study, top_n=3)
-        ).split("\n")[3]
+        first_row = _first_row(format_leaderboard(populated_cal_study, top_n=3))
         assert "LL=0.6000" in first_row  # calibrated LL, not raw 0.6200
         assert "trial 1)" in first_row   # C=1.0 was the 2nd-created trial
 
-    def test_cal_header_and_raw_reference(self, populated_cal_study):
-        """Header flags deployment-frame; each trial shows a raw LL reference."""
+    def test_raw_reference_on_each_row(self, populated_cal_study):
+        """Each trial shows its uncalibrated LL next to the ranked one. The frame
+        needs no header note — the sort line names the key and the field labels
+        itself."""
         output = "\n".join(format_leaderboard(populated_cal_study, top_n=3))
-        assert "deployment-frame" in output
         assert "raw LL=0.6600" in output  # winner's raw LL on the reference line
+        assert output.split("\n")[1].startswith("=")  # no bullets, straight to rows
 
     def test_cal_outer_block_spread(self, populated_cal_study):
         """The reference line shows the outer-block per-fold log_loss spread."""
@@ -319,9 +322,9 @@ class TestFormatLeaderboard:
 
     def test_cal_bare_sort_routes_to_calibrated(self, populated_cal_study):
         """`--sort log_loss` on a cal study ranks by holdout_cal_log_loss."""
-        first_row = "\n".join(
+        first_row = _first_row(
             format_leaderboard(populated_cal_study, sort_by=["log_loss"], top_n=1)
-        ).split("\n")[3]
+        )
         assert "LL=0.6000" in first_row
 
     def test_cal_sort_by_auc_stays_raw(self, populated_cal_study):
@@ -366,10 +369,9 @@ class TestFormatLeaderboard:
         study.add_trial(_trial(1.0, 0.62, with_cal=False))  # raw-only, best raw LL
         study.add_trial(_trial(10.0, 0.64, with_cal=True))
         output = "\n".join(format_leaderboard(study, top_n=3))
-        # Mixed → raw view (not deployment-frame) with an explanatory note.
-        assert "deployment-frame" in output  # only in the mixed-note text
-        assert "2/3 trials carry deployment-frame metrics" in output
-        assert "Probability metrics are deployment-frame" not in output  # not the cal header
+        # Mixed → raw view, flagged: an inconsistent study is worth a bullet.
+        assert "only 2/3 trials have deployment-frame metrics" in output
+        assert "holdout_log_loss" in output  # ranked raw, not holdout_cal_
         # The raw-only trial (best raw LL 0.62) is ranked and shown, not buried.
         assert "LL=0.6200" in output
         assert "nan" not in output
@@ -449,15 +451,16 @@ class TestRobustPick:
         )
         study.add_trial(self._cal_trial(0.1, [0.55, 0.64, 0.55, 0.63]))  # 0: hi var
         study.add_trial(self._cal_trial(1.0, [0.60, 0.60, 0.60, 0.60]))  # 1: stable
-        number, band = _robust_pick(study.trials, "holdout_cal_log_loss")
+        number, band, note = _robust_pick(study.trials, "holdout_cal_log_loss")
         assert number == 1
         assert band == 2
+        assert note == ""
 
     def test_none_without_per_fold_metrics(self):
         t = optuna.trial.create_trial(
             params={}, distributions={}, values=[0.6], user_attrs={}
         )
-        assert _robust_pick([t], "holdout_cal_log_loss") == (None, 0)
+        assert _robust_pick([t], "holdout_cal_log_loss") == (None, 0, "")
 
     def test_maximize_metric_direction(self, tmp_path):
         """roc_auc is maximize: the stable trial within 1 SE *below* the best mean
@@ -479,9 +482,10 @@ class TestRobustPick:
 
         study.add_trial(_t(0.1, [0.70, 0.80, 0.70, 0.80]))  # 0: mean .75, high var
         study.add_trial(_t(1.0, [0.74, 0.74, 0.74, 0.74]))  # 1: mean .74, var 0
-        number, band = _robust_pick(study.trials, "holdout_roc_auc")
+        number, band, note = _robust_pick(study.trials, "holdout_roc_auc")
         assert number == 1
         assert band == 2
+        assert note == ""
 
     def test_robust_pick_annotates_leaderboard(self, tmp_path):
         """format_leaderboard flags the 1-SE robust pick when it differs from the
@@ -513,8 +517,263 @@ class TestRobustPick:
         study.add_trial(_t(0.1, 0.592, [0.55, 0.64, 0.55, 0.63]))  # argmax, high var
         study.add_trial(_t(1.0, 0.600, [0.60, 0.60, 0.60, 0.60]))  # stable, in band
         output = "\n".join(format_leaderboard(study, top_n=2))
-        assert "1-SE robust pick: trial 1" in output
+        assert "1-SE pick: trial 1" in output
         assert "◆ 1-SE robust pick" in output
+
+    def test_suppressed_below_three_outer_folds(self, tmp_path):
+        """At K=2 the variance tie-break is just "which two numbers sit closest",
+        so the pick is suppressed with a reason rather than recommended."""
+        storage = f"sqlite:///{tmp_path / 'rp_k2.db'}"
+        study = optuna.create_study(
+            study_name="rp_k2", storage=storage, direction="minimize"
+        )
+        study.add_trial(self._cal_trial(0.1, [0.55, 0.65]))  # best mean, wide
+        study.add_trial(self._cal_trial(1.0, [0.605, 0.607]))  # in band, narrow
+        number, band, note = _robust_pick(
+            study.trials, "holdout_cal_log_loss", outer_folds=2
+        )
+        assert number is None
+        assert band == 0
+        assert "1-SE pick off: 2 outer folds" in note
+
+    def test_fold_count_falls_back_to_per_fold_attrs(self, tmp_path):
+        """Studies predating the `outer_folds` attr still get the K guard, from
+        what the per-fold metrics actually carry."""
+        storage = f"sqlite:///{tmp_path / 'rp_k2b.db'}"
+        study = optuna.create_study(
+            study_name="rp_k2b", storage=storage, direction="minimize"
+        )
+        study.add_trial(self._cal_trial(0.1, [0.55, 0.65]))
+        study.add_trial(self._cal_trial(1.0, [0.605, 0.607]))
+        number, _, note = _robust_pick(study.trials, "holdout_cal_log_loss")
+        assert number is None
+        assert "1-SE pick off: 2 outer folds" in note
+
+    def test_suppressed_when_band_swallows_the_leaderboard(self, tmp_path):
+        """Enough outer folds, but per-fold noise dwarfs the between-trial spread,
+        so nearly every trial lands within 1 SE — naming one implies a distinction
+        the data doesn't carry. Fold count alone wouldn't catch this."""
+        storage = f"sqlite:///{tmp_path / 'rp_band.db'}"
+        study = optuna.create_study(
+            study_name="rp_band", storage=storage, direction="minimize"
+        )
+        # 25 trials, means 0.6000..0.6024 apart, each with a ~0.03 fold spread.
+        for i in range(25):
+            base = 0.60 + i * 0.0001
+            study.add_trial(
+                self._cal_trial(0.1 + i, [base - 0.015, base + 0.015, base, base])
+            )
+        number, band, note = _robust_pick(
+            study.trials, "holdout_cal_log_loss", outer_folds=4
+        )
+        assert number is None
+        assert band == 0
+        assert "trials within 1 SE" in note
+        assert "doesn't separate trials" in note
+
+    def test_band_fraction_guard_needs_enough_trials(self, tmp_path):
+        """The band-fraction symptom only means something with enough trials —
+        a 2-trial study keeps the pick."""
+        storage = f"sqlite:///{tmp_path / 'rp_small.db'}"
+        study = optuna.create_study(
+            study_name="rp_small", storage=storage, direction="minimize"
+        )
+        study.add_trial(self._cal_trial(0.1, [0.55, 0.64, 0.55, 0.63]))
+        study.add_trial(self._cal_trial(1.0, [0.60, 0.60, 0.60, 0.60]))
+        number, band, note = _robust_pick(
+            study.trials, "holdout_cal_log_loss", outer_folds=4
+        )
+        assert number == 1  # band is 2/2 but the study is too small to judge
+        assert band == 2
+        assert note == ""
+
+
+class TestDefaultSort:
+    """With no `--sort`, rank on the study's own objective — not a hardcoded
+    metric the study may never have optimized."""
+
+    @staticmethod
+    def _study(tmp_path, name, objective, rows):
+        """rows: (C, holdout_cal_log_loss, holdout_cal_brier_score)."""
+        storage = f"sqlite:///{tmp_path / f'{name}.db'}"
+        study = optuna.create_study(
+            study_name=name, storage=storage, direction="minimize"
+        )
+        if objective:
+            study.set_user_attr("objective_metrics", objective)
+        for c, ll, brier in rows:
+            study.add_trial(
+                optuna.trial.create_trial(
+                    params={"C": c},
+                    distributions={
+                        "C": optuna.distributions.FloatDistribution(0.01, 100.0, log=True)
+                    },
+                    values=[ll],
+                    user_attrs={
+                        "_tuning_mode": "calibrated",
+                        "log_loss": ll, "duration_s": 5.0,
+                        "holdout_cal_log_loss": ll,
+                        "holdout_cal_brier_score": brier,
+                        "holdout_log_loss": ll + 0.001,
+                        "holdout_roc_auc": 0.73,
+                    },
+                )
+            )
+        return study
+
+    # LL and brier disagree: C=0.1 wins LL, C=1.0 wins brier.
+    _ROWS = [(0.1, 0.60, 0.23), (1.0, 0.62, 0.21)]
+
+    def test_brier_objective_ranks_by_brier(self, tmp_path):
+        study = self._study(tmp_path, "obj_brier", ["brier_score"], self._ROWS)
+        assert resolve_sort_keys(study, study.trials) == ["holdout_cal_brier_score"]
+        lines = format_leaderboard(study, top_n=2)
+        assert "sorted by holdout_cal_brier_score" in lines[0]
+        assert "brier=0.2100" in _first_row(lines)  # C=1.0 leads, not the LL winner
+
+    def test_log_loss_objective_ranks_by_log_loss(self, tmp_path):
+        study = self._study(tmp_path, "obj_ll", ["log_loss"], self._ROWS)
+        assert resolve_sort_keys(study, study.trials) == ["holdout_cal_log_loss"]
+        assert "LL=0.6000" in _first_row(format_leaderboard(study, top_n=2))
+
+    def test_explicit_sort_overrides_the_objective(self, tmp_path):
+        study = self._study(tmp_path, "obj_override", ["brier_score"], self._ROWS)
+        keys = resolve_sort_keys(study, study.trials, ["log_loss"])
+        assert keys == ["holdout_cal_log_loss"]
+
+    def test_unstamped_study_falls_back(self, tmp_path):
+        """No objective_metrics and an ambiguous value → the old log_loss default,
+        so studies tuned before the stamp keep rendering."""
+        study = self._study(tmp_path, "obj_none", None, self._ROWS)
+        assert resolve_sort_keys(study, study.trials) == ["holdout_cal_log_loss"]
+
+    def test_sweep_and_leaderboard_agree(self, tmp_path):
+        """The invariant the sweep depends on: top-N off the shared helpers is the
+        same set, in the same order, as the leaderboard's rows. Both `tune-review`
+        and `--select topn` go through resolve_sort_keys + sort_trials."""
+        rows = [(0.1, 0.60, 0.23), (1.0, 0.62, 0.21), (10.0, 0.61, 0.22)]
+        study = self._study(tmp_path, "obj_agree", ["brier_score"], rows)
+        keys = resolve_sort_keys(study, study.trials)
+        picked = [t.number for t in sort_trials(study.trials, keys)[:2]]
+        shown = [
+            int(line.split("trial ")[1].rstrip(")"))
+            for line in format_leaderboard(study, top_n=2)
+            if line.strip().startswith(("1.", "2."))
+        ]
+        assert picked == shown
+
+
+class TestObjectiveKey:
+    """Naming the value Optuna optimized, so the tuner's `best=` reconciles with
+    the leaderboard (which ranks a different fold set)."""
+
+    @staticmethod
+    def _study(tmp_path, name, attrs, trial_attrs, value):
+        storage = f"sqlite:///{tmp_path / f'{name}.db'}"
+        study = optuna.create_study(
+            study_name=name, storage=storage, direction="minimize"
+        )
+        for k, v in attrs.items():
+            study.set_user_attr(k, v)
+        for i in range(2):
+            study.add_trial(
+                optuna.trial.create_trial(
+                    params={"C": 0.1 * (i + 1)},
+                    distributions={
+                        "C": optuna.distributions.FloatDistribution(0.01, 100.0, log=True)
+                    },
+                    values=[value + i * 0.01],
+                    user_attrs={
+                        k: (v + i * 0.01 if isinstance(v, float) else v)
+                        for k, v in trial_attrs.items()
+                    },
+                )
+            )
+        return study
+
+    def test_stamped_calibrated_study_resolves_to_cal_key(self, tmp_path):
+        """A calibrated-frame study optimizes `cal_<metric>`, not the raw metric."""
+        study = self._study(
+            tmp_path, "stamped",
+            {"objective_metrics": ["log_loss"], "objective_frame": "forward_cal_v1"},
+            {"log_loss": 0.61, "cal_log_loss": 0.60},
+            0.60,
+        )
+        assert _objective_key(study, study.trials) == "cal_log_loss"
+
+    def test_stamped_raw_study_resolves_to_bare_key(self, tmp_path):
+        study = self._study(
+            tmp_path, "stamped_raw",
+            {"objective_metrics": ["log_loss"], "objective_frame": "forward_v2"},
+            {"log_loss": 0.60, "cal_log_loss": 0.59},
+            0.60,
+        )
+        assert _objective_key(study, study.trials) == "log_loss"
+
+    def test_unstamped_study_recovers_by_value_match(self, tmp_path):
+        """Studies tuned before the stamp existed still get the column: the
+        objective attr is the one equal to `values[0]` on every trial."""
+        study = self._study(
+            tmp_path, "unstamped", {},
+            {"log_loss": 0.61, "cal_log_loss": 0.60},
+            0.60,
+        )
+        assert _objective_key(study, study.trials) == "cal_log_loss"
+
+    def test_ambiguous_recovery_returns_none(self, tmp_path):
+        """Two attrs tying on every trial is ambiguous — no column beats a guess."""
+        study = self._study(
+            tmp_path, "ambiguous", {},
+            {"log_loss": 0.60, "holdout_log_loss": 0.60},
+            0.60,
+        )
+        assert _objective_key(study, study.trials) is None
+
+    def test_multi_objective_returns_none(self, tmp_path):
+        storage = f"sqlite:///{tmp_path / 'multi.db'}"
+        study = optuna.create_study(
+            study_name="multi", storage=storage, directions=["minimize", "maximize"]
+        )
+        assert _objective_key(study, []) is None
+
+    def test_leaderboard_never_shows_the_objective(self, tmp_path):
+        """The search objective appears nowhere in the leaderboard — not as a
+        header claim, not as a per-row field. Every trial was optimized against
+        it, so it can't rank them, and showing it only invites the reader to
+        mistake it for the sort key."""
+        storage = f"sqlite:///{tmp_path / 'obj.db'}"
+        study = optuna.create_study(
+            study_name="obj", storage=storage, direction="minimize"
+        )
+        study.set_user_attr("objective_metrics", ["log_loss"])
+        study.set_user_attr("objective_frame", "forward_cal_v1")
+        # Trial 0 wins the objective; trial 1 wins the held-out block.
+        for cal_ll, hc_ll in ((0.5966, 0.5997), (0.5972, 0.5991)):
+            study.add_trial(
+                optuna.trial.create_trial(
+                    params={"C": cal_ll},
+                    distributions={
+                        "C": optuna.distributions.FloatDistribution(0.01, 100.0, log=True)
+                    },
+                    values=[cal_ll],
+                    user_attrs={
+                        "_tuning_mode": "calibrated",
+                        "cal_log_loss": cal_ll,
+                        "log_loss": cal_ll + 0.001,
+                        "holdout_log_loss": hc_ll + 0.001,
+                        "holdout_cal_log_loss": hc_ll,
+                        "holdout_roc_auc": 0.73,
+                        "duration_s": 5.0,
+                    },
+                )
+            )
+        lines = format_leaderboard(study, top_n=2)
+        output = "\n".join(lines)
+        # Trial 0 won the objective; trial 1 wins the held-out block and leads.
+        assert "trial 1)" in _first_row(lines)
+        assert "cal_log_loss=" not in output  # no `obj cal_log_loss=` field
+        assert "0.59660" not in output        # nor the objective's best value
+        assert "tuner's best" not in output   # nor a header claim about it
 
 
 class TestFormatParamImportance:
@@ -524,6 +783,12 @@ class TestFormatParamImportance:
         """format_param_importance returns non-empty output."""
         lines = format_param_importance(populated_study)
         assert len(lines) > 0
+
+    def test_names_its_target(self, populated_study):
+        """The block is computed against the tuning objective while the
+        leaderboard above it ranks on `--sort` — say so."""
+        output = "\n".join(format_param_importance(populated_study))
+        assert "· target: log_loss (tuning objective, not the sort metric)" in output
 
     def test_handles_insufficient_trials(self, tmp_path):
         """Gracefully handles studies with too few trials for importance."""

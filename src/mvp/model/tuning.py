@@ -629,6 +629,14 @@ class HyperparamTuner:
                 self.study.set_user_attr("objective_frame", self.objective_frame)
                 self.study.set_user_attr("outer_folds", self.outer_folds)
 
+        # Objective metric name(s). A trial's `values[0]` is a bare number —
+        # nothing in the study said WHICH metric it was, nor in which frame, so
+        # `tune-review` could only infer it by matching the value against the
+        # stored metric attrs. Written on every run (not just fresh studies) so
+        # studies tuned before this stamp existed pick it up on their next
+        # resume. Metadata only: nothing in the search reads it back.
+        self.study.set_user_attr("objective_metrics", list(self.metrics))
+
         if self.pinned_params:
             self.study.set_user_attr("pinned_params", self.pinned_params)
 

@@ -1015,7 +1015,7 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
     )
     tune_review_parser.add_argument(
         "--sort", type=str, nargs="+", default=None,
-        help="Metric(s) to sort by (default: auto-detect from study)",
+        help="Metric(s) to sort by (default: the study's own objective)",
     )
     tune_review_parser.add_argument(
         "--dashboard", action="store_true",
