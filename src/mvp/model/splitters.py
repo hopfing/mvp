@@ -189,6 +189,39 @@ def _validate_first_of_month(d: date, name: str) -> None:
         raise ValueError(f"{name} must be the 1st of a month, got {d.isoformat()}")
 
 
+# Window signatures already announced by `_log_short_final`, process-wide.
+_SHORT_FINAL_SEEN: set[tuple[date, date, date]] = set()
+
+
+def _log_short_final(
+    windows: list[tuple[date, date, date, date]], test_months: int
+) -> None:
+    """Announce a truncated final fold once per distinct geometry per process.
+
+    A short final fold carries fewer rows but counts equally in a mean fold
+    score, so keeping it silently would trade a silent discard for a silent
+    dilution. The guard is keyed on the window itself rather than held on the
+    splitter: `_bounds` runs once per candidate during forward selection, and
+    tuning builds a fresh splitter per trial, so a per-instance flag re-armed
+    every trial and repeated one identical line hundreds of times. A genuinely
+    different geometry still gets its own line.
+    """
+    if not windows:
+        return
+    _, _, test_start, test_end = windows[-1]
+    expected = _add_months(test_start, test_months)
+    if test_end >= expected:
+        return
+    signature = (test_start, test_end, expected)
+    if signature in _SHORT_FINAL_SEEN:
+        return
+    _SHORT_FINAL_SEEN.add(signature)
+    logger.info(
+        "Final test fold short: %s to %s (full window ends %s)",
+        test_start, test_end, expected,
+    )
+
+
 class DateSlidingWindowSplitter(BaseSplitter):
     """Sliding window validation expressed in calendar months.
 
@@ -240,29 +273,8 @@ class DateSlidingWindowSplitter(BaseSplitter):
             train_end = test_start
             windows.append((train_start, train_end, test_start, test_end))
             i += 1
-        self._log_short_final(windows)
+        _log_short_final(windows, self.test_months)
         return windows
-
-    def _log_short_final(
-        self, windows: list[tuple[date, date, date, date]],
-    ) -> None:
-        """Announce a truncated final fold once per splitter instance.
-
-        A short final fold carries fewer rows but counts equally in a mean fold
-        score, so keeping it silently trades a silent discard for a silent
-        dilution. `_bounds` is called once per candidate during forward
-        selection, hence the once-per-instance guard rather than a log here.
-        """
-        if getattr(self, "_warned_short_final", False) or not windows:
-            return
-        _, _, test_start, test_end = windows[-1]
-        expected = _add_months(test_start, self.test_months)
-        if test_end < expected:
-            self._warned_short_final = True
-            logger.info(
-                "Final test fold short: %s to %s (full window ends %s)",
-                test_start, test_end, expected,
-            )
 
     def date_windows(
         self, df: pl.DataFrame
@@ -370,29 +382,8 @@ class DateExpandingWindowSplitter(BaseSplitter):
             test_end = min(_add_months(test_start, self.test_months), upper)
             windows.append((anchor, test_start, test_start, test_end))
             i += 1
-        self._log_short_final(windows)
+        _log_short_final(windows, self.test_months)
         return windows
-
-    def _log_short_final(
-        self, windows: list[tuple[date, date, date, date]],
-    ) -> None:
-        """Announce a truncated final fold once per splitter instance.
-
-        A short final fold carries fewer rows but counts equally in a mean fold
-        score, so keeping it silently would trade a silent discard for a silent
-        dilution. `_bounds` runs once per candidate during forward selection,
-        hence the once-per-instance guard.
-        """
-        if getattr(self, "_warned_short_final", False) or not windows:
-            return
-        _, _, test_start, test_end = windows[-1]
-        expected = _add_months(test_start, self.test_months)
-        if test_end < expected:
-            self._warned_short_final = True
-            logger.info(
-                "Final test fold short: %s to %s (full window ends %s)",
-                test_start, test_end, expected,
-            )
 
     def date_windows(
         self, df: pl.DataFrame

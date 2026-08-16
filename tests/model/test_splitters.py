@@ -12,6 +12,7 @@ from mvp.model.splitters import (
     SlidingWindowSplitter,
     WalkForwardSplitter,
     _add_months,
+    _SHORT_FINAL_SEEN,
 )
 
 
@@ -400,6 +401,14 @@ class TestPartialFinalWindow:
     rejecting windows before those checks could see them.
     """
 
+    @pytest.fixture(autouse=True)
+    def _clear_short_final_guard(self):
+        # The announce-once guard is process-wide, so a test that asserts on
+        # the log would otherwise depend on which earlier test warmed the set.
+        _SHORT_FINAL_SEEN.clear()
+        yield
+        _SHORT_FINAL_SEEN.clear()
+
     @staticmethod
     def _frame(start: date, end: date) -> pl.DataFrame:
         days = (end - start).days
@@ -462,10 +471,53 @@ class TestPartialFinalWindow:
         for _, test_idx in folds:
             assert test_idx, "a fold with an empty test set was yielded"
 
-    def test_short_final_logs_once(self, caplog):
+    @staticmethod
+    def _short_final_hits(caplog) -> list:
+        return [r for r in caplog.records if "Final test fold short" in r.message]
+
+    def test_short_final_logs_once_per_instance(self, caplog):
         sp = DateExpandingWindowSplitter(initial_train_months=12, test_months=6)
         with caplog.at_level("INFO", logger="mvp.model.splitters"):
             sp._bounds(date(2023, 1, 1), date(2025, 11, 30))
             sp._bounds(date(2023, 1, 1), date(2025, 11, 30))
-        hits = [r for r in caplog.records if "Final test fold short" in r.message]
-        assert len(hits) == 1, f"expected one warning, got {len(hits)}"
+        hits = self._short_final_hits(caplog)
+        assert len(hits) == 1, f"expected one log, got {len(hits)}"
+
+    def test_short_final_logs_once_across_instances(self, caplog):
+        # Tuning builds a fresh splitter per trial, so a per-instance guard
+        # re-armed every trial and repeated one identical line hundreds of
+        # times. The guard is keyed on the window, not the object.
+        with caplog.at_level("INFO", logger="mvp.model.splitters"):
+            for _ in range(5):
+                sp = DateExpandingWindowSplitter(
+                    initial_train_months=12, test_months=6
+                )
+                sp._bounds(date(2023, 1, 1), date(2025, 11, 30))
+        hits = self._short_final_hits(caplog)
+        assert len(hits) == 1, f"expected one log, got {len(hits)}"
+
+    def test_a_different_short_window_still_logs(self, caplog):
+        # Suppression is per geometry — a genuinely different truncation is
+        # still news and must not be swallowed by the first one.
+        with caplog.at_level("INFO", logger="mvp.model.splitters"):
+            DateExpandingWindowSplitter(
+                initial_train_months=12, test_months=6
+            )._bounds(date(2023, 1, 1), date(2025, 11, 30))
+            DateExpandingWindowSplitter(
+                initial_train_months=12, test_months=6
+            )._bounds(date(2023, 1, 1), date(2025, 9, 30))
+        hits = self._short_final_hits(caplog)
+        assert len(hits) == 2, f"expected two logs, got {len(hits)}"
+
+    def test_sliding_shares_the_guard_with_expanding(self, caplog):
+        # Both splitters route through the same module-level function, so an
+        # identical window announced by one is not re-announced by the other.
+        with caplog.at_level("INFO", logger="mvp.model.splitters"):
+            DateExpandingWindowSplitter(
+                initial_train_months=12, test_months=6
+            )._bounds(date(2023, 1, 1), date(2025, 11, 30))
+            DateSlidingWindowSplitter(
+                train_months=12, test_months=6
+            )._bounds(date(2023, 1, 1), date(2025, 11, 30))
+        hits = self._short_final_hits(caplog)
+        assert len(hits) == 1, f"expected one log, got {len(hits)}"
