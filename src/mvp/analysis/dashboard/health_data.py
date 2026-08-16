@@ -18,6 +18,13 @@ def _is_main_run(run: dict) -> bool:
 
 
 def _read_rows(data_root: Path) -> list[dict]:
+    """Parsed run rows, skipping any line that isn't valid JSON.
+
+    An unclean shutdown mid-append leaves a torn line behind: the file length
+    is extended but the block never flushes, so it reads back as NUL bytes.
+    Every dashboard page loads this file, so one bad line has to degrade to a
+    single missing run rather than taking down the whole app.
+    """
     path = _runs_path(data_root)
     if not path.exists():
         return []
@@ -25,8 +32,12 @@ def _read_rows(data_root: Path) -> list[dict]:
     with open(path) as f:
         for line in f:
             stripped = line.strip()
-            if stripped:
+            if not stripped:
+                continue
+            try:
                 rows.append(json.loads(stripped))
+            except json.JSONDecodeError:
+                continue
     return rows
 
 

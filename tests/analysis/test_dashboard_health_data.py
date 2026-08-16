@@ -94,6 +94,31 @@ def test_main_run_without_matching_books_row(tmp_path):
     assert load_latest_run(root)["books_fetched"] == {}
 
 
+def test_torn_line_from_unclean_shutdown_is_skipped(tmp_path):
+    from mvp.analysis.dashboard.health_data import load_all_runs, load_latest_run
+
+    # A crash mid-append leaves the row as NUL bytes with no trailing newline,
+    # so the next run's row gets written onto the same line. Both are lost, but
+    # the surrounding runs must still load.
+    root = _write_runs(tmp_path, [
+        {"timestamp": "2026-04-02T14:00:00", "job": "main", "errors": []},
+    ])
+    glued = json.dumps(
+        {"timestamp": "2026-04-02T14:30:00", "job": "main", "errors": []}
+    )
+    with open(root / "pipeline" / "runs.jsonl", "a") as f:
+        f.write("\x00" * 530 + glued + "\n")
+        f.write(json.dumps(
+            {"timestamp": "2026-04-02T14:45:00", "job": "main", "errors": []}
+        ) + "\n")
+
+    runs = load_all_runs(root)
+    assert [r["timestamp"] for r in runs] == [
+        "2026-04-02T14:45:00", "2026-04-02T14:00:00",
+    ]
+    assert load_latest_run(root)["timestamp"] == "2026-04-02T14:45:00"
+
+
 def test_pre_split_row_keeps_own_books(tmp_path):
     from mvp.analysis.dashboard.health_data import load_latest_run
 
