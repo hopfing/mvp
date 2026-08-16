@@ -5,6 +5,7 @@ cover the detection heuristic and the two-tier fallback control flow in
 BaseExtractor, not the real solver.
 """
 
+import os
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -13,6 +14,7 @@ from curl_cffi import requests as curl_requests
 from mvp.common.base_extractor import BaseExtractor
 from mvp.common.cf_solver import (
     CloudflareChallengeError,
+    CloudflareSolver,
     body_has_challenge,
     is_cf_challenge,
 )
@@ -184,3 +186,48 @@ class TestFetchFallback:
                 with pytest.raises(curl_requests.RequestsError):
                     ext._fetch("https://example.com", retries=0)
         get_solver.assert_not_called()
+
+
+class TestDriverLaunch:
+    """Recovery from uc's multi-procs patcher raising on an empty cache.
+
+    `user_multi_procs=True` selects a patcher branch that globs the shared
+    chromedriver cache and calls max() on the result with no empty guard, and
+    it raises before the branch that would download a driver — so an empty
+    cache never repairs itself.
+    """
+
+    def _launch(self, chrome_side_effect):
+        """Run _ensure_driver with uc.Chrome mocked; return (result, mock)."""
+        solver = CloudflareSolver()
+        # DISPLAY set so the virtual-display branch is skipped off-Windows;
+        # check_output failing pins chrome_major to None on any host.
+        with (
+            patch.dict(os.environ, {"DISPLAY": ":0"}),
+            patch(
+                "mvp.common.cf_solver.subprocess.check_output",
+                side_effect=OSError,
+            ),
+            patch(
+                "undetected_chromedriver.Chrome", side_effect=chrome_side_effect
+            ) as chrome,
+        ):
+            try:
+                return solver._ensure_driver(), chrome
+            finally:
+                solver._driver = None
+
+    def test_empty_driver_cache_retries_without_multi_procs(self):
+        driver = MagicMock()
+        result, chrome = self._launch(
+            [ValueError("max() iterable argument is empty"), driver]
+        )
+
+        assert result is driver
+        assert chrome.call_count == 2
+        assert chrome.call_args_list[0].kwargs["user_multi_procs"] is True
+        assert "user_multi_procs" not in chrome.call_args_list[1].kwargs
+
+    def test_unrelated_value_error_is_not_swallowed(self):
+        with pytest.raises(ValueError, match="no chrome binary"):
+            self._launch(ValueError("no chrome binary"))

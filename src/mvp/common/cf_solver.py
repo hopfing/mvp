@@ -16,12 +16,20 @@ Only one browser operation runs at a time (RLock), bounding Chrome memory on
 the 16GB Beelink. The driver is launched lazily on first challenge and torn
 down by the caller (`cmd_live` finally block) via `close()`.
 
-Every `uc.Chrome()` launch passes `user_multi_procs=True`: without it the
+`uc.Chrome()` normally launches with `user_multi_procs=True`: without it the
 patcher unconditionally unlinks and re-downloads the SHARED chromedriver binary
 on launch, so a concurrent `uc.Chrome()` elsewhere (the bet365 scraper runs in
 the odds pool during the same cycle) deletes the binary mid-launch and both
 crash with Errno 2. The flag routes the patcher through its internal
 multiprocessing lock and skips the unlink/redownload when already patched.
+
+The one exception is the recovery path in `_ensure_driver`. That flag's branch
+assumes a driver already exists — it globs the shared cache and calls max() on
+the result without guarding for empty — and it runs ahead of the code that
+downloads one, so an empty cache raises and cannot repair itself. Nothing else
+on the live host launches without the flag, so the cache would stay empty
+indefinitely. The recovery path drops the flag for a single retry purely to
+reach the download, then leaves later launches to serialize as usual.
 """
 
 import logging
@@ -256,9 +264,27 @@ class CloudflareSolver:
         # user_multi_procs=True: serialize patcher access so this launch does
         # not race the bet365 scraper's concurrent uc.Chrome() on the shared
         # chromedriver binary.
-        self._driver = uc.Chrome(
-            options=options, version_main=chrome_major, user_multi_procs=True
-        )
+        try:
+            self._driver = uc.Chrome(
+                options=options, version_main=chrome_major, user_multi_procs=True
+            )
+        except ValueError as e:
+            if "max()" not in str(e):
+                raise
+            # That flag selects a patcher branch which globs the shared driver
+            # cache and calls max() on the result with no empty guard
+            # (undetected_chromedriver/patcher.py:135-138). An empty cache
+            # therefore raises — and raises *before* the branch that would
+            # download and patch a driver, so the cache stays empty and every
+            # later challenge fails the same way. It does not self-repair.
+            # Retry once without the flag to take the download-and-patch path
+            # and repopulate the cache; subsequent launches serialize as
+            # intended.
+            logger.warning(
+                "CF solver: chromedriver cache is empty (%s) — retrying "
+                "without user_multi_procs to repopulate it", e,
+            )
+            self._driver = uc.Chrome(options=options, version_main=chrome_major)
         return self._driver
 
 
