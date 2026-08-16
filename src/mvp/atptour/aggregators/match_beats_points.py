@@ -80,16 +80,42 @@ class MatchBeatsPointsAggregator(BaseJob):
             return None
 
         logger.info("Reading %d match_beats files", len(parquet_files))
-        frames: list[pl.DataFrame] = []
+        # Scanned per file and concatenated lazily, NOT through a single glob
+        # scan. The staged files carry two schemas — `serve_speed` is Null-typed
+        # in the files whose matches have no speed data and Double in the rest —
+        # and a glob scan resolves the dtype from whichever file it happens to
+        # match first, then fails at collect on the mismatch. Casting each file
+        # to a common dtype before the concat is what makes the union
+        # well-typed, so the per-file loop is load-bearing, not incidental.
+        frames: list[pl.LazyFrame] = []
+        unreadable = 0
         for pq_file in parquet_files:
             try:
-                df = pl.read_parquet(pq_file)
-                df = df.cast({c: pl.Float64 for c in _NULLABLE_FLOAT_COLS if c in df.columns})
-                df = df.filter(~pl.col("is_doubles"))
-                if len(df) > 0:
-                    frames.append(df)
+                lf = pl.scan_parquet(pq_file)
+                cols = lf.collect_schema().names()
+                # Materialised and discarded purely to validate the file before
+                # it joins the union. `collect_schema` reads the footer only, so
+                # it cannot see row-level corruption, and the upstream writer
+                # (transformers/match_beats.py:79) is a bare write_parquet — a
+                # kill mid-write leaves a truncated file in staging. Without
+                # this, one such file would fail the single collect below, and
+                # since a failed rebuild never refreshes the output mtime,
+                # `is_stale` would have every subsequent tick retry it: the
+                # aggregate wedges permanently rather than losing one file's
+                # points. Staged files are <=0.2MB, so the extra pass costs
+                # nothing against the peak.
+                lf.collect()
             except Exception as e:
-                logger.warning("Failed to read %s: %s", pq_file, e)
+                unreadable += 1
+                logger.error("Skipping unreadable %s: %s", pq_file, e)
+                continue
+            lf = lf.cast({c: pl.Float64 for c in _NULLABLE_FLOAT_COLS if c in cols})
+            frames.append(lf.filter(~pl.col("is_doubles")))
+        if unreadable:
+            logger.error(
+                "Skipped %d unreadable match_beats file(s) — points are missing "
+                "from this aggregate", unreadable,
+            )
         if not frames:
             logger.info("No singles point data found")
             return None
@@ -130,16 +156,26 @@ class MatchBeatsPointsAggregator(BaseJob):
                 # Target
                 "point_won_by_server",
             ]
-        )
+        ).collect(engine="streaming")
 
+        if result.is_empty():
+            logger.info("No singles point data found")
+            return None
+
+        # Through save_parquet rather than a bare write_parquet: parquet writers
+        # stream row groups to the destination progressively, so a kill during
+        # the write leaves a truncated file at the target path carrying a fresh
+        # mtime — which is exactly what `is_stale` reads to decide whether to
+        # rebuild. The pipeline would then never retry, and every downstream
+        # reader would be served the corrupt file. save_parquet writes to a tmp
+        # path and renames.
         output = self.build_path("aggregate", "match_beats_points.parquet")
-        output.parent.mkdir(parents=True, exist_ok=True)
-        result.write_parquet(output)
+        self.save_parquet(result, output)
 
         logger.info("Aggregated %d point rows to %s", len(result), output)
         return result
 
-    def _derive_server_perspective(self, df: pl.DataFrame) -> pl.DataFrame:
+    def _derive_server_perspective(self, df: pl.LazyFrame) -> pl.LazyFrame:
         """Shift raw (post-point) game scores to pre-point, then map to server perspective.
 
         Infosys' `tm1GameScore` / `tm2GameScore` are POST-point scores (what the score
@@ -174,7 +210,7 @@ class MatchBeatsPointsAggregator(BaseJob):
     _RALLY_MIN_SHOTS = 0
     _RALLY_MAX_SHOTS = 100
 
-    def _derive_rally_shots(self, df: pl.DataFrame) -> pl.DataFrame:
+    def _derive_rally_shots(self, df: pl.LazyFrame) -> pl.LazyFrame:
         """Server-oriented rally shot counts, nulled where the feed is unusable.
 
         `rally_length_missing` cannot carry this on its own. It marks 34.6% of
@@ -206,7 +242,7 @@ class MatchBeatsPointsAggregator(BaseJob):
             ]
         )
 
-    def _derive_set_and_match_scores(self, df: pl.DataFrame) -> pl.DataFrame:
+    def _derive_set_and_match_scores(self, df: pl.LazyFrame) -> pl.LazyFrame:
         """Compute set_score_*_games (pre-current-game) and sets_won_* (pre-current-set).
 
         Strategy: dedupe to one row per game / set, cumsum game_winner / set_winner
@@ -261,16 +297,19 @@ class MatchBeatsPointsAggregator(BaseJob):
             ]
         )
 
-    def _join_match_metadata(self, df: pl.DataFrame) -> pl.DataFrame:
+    def _join_match_metadata(self, df: pl.LazyFrame) -> pl.LazyFrame:
         matches_path = self.build_path("aggregate", "matches.parquet")
         if not matches_path.exists():
             raise FileNotFoundError(
                 f"matches.parquet not found at {matches_path}; run MatchesAggregator first"
             )
 
-        matches = pl.read_parquet(matches_path)
+        # Scanned, not read: matches.parquet is ~460MB across ~400 columns and
+        # only these nine are wanted, so the projection is pushed into the read
+        # rather than materialising the whole frame to select from it.
         match_meta = (
-            matches.select(
+            pl.scan_parquet(matches_path)
+            .select(
                 [
                     "tournament_id", "year", "match_id",
                     "match_uid", "circuit", "surface", "round",
@@ -281,7 +320,7 @@ class MatchBeatsPointsAggregator(BaseJob):
         )
         return df.join(match_meta, on=["tournament_id", "year", "match_id"], how="inner")
 
-    def _derive_set_and_match_points(self, df: pl.DataFrame) -> pl.DataFrame:
+    def _derive_set_and_match_points(self, df: pl.LazyFrame) -> pl.LazyFrame:
         """Flag is_set_point and is_match_point.
 
         Non-tiebreak points: winning the point wins the game AND the resulting set
