@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from curl_cffi import requests as curl_requests
+from selenium.common.exceptions import SessionNotCreatedException
 
 from mvp.common.base_extractor import BaseExtractor
 from mvp.common.cf_solver import (
@@ -189,12 +190,11 @@ class TestFetchFallback:
 
 
 class TestDriverLaunch:
-    """Recovery from uc's multi-procs patcher raising on an empty cache.
+    """Recovery from a bad shared chromedriver cache.
 
-    `user_multi_procs=True` selects a patcher branch that globs the shared
-    chromedriver cache and calls max() on the result with no empty guard, and
-    it raises before the branch that would download a driver — so an empty
-    cache never repairs itself.
+    `user_multi_procs=True` selects a patcher branch that never downloads a
+    driver, so both an empty cache (max() on an empty glob) and a stale one
+    (driver built for an older Chrome major) are terminal under it.
     """
 
     def _launch(self, chrome_side_effect):
@@ -228,6 +228,30 @@ class TestDriverLaunch:
         assert chrome.call_args_list[0].kwargs["user_multi_procs"] is True
         assert "user_multi_procs" not in chrome.call_args_list[1].kwargs
 
+    def test_stale_driver_after_chrome_update_retries_without_multi_procs(self):
+        # The 2026-07-11 failure: Chrome auto-updated to 150, the cached
+        # driver still spoke 146. The flag's branch returns the stale driver
+        # instead of downloading a current one.
+        stale = SessionNotCreatedException(
+            "session not created: This version of ChromeDriver only supports "
+            "Chrome version 146\nCurrent browser version is 150.0.7871.114"
+        )
+        driver = MagicMock()
+        result, chrome = self._launch([stale, driver])
+
+        assert result is driver
+        assert chrome.call_count == 2
+        assert "user_multi_procs" not in chrome.call_args_list[1].kwargs
+
     def test_unrelated_value_error_is_not_swallowed(self):
         with pytest.raises(ValueError, match="no chrome binary"):
             self._launch(ValueError("no chrome binary"))
+
+    def test_unrelated_launch_failure_is_not_swallowed(self):
+        # A genuine launch failure must not be retried into a driver rebuild.
+        with pytest.raises(SessionNotCreatedException, match="user data dir"):
+            self._launch(
+                SessionNotCreatedException(
+                    "session not created: probably user data dir is already in use"
+                )
+            )

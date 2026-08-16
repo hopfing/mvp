@@ -24,12 +24,13 @@ crash with Errno 2. The flag routes the patcher through its internal
 multiprocessing lock and skips the unlink/redownload when already patched.
 
 The one exception is the recovery path in `_ensure_driver`. That flag's branch
-assumes a driver already exists — it globs the shared cache and calls max() on
-the result without guarding for empty — and it runs ahead of the code that
-downloads one, so an empty cache raises and cannot repair itself. Nothing else
-on the live host launches without the flag, so the cache would stay empty
-indefinitely. The recovery path drops the flag for a single retry purely to
-reach the download, then leaves later launches to serialize as usual.
+never downloads a driver — it assumes a usable one is already cached — so both
+an empty cache and a cache holding a driver for the wrong Chrome major are
+terminal under it. Nothing else on the live host launches without the flag, so
+neither state resolves on its own: Chrome updating to 150 on 2026-07-11 left
+the cache unusable until 2026-08-16. The recovery path drops the flag for a
+single retry purely to reach the download, then leaves later launches to
+serialize as usual. See `_is_unrepairable_cache_fault`.
 """
 
 import logging
@@ -83,6 +84,27 @@ class CloudflareChallengeError(Exception):
 
 def _host(url: str) -> str:
     return urlparse(url).netloc
+
+
+def _is_unrepairable_cache_fault(e: BaseException) -> bool:
+    """True for the two ways the shared chromedriver cache goes bad.
+
+    Both are reachable only under ``user_multi_procs=True``, and neither can
+    repair itself while that flag is set, because the branch it selects
+    (undetected_chromedriver/patcher.py:133-140) returns or raises before
+    reaching the code that downloads a driver:
+
+    - **Empty cache.** The branch globs the cache and calls ``max()`` on the
+      result with no empty guard, so it raises ValueError.
+    - **Stale cache.** A driver is present but built for an older Chrome
+      major. The branch sees it patched and returns it, and the launch then
+      fails on the version mismatch. Chrome auto-updates, so this is the
+      expected steady-state failure, not an edge case — it is what emptied
+      the cache on 2026-07-11 and cost five weeks of failed challenges.
+    """
+    if isinstance(e, ValueError):
+        return "max()" in str(e)
+    return "only supports Chrome version" in str(e)
 
 
 class CloudflareSolver:
@@ -268,21 +290,15 @@ class CloudflareSolver:
             self._driver = uc.Chrome(
                 options=options, version_main=chrome_major, user_multi_procs=True
             )
-        except ValueError as e:
-            if "max()" not in str(e):
+        except Exception as e:
+            if not _is_unrepairable_cache_fault(e):
                 raise
-            # That flag selects a patcher branch which globs the shared driver
-            # cache and calls max() on the result with no empty guard
-            # (undetected_chromedriver/patcher.py:135-138). An empty cache
-            # therefore raises — and raises *before* the branch that would
-            # download and patch a driver, so the cache stays empty and every
-            # later challenge fails the same way. It does not self-repair.
-            # Retry once without the flag to take the download-and-patch path
-            # and repopulate the cache; subsequent launches serialize as
-            # intended.
+            # Retry without the flag: that path unlinks whatever is in the
+            # cache and runs the download-and-patch, which is the repair for
+            # both faults. Later launches serialize as intended.
             logger.warning(
-                "CF solver: chromedriver cache is empty (%s) — retrying "
-                "without user_multi_procs to repopulate it", e,
+                "CF solver: shared chromedriver cache is unusable (%s) — "
+                "retrying without user_multi_procs to rebuild it", e,
             )
             self._driver = uc.Chrome(options=options, version_main=chrome_major)
         return self._driver
