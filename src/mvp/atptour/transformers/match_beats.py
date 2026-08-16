@@ -71,12 +71,15 @@ class MatchBeatsTransformer(BaseJob):
         # Add schema hash
         df = df.with_columns(pl.lit(SCHEMA_HASH).alias("schema_hash"))
 
-        # Write parquet
+        # Write parquet. Through save_parquet for the tmp-then-rename: a bare
+        # write_parquet streams row groups straight to the destination, so a
+        # kill mid-write leaves a truncated file in staging carrying a fresh
+        # mtime. Downstream, MatchBeatsPointsAggregator reads every staged
+        # match_beats.parquet, and a torn one there fails the rebuild.
         output_path = self.build_path(
             "stage", self.tournament.path, "match_beats.parquet"
         )
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        df.write_parquet(output_path)
+        self.save_parquet(df, output_path)
 
         logger.info(
             "%s: staged %d points from %d matches",
