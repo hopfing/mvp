@@ -1,0 +1,89 @@
+# PRODUCTION-WINDOW config. Trial h37_t134 of study exp1206_23_log_offset_lr_22_of2.
+#
+# Identical to models/exp1206_23_offset_h37_t134.yaml except date_range.end is
+# 2026-06-30 rather than 2025-12-31, so it fingerprints DIFFERENTLY and does not
+# resolve to fcf5bc9436b5. Same relationship models/prod_260812.yaml has to
+# models/production/exp1206_23_bri_v3_02_t197.yaml: the root copy is the
+# backtest-clean evaluation artifact, this one is what ships.
+#
+# Window is pinned to the June boundary by the 12/6 train/test cadence -- retrain
+# every 6 months, so `end` stays 2026-06-30 until the December boundary regardless
+# of the promote date.
+#
+# 2026 is IN-SAMPLE for this config. The evidence for promoting it lives on the
+# 2025-12-31 sibling; do not backtest this one against 2026 and read the result as
+# validation -- backtests retrain from the current YAML, so it would be leaked.
+#
+# Gate: scripts/offset_reclaim_test.py re-run against these params via
+# experiments/xgb_de_offset_h37params.yaml -- mean A-B -0.00006 vs min_delta 5e-05,
+# 0/4 folds where the tree beat the offset alone. Passes (baseline was -0.00061, 1/4).
+description: Offset arm production lead - h37_t134
+calibration: null
+data:
+  date_range:
+    end: 2026-06-30
+    start: 2022-01-01
+  eval_filters: {}
+  filters:
+    circuit:
+    - tour
+    - chal
+    draw_type: singles
+  train_filters: {}
+features:
+  compute_only: []
+  include:
+  - glicko_rd_min
+  - opp_straight_sets_win_pct(days=30)
+  - opp_surface_games_margin_per_set_lost(days=30)
+  - player_age_diff
+  - player_days_since_surface_singles_diff
+  - player_deciding_set_win_pct(days=30)
+  - player_elo_surface_indoor_diff
+  - player_glicko_rd_diff
+  - player_height_diff
+  - player_match_count_diff(days=30)
+  - player_opp_elo_faced_avg_diff
+  - player_opp_elo_faced_avg_diff(days=730)
+  - player_pct_matches_on_surface(days=365)
+  - player_ret_bp_convert_pct_diff(days=30)
+  - player_surface_easy_hold_pct(days=30)
+  - player_surface_pts_total_won_pct_diff(days=730)
+  - player_tourn_pts_service_lost_per_match_diff
+  - player_vs_opp_style_resid_flat_diff
+  - player_vs_opp_style_resid_flat_diff(days=365)
+  - pts_return_won_pct_sum(days=730)
+  - svc_first_serve_win_pct_sum(days=180)
+metrics:
+  objective:
+  - log_loss
+model:
+  params:
+    colsample_bylevel: 0.6617124392351785
+    colsample_bynode: 0.5979282916884369
+    colsample_bytree: 0.9992813902962258
+    gamma: 2.87662181389572
+    grow_policy: depthwise
+    learning_rate: 0.018999779454333426
+    max_bin: 512
+    max_delta_step: 5
+    max_depth: 5
+    min_child_weight: 18
+    n_estimators: 700
+    random_state: 42
+    reg_alpha: 0.3043363142201908
+    reg_lambda: 7.851408787905918
+    scale_pos_weight: 0.980510694885669
+    subsample: 0.5266315132716064
+    tree_method: hist
+  type: xgboost
+offset:
+  feature: player_elo_surface_indoor_diff
+  params: {}
+  type: logistic
+sample_weight: null
+target: won
+validation:
+  initial_train_months: 12
+  test_months: 6
+  type: date_expanding
