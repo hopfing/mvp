@@ -269,8 +269,14 @@ class CloudflareSolver:
                 )
                 time.sleep(1)
 
-        options = uc.ChromeOptions()
-        options.add_argument("--no-sandbox")
+        def build_options():
+            # Built per launch, never reused: selenium consumes an options
+            # object on construction and raises "you cannot reuse the
+            # ChromeOptions object" if the same one reaches a second
+            # uc.Chrome(). The retry below is a second construction.
+            options = uc.ChromeOptions()
+            options.add_argument("--no-sandbox")
+            return options
 
         try:
             version = (
@@ -288,7 +294,9 @@ class CloudflareSolver:
         # chromedriver binary.
         try:
             self._driver = uc.Chrome(
-                options=options, version_main=chrome_major, user_multi_procs=True
+                options=build_options(),
+                version_main=chrome_major,
+                user_multi_procs=True,
             )
         except Exception as e:
             if not _is_unrepairable_cache_fault(e):
@@ -300,7 +308,9 @@ class CloudflareSolver:
                 "CF solver: shared chromedriver cache is unusable (%s) — "
                 "retrying without user_multi_procs to rebuild it", e,
             )
-            self._driver = uc.Chrome(options=options, version_main=chrome_major)
+            self._driver = uc.Chrome(
+                options=build_options(), version_main=chrome_major
+            )
         return self._driver
 
 

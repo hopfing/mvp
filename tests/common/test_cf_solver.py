@@ -198,8 +198,31 @@ class TestDriverLaunch:
     """
 
     def _launch(self, chrome_side_effect):
-        """Run _ensure_driver with uc.Chrome mocked; return (result, mock)."""
+        """Run _ensure_driver with uc.Chrome mocked; return (result, mock).
+
+        The mock enforces selenium's single-use rule on the options object,
+        which a bare MagicMock does not — reusing one across both launches
+        raises "you cannot reuse the ChromeOptions object" in production and
+        must fail here too.
+        """
         solver = CloudflareSolver()
+        effects = (
+            list(chrome_side_effect)
+            if isinstance(chrome_side_effect, list)
+            else [chrome_side_effect]
+        )
+        consumed: list[int] = []
+
+        def chrome_call(*args, **kwargs):
+            opts = kwargs.get("options")
+            if id(opts) in consumed:
+                raise RuntimeError("you cannot reuse the ChromeOptions object")
+            consumed.append(id(opts))
+            effect = effects.pop(0)
+            if isinstance(effect, BaseException):
+                raise effect
+            return effect
+
         # DISPLAY set so the virtual-display branch is skipped off-Windows;
         # check_output failing pins chrome_major to None on any host.
         with (
@@ -209,7 +232,7 @@ class TestDriverLaunch:
                 side_effect=OSError,
             ),
             patch(
-                "undetected_chromedriver.Chrome", side_effect=chrome_side_effect
+                "undetected_chromedriver.Chrome", side_effect=chrome_call
             ) as chrome,
         ):
             try:
