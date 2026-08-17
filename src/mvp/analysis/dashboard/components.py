@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import math
-
 import polars as pl
 
 
@@ -165,14 +163,16 @@ def odds_basis_selector(ds: pl.DataFrame, key: str) -> tuple[str, str, str]:
 def edge_range_selector(
     ds: pl.DataFrame, edge_col: str, key: str
 ) -> tuple[float | None, float | None]:
-    """Render a two-handle edge slider. Returns (low, high) as fractions.
+    """Render an edge slider paired with Min/Max boxes. Returns (low, high).
 
-    Displayed in percentage points, returned on the same scale as the edge
-    columns themselves. Bounds are taken from ``edge_col``, so they move
-    with the odds basis selected alongside this. Each side is None when its
-    handle sits at the corresponding bound, meaning that end cuts nothing —
-    which is also what keeps the top of the range from dropping the highest
-    rows, since the low cut is inclusive and the high cut exclusive.
+    Mirrors the Bet Performance edge filter: a two-handle slider over Min %
+    and Max % entry boxes, each syncing the other. Displayed in percentage
+    points, returned as fractions on the same scale as the edge columns
+    themselves. Bounds are taken from ``edge_col``, so they move with the
+    odds basis selected alongside this. Each side is None when it sits at
+    the corresponding bound, meaning that end cuts nothing — which is what
+    keeps the top of the range from dropping the highest rows, since the
+    low cut is inclusive and the high cut exclusive.
     """
     import streamlit as st
 
@@ -182,29 +182,78 @@ def edge_range_selector(
     if len(vals) == 0:
         return None, None
 
-    # Fraction -> percentage points, widened to the enclosing 0.5pp step.
-    lo = math.floor(float(vals.min()) * 200) / 2
-    hi = math.ceil(float(vals.max()) * 200) / 2
-    if hi <= lo:
-        return None, None
+    # Fraction -> percentage points, widened past the extremes so each end
+    # has somewhere to sit that cuts nothing.
+    lo = round(float(vals.min()) * 100 - 0.5, 1)
+    hi = round(float(vals.max()) * 100 + 0.5, 1)
+    if hi - lo < 0.2:
+        lo -= 0.1
+        hi += 0.1
 
-    state_key = f"edge_range_{key}"
+    slider_key = f"edge_slider_{key}"
+    lo_key = f"edge_lo_{key}"
+    hi_key = f"edge_hi_{key}"
+
     # Bounds shift with the odds basis, so a value carried over from the
     # previous basis can land outside the new range — Streamlit raises on
     # that rather than clamping.
-    if state_key in st.session_state:
-        st.session_state[state_key] = tuple(
-            min(max(float(v), lo), hi) for v in st.session_state[state_key]
-        )
+    def _clamp(v: float) -> float:
+        return max(lo, min(float(v), hi))
 
-    low, high = st.sidebar.slider(
-        "Edge % Range",
+    if slider_key not in st.session_state:
+        st.session_state[slider_key] = (lo, hi)
+        st.session_state[lo_key] = lo
+        st.session_state[hi_key] = hi
+    else:
+        cur_lo, cur_hi = st.session_state[slider_key]
+        cur_lo, cur_hi = _clamp(cur_lo), _clamp(cur_hi)
+        st.session_state[slider_key] = (cur_lo, cur_hi)
+        st.session_state[lo_key] = cur_lo
+        st.session_state[hi_key] = cur_hi
+
+    def _sync_from_slider():
+        st.session_state[lo_key], st.session_state[hi_key] = st.session_state[
+            slider_key
+        ]
+
+    def _sync_from_inputs():
+        low, high = st.session_state[lo_key], st.session_state[hi_key]
+        if low > high:
+            low, high = high, low
+        st.session_state[slider_key] = (low, high)
+
+    st.sidebar.slider(
+        "Edge %",
         min_value=lo,
         max_value=hi,
-        value=(lo, hi),
-        step=0.5,
-        key=state_key,
+        step=0.1,
+        format="%.1f%%",
+        key=slider_key,
+        on_change=_sync_from_slider,
     )
+    col_lo, col_hi = st.sidebar.columns(2)
+    with col_lo:
+        st.number_input(
+            "Min %",
+            min_value=lo,
+            max_value=hi,
+            step=0.1,
+            format="%.1f",
+            key=lo_key,
+            on_change=_sync_from_inputs,
+        )
+    with col_hi:
+        st.number_input(
+            "Max %",
+            min_value=lo,
+            max_value=hi,
+            step=0.1,
+            format="%.1f",
+            key=hi_key,
+            on_change=_sync_from_inputs,
+        )
+
+    low, high = st.session_state[slider_key]
     return (
         None if low <= lo else low / 100,
         None if high >= hi else high / 100,
