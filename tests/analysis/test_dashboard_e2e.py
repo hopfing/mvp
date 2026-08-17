@@ -42,6 +42,11 @@ def _make_full_ds():
             "bet_odds": [
                 random.uniform(1.5, 3.0) if i < 20 else None for i in range(n)
             ],
+            # Every CLV path in execution.py gates on this column, so without
+            # it the page's functions short-circuit to their empty frames.
+            "bet_closing_best": [
+                random.uniform(1.5, 3.0) if i < 20 else None for i in range(n)
+            ],
         }
     )
 
@@ -135,8 +140,12 @@ def test_execution_clv_by_group():
     from mvp.analysis.dashboard.execution import clv_by_group
 
     ds = _make_full_ds()
-    result = clv_by_group(ds, group_col="consensus", clv_col="clv_vs_avg")
+    result = clv_by_group(ds, group_col="consensus")
     assert "group" in result.columns
+    # The fixture bets across three consensus levels, so the group-by should
+    # produce rows rather than the empty-schema frame.
+    assert len(result) > 0
+    assert int(result["n"].sum()) == 20
 
 
 def test_execution_summary_on_full_ds():
