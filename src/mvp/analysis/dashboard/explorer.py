@@ -64,22 +64,46 @@ def _edge_subset(df: pl.DataFrame, edge_flag: bool | None) -> pl.DataFrame:
     return df
 
 
-def _cuts_no_edge(min_edge: float | None) -> bool:
-    """Whether a Min Edge cut leaves only positive-edge rows on the page."""
-    return min_edge is not None and min_edge > 0
+EdgeRange = tuple[float | None, float | None]
 
 
-def _edge_slices(min_edge: float | None) -> list[tuple[str, bool | None]]:
+def _cuts_rows(edge_range: EdgeRange) -> bool:
+    """Whether either handle of the Edge range drops rows from the page."""
+    return any(cut is not None for cut in edge_range)
+
+
+def _edge_slices(edge_range: EdgeRange) -> list[tuple[str, bool | None]]:
     """Row slices a breakdown table expands each dimension into.
 
-    Normally All / Edge / No Edge. Once Min Edge is above zero every
-    surviving row has edge, so the triplet would be one real row, one empty
-    row and a duplicate — collapse it to the single Edge row. A cut at or
-    below zero still leaves rows on both sides, so the triplet stands.
+    Normally All / Edge / No Edge. Once the range sits entirely above zero
+    every surviving row has edge, so the triplet would be one real row, one
+    empty row and a duplicate — collapse it to the single Edge row, and
+    mirror that to No Edge for a range that sits entirely at or below zero.
+    A range straddling zero still leaves rows on both sides, so the triplet
+    stands.
     """
-    if _cuts_no_edge(min_edge):
+    low, high = edge_range
+    if low is not None and low > 0:
         return [("Edge", None)]
+    if high is not None and high <= 0:
+        return [("No Edge", None)]
     return _EDGE_SLICES
+
+
+def _one_sided(edge_range: EdgeRange) -> bool:
+    """Whether the Edge range leaves rows on only one side of zero."""
+    return len(_edge_slices(edge_range)) == 1
+
+
+def _describe_range(edge_range: EdgeRange) -> str:
+    """The active Edge cuts in words, e.g. ``≥ 0.0% and < 1.0%``."""
+    low, high = edge_range
+    parts = []
+    if low is not None:
+        parts.append(f"≥ {low * 100:.1f}%")
+    if high is not None:
+        parts.append(f"< {high * 100:.1f}%")
+    return " and ".join(parts)
 
 
 def _circuit_slices(df: pl.DataFrame) -> list[tuple[str, str]]:
@@ -120,7 +144,7 @@ def _aggregate_by(
     df: pl.DataFrame,
     col: str,
     odds_col: str,
-    min_edge: float | None,
+    edge_range: EdgeRange,
     sort_order: list[str] | None = None,
 ) -> pl.DataFrame:
     """Group by dimension x edge (no All summary — used for circuit-sliced tables)."""
@@ -132,7 +156,7 @@ def _aggregate_by(
     rows: list[dict] = []
     for val in vals:
         dim_df = df.filter(pl.col(col) == val)
-        for label, flag in _edge_slices(min_edge):
+        for label, flag in _edge_slices(edge_range):
             stats = _flat_bet_stats(_edge_subset(dim_df, flag), odds_col)
             stats[col] = str(val)
             stats["Edge"] = label
@@ -185,7 +209,7 @@ def _aggregate_by_timing(df: pl.DataFrame, agg: str) -> pl.DataFrame:
 
 
 def _aggregate_books(
-    df: pl.DataFrame, books: list[str], min_edge: float | None
+    df: pl.DataFrame, books: list[str], edge_range: EdgeRange
 ) -> pl.DataFrame:
     """Aggregate by book x edge using per-book closing odds (no All summary)."""
     rows: list[dict] = []
@@ -196,7 +220,7 @@ def _aggregate_books(
         book_df = df.filter(pl.col(odds_col).is_not_null())
         if len(book_df) == 0:
             continue
-        for label, flag in _edge_slices(min_edge):
+        for label, flag in _edge_slices(edge_range):
             stats = _flat_bet_stats(_edge_subset(book_df, flag), odds_col)
             stats["Book"] = book.upper()
             stats["Edge"] = label
@@ -236,13 +260,13 @@ def _style_breakdown(df: pl.DataFrame, label_col: str, st) -> None:
 
 
 def _render_cal_tier_breakdown(
-    df: pl.DataFrame, odds_col: str, min_edge: float | None, st
+    df: pl.DataFrame, odds_col: str, edge_range: EdgeRange, st
 ) -> None:
     """Per-tier breakdown with All / Edge / No Edge slices.
 
     Matches the rest of the Model Performance page: each tier gets three
-    rows (All / Edge / No Edge) styled by Edge column, or one row once Min
-    Edge is above zero.
+    rows (All / Edge / No Edge) styled by Edge column, or one row once the
+    Edge range sits wholly on one side of zero.
     """
     if "cal_tier" not in df.columns:
         st.info("No cal_tier data available.")
@@ -255,19 +279,19 @@ def _render_cal_tier_breakdown(
         return
 
     table = _aggregate_by(
-        tiered, "cal_tier", odds_col, min_edge, sort_order=_TIER_ORDER
+        tiered, "cal_tier", odds_col, edge_range, sort_order=_TIER_ORDER
     ).rename({"cal_tier": "Tier"})
     _style_breakdown(table, "Tier", st)
 
 
 def _render_per_cell_table(
-    df: pl.DataFrame, odds_col: str, min_edge: float | None, st
+    df: pl.DataFrame, odds_col: str, edge_range: EdgeRange, st
 ) -> None:
     """Per-(round, tier) drill-down with All / Edge / No Edge slices.
 
     Each (round, tier) cell expands to three rows mirroring the page-wide
-    Edge slicing pattern, or one row once Min Edge is above zero. Cell Cal
-    is the cell-mean of the cell_cal column.
+    Edge slicing pattern, or one row once the Edge range sits wholly on one
+    side of zero. Cell Cal is the cell-mean of the cell_cal column.
     """
     needed = {"cal_tier", "round"}
     if not needed.issubset(df.columns):
@@ -298,7 +322,7 @@ def _render_per_cell_table(
                 if cell_cal_vals is not None and len(cell_cal_vals) > 0
                 else None
             )
-            for label, flag in _edge_slices(min_edge):
+            for label, flag in _edge_slices(edge_range):
                 stats = _flat_bet_stats(
                     _edge_subset(cell_df, flag), odds_col
                 )
@@ -352,13 +376,13 @@ def _render_per_cell_table(
 
 
 def _render_edge_bands(
-    df: pl.DataFrame, odds_col: str, edge_col: str, min_edge: float | None, st
+    df: pl.DataFrame, odds_col: str, edge_col: str, edge_range: EdgeRange, st
 ) -> None:
     """Edge band performance table using scanner's 2.5pp buckets.
 
     Includes All / Edge / No Edge summary rows, then per-band rows
     ordered positive-first (10%+ at top, below -10% at bottom). Bands
-    entirely below a Min Edge cut are empty by construction, so they're
+    outside an active Edge range are empty by construction, so they're
     dropped rather than shown as zero rows.
     """
     from mvp.analysis.scanner import EDGE_BREAKS, EDGE_LABELS
@@ -379,7 +403,7 @@ def _render_edge_bands(
 
     # Summary rows first
     rows: list[dict] = []
-    for label, flag in _edge_slices(min_edge):
+    for label, flag in _edge_slices(edge_range):
         stats = _flat_bet_stats(_edge_subset(df, flag), odds_col)
         stats["Edge Band"] = label
         rows.append(stats)
@@ -389,7 +413,7 @@ def _render_edge_bands(
         stats = _flat_bet_stats(
             bucketed.filter(pl.col("edge_band") == label), odds_col
         )
-        if min_edge is not None and stats["N"] == 0:
+        if _cuts_rows(edge_range) and stats["N"] == 0:
             continue
         stats["Edge Band"] = label
         rows.append(stats)
@@ -516,8 +540,8 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
 
     from mvp.analysis.dashboard.components import (
         consensus_selector,
+        edge_range_selector,
         metric_card_data,
-        min_edge_selector,
         model_selector,
         odds_basis_selector,
         render_metric_cards,
@@ -533,7 +557,7 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
         ds = ds.filter(pl.col("consensus") == consensus)
 
     basis_label, odds_col, edge_col = odds_basis_selector(ds, key="perf")
-    min_edge = min_edge_selector(ds, edge_col, key="perf")
+    edge_range = edge_range_selector(ds, edge_col, key="perf")
 
     granularity = st.sidebar.radio(
         "Chart Granularity",
@@ -555,13 +579,18 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
     # _aggregate_by_timing.
     unfiltered = resolved
 
-    if min_edge is not None:
-        # Null edge is not "edge below the cut" — it's unknown, so it can't
-        # clear the bar either way and drops out with the comparison.
-        resolved = resolved.filter(pl.col(edge_col) >= min_edge)
+    if _cuts_rows(edge_range):
+        # Null edge is not "edge outside the range" — it's unknown, so it
+        # can't clear either bar and drops out with the comparison. The low
+        # cut is inclusive and the high cut exclusive.
+        low_cut, high_cut = edge_range
+        if low_cut is not None:
+            resolved = resolved.filter(pl.col(edge_col) >= low_cut)
+        if high_cut is not None:
+            resolved = resolved.filter(pl.col(edge_col) < high_cut)
         if len(resolved) == 0:
             st.info(
-                f"No predictions with edge ≥ {min_edge * 100:.1f}% "
+                f"No predictions with edge {_describe_range(edge_range)} "
                 f"priced at {basis_label}."
             )
             return
@@ -584,10 +613,10 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
         ),
     ])
 
-    # Above a positive Min Edge the No Edge block is empty by construction
-    # and the Edge block restates the headline cards, so show the pair only
-    # while both sides can carry rows.
-    if not _cuts_no_edge(min_edge):
+    # Once the Edge range sits wholly on one side of zero, one block is
+    # empty by construction and the other restates the headline cards, so
+    # show the pair only while both sides can carry rows.
+    if not _one_sided(edge_range):
         edge_stats = _flat_bet_stats(
             resolved.filter(pl.col("has_edge")), odds_col
         )
@@ -679,19 +708,19 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
         for val, label in circuits:
             st.markdown(f"**{label}**")
             _render_cal_tier_breakdown(
-                circuit_dfs[val], odds_col, min_edge, st
+                circuit_dfs[val], odds_col, edge_range, st
             )
 
         st.subheader("By Calibration Segment")
         for val, label in circuits:
             st.markdown(f"**{label}**")
-            _render_per_cell_table(circuit_dfs[val], odds_col, min_edge, st)
+            _render_per_cell_table(circuit_dfs[val], odds_col, edge_range, st)
 
     # --- Edge band table ---
     st.subheader("By Edge Band")
     for val, label in circuits:
         st.markdown(f"**{label}**")
-        _render_edge_bands(circuit_dfs[val], odds_col, edge_col, min_edge, st)
+        _render_edge_bands(circuit_dfs[val], odds_col, edge_col, edge_range, st)
 
     # By Probability Band
     if "prob_band" in resolved.columns:
@@ -702,7 +731,7 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
                 circuit_dfs[val],
                 "prob_band",
                 odds_col,
-                min_edge,
+                edge_range,
                 sort_order=_PROB_LABELS,
             ).rename({"prob_band": "Probability"})
             _style_breakdown(table, "Probability", st)
@@ -715,7 +744,7 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
             circuit_dfs[val],
             "odds_band",
             odds_col,
-            min_edge,
+            edge_range,
             sort_order=ODDS_LABELS,
         ).rename({"odds_band": "Odds Band"})
         _style_breakdown(table, "Odds Band", st)
@@ -730,7 +759,7 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
                 circuit_dfs[val],
                 "round",
                 odds_col,
-                min_edge,
+                edge_range,
                 sort_order=round_order,
             ).rename({"round": "Round"})
             _style_breakdown(table, "Round", st)
@@ -741,7 +770,7 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
         for val, label in circuits:
             st.markdown(f"**{label}**")
             table = _aggregate_by(
-                circuit_dfs[val], "surface", odds_col, min_edge
+                circuit_dfs[val], "surface", odds_col, edge_range
             ).rename({"surface": "Surface"})
             _style_breakdown(table, "Surface", st)
 
@@ -750,7 +779,7 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
         st.subheader("By Book")
         for val, label in circuits:
             st.markdown(f"**{label}**")
-            table = _aggregate_books(circuit_dfs[val], books, min_edge)
+            table = _aggregate_books(circuit_dfs[val], books, edge_range)
             _style_breakdown(table, "Book", st)
 
     # By Timing — per-threshold cross-book best / median / worst. Reads the

@@ -162,48 +162,53 @@ def odds_basis_selector(ds: pl.DataFrame, key: str) -> tuple[str, str, str]:
     return next(b for b in available if b[0] == selected)
 
 
-def min_edge_selector(
+def edge_range_selector(
     ds: pl.DataFrame, edge_col: str, key: str
-) -> float | None:
-    """Render a minimum-edge slider. Returns the cut as a fraction, or None.
+) -> tuple[float | None, float | None]:
+    """Render a two-handle edge slider. Returns (low, high) as fractions.
 
     Displayed in percentage points, returned on the same scale as the edge
     columns themselves. Bounds are taken from ``edge_col``, so they move
-    with the odds basis selected alongside this. None means the slider is
-    at its floor and nothing should be cut.
+    with the odds basis selected alongside this. Each side is None when its
+    handle sits at the corresponding bound, meaning that end cuts nothing —
+    which is also what keeps the top of the range from dropping the highest
+    rows, since the low cut is inclusive and the high cut exclusive.
     """
     import streamlit as st
 
     if edge_col not in ds.columns:
-        return None
+        return None, None
     vals = ds[edge_col].drop_nulls()
     if len(vals) == 0:
-        return None
+        return None, None
 
     # Fraction -> percentage points, widened to the enclosing 0.5pp step.
     lo = math.floor(float(vals.min()) * 200) / 2
     hi = math.ceil(float(vals.max()) * 200) / 2
     if hi <= lo:
-        return None
+        return None, None
 
-    state_key = f"min_edge_{key}"
+    state_key = f"edge_range_{key}"
     # Bounds shift with the odds basis, so a value carried over from the
     # previous basis can land outside the new range — Streamlit raises on
     # that rather than clamping.
     if state_key in st.session_state:
-        st.session_state[state_key] = min(
-            max(float(st.session_state[state_key]), lo), hi
+        st.session_state[state_key] = tuple(
+            min(max(float(v), lo), hi) for v in st.session_state[state_key]
         )
 
-    selected = st.sidebar.slider(
-        "Min Edge %",
+    low, high = st.sidebar.slider(
+        "Edge % Range",
         min_value=lo,
         max_value=hi,
-        value=lo,
+        value=(lo, hi),
         step=0.5,
         key=state_key,
     )
-    return None if selected <= lo else selected / 100
+    return (
+        None if low <= lo else low / 100,
+        None if high >= hi else high / 100,
+    )
 
 
 def metric_card_data(
