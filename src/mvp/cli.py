@@ -801,11 +801,24 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
     )
+    # Shared options every subcommand inherits. `main()` already applies
+    # memory_limit generically via getattr, so the BEHAVIOUR was always
+    # universal — only the declaration was manual, copy-pasted into 14 of 22
+    # subparsers, which is how `iid-backtest` ended up unable to accept a flag
+    # its own runner respects. A parent parser (add_help=False) keeps the flag
+    # positioned AFTER the subcommand name, unlike a top-level argument.
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument(
+        "--memory-limit", type=int, default=None,
+        help="Override memory limit %% (0 to disable, default 75)",
+    )
+
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # model subcommand - trains from models/ directory
     model_parser = subparsers.add_parser(
-        "model", help="Train model (looks in models/ by default)"
+        "model",
+        parents=[common], help="Train model (looks in models/ by default)"
     )
     model_parser.add_argument(
         "config", type=str, help="Config name or path (e.g., 'baseline' or 'baseline.yaml')"
@@ -813,27 +826,21 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
     model_parser.add_argument(
         "--refresh", action="store_true", help="Rebuild matches.parquet before running"
     )
-    model_parser.add_argument(
-        "--memory-limit", type=int, default=None,
-        help="Override memory limit %% (0 to disable, default 75)",
-    )
 
     # rules subcommand - evaluate a rules_* config as a decision rule
     rules_parser = subparsers.add_parser(
         "rules",
+        parents=[common],
         help="Evaluate a rules_* config as a decision rule (vote tally by configuration)",
     )
     rules_parser.add_argument(
         "config", type=str, help="Config name or path (e.g., 'rules_combined')"
     )
-    rules_parser.add_argument(
-        "--memory-limit", type=int, default=None,
-        help="Override memory limit %% (0 to disable, default 75)",
-    )
 
     # model-sweep subcommand - sweep validation.test_months on a model config
     sweep_parser = subparsers.add_parser(
         "model-sweep",
+        parents=[common],
         help="Run a model under multiple test_months values and compare cadences",
     )
     sweep_parser.add_argument(
@@ -844,14 +851,11 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         "--test-months", type=int, nargs="+", required=True,
         help="List of test_months values to sweep (e.g. --test-months 12 6 3 1)",
     )
-    sweep_parser.add_argument(
-        "--memory-limit", type=int, default=None,
-        help="Override memory limit %% (0 to disable, default 75)",
-    )
 
     # experiment subcommand - discovery from experiments/ directory
     exp_parser = subparsers.add_parser(
-        "experiment", help="Run experiment/discovery (looks in experiments/ by default)"
+        "experiment",
+        parents=[common], help="Run experiment/discovery (looks in experiments/ by default)"
     )
     exp_parser.add_argument(
         "config", type=str, nargs="?", default=None,
@@ -880,10 +884,6 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         "--parallel-candidates", type=int, default=None,
         help="Concurrent candidate fits in forward selection (None=auto, 1=serial)",
     )
-    exp_parser.add_argument(
-        "--memory-limit", type=int, default=None,
-        help="Override memory limit %% (0 to disable, default 75)",
-    )
     resume_group = exp_parser.add_mutually_exclusive_group()
     resume_group.add_argument(
         "--resume", action="store_true",
@@ -901,6 +901,7 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
     # shap-rank subcommand - one-shot SHAP-based feature ranking
     shap_parser = subparsers.add_parser(
         "shap-rank",
+        parents=[common],
         help="SHAP-based one-shot feature ranking on the full feature pool",
     )
     shap_parser.add_argument(
@@ -911,14 +912,11 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         "--output", "-o", type=str, required=True,
         help="Output CSV stem (saved to B:/experiments/<stem>_shap_ranking.csv)",
     )
-    shap_parser.add_argument(
-        "--memory-limit", type=int, default=None,
-        help="Override memory limit %% (0 to disable, default 75)",
-    )
 
     # tune subcommand - hyperparameter optimization
     tune_parser = subparsers.add_parser(
-        "tune", help="Tune model hyperparameters"
+        "tune",
+        parents=[common], help="Tune model hyperparameters"
     )
     tune_parser.add_argument(
         "config", type=str,
@@ -928,10 +926,6 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         "--metric", type=str, nargs="+", default=None,
         help="[IID/projection only] Metric(s) to optimize. Classification tuning "
              "reads metrics.objective from the config and rejects --metric.",
-    )
-    tune_parser.add_argument(
-        "--memory-limit", type=int, default=None,
-        help="Override memory limit %% (0 to disable, default 75)",
     )
     tune_parser.add_argument(
         "--param", action="append", metavar="KEY=VALUE",
@@ -1003,7 +997,8 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
 
     # tune-review subcommand
     tune_review_parser = subparsers.add_parser(
-        "tune-review", help="Review tuning results"
+        "tune-review",
+        parents=[common], help="Review tuning results"
     )
     tune_review_parser.add_argument(
         "config", type=str,
@@ -1024,16 +1019,14 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
 
     # train subcommand - train production model
     train_parser = subparsers.add_parser(
-        "train", help="Train (or retrain) the production model from production.yaml"
-    )
-    train_parser.add_argument(
-        "--memory-limit", type=int, default=None,
-        help="Override memory limit %% (0 to disable, default 75)",
+        "train",
+        parents=[common], help="Train (or retrain) the production model from production.yaml"
     )
 
     # live subcommand
     live_parser = subparsers.add_parser(
-        "live", help="Run live pipeline for active tournaments"
+        "live",
+        parents=[common], help="Run live pipeline for active tournaments"
     )
     live_parser.add_argument(
         "--tid", type=str, metavar="TID", help="Target a single active tournament"
@@ -1050,12 +1043,14 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
     # books subcommand — odds scraping, split from `live` so it can run on the
     # VPN while `live` runs off-VPN (mullvad-exclude).
     subparsers.add_parser(
-        "books", help="Fetch sportsbook odds (VPN egress; split from live)"
+        "books",
+        parents=[common], help="Fetch sportsbook odds (VPN egress; split from live)"
     )
 
     # confidence subcommand
     conf_parser = subparsers.add_parser(
-        "confidence", help="Run confidence validation on a model's OOF predictions"
+        "confidence",
+        parents=[common], help="Run confidence validation on a model's OOF predictions"
     )
     conf_parser.add_argument(
         "config", type=str, help="Model config name (e.g., 'tu_log_fs_75_20f')"
@@ -1064,14 +1059,11 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         "--no-refresh", action="store_true",
         help="Use cached OOF if available (skip model re-run)"
     )
-    conf_parser.add_argument(
-        "--memory-limit", type=int, default=None,
-        help="Override memory limit %% (0 to disable, default 75)",
-    )
 
     # project subcommand - game projection from projections/ directory
     proj_parser = subparsers.add_parser(
-        "project", help="Run game projection (looks in projections/ by default)"
+        "project",
+        parents=[common], help="Run game projection (looks in projections/ by default)"
     )
     proj_parser.add_argument(
         "config", type=str, help="Config name or path (e.g., 'baseline')"
@@ -1083,6 +1075,7 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
     # iid-project subcommand - structural IID/Markov tennis projection
     iid_proj_parser = subparsers.add_parser(
         "iid-project",
+        parents=[common],
         help="Run IID/Markov tennis projection (looks in projections/ by default)",
     )
     iid_proj_parser.add_argument(
@@ -1091,14 +1084,11 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
     iid_proj_parser.add_argument(
         "--refresh", action="store_true", help="Rebuild matches.parquet before running"
     )
-    iid_proj_parser.add_argument(
-        "--memory-limit", type=int, default=None,
-        help="Override memory limit %% (0 to disable, default 75)",
-    )
 
     # iid-backtest subcommand - backtest IID projector against 2026 totals/spread book lines
     iid_bt_parser = subparsers.add_parser(
         "iid-backtest",
+        parents=[common],
         help="Backtest IID projector vs 2026 totals/spread book lines (lazy-trains artifact)",
     )
     iid_bt_parser.add_argument(
@@ -1112,6 +1102,7 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
     # oddspapi-transform subcommand - raw/oddspapi -> stage/oddspapi
     oap_parser = subparsers.add_parser(
         "oddspapi-transform",
+        parents=[common],
         help="Stage captured oddspapi ticks, then reduce to stage/oddspapi/<book>/<market>.parquet",
     )
     oap_parser.add_argument(
@@ -1127,6 +1118,7 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
     # iid-sweep subcommand - evaluate N tuning trials of an IID projection config
     iid_sweep_parser = subparsers.add_parser(
         "iid-sweep",
+        parents=[common],
         help="Evaluate N tuning trials of an IID projection config for comparison",
     )
     iid_sweep_parser.add_argument(
@@ -1158,14 +1150,11 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         "--refresh", action="store_true",
         help="Re-evaluate trials that already have artifacts (default: skip them)",
     )
-    iid_sweep_parser.add_argument(
-        "--memory-limit", type=int, default=None,
-        help="Override memory limit %% (0 to disable, default 75)",
-    )
 
     # iid-rank subcommand - compare evaluated IID projection configs
     iid_rank_parser = subparsers.add_parser(
         "iid-rank",
+        parents=[common],
         help="Compare evaluated IID projection configs across all instruments",
     )
     iid_rank_parser.add_argument(
@@ -1184,6 +1173,7 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
     # backtest subcommand - simulate a lead model's bets on a window with odds data
     bt_parser = subparsers.add_parser(
         "backtest",
+        parents=[common],
         help="Backtest a lead model: simulate predictions + bets on a window with odds data",
     )
     bt_parser.add_argument(
@@ -1206,14 +1196,11 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         help="Path to alternate production-shaped YAML for voter override "
              "(default: production.yaml's voters)",
     )
-    bt_parser.add_argument(
-        "--memory-limit", type=int, default=None,
-        help="Override memory limit %% (0 to disable, default 75)",
-    )
 
     # model-errors subcommand — feature-error analysis on a model evaluation dir
     me_parser = subparsers.add_parser(
         "model-errors",
+        parents=[common],
         help="Run feature-error analysis (calibration, SHAP-on-errors, etc.) "
              "on a model_evaluations/<fingerprint>/ dir",
     )
@@ -1234,14 +1221,11 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         "--cache-dir", type=str, default=None,
         help="FeatureEngine cache dir override",
     )
-    me_parser.add_argument(
-        "--memory-limit", type=int, default=None,
-        help="Override memory limit %% (0 to disable, default 75)",
-    )
 
     # analysis subcommand
     analysis_parser = subparsers.add_parser(
-        "analysis", help="Build analysis dataset with odds, CLV, and simulations"
+        "analysis",
+        parents=[common], help="Build analysis dataset with odds, CLV, and simulations"
     )
     analysis_parser.add_argument(
         "--no-ui",
@@ -1252,6 +1236,7 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
     # model-report subcommand - single-model end-to-end review
     mreport_parser = subparsers.add_parser(
         "model-report",
+        parents=[common],
         help="Single-model deep dive across diagnostics, confidence, and backtest",
     )
     mreport_parser.add_argument(
@@ -1267,14 +1252,11 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
              "Section C renders as skipped. Diagnostics + backtest still run. Saves a full CV "
              "retrain + validate.",
     )
-    mreport_parser.add_argument(
-        "--memory-limit", type=int, default=None,
-        help="Override memory limit %% (0 to disable, default 75)",
-    )
 
     # model-rank subcommand - cross-model survey
     mrank_parser = subparsers.add_parser(
         "model-rank",
+        parents=[common],
         help="Cross-model survey across diagnostics, confidence, and backtest",
     )
     mrank_parser.add_argument(
@@ -1284,10 +1266,6 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
     mrank_parser.add_argument(
         "--no-refresh", action="store_true",
         help="Skip refresh entirely; read existing artifacts only",
-    )
-    mrank_parser.add_argument(
-        "--memory-limit", type=int, default=None,
-        help="Override memory limit %% (0 to disable, default 75)",
     )
 
     return parser.parse_args(args)
