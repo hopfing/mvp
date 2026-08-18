@@ -286,9 +286,8 @@ class ServeDiscoveryConfig(BaseModel):
         constant point features come straight from `match_beats_points.parquet`
         at fit time and are not engine-computed.
 
-        The opp_ set comes from `swap_side_opp_specs`, the same classifier
-        `_prepare_match_data` uses, rather than pairing every `player_X` with an
-        `opp_X`. Two reasons, one of them a crash:
+        The partner set comes from `swap_side_partner_specs` rather than pairing
+        every `player_X` with an `opp_X`. Two reasons, one of them a crash:
 
         A diff-style feature (registry `mirror=False`) has no `opp_` column —
         its swap value is the NEGATION of the player value — so pairing emits a
@@ -302,10 +301,19 @@ class ServeDiscoveryConfig(BaseModel):
         transform, so `_resolve_dependencies` falls through to
         `registry.get(base_name)` and raises KeyError. A promoted config that
         selected such a feature was unrunnable.
+
+        Mirror features get their partner in BOTH directions. A selection can be
+        `opp_`-prefixed — the shortlist's composite-side expansion puts those in
+        the candidate pool and FS picks them (`opp_surface_matches(days=30)`) —
+        and the swap side then reads the `player_` column. Emitting only the
+        `opp_` direction under-declares the config: it still runs, because the
+        engine computes player-side first and mirrors to get `opp_`, but the
+        include list would be relying on that ordering instead of naming what
+        `_match_feature_values` reads.
         """
         from mvp.model.engine import parse_feature_spec
 
-        from mvp.projection.iid.serve_model import swap_side_opp_specs
+        from mvp.projection.iid.serve_model import swap_side_partner_specs
 
         include_specs: list[str] = []
         seen: set[str] = set()
@@ -321,10 +329,10 @@ class ServeDiscoveryConfig(BaseModel):
                 include_specs.append(own_spec)
                 seen.add(own_spec)
 
-        for swap_spec in swap_side_opp_specs(selected_match_level):
-            if swap_spec not in seen:
-                include_specs.append(swap_spec)
-                seen.add(swap_spec)
+        for partner in swap_side_partner_specs(selected_match_level):
+            if partner not in seen:
+                include_specs.append(partner)
+                seen.add(partner)
 
         if self.serve_component is None:
             serve_block: dict[str, Any] = {

@@ -231,6 +231,57 @@ def swap_side_opp_specs(match_level_features: list[str]) -> list[str]:
     return specs
 
 
+def swap_side_partner_specs(match_level_features: list[str]) -> list[str]:
+    """Every counterpart column a mirror feature is read from, either side.
+
+    `swap_side_opp_specs` above answers a narrower question — "which `opp_`
+    columns must exist" — and skips anything not `player_`-prefixed. That is
+    complete only while every selected spec is `player_`-prefixed. It is not:
+    the shortlist's composite-side expansion puts `opp_`-prefixed specs in the
+    candidate pool, and FS selects them (`opp_surface_matches(days=30)`).
+
+    For a mirror feature the model reads BOTH sides regardless of which one was
+    selected. `_match_feature_values` (serve_model.py:855-885): a `returner_`
+    column reads `opp_` when A serves and `player_` when B serves, and a
+    `server_` column reads the reverse. So `opp_surface_matches(days=30)`
+    requires `player_surface_matches(days=30)` exactly as `player_glicko_rd`
+    requires `opp_glicko_rd`.
+
+    Diffs are still excluded — their swap side negates the `player_` column in
+    place, so no second column is involved.
+
+    Why this is not merely tidiness: a config emitted without the partner still
+    RUNS today, because the engine computes every feature player-side first and
+    derives `opp_` by mirroring (Phase 2 / Phase 4), so the player-side column
+    is a precondition of the opp-side one and lands in the frame regardless.
+    The config is then relying on that ordering rather than declaring what it
+    reads — and an opp-only feature, or a change to the mirroring pass, turns
+    that into a silent wrong-column read instead of a missing-column error.
+    """
+    from mvp.model.engine import parse_feature_spec
+
+    _cols, is_diff_flags = resolve_match_feature_cols(match_level_features)
+    specs: list[str] = []
+    for spec, is_diff in zip(match_level_features, is_diff_flags, strict=True):
+        prefix, base_name, _full_name, params = parse_feature_spec(spec)
+        if is_diff:
+            continue
+        if prefix == "player":
+            partner = f"opp_{base_name}"
+        elif prefix == "opp":
+            partner = f"player_{base_name}"
+        else:
+            # Unprefixed match-level (e.g. a `_sum`): one column serves both
+            # perspectives, so there is no partner to request.
+            continue
+        if params:
+            param_str = ",".join(f"{k}={v}" for k, v in params.items())
+            partner = f"{partner}({param_str})"
+        if partner not in specs:
+            specs.append(partner)
+    return specs
+
+
 class ServeWinProbEstimator(ABC):
     """Predicts each player's serve point win probability per matchup."""
 

@@ -364,7 +364,7 @@ class TestPromotedConfigIncludeList:
 
     The emitter used to pair every `player_X` with an `opp_X` unconditionally.
     That is merely wasteful for registry-backed diffs (the engine can compute
-    `opp_X_diff`, and nothing reads it â€” a diff's swap value is the negation of
+    `opp_X_diff`, and nothing reads it — a diff's swap value is the negation of
     the player value). It is FATAL for transform outputs, which register explicit
     column names: only `player_vs_opp_style_resid_flat_diff` exists, so the
     invented `opp_` twin falls through to `registry.get(base_name)` and raises
@@ -398,10 +398,9 @@ class TestPromotedConfigIncludeList:
         inc = self._emit(["player_surface_matches(days=30)"])["features"]["include"]
         assert "opp_surface_matches(days=30)" in inc
 
-    def test_include_matches_swap_side_opp_specs(self):
-        """The emitter and the FS materializer must agree on which opp_ columns
-        exist, or a config is promoted naming columns the run never built."""
-        from mvp.projection.iid.serve_model import swap_side_opp_specs
+    def test_include_matches_the_partner_resolver(self):
+        """The emitter must name exactly what `_match_feature_values` reads."""
+        from mvp.projection.iid.serve_model import swap_side_partner_specs
 
         match = [
             "player_elo_surface_indoor_diff",
@@ -410,4 +409,26 @@ class TestPromotedConfigIncludeList:
             "opp_surface_matches(days=30)",
         ]
         inc = self._emit(match)["features"]["include"]
-        assert set(inc) == set(match) | set(swap_side_opp_specs(match))
+        assert set(inc) == set(match) | set(swap_side_partner_specs(match))
+
+    def test_opp_selected_mirror_gets_its_player_partner(self):
+        """The swap side of an `opp_`-prefixed mirror reads the `player_` column.
+
+        `_match_feature_values` (serve_model.py:875-876) resolves a `returner_`
+        mirror column to `opp_` when A serves and `player_` when B serves. So a
+        selection FS made as `opp_surface_matches(days=30)` — which it did, via
+        the shortlist's composite-side expansion — needs both.
+
+        This passes without the fix only by accident: the engine computes every
+        feature player-side and derives `opp_` by mirroring, so the player-side
+        column exists whether or not anything asked for it.
+        """
+        inc = self._emit(["opp_surface_matches(days=30)"])["features"]["include"]
+        assert "opp_surface_matches(days=30)" in inc
+        assert "player_surface_matches(days=30)" in inc
+
+    def test_diffs_still_get_no_partner_in_either_direction(self):
+        for spec in ("player_elo_surface_indoor_diff",
+                     "player_vs_opp_style_resid_flat_diff"):
+            inc = self._emit([spec])["features"]["include"]
+            assert inc == [spec], inc
