@@ -199,3 +199,59 @@ class TestPrepareMatchData:
         # Two rows per match: the partner row is what makes the opp_ join resolve.
         assert len(both) == 2 * len(selector._match_df)
         assert "opp_tourn_pts_service_won_per_game" in engine.requested[-1]
+
+
+class TestChainFoldCache:
+    """The per-fold cache must be exactly what the per-candidate code produced.
+
+    `_score_cv_chain` used to rebuild these four frames inside its candidate loop;
+    they are now built once in `_build_chain_folds`. That is only safe if the
+    cached frames are identical to the inline ones, and nothing else asserts it.
+    """
+
+    def _prepared(self, selector):
+        selector._prepare_match_data(
+            match_pool=[MIRROR_SPEC], engine=MirroringFakeEngine(), cache_key="k",
+        )
+        return selector
+
+    def test_cached_folds_equal_the_inline_computation(self, selector):
+        self._prepared(selector)
+        folds = selector._chain_folds
+        assert folds is not None
+        assert len(folds) == len(selector._fs_match_splits)
+
+        raw_points = pl.read_parquet(selector.points_path)
+        for fold, (train_idx, test_idx) in zip(
+            folds, selector._fs_match_splits, strict=True,
+        ):
+            # Row gathers: same indices, same frame.
+            assert fold.train_df.equals(selector._match_df[train_idx])
+            assert fold.test_df.equals(selector._match_df[test_idx])
+
+            # The two `is_in(train_uids)` filters the candidate loop used to run.
+            train_uids = set(fold.train_df["match_uid"].to_list())
+            assert fold.feats.equals(
+                selector._match_features_both_sides.filter(
+                    pl.col("match_uid").is_in(train_uids)
+                )
+            )
+            assert fold.points.equals(
+                raw_points.filter(pl.col("match_uid").is_in(train_uids))
+            )
+
+    def test_preloaded_points_is_released_after_the_build(self, selector):
+        self._prepared(selector)
+        # The fold slices are its only consumers; holding the unfiltered frame for
+        # the rest of the run is pure residency. Guards the release from a revert.
+        assert selector._preloaded_points is None
+        assert all(len(f.points) > 0 for f in selector._chain_folds)
+
+    def test_no_folds_fails_loudly(self, selector):
+        self._prepared(selector)
+        # A silent empty-split list scores np.mean([]) = nan for every candidate,
+        # so the run ends with zero selected features and no error.
+        selector._fs_match_splits = []
+        selector._preloaded_points = pl.read_parquet(selector.points_path)
+        with pytest.raises(ValueError, match="no folds"):
+            selector._build_chain_folds()
