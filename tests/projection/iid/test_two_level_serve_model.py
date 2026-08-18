@@ -93,9 +93,41 @@ class TestFactory:
         est = build_serve_model(_cfg())
         assert not hasattr(est._first_in, "predict_state_fn")
 
-    def test_empty_component_sets_raise(self):
-        with pytest.raises(ValueError, match="two_level"):
-            build_serve_model(ServeModelConfig(type="two_level"))
+    def test_all_empty_builds_with_every_component_degenerate(self):
+        """The feature-blind fit must be constructible.
+
+        It is what validation-ladder step 2 (degenerate recovery) is DEFINED as,
+        and it is the round-0 state of any component-wise FS starting from
+        nothing — round 1 leaves the two non-selected components empty. This
+        used to raise, which made both unreachable.
+        """
+        est = build_serve_model(ServeModelConfig(type="two_level"))
+        assert isinstance(est, TwoLevelServeModel)
+        # Each win branch degrades to its own training rate rather than a model.
+        assert not isinstance(est._win_first, ScoreStateChainServeModel)
+        assert not isinstance(est._win_second, ScoreStateChainServeModel)
+        assert est._win_first.serve_branch == 1
+        assert est._win_second.serve_branch == 2
+        # first_in already had this path — an empty set is intercept-only.
+        assert est._first_in.match_level_features == []
+
+    def test_one_populated_component_leaves_the_others_degenerate(self):
+        """Round 1 of a component-wise FS: one feature, two empty components."""
+        est = build_serve_model(
+            ServeModelConfig(type="two_level", win_first_match_features=["a"])
+        )
+        assert isinstance(est._win_first, ScoreStateChainServeModel)
+        assert not isinstance(est._win_second, ScoreStateChainServeModel)
+
+    def test_a_degenerate_branch_is_constant_across_states(self):
+        est = build_serve_model(ServeModelConfig(type="two_level"))
+        est._win_first._rate = 0.7
+        fn_a, fn_b = est._win_first.predict_state_fn(
+            pl.DataFrame({"match_uid": ["m1", "m2"]})
+        )
+        # No state dependence and no side dependence: the branch carries a rate.
+        assert fn_a(object()).tolist() == [0.7, 0.7]
+        assert fn_b(object()).tolist() == [0.7, 0.7]
 
     def test_components_tuple_is_the_addressable_set(self):
         assert COMPONENTS == (FIRST_IN, WIN_FIRST, WIN_SECOND)

@@ -122,16 +122,12 @@ def build_serve_model(cfg: Any, engine: Any = None) -> "ServeWinProbEstimator":
     if cfg.type == "two_level":
         from mvp.projection.iid.two_level_serve_model import TwoLevelServeModel
 
-        configured = (
-            cfg.first_in_match_features or cfg.first_in_point_features
-            or cfg.win_first_match_features or cfg.win_first_point_features
-            or cfg.win_second_match_features or cfg.win_second_point_features
-        )
-        if not configured:
-            raise ValueError(
-                "serve_model type=two_level needs at least one of "
-                "first_in_* / win_first_* / win_second_* to be non-empty"
-            )
+        # No non-empty requirement. An all-empty two-level model is the
+        # feature-blind fit validation-ladder step 2 is defined as, and it is the
+        # round-0 state of any component-wise FS that starts from nothing. Each
+        # component degrades to its own training base rate — first_in via
+        # FirstServeInModel's intercept-only path, the win branches via
+        # _ConstantBranch — so the composition stays well defined throughout.
         return TwoLevelServeModel(
             model_type=cfg.model_type,
             first_in_match_features=cfg.first_in_match_features,

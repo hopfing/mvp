@@ -235,10 +235,27 @@ class FirstServeInModel:
             for _, _, full, params in [parse_feature_spec(spec)]
         ]
         if preloaded is not None:
-            have = [c for c in needed if c in preloaded.columns]
-            return preloaded.select(["match_uid", "player_id", *have]).rename(
-                {c: s for c, s in zip(have, self._cols[: len(have)], strict=False)}
-            )
+            # Pair each raw column with ITS OWN inference name before dropping
+            # the absent ones. Zipping survivors against `self._cols[:len(have)]`
+            # positionally re-labelled every survivor after a gap with the wrong
+            # spec's name — silently, producing a model fitted on mislabelled
+            # columns rather than an error.
+            pairs = [
+                (raw, col)
+                for raw, col in zip(needed, self._cols, strict=True)
+                if raw in preloaded.columns
+            ]
+            absent = [raw for raw in needed if raw not in preloaded.columns]
+            if absent:
+                raise KeyError(
+                    f"FirstServeInModel: match features absent from the preloaded "
+                    f"frame: {sorted(absent)}. The FS candidate pool must contain "
+                    f"every spec any held component references, or the column is "
+                    f"never materialized."
+                )
+            return preloaded.select(
+                ["match_uid", "player_id", *[r for r, _ in pairs]]
+            ).rename(dict(pairs))
         engine = self._engine or FeatureEngine(
             matches_path=self._matches_path
             or (get_data_root() / "aggregate" / "atptour" / "matches.parquet"),
@@ -276,6 +293,69 @@ def _build_rate_regressor(model_type: str, params: dict[str, Any]) -> Any:
     from sklearn.linear_model import Ridge
 
     return Ridge(alpha=float(params.get("alpha", 1.0)))
+
+
+class _ConstantBranch:
+    """A win branch with no features: the training win rate on its own rows.
+
+    `ScoreStateChainServeModel.__init__` raises on empty feature lists
+    (serve_model.py:407), but `FirstServeInModel` treats empty as intercept-only
+    and falls back to a base rate (its comment: "Intercept-only is legitimate...
+    a valid configuration in its own right"). That asymmetry made an all-empty
+    two-level model unconstructible, which blocked two things that both need it:
+    validation-ladder step 2 (degenerate recovery, which is DEFINED as the
+    feature-blind fit), and any component-wise FS that starts from nothing —
+    round 1 has the selected component holding one feature and the other two
+    holding none.
+
+    Deliberately not a ScoreStateChainServeModel subclass: it has no model, no
+    feature columns and no state dependence, so inheriting would carry a fit path
+    that cannot run. It implements the three members TwoLevelServeModel actually
+    uses — `required_columns`, `fit`, `predict_state_fn`.
+    """
+
+    is_state_aware = True
+    required_columns: list[str] = []
+
+    def __init__(self, serve_branch: int, points_path: Path | str | None = None):
+        self.serve_branch = serve_branch
+        self._points_path = points_path
+        self._rate = 0.5
+
+    def fit(
+        self,
+        df: pl.DataFrame,
+        *,
+        preloaded_match_features: pl.DataFrame | None = None,
+        preloaded_points: pl.DataFrame | None = None,
+    ) -> None:
+        from mvp.common.base_job import get_data_root
+
+        if preloaded_points is not None:
+            points = preloaded_points
+        else:
+            path = self._points_path or (
+                get_data_root() / "aggregate" / "atptour" / "match_beats_points.parquet"
+            )
+            points = pl.read_parquet(
+                path, columns=["match_uid", "serve", "point_won_by_server"]
+            ).filter(pl.col("match_uid").is_in(df["match_uid"].unique().to_list()))
+        rows = _apply_serve_branch(points, self.serve_branch)
+        won = rows["point_won_by_server"].drop_nulls()
+        if len(won) == 0:
+            raise ValueError(
+                f"_ConstantBranch(serve_branch={self.serve_branch}): no training "
+                f"points on this branch"
+            )
+        self._rate = float(won.mean())
+
+    def predict_state_fn(self, df: pl.DataFrame):
+        n = len(df)
+
+        def fn(_state) -> np.ndarray:
+            return np.full(n, self._rate, dtype=np.float64)
+
+        return fn, fn
 
 
 class TwoLevelServeModel(ServeWinProbEstimator):
@@ -333,19 +413,26 @@ class TwoLevelServeModel(ServeWinProbEstimator):
         # are applied to the COMPOSED p below, never inside a branch — applying
         # them per branch would compress each one and then compose the
         # compressed pair, which is not the same transform.
-        self._win_first = ScoreStateChainServeModel(
-            model_type=model_type,
-            match_level_features=self.win_first_match_features,
-            point_level_features=self.win_first_point_features,
-            params=self.params, clip_min=0.0, clip_max=1.0,
-            gap_shrink=1.0, serve_branch=_SERVE_BRANCH[WIN_FIRST], **shared,
+        def _branch(component: str, match: list[str], point: list[str]):
+            # Empty -> the branch's training win rate, matching FirstServeInModel's
+            # treatment of an empty set. See _ConstantBranch.
+            if not match and not point:
+                return _ConstantBranch(
+                    _SERVE_BRANCH[component], points_path=points_path,
+                )
+            return ScoreStateChainServeModel(
+                model_type=model_type,
+                match_level_features=match,
+                point_level_features=point,
+                params=self.params, clip_min=0.0, clip_max=1.0,
+                gap_shrink=1.0, serve_branch=_SERVE_BRANCH[component], **shared,
+            )
+
+        self._win_first = _branch(
+            WIN_FIRST, self.win_first_match_features, self.win_first_point_features,
         )
-        self._win_second = ScoreStateChainServeModel(
-            model_type=model_type,
-            match_level_features=self.win_second_match_features,
-            point_level_features=self.win_second_point_features,
-            params=self.params, clip_min=0.0, clip_max=1.0,
-            gap_shrink=1.0, serve_branch=_SERVE_BRANCH[WIN_SECOND], **shared,
+        self._win_second = _branch(
+            WIN_SECOND, self.win_second_match_features, self.win_second_point_features,
         )
         self._first_in = FirstServeInModel(
             model_type=model_type,
@@ -382,20 +469,44 @@ class TwoLevelServeModel(ServeWinProbEstimator):
         self._win_first.fit(df, **kw)
         self._win_second.fit(df, **kw)
 
+    @staticmethod
+    def _engine_col(col: str) -> str:
+        """Inference name -> engine name. Inverse of resolve_match_feature_cols."""
+        if col.startswith("server_"):
+            return "player_" + col[len("server_"):]
+        if col.startswith("returner_"):
+            return "opp_" + col[len("returner_"):]
+        return col
+
     def _first_in_for(self, df: pl.DataFrame) -> tuple[np.ndarray, np.ndarray]:
         """P(1st in) per match for A-serving and B-serving, as arrays."""
         n = len(df)
         if self._first_in._model is None or not self.first_in_match_features:
             base = np.full(n, self._first_in._base_rate, dtype=np.float64)
             return base, base
+        # `_cols` are INFERENCE names (`server_*` / `returner_*`, from
+        # resolve_match_feature_cols at serve_model.py:159). `df` here is the
+        # match-grain frame, which carries the ENGINE names (`player_*` /
+        # `opp_*`) — the rename only happens inside FirstServeInModel.fit's own
+        # join. Selecting `_cols` straight off `df` therefore raised KeyError
+        # for every non-empty first_in feature set, which is every round of a
+        # first_in FS run. Map back to the engine names before reading.
         cols, is_diff = self._first_in._cols, self._first_in._is_diff
-        have = [c for c in cols if c in df.columns]
-        if len(have) != len(cols):
-            missing = sorted(set(cols) - set(df.columns))
+        engine_cols = [self._engine_col(c) for c in cols]
+        missing = [
+            e for e, c in zip(engine_cols, cols, strict=True)
+            if e not in df.columns and c not in df.columns
+        ]
+        if missing:
             raise KeyError(
-                f"TwoLevelServeModel: first_in features missing from df: {missing}"
+                f"TwoLevelServeModel: first_in features missing from df: "
+                f"{sorted(missing)}"
             )
-        X_a = df.select(cols).to_numpy().astype(np.float64)
+        # A frame already in inference names (the FS scorer builds one) still
+        # works — prefer the engine name, fall back to the inference name.
+        read = [e if e in df.columns else c
+                for e, c in zip(engine_cols, cols, strict=True)]
+        X_a = df.select(read).to_numpy().astype(np.float64)
         # Swap perspective: diff-style columns negate, mirrored ones read the
         # partner column. Same rule resolve_match_feature_cols encodes.
         X_b = X_a.copy()
