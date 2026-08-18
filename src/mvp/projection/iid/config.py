@@ -281,37 +281,50 @@ class ServeDiscoveryConfig(BaseModel):
     ) -> dict[str, Any]:
         """Emit a runnable IIDProjectionConfig-compatible dict from FS output.
 
-        `features.include` gets both player_/opp_ versions of each selected
-        match-level spec — match-constant point features are pulled directly
-        from `match_beats_points.parquet` at fit time and don't need to be
-        engine-computed.
+        `features.include` gets the selected match-level specs plus ONLY the
+        `opp_` columns the swap (B-serves) perspective actually reads — match-
+        constant point features come straight from `match_beats_points.parquet`
+        at fit time and are not engine-computed.
+
+        The opp_ set comes from `swap_side_opp_specs`, the same classifier
+        `_prepare_match_data` uses, rather than pairing every `player_X` with an
+        `opp_X`. Two reasons, one of them a crash:
+
+        A diff-style feature (registry `mirror=False`) has no `opp_` column —
+        its swap value is the NEGATION of the player value — so pairing emits a
+        spec nothing reads. Harmless for registry-backed features, since the
+        engine can compute `opp_X_diff` when the base name is registered, just
+        wasted work.
+
+        It is NOT harmless for TRANSFORM outputs. Those register explicit column
+        names (`style_matchup_retrieval._OUTPUTS`) and only the `player_` diff
+        exists; `opp_vs_opp_style_resid_flat_diff` is in no registry and no
+        transform, so `_resolve_dependencies` falls through to
+        `registry.get(base_name)` and raises KeyError. A promoted config that
+        selected such a feature was unrunnable.
         """
         from mvp.model.engine import parse_feature_spec
+
+        from mvp.projection.iid.serve_model import swap_side_opp_specs
 
         include_specs: list[str] = []
         seen: set[str] = set()
 
         for spec in selected_match_level:
-            prefix, base_name, full_name, params = parse_feature_spec(spec)
-            if prefix == "player":
-                swap_full = f"opp_{base_name}"
-            elif prefix == "opp":
-                swap_full = f"player_{base_name}"
-            else:
-                swap_full = full_name
-
+            _prefix, _base, full_name, params = parse_feature_spec(spec)
             if params:
                 param_str = ", ".join(f"{k}={v}" for k, v in params.items())
                 own_spec = f"{full_name}({param_str})"
-                swap_spec = f"{swap_full}({param_str})"
             else:
                 own_spec = full_name
-                swap_spec = swap_full
+            if own_spec not in seen:
+                include_specs.append(own_spec)
+                seen.add(own_spec)
 
-            for s in (own_spec, swap_spec):
-                if s not in seen:
-                    include_specs.append(s)
-                    seen.add(s)
+        for swap_spec in swap_side_opp_specs(selected_match_level):
+            if swap_spec not in seen:
+                include_specs.append(swap_spec)
+                seen.add(swap_spec)
 
         if self.serve_component is None:
             serve_block: dict[str, Any] = {
