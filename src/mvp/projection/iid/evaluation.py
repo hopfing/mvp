@@ -27,11 +27,59 @@ from mvp.oddspapi import paths
 logger = logging.getLogger(__name__)
 
 PMF_COL = "total_games_pmf"
+SPREAD_PMF_COL = "spread_pmf"
+
+# Per-market pmf schema. `offset` is what separates the two index conventions:
+# totals is 0-based (element i is P(total == i)), spread is SIGNED and stored with
+# an offset (element i is P(margin == i - offset)). Reading a spread pmf 0-based
+# does not raise -- it lands every lookup `offset` places out, and the resulting
+# ledger is plausible and wrong.
+_MARKET_PMF: dict[str, dict[str, str | bool | None]] = {
+    "total_games": {
+        "pmf": PMF_COL,
+        "outcome": "actual_total",
+        "expected": "expected_total_games",
+        "offset": None,
+        # Named-outcome: `Over` is not a player, so there is no orientation to
+        # check and no `a_is_uid_min` to demand.
+        "oriented": False,
+    },
+    "game_spread": {
+        "pmf": SPREAD_PMF_COL,
+        "outcome": "actual_spread",
+        "expected": "expected_spread",
+        "offset": "spread_offset",
+        # Participant-sided: the board's `a` and the pmf's `a` are defined
+        # independently and MUST be checked against each other.
+        "oriented": True,
+    },
+}
+
+
+def market_pmf_spec(market: str) -> dict[str, str | bool | None]:
+    """Column names for one market's pmf frame.
+
+    Raises on an unknown market rather than defaulting to totals: a market that
+    reaches pricing without a registered schema would otherwise be priced against
+    the wrong distribution under the right-looking column names.
+    """
+    try:
+        return _MARKET_PMF[market]
+    except KeyError:
+        raise ValueError(
+            f"no pmf schema for market {market!r}; known: {sorted(_MARKET_PMF)}"
+        ) from None
 
 # Bumped when the ledger's contract changes. Carried as a column so a reader can
 # tell contracts apart without depending on `projection_evaluations` happening to
 # hold exactly one directory.
-LEDGER_SCHEMA_VERSION = 1
+#
+# 2: `p_over` removed, `book_p` and `side_pos` added. `p_over` was rung-level and
+#    therefore the wrong side's probability on half of every ledger's rows;
+#    `book_p` is its per-side form. `side_pos` is the positional key the two-way
+#    complements branch on, which the `side` label cannot serve once a market
+#    labels its sides by something other than position.
+LEDGER_SCHEMA_VERSION = 2
 
 # Anchors written into every ledger. `open` and `close` answer the entry-timing
 # question; `formed(2)` is the first moment a second entry book agrees there is a
@@ -40,29 +88,87 @@ LEDGER_SCHEMA_VERSION = 1
 DEFAULT_ANCHORS: tuple[str, ...] = ("open", "formed2", "close")
 
 
-def cumulative(pmf: pl.DataFrame) -> pl.DataFrame:
+class MarketNotCarried(RuntimeError):
+    """No entry book carries this market's stage file.
+
+    A fact about the stage tree, not about the config being evaluated, so a
+    caller pricing several markets can skip this one and keep the others.
+
+    A dedicated class rather than catching `RuntimeError`: `NotImplementedError`
+    and `RecursionError` are both subclasses, so a bare catch would swallow
+    either from anywhere under `build_ledger` and record it as "this market is
+    not carried" -- retrying forever with the same result. Subclassing
+    `RuntimeError` keeps existing `except RuntimeError` callers working.
+    """
+
+
+
+def cumulative(
+    pmf: pl.DataFrame, *, market: str = "total_games"
+) -> pl.DataFrame:
     """(match_uid, games, p, p_at_or_below) -- the pmf as a long, cumulative table.
 
-    The pmf list is indexed BY GAME COUNT: element i is P(total == i games), verified
-    against `expected_total_games` (sum of i*p_i reproduces it exactly). Exploding
-    rather than slicing keeps the arithmetic legible and lets the line join be an
-    ordinary equality rather than a per-row offset.
+    `games` is the market's outcome value: a total for `total_games`, a SIGNED
+    margin for `game_spread`. Exploding rather than slicing keeps the arithmetic
+    legible and lets the line join be an ordinary equality rather than a per-row
+    offset.
+
+    **The index is shifted per market, not just renamed.** Totals is 0-based
+    (element i is P(total == i), verified against `expected_total_games`). Spread
+    stores a signed support with an offset, so element i is P(margin == i - offset)
+    and the offset must be subtracted here. Renaming the column without shifting
+    does not raise: board `points` for spread run roughly -10..+10 while an
+    unshifted index runs 0..130, so `price`'s inner join would match spuriously
+    across the 0..10 overlap with the wrong probability mass attached, and
+    everything outside that band would vanish down the already-logged no-support
+    path.
+
+    The offset is read from the frame rather than assumed, and asserted constant:
+    it is a storage constant of the chain, so a frame carrying two of them means
+    two incompatible pmfs have been concatenated.
     """
-    missing = {"match_uid", PMF_COL} - set(pmf.columns)
+    spec = market_pmf_spec(market)
+    col = spec["pmf"]
+    missing = {"match_uid", col} - set(pmf.columns)
     if missing:
         raise ValueError(f"pmf frame is missing {sorted(missing)}")
+
+    offset = 0
+    offset_col = spec["offset"]
+    if offset_col is not None:
+        if offset_col not in pmf.columns:
+            raise ValueError(
+                f"{market} pmf frame is missing {offset_col!r}; the signed index "
+                "cannot be recovered without it"
+            )
+        distinct = pmf[offset_col].unique().to_list()
+        if any(v is None for v in distinct):
+            raise ValueError(
+                f"{offset_col} is null; the signed index cannot be recovered"
+            )
+        if len(distinct) != 1:
+            raise ValueError(
+                f"{offset_col} is not constant across the frame ({distinct}); "
+                "two pmfs with different supports have been combined"
+            )
+        offset = int(distinct[0])
+
     return (
-        pmf.select("match_uid", PMF_COL)
+        pmf.select("match_uid", col)
         .with_row_index("_r")
-        .explode(PMF_COL)
-        .with_columns(pl.int_range(pl.len()).over("_r").alias("games"))
-        .rename({PMF_COL: "p"})
+        .explode(col)
+        .with_columns(
+            (pl.int_range(pl.len()).over("_r") - offset).alias("games")
+        )
+        .rename({col: "p"})
         .with_columns(pl.col("p").cum_sum().over("_r").alias("p_at_or_below"))
         .drop("_r")
     )
 
 
-def price(board: pl.DataFrame, pmf: pl.DataFrame) -> pl.DataFrame:
+def price(
+    board: pl.DataFrame, pmf: pl.DataFrame, *, market: str = "total_games"
+) -> pl.DataFrame:
     """Attach model probabilities and edges to a board.
 
     `model_p_over` is P(total > line) and `p_push` is P(total == line), zero for the
@@ -83,7 +189,7 @@ def price(board: pl.DataFrame, pmf: pl.DataFrame) -> pl.DataFrame:
     """
     if board.is_empty():
         return board
-    cum = cumulative(pmf)
+    cum = cumulative(pmf, market=market)
     # floor(line) is the largest game count that is NOT over the line
     at_or_below = cum.select(
         "match_uid",
@@ -95,7 +201,7 @@ def price(board: pl.DataFrame, pmf: pl.DataFrame) -> pl.DataFrame:
         pl.col("games").cast(pl.Float64).alias("_exact"),
         pl.col("p").alias("p_push"),
     )
-    return (
+    priced = (
         board.with_columns(pl.col("points").floor().alias("_floor"))
         .join(at_or_below, on=["match_uid", "_floor"], how="inner")
         .join(
@@ -124,35 +230,107 @@ def price(board: pl.DataFrame, pmf: pl.DataFrame) -> pl.DataFrame:
         )
         .drop("_floor", "p_at_or_below")
     )
+    _assert_orientation_agrees(priced, pmf, market=market)
+    return priced
 
 
-def settle(priced: pl.DataFrame, outcomes: pl.DataFrame) -> pl.DataFrame:
-    """Settle both sides of every rung against the realised total.
+def _assert_orientation_agrees(
+    priced: pl.DataFrame, pmf: pl.DataFrame, *, market: str
+) -> None:
+    """The pmf's `a` and the board's `a` must be the same player.
 
-    `outcomes` is (match_uid, actual_total). Matches absent from it are dropped rather
-    than scored: a retirement, walkover or default produces fewer games than the match
-    would have, so scoring one against a total records an "under" no book would have
-    settled that way. The exclusion belongs upstream, in whatever built `outcomes`.
+    They are defined independently and can disagree. The board derives its
+    ordinal from `match_uid`'s fifth component, which is `min(player_id, opp_id)`
+    by construction. The pmf's `a` is whichever perspective row survived
+    filtering -- `_collapse_to_match_rows` keeps the lowest SURVIVING
+    `player_id`, so a match arriving with one perspective row keeps that row
+    whatever its id. Measured on the 2026 test set, 11.5% of matches are in that
+    state.
+
+    They agree on every currently priceable match, which is exactly why this
+    needs asserting rather than assuming: the day a book quotes one of those
+    matches, every rung on it prices the wrong player's margin against the line
+    and settles with the sign flipped, silently. §7's `corr < 0` criterion cannot
+    see it either, because relabelling and re-signing together leave a
+    correlation unchanged.
+
+    Scoped to the rows that survived the join, because that is the only point
+    where both definitions are in scope: asserting earlier -- in the projection,
+    where `player_id` is in hand -- cannot be limited to priced matches, and
+    would fire on the 11.5% immediately.
+    """
+    if priced.is_empty():
+        return
+    if "a_is_uid_min" not in pmf.columns:
+        # Absent is fine for a market with no orientation to check. For an
+        # oriented one it is NOT: the column is mandatory, and skipping the check
+        # because the operand is missing is the same fail-open the check exists to
+        # prevent -- a pmf frame written by a partially-updated version, or hand
+        # built, would ship mirror mode silently. Keyed off the market spec rather
+        # than a literal, so a third participant market cannot silently reopen it.
+        if market_pmf_spec(market)["oriented"]:
+            raise ValueError(
+                f"{market} pmf frame is missing `a_is_uid_min`; the board's "
+                "and the projection's `a` cannot be checked against each other, "
+                "and a mismatch is invisible downstream"
+            )
+        return
+    kept = priced["match_uid"].unique()
+    # Null reads as DISAGREEMENT, not agreement: an unknown orientation is
+    # exactly the state this refuses to price through.
+    bad = pmf.filter(
+        pl.col("match_uid").is_in(kept.implode())
+        & ~pl.col("a_is_uid_min").fill_null(False)
+    )
+    if bad.height:
+        raise ValueError(
+            f"orientation mismatch on {bad.height} priced match(es): the pmf's "
+            f"`a` is not match_uid's lower player_id, so the board and the "
+            f"projection disagree about which player each price belongs to. "
+            f"First: {bad['match_uid'][0]}. Fix belongs in "
+            f"_collapse_to_match_rows, not here."
+        )
+
+
+def settle(
+    priced: pl.DataFrame, outcomes: pl.DataFrame, *, market: str = "total_games"
+) -> pl.DataFrame:
+    """Settle both sides of every rung against the realised outcome.
+
+    `outcomes` is (match_uid, <the market's outcome column>) -- `actual_total` for
+    totals, `actual_spread` for spread. Matches absent from it are dropped rather
+    than scored: a retirement, walkover or default produces fewer games than the
+    match would have, so scoring one against a total records an "under" no book
+    would have settled that way. It produces a MARGIN no book would have settled
+    either, and margin is what spreads price, so the same exclusion matters at
+    least as much here. It belongs upstream, in whatever built `outcomes`.
+
+    The comparison is identical in shape for both markets because both are already
+    in the a-frame: `actual_spread` is `games_a - games_b` and `points` is a
+    threshold on that same quantity (`board._orient_participant_sides`). So
+    "over_won" reads as "the A side covered" and needs no per-market branch.
 
     A push returns the stake -- pnl 0, not a loss -- and is counted separately so it
-    cannot be mistaken for a break-even bet in a hit rate.
+    cannot be mistaken for a break-even bet in a hit rate. A whole-number spread
+    pushes exactly as a whole-number total does.
     """
     if priced.is_empty():
         return priced
-    if "actual_total" not in outcomes.columns:
-        raise ValueError("outcomes needs (match_uid, actual_total)")
+    outcome_col = market_pmf_spec(market)["outcome"]
+    if outcome_col not in outcomes.columns:
+        raise ValueError(f"outcomes needs (match_uid, {outcome_col})")
     out = priced.join(
-        outcomes.select("match_uid", "actual_total"), on="match_uid", how="inner"
+        outcomes.select("match_uid", outcome_col), on="match_uid", how="inner"
     )
     # A null outcome makes both `push` and `over_won` null, and a null predicate
     # routes to `.otherwise`, landing the row as a loss on BOTH sides. Drop rather
     # than score: an unknown result is not a losing bet.
-    unknown = out.filter(pl.col("actual_total").is_null()).height
+    unknown = out.filter(pl.col(outcome_col).is_null()).height
     if unknown:
-        logger.warning("settle: dropping %d rows with a null actual_total", unknown)
-        out = out.drop_nulls("actual_total")
-    over_won = pl.col("actual_total") > pl.col("points")
-    push = pl.col("actual_total") == pl.col("points")
+        logger.warning("settle: dropping %d rows with a null %s", unknown, outcome_col)
+        out = out.drop_nulls(outcome_col)
+    over_won = pl.col(outcome_col) > pl.col("points")
+    push = pl.col(outcome_col) == pl.col("points")
     return out.with_columns(
         push.alias("is_push"),
         pl.when(push).then(None).otherwise(over_won).alias("over_won"),
@@ -224,8 +402,16 @@ def bets(settled: pl.DataFrame, *, min_edge: float = 0.0) -> pl.DataFrame:
     )
     return (
         settled.with_columns(
-            pl.when(take_over).then(pl.lit("over")).otherwise(pl.lit("under"))
-            .alias("side"),
+            # `side_pos`, not the literals `over`/`under`. This function has no
+            # `market` parameter and `settle()`'s output has no `market` column
+            # (`build_ledger` adds it after the reshape), so there is nothing to
+            # branch on -- and nothing to raise on either: `over_odds`,
+            # `model_p_over` and `edge_novig_over` all exist on a spread frame
+            # because the board is normalised positionally. It would run happily
+            # and mislabel every row. Emitting the positional key removes the
+            # hazard rather than guarding it.
+            pl.when(take_over).then(pl.lit("a")).otherwise(pl.lit("b"))
+            .alias("side_pos"),
             pl.max_horizontal("edge_over", "edge_under").alias("edge"),
             pl.when(take_over).then(pl.col("over_odds"))
             .otherwise(pl.col("under_odds")).alias("odds"),
@@ -251,24 +437,126 @@ def bets(settled: pl.DataFrame, *, min_edge: float = 0.0) -> pl.DataFrame:
 # ---------------------------------------------------------------------------
 
 # Columns that describe the RUNG and are therefore shared by both of its sides.
-_RUNG_COLS = (
+# Rung-level columns copied onto BOTH side rows. Everything here is a property of
+# the rung or the pair -- the overround of the two prices together, how balanced
+# they are, when it last moved -- so duplicating it is correct.
+#
+# `p_over` is deliberately NOT here. It describes ONE side, so carrying it at rung
+# level put the over's probability on the under's row too, where it had to be read
+# as "one minus this". `unpivot_sides` emits it per side as `book_p` instead.
+_RUNG_COLS_BASE = (
     "match_uid", "book", "points",
-    "p_over", "overround", "imbalance", "separation",
+    "overround", "imbalance", "separation",
     "live", "quote_age_s", "last_change_s", "n_two_sided", "is_main_line",
     "line_offset",
-    "p_push", "actual_total", "is_push",
+    "p_push", "is_push",
 )
 
-# (side, odds, model_p, edge, edge_novig, pnl, live) column per side.
+
+def _rung_cols(market: str) -> tuple[str, ...]:
+    """Rung columns for one market: the shared set plus that market's outcome.
+
+    Per market rather than a union of both outcome columns, because each market
+    writes its own ledger file (`artifacts.PMF_PARQUET_BY_MARKET`) and a reader of
+    one should not have to know the other's schema.
+    """
+    return _RUNG_COLS_BASE + (market_pmf_spec(market)["outcome"],)
+
+
+# POSITIONAL side key -> its (odds, model_p, edge, edge_novig, pnl, live) columns.
+#
+# Keyed `a`/`b`, not `over`/`under`, and the same map for every market. The board
+# is normalised positionally -- `_pivot_two_sided` renames whichever pair it was
+# given to `over_*`/`under_*` -- so slot A is the first side of whatever
+# vocabulary the market uses, and the column names never vary by market.
+#
+# This is what the two-way complements branch on. They must NOT branch on the
+# ledger's `side` label: for spread that label is `fav`/`dog`, which is a
+# different question from "is this the a side" and disagrees with it on about half
+# of all rungs.
 _SIDE_COLS = {
-    "over": ("over_odds", "model_p_over", "edge_over", "edge_novig_over",
-             "pnl_over", "live_over"),
-    "under": ("under_odds", "model_p_under", "edge_under", "edge_novig_under",
-              "pnl_under", "live_under"),
+    "a": ("over_odds", "model_p_over", "edge_over", "edge_novig_over",
+          "pnl_over", "live_over"),
+    "b": ("under_odds", "model_p_under", "edge_under", "edge_novig_under",
+          "pnl_under", "live_under"),
+}
+
+# The ledger's human-facing `side` label, keyed by POSITION rather than paired by
+# tuple order, so it cannot drift with `_SIDE_COLS`' dict ordering.
+#
+# `game_spread` is deliberately absent: its label is `fav`/`dog` taken from the
+# sign of the (match, book, anchor) main line, which needs the oriented board that
+# the orientation work supplies. Until then asking for it raises rather than
+# falling back to `a`/`b` -- shipping the positional label would put "alphabetical
+# accident" in a bettor-facing column with nothing to signal it.
+_SIDE_LABELS: dict[str, dict[str, str]] = {
+    "total_games": {"a": "over", "b": "under"},
 }
 
 
-def unpivot_sides(settled: pl.DataFrame) -> pl.DataFrame:
+def _favourite_label(pos: str) -> pl.Expr:
+    """`fav` / `dog` / `pk` for one positional slot, from the main line's sign.
+
+    A property of the (match, book, anchor) BLOCK, not of the rung. Assigning it
+    per rung from the shorter price would flip along a ladder -- the a side is
+    long-priced at a high line and short-priced at a low one -- and would label
+    the same player both ways in one match. The favourite is whoever the market
+    has stronger, which is one answer per block, inherited by every rung on it.
+
+    **Sign is ledger-frame.** `points` here is a threshold on `games_a - games_b`,
+    so a POSITIVE main line means a must win by more than X: a is the favourite.
+    That is the opposite of the feed's display convention ("A -4.5"), which is
+    where this gets read backwards.
+
+    The grain is (match, book) inside `build_ledger`'s per-anchor loop, which is
+    the full (match, book, anchor) key -- `anchor` is stamped after this runs. Two
+    books may therefore disagree about who is favoured, and a match may flip
+    between anchors. Both are real and worth seeing; `side` is NOT a match-level
+    constant.
+
+    Null where the block has no main line at all -- `_flag_main_line` needs a live
+    two-sided rung, and a block with none has no sign to read. Harmless because
+    both readers of `side` filter to main-line rows first, so such a block
+    contributes nothing to either.
+    """
+    main = (
+        pl.when(pl.col("is_main_line").fill_null(False))
+        .then(pl.col("points"))
+        .max()
+        .over(["match_uid", "book"])
+    )
+    a_is_fav = main > 0
+    fav, dog = ("fav", "dog") if pos == "a" else ("dog", "fav")
+    return (
+        pl.when(main.is_null()).then(pl.lit(None, dtype=pl.String))
+        .when(main == 0).then(pl.lit("pk"))
+        .when(a_is_fav).then(pl.lit(fav))
+        .otherwise(pl.lit(dog))
+    )
+
+
+def _side_label_expr(market: str, pos: str) -> pl.Expr:
+    """The `side` value for one positional slot, as an expression.
+
+    An expression rather than a literal because spread's label is derived from
+    the frame -- see `_favourite_label`. Raises for a market that has named
+    neither, rather than falling back to `a`/`b`: shipping the positional key in
+    a bettor-facing column puts alphabetical accident where a bet type belongs.
+    """
+    if market == "game_spread":
+        return _favourite_label(pos)
+    try:
+        return pl.lit(_SIDE_LABELS[market][pos])
+    except KeyError:
+        raise ValueError(
+            f"no `side` label for market {market!r} slot {pos!r}; known: "
+            f"{sorted(_SIDE_LABELS) + ['game_spread']}"
+        ) from None
+
+
+def unpivot_sides(
+    settled: pl.DataFrame, *, market: str = "total_games"
+) -> pl.DataFrame:
     """One row per (rung, side) from `settle()`'s two-sided rows.
 
     `settle` returns rung-level rows carrying `over_*` / `under_*` pairs and no
@@ -290,26 +578,45 @@ def unpivot_sides(settled: pl.DataFrame) -> pl.DataFrame:
     if settled.is_empty():
         return settled
 
-    shared = [c for c in _RUNG_COLS if c in settled.columns]
+    shared = [c for c in _rung_cols(market) if c in settled.columns]
     frames: list[pl.DataFrame] = []
-    for side, (odds, model_p, edge, edge_novig, pnl, live) in _SIDE_COLS.items():
+    for pos, cols in _SIDE_COLS.items():
+        odds, model_p, edge, edge_novig, pnl, live = cols
         needed = {odds, model_p, edge, pnl}
         if not needed <= set(settled.columns):
             raise ValueError(
                 f"settled frame is missing {sorted(needed - set(settled.columns))} "
                 f"— unpivot_sides expects settle() output"
             )
-        won = (
-            pl.col("over_won") if side == "over" else pl.col("over_won").not_()
-        )
+        won = pl.col("over_won") if pos == "a" else pl.col("over_won").not_()
         exprs = [
-            pl.lit(side).alias("side"),
+            pl.lit(pos).alias("side_pos"),
+            _side_label_expr(market, pos).alias("side"),
             pl.col(odds).alias("odds"),
             pl.col(model_p).alias("model_p"),
             pl.col(edge).alias("edge"),
             pl.col(pnl).alias("pnl"),
             won.alias("won"),
         ]
+        # The book's de-vigged probability for THIS row's side, mirroring
+        # `model_p`. `p_over` is the a-side value, so the b row takes its
+        # complement -- carried at rung level it was the wrong side's number on
+        # half of every ledger's rows, and nothing read it.
+        #
+        # NOTE the two do not sum alike: `book_p` is the two-way de-vig and
+        # carries no push mass, so `book_p_a + book_p_b == 1` while
+        # `model_p_a + model_p_b == 1 - p_push`. On a whole-number line they
+        # therefore differ by `p_push` by construction, which is the same
+        # identity as `edge_novig_a + edge_novig_b == -p_push`. Comparing the two
+        # sums directly is a category error, not a bug.
+        if "p_over" in settled.columns:
+            book_p = (
+                pl.col("p_over") if pos == "a" else 1.0 - pl.col("p_over")
+            )
+            exprs.append(book_p.alias("book_p"))
+        player_col = f"player_id_{pos}"
+        if player_col in settled.columns:
+            exprs.append(pl.col(player_col).alias("side_player_id"))
         if edge_novig in settled.columns:
             exprs.append(pl.col(edge_novig).alias("edge_novig"))
         if live in settled.columns:
@@ -319,28 +626,43 @@ def unpivot_sides(settled: pl.DataFrame) -> pl.DataFrame:
     return pl.concat(frames, how="vertical_relaxed")
 
 
-def add_mean_covers(ledger: pl.DataFrame, pmf: pl.DataFrame) -> pl.DataFrame:
-    """Does the chain's EXPECTED total land on the side being bet?
+def add_mean_covers(
+    ledger: pl.DataFrame, pmf: pl.DataFrame, *, market: str = "total_games"
+) -> pl.DataFrame:
+    """Does the chain's EXPECTED outcome land on the side being bet?
 
     A per-side model-agreement gate, not a property of the rung: the pmf tail can
     put the model over the price while its centre disagrees, and the same rung
     therefore gets `mean_covers` true on one side and false on the other. This is
     the gate that separated bet-selection from chain error — H71 attributed ~80%
     of the favourite bleed to selection using it.
+
+    The expected column is per market; the BRANCH is not. It tests `side_pos`,
+    because the quantity compared is a-framed — `expected_spread` is E[margin_a],
+    so the a side covers when it exceeds the line and the b side when it falls
+    short. Branching on the ledger's `side` label instead would be correct for
+    totals and wrong for spread on roughly half of all rungs, silently, since
+    `fav`/`dog` is a different question from "is this the a side".
     """
     if ledger.is_empty():
         return ledger
-    if "expected_total_games" not in pmf.columns:
-        raise ValueError("pmf frame needs expected_total_games for mean_covers")
+    expected = market_pmf_spec(market)["expected"]
+    if expected not in pmf.columns:
+        raise ValueError(f"pmf frame needs {expected} for mean_covers")
+    if "side_pos" not in ledger.columns:
+        raise ValueError(
+            "ledger needs side_pos for mean_covers; branching on `side` is "
+            "correct only where the label happens to be positional"
+        )
     out = ledger.join(
-        pmf.select("match_uid", "expected_total_games").unique(subset=["match_uid"]),
+        pmf.select("match_uid", expected).unique(subset=["match_uid"]),
         on="match_uid",
         how="left",
     )
     return out.with_columns(
-        pl.when(pl.col("side") == "over")
-        .then(pl.col("expected_total_games") > pl.col("points"))
-        .otherwise(pl.col("expected_total_games") < pl.col("points"))
+        pl.when(pl.col("side_pos") == "a")
+        .then(pl.col(expected) > pl.col("points"))
+        .otherwise(pl.col(expected) < pl.col("points"))
         .alias("mean_covers")
     )
 
@@ -435,8 +757,12 @@ def add_clv(
         .unique(subset=["match_uid", "points"], keep="first")
     )
     out = ledger.join(ref, on=["match_uid", "points"], how="left")
+    # Branches on `side_pos`, not `side`: `p_ref_close_over` is the reference
+    # board's A-SIDE probability, so the complement is positional. For spread the
+    # `side` label is `fav`/`dog`, which disagrees with the a/b ordinal on about
+    # half of all rungs -- keying here would invert CLV on both rows of those.
     p_ref = (
-        pl.when(pl.col("side") == "over")
+        pl.when(pl.col("side_pos") == "a")
         .then(pl.col("p_ref_close_over"))
         .otherwise(1.0 - pl.col("p_ref_close_over"))
     )
@@ -453,14 +779,34 @@ def add_clv(
 
 
 def _anchor_times(name: str, market: str, match_uids: pl.Series) -> pl.DataFrame:
-    """`(match_uid, t)` for one named anchor, scoped to the projected matches."""
-    from mvp.oddspapi import anchors
+    """`(match_uid, t)` for one named anchor, scoped to the projected matches.
 
+    `open` and `formed` decide a rung is two-sided by matching the `side` column
+    against a pair that defaults to `Over`/`Under` (`anchors.formed`), so a
+    participant-sided market matched nothing and returned ZERO times -- silently,
+    via `build_ledger`'s "produced no times; skipping". With
+    `rank.py:HEADLINE_ANCHOR = "open"` that emptied the whole report for
+    `game_spread` while `close` kept working, because `close` is start-time based
+    and takes no side pair at all. Same for `offset`.
+
+    `board.feed_sides` is the FEED's vocabulary deliberately: `anchors._load`
+    reads `side` off the stage parquet, so an oriented pair would match nothing
+    and leave the count at zero -- a fix that changes nothing.
+    """
+    from mvp.oddspapi import anchors, board
+
+    over_side, under_side = board.feed_sides(market)
     if name == "open":
-        return anchors.open_(market, match_uids=match_uids)
+        return anchors.open_(
+            market, match_uids=match_uids,
+            over_side=over_side, under_side=under_side,
+        )
     if name.startswith("formed"):
         n = int(name.removeprefix("formed") or 2)
-        return anchors.formed(market, n, match_uids=match_uids)
+        return anchors.formed(
+            market, n, match_uids=match_uids,
+            over_side=over_side, under_side=under_side,
+        )
     if name == "close":
         return anchors.close(market, match_uids=match_uids)
     if name.startswith("offset"):
@@ -492,9 +838,9 @@ def build_ledger(
 
     books = board.entry_books(market)
     if not books:
-        raise RuntimeError(f"no entry books carry {market}")
+        raise MarketNotCarried(f"no entry books carry {market}")
     uids = pmf["match_uid"].unique()
-    outcomes = pmf.select("match_uid", "actual_total")
+    outcomes = pmf.select("match_uid", market_pmf_spec(market)["outcome"])
 
     frames: list[pl.DataFrame] = []
     for name in anchor_names:
@@ -507,7 +853,7 @@ def build_ledger(
             logger.warning("anchor %s produced an empty board; skipping", name)
             continue
         board_df = add_line_offset(board_df)
-        priced = price(board_df, pmf)
+        priced = price(board_df, pmf, market=market)
         # `price` joins the pmf how="inner" on the floored line, so a rung whose
         # line sits outside the pmf's support disappears with nothing raised.
         # Inert while the support (0..65 games) covers every offered total, but
@@ -519,11 +865,13 @@ def build_ledger(
                 "anchor %s: %d of %d board rows had no pmf support and were "
                 "dropped by pricing", name, dropped, board_df.height,
             )
-        settled = settle(priced, outcomes)
+        settled = settle(priced, outcomes, market=market)
         if settled.is_empty():
             logger.warning("anchor %s settled to nothing; skipping", name)
             continue
-        rows = add_mean_covers(unpivot_sides(settled), pmf)
+        rows = add_mean_covers(
+            unpivot_sides(settled, market=market), pmf, market=market
+        )
         frames.append(rows.with_columns(pl.lit(name).alias("anchor")))
         logger.info("anchor %s: %d ledger rows", name, rows.height)
 
@@ -541,16 +889,18 @@ def build_ledger(
     return add_clv(ledger, market=market)
 
 
-def ledger_path(config, config_path: Path | str) -> Path:
+def ledger_path(
+    config, config_path: Path | str, *, market: str = "total_games"
+) -> Path:
     """Where this config's ledger lives — keyed by config CONTENT, not filename.
 
     Stem-keying collided: a sweep over N hyperparameter variants of one config
     wrote every variant to the same path, so each silently overwrote the last and
     the comparison was one model against itself.
     """
-    from mvp.projection.iid.artifacts import BACKTEST_PARQUET, fp_dir_for
+    from mvp.projection.iid.artifacts import backtest_name, fp_dir_for
 
-    return fp_dir_for(config, Path(config_path)) / BACKTEST_PARQUET
+    return fp_dir_for(config, Path(config_path)) / backtest_name(market)
 
 
 def run_backtest(
@@ -559,32 +909,69 @@ def run_backtest(
     retrain: bool = False,
     source: str | None = None,
     run_id: str | None = None,
-) -> Path:
+    markets: tuple[str, ...] = ("total_games", "game_spread"),
+) -> dict[str, Path]:
     """Project, price against the oddspapi board, settle, and write the ledger.
 
     Signature preserved from the retired `backtest.run_backtest` so `cli.py` and
     `sweep.py` call it unchanged — `retrain` in particular still trains, rather
     than becoming a parameter whose meaning was quietly removed.
 
-    Writes `backtest.parquet`, not CSV: `rank.py` reads a handful of columns per
-    fingerprint dir and the long grain makes the file far larger than the 45-column
-    wide one it replaces, so projection pushdown is the difference between reading
-    five columns and thirty.
+    Writes parquet, not CSV: `rank.py` reads a handful of columns per fingerprint
+    dir and the long grain makes the file far larger than the 45-column wide one it
+    replaces, so projection pushdown is the difference between reading five columns
+    and thirty.
+
+    **One ledger per market, and the return is a mapping.** `rank.py`'s contract is
+    one table per (instrument, market) and never a pooled market; the two markets'
+    outcome columns differ, so a single frame could not hold both without either a
+    shared outcome column or sparse per-market ones. Separate files also keep
+    `print_backtest_summary` honest -- it groups by anchor alone, so two markets in
+    one frame would blend into a single row per anchor.
+
+    The signature change from `Path` to `dict[str, Path]` touches one caller
+    (`cli.py`), which passes the result to `print_backtest_summary`; `sweep.py`
+    discards it.
     """
-    from mvp.projection.iid.artifacts import BACKTEST_PARQUET
+    from mvp.projection.iid.artifacts import backtest_name
     from mvp.projection.iid.projection_run import run_projection
 
     run = run_projection(
         config_path, retrain=retrain, source=source, run_id=run_id
     )
-    ledger = build_ledger(run.pmf)
-    out_path = run.fp_dir / BACKTEST_PARQUET
-    if ledger.is_empty():
-        logger.warning("ledger is empty — writing nothing to %s", out_path)
-        return out_path
-    ledger.write_parquet(out_path)
-    logger.info("Wrote %d ledger rows -> %s", ledger.height, out_path)
-    return out_path
+    paths_out: dict[str, Path] = {}
+    for mkt in markets:
+        # Recorded before the attempt so the caller can tell a market was TRIED
+        # and produced nothing from one that was never asked for. `cli.py` prints
+        # "no ledger written" off exactly this path.
+        out_path = run.fp_dir / backtest_name(mkt)
+        paths_out[mkt] = out_path
+        try:
+            ledger = build_ledger(run.pmf_for(mkt), market=mkt)
+        except MarketNotCarried as exc:
+            # A fact about the stage tree, not about this config, so it must not
+            # take the OTHER market's ledger down with it -- a missing spread
+            # file would otherwise lose the totals run that already succeeded.
+            # Nothing is written, so the trial stays incomplete and retries.
+            # Caught narrowly: a bare `RuntimeError` would also swallow
+            # NotImplementedError and RecursionError from anywhere below.
+            logger.warning("%s: %s — skipping this market", mkt, exc)
+            continue
+        if ledger.is_empty():
+            # Write the empty frame rather than skipping. `sweep._is_complete`
+            # decides a trial is done by which artifacts exist, so a market that
+            # legitimately produces no rows would otherwise leave the trial
+            # permanently incomplete and re-running on every sweep invocation --
+            # the exact failure that check's own docstring warns about. An empty
+            # file says "this ran and there was nothing"; a missing one cannot.
+            logger.warning("%s ledger is empty — writing 0 rows to %s", mkt, out_path)
+        ledger.write_parquet(out_path)
+        if ledger.is_empty():
+            continue
+        logger.info(
+            "Wrote %d %s ledger rows -> %s", ledger.height, mkt, out_path
+        )
+    return paths_out
 
 
 def print_backtest_summary(path: Path | str) -> None:

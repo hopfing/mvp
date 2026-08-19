@@ -2957,8 +2957,25 @@ def cmd_iid_backtest(args: argparse.Namespace) -> int:
             f"{config_path.name} is not an IID config (no serve_model)."
         )
 
-    out_path = run_backtest(config_path, retrain=args.retrain)
-    print_backtest_summary(out_path)
+    # One ledger per market, summarised separately. Calling the summary once per
+    # file is what keeps the two markets from being pooled: it groups by anchor
+    # alone, so a single frame holding both would average them into one row.
+    out_paths = run_backtest(config_path, retrain=args.retrain)
+    written = 0
+    for market, path in out_paths.items():
+        if not path.exists():
+            print(f"\n{market}: no ledger written")
+            continue
+        written += 1
+        print(f"\n=== {market} ===")
+        print_backtest_summary(path)
+    if not written:
+        # Every market failed to produce a ledger. Visible to a human either way,
+        # but returning 0 makes it invisible to anything reading exit status --
+        # a sweep step or CI would record the run as a success that priced
+        # nothing. One market failing is not an error: the other still ran.
+        print("\nNo ledger was written for any market.")
+        return 1
     return 0
 
 

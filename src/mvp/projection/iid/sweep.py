@@ -31,6 +31,8 @@ from mvp.model.tuning import _decode_params
 from mvp.projection.iid.artifacts import (
     BACKTEST_PARQUET,
     PMF_PARQUET,
+    SPREAD_BACKTEST_PARQUET,
+    SPREAD_PMF_PARQUET,
     fp_dir_for,
 )
 from mvp.projection.iid.config import IIDProjectionConfig
@@ -221,7 +223,13 @@ def _is_complete(fp_dir: Path) -> bool:
     """
     return all(
         (fp_dir / f).exists()
-        for f in ("projection.json", BACKTEST_PARQUET, PMF_PARQUET)
+        for f in (
+            "projection.json",
+            BACKTEST_PARQUET,
+            SPREAD_BACKTEST_PARQUET,
+            PMF_PARQUET,
+            SPREAD_PMF_PARQUET,
+        )
     )
 
 

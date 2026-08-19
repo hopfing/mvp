@@ -24,6 +24,7 @@ from mvp.projection.iid.chain import (
 )
 from mvp.projection.iid.projection_run import (
     build_pmf_frame,
+    build_spread_pmf_frame,
     resolve_targets,
 )
 from mvp.projection.iid.projector import ProjectionOutput
@@ -221,3 +222,74 @@ serve_model:
             lambda cfg, cfg_path: tmp_path / "nope.joblib",
         )
         assert projection_run._load_artifact(config, path) is None
+
+
+def _spread_test_df(pairs: list[tuple[str, str]]) -> pl.DataFrame:
+    """`pairs` is (kept-row player_id, other id); the uid sorts them."""
+    n = len(pairs)
+    uids = [f"2026_540_SGL_R32_{min(a, b)}_{max(a, b)}" for a, b in pairs]
+    return pl.DataFrame(
+        {
+            "match_uid": uids,
+            "player_id": [a for a, _ in pairs],
+            "circuit": ["tour"] * n,
+            "surface": ["Hard"] * n,
+            "round": ["R32"] * n,
+            "best_of": [3] * n,
+            "_target_games_a": [12.0 + i for i in range(n)],
+            "_target_games_b": [10.0] * n,
+        }
+    )
+
+
+class TestBuildSpreadPmfFrame:
+    """The spread pmf is the totals one in a different frame: signed margin with
+    an offset, and an orientation flag pricing asserts against."""
+
+    def test_actual_spread_is_a_minus_b_signed(self):
+        df = _spread_test_df([("AA01", "ZZ99"), ("BB02", "YY88")])
+        out = _output_for(df["match_uid"].to_list())
+        pmf = build_spread_pmf_frame(df, out)
+        assert pmf["actual_spread"].to_list() == [2.0, 3.0]
+
+    def test_offset_is_written_not_inferred(self):
+        """A reader assuming a 0-based index lands every lookup `offset` places
+        out with nothing raising, so the constant travels with the data."""
+        df = _spread_test_df([("AA01", "ZZ99")])
+        out = _output_for(df["match_uid"].to_list())
+        pmf = build_spread_pmf_frame(df, out)
+        offset = pmf["spread_offset"][0]
+        assert offset == out.distribution.spread_offset
+        assert offset > 0, "a 0 offset would make the signed index unrecoverable"
+        assert len(pmf["spread_pmf"][0]) == 2 * offset + 1
+
+    def test_a_is_uid_min_true_when_kept_row_is_the_lower_id(self):
+        df = _spread_test_df([("AA01", "ZZ99")])
+        pmf = build_spread_pmf_frame(df, _output_for(df["match_uid"].to_list()))
+        assert pmf["a_is_uid_min"].to_list() == [True]
+
+    def test_a_is_uid_min_false_when_the_kept_row_is_the_higher_id(self):
+        """Reachable: `_collapse_to_match_rows` keeps the lowest SURVIVING
+        player_id, so a match arriving with one perspective row keeps that row
+        whichever id it holds. This flag is what makes that visible downstream."""
+        df = _spread_test_df([("ZZ99", "AA01")])
+        pmf = build_spread_pmf_frame(df, _output_for(df["match_uid"].to_list()))
+        assert pmf["a_is_uid_min"].to_list() == [False]
+
+    def test_alignment_is_asserted(self):
+        """Same guard as the totals frame — an equal-length but reordered pair
+        would give every match another match's distribution silently."""
+        df = _spread_test_df([("AA01", "ZZ99"), ("BB02", "YY88")])
+        out = _output_for(list(reversed(df["match_uid"].to_list())))
+        with pytest.raises(ValueError, match="not row-aligned"):
+            build_spread_pmf_frame(df, out)
+
+    def test_the_two_frames_agree_on_identity_and_disagree_on_outcome(self):
+        """Both pmfs describe the same matches in the same order; only the
+        outcome column and the distribution differ."""
+        df = _spread_test_df([("AA01", "ZZ99"), ("BB02", "YY88")])
+        out = _output_for(df["match_uid"].to_list())
+        tot, spr = build_pmf_frame(df, out), build_spread_pmf_frame(df, out)
+        assert tot["match_uid"].to_list() == spr["match_uid"].to_list()
+        assert "actual_total" in tot.columns and "actual_total" not in spr.columns
+        assert "actual_spread" in spr.columns and "actual_spread" not in tot.columns

@@ -18,7 +18,7 @@ from datetime import datetime, timedelta
 import polars as pl
 import pytest
 
-from mvp.oddspapi import paths
+from mvp.oddspapi import board, paths
 from mvp.oddspapi.board import (
     BOARD_SCHEMA,
     _flag_main_line,
@@ -93,15 +93,28 @@ class TestDevig:
         assert out["quote_age_s"][0] == 600
         assert out["last_change_s"][0] == 120
 
-    def test_participant_sided_market_is_refused_not_guessed(self):
-        """Sides "1"/"2" are positional and need side_player_id to orient. Producing a
-        board keyed to the wrong player is worse than refusing."""
-        with pytest.raises(ValueError, match="side_player_id"):
+    def test_unexpected_side_values_are_refused_not_guessed(self):
+        """The guard now covers a named-outcome market whose rows carry a side it
+        was not given, rather than refusing participant markets outright —
+        `board_at` re-sides those to a/b before they reach here. Producing a board
+        keyed to the wrong player is still worse than refusing."""
+        with pytest.raises(ValueError, match="are not Over/Under"):
             _pivot_two_sided(
                 _sides([(-2.5, "1", 1.9, 0, True), (-2.5, "2", 1.9, 0, True)]),
                 "Over",
                 "Under",
             )
+
+    def test_the_oriented_pair_is_output_not_input(self):
+        """`board_at` refuses an oriented pair for a participant market. Passing
+        one sends every row down `_orient_participant_sides`' otherwise-branch,
+        splitting each rung into two one-sided ones with no error — so this is a
+        raise rather than a degraded board."""
+        from mvp.oddspapi.board import board_at
+
+        times = pl.DataFrame({"match_uid": ["m1"], "t": [T0]})
+        with pytest.raises(ValueError, match="not the oriented pair"):
+            board_at(times, "game_spread", over_side="a", under_side="b")
 
 
 class TestOneSidedRungs:
@@ -407,3 +420,191 @@ class TestDeterminism:
             for _ in range(8)
         }
         assert picks == {22.5}, f"tie broke inconsistently: {picks}"
+
+
+class TestFeedSides:
+    """Which side literals a market's STAGE FILES carry.
+
+    Load-bearing because `anchors` decides a rung is two-sided by matching the
+    `side` column against a pair defaulting to `Over`/`Under`. A participant-sided
+    market matched nothing there and produced zero anchor times, silently.
+    """
+
+    def test_totals_is_named_outcome(self):
+        assert board.feed_sides("total_games") == ("Over", "Under")
+
+    def test_participant_markets_are_positional(self):
+        assert board.feed_sides("game_spread") == ("1", "2")
+        assert board.feed_sides("moneyline") == ("1", "2")
+
+    def test_unknown_market_falls_back_to_totals(self):
+        """Named-outcome is the safe default: a market nobody has classified is
+        far more likely to be a totals variant than participant-sided, and the
+        wrong answer here fails loudly at `_pivot_two_sided`'s guard rather than
+        silently attributing prices to the wrong player."""
+        assert board.feed_sides("first_set_total_games") == ("Over", "Under")
+
+    def test_the_two_vocabularies_are_disjoint(self):
+        """Nothing may appear in both. If they ever overlap, a market matched by
+        the wrong pair would half-work rather than return nothing, which is the
+        harder failure to spot."""
+        assert not set(board.TOTALS_SIDES) & set(board.PARTICIPANT_SIDES)
+
+
+class TestParticipantOrientation:
+    """Re-siding a participant market to the projection's a/b frame.
+
+    Two independent corrections — which player a price belongs to, and which
+    direction the line points. Each alone leaves a board that looks right: the
+    identity fix alone gives correct attribution at a backwards line, and the
+    sign fix alone gives the right line on the wrong player.
+    """
+
+    @staticmethod
+    def _per_side(points=2.5, p1="AA01", uid="2026_540_SGL_R32_AA01_ZZ99"):
+        """One rung, both feed sides. `p1` is whoever the feed listed first."""
+        p2 = "ZZ99" if p1 == "AA01" else "AA01"
+        return pl.DataFrame({
+            "match_uid": [uid, uid],
+            "points": [points, points],
+            "side": ["1", "2"],
+            "side_player_id": [p1, p2],
+            "odds": [2.0, 1.8],
+        })
+
+    def test_the_lower_id_becomes_a_whichever_side_the_feed_listed_it(self):
+        from mvp.oddspapi.board import _orient_participant_sides
+
+        for p1 in ("AA01", "ZZ99"):
+            out = _orient_participant_sides(self._per_side(p1=p1), "1", "2")
+            by_side = dict(zip(out["side"].to_list(), out["side_player_id"].to_list()))
+            assert by_side["a"] == "AA01", f"feed listed {p1} first"
+            assert by_side["b"] == "ZZ99"
+
+    def test_points_becomes_a_threshold_on_margin_a(self):
+        """Feed `points=+2.5` on participant 1 is a head start, so participant 1
+        covers iff their margin > -2.5. With p1 == a that is `margin_a > -2.5`,
+        so the ledger line is -2.5."""
+        from mvp.oddspapi.board import _orient_participant_sides
+
+        out = _orient_participant_sides(self._per_side(points=2.5, p1="AA01"), "1", "2")
+        assert out["points"].unique().to_list() == [-2.5]
+
+    def test_the_sign_flips_with_the_feed_ordering(self):
+        """Same feed handicap, opposite listing: now p1 is b, so the a-side
+        threshold is +2.5 rather than -2.5. This is the ~49% the orientation
+        touches, and getting it wrong inverts the line on every rung."""
+        from mvp.oddspapi.board import _orient_participant_sides
+
+        out = _orient_participant_sides(self._per_side(points=2.5, p1="ZZ99"), "1", "2")
+        assert out["points"].unique().to_list() == [2.5]
+
+    def test_both_rows_of_a_rung_agree_on_the_line(self):
+        """The transform is per row with no window, so the two sides landing on
+        one value is structural rather than something to remember."""
+        from mvp.oddspapi.board import _orient_participant_sides
+
+        for p1 in ("AA01", "ZZ99"):
+            for pts in (2.5, -2.5, 0.0, 6.5):
+                out = _orient_participant_sides(
+                    self._per_side(points=pts, p1=p1), "1", "2"
+                )
+                assert out["points"].n_unique() == 1, (p1, pts)
+
+
+class TestSpreadBoardEndToEnd:
+    """`board_at` for a participant market, through a real stage tree.
+
+    The orientation is unit-tested on `_orient_participant_sides`, but the path
+    around it is not: `side_player_id` has to survive `_latest_per_side`'s
+    projection, the pivot's `values` list, the materialise loop, and finally
+    `.select(BOARD_SCHEMA.keys())`. Each of those drops columns silently, so this
+    exercises the seam rather than the arithmetic.
+    """
+
+    UID = "2026_540_SGL_R32_AA01_ZZ99"
+
+    def _stage(self, tmp_path, rows, market="game_spread"):
+        d = tmp_path / "pinnacle"
+        d.mkdir(parents=True, exist_ok=True)
+        pl.DataFrame({
+            "match_uid": [self.UID] * len(rows),
+            "points": [r[0] for r in rows],
+            "side": [r[1] for r in rows],
+            "side_player_id": [r[2] for r in rows],
+            "odds": [r[3] for r in rows],
+            "fetched_at": [T0 - timedelta(seconds=300)] * len(rows),
+            "active": [True] * len(rows),
+            "event_status": ["NOT_STARTED"] * len(rows),
+        }).write_parquet(d / f"{market}.parquet")
+        return d.parent
+
+    def _board(self, tmp_path, monkeypatch, rows):
+        root = self._stage(tmp_path, rows)
+        monkeypatch.setattr(paths, "stage_root", lambda: root)
+        times = pl.DataFrame({"match_uid": [self.UID], "t": [T0]})
+        return board_at(times, "game_spread", books=["pinnacle"])
+
+    def test_player_ids_survive_to_the_board(self, tmp_path, monkeypatch):
+        """The pivot drops any column outside `index`/`values`, and BOARD_SCHEMA
+        drops any column it does not list. Both had to change."""
+        out = self._board(tmp_path, monkeypatch, [
+            (2.5, "1", "AA01", 1.9), (2.5, "2", "ZZ99", 1.9),
+        ])
+        assert out.height == 1
+        assert out["player_id_a"][0] == "AA01"
+        assert out["player_id_b"][0] == "ZZ99"
+
+    def test_a_is_the_lower_id_even_when_the_feed_listed_it_second(
+        self, tmp_path, monkeypatch
+    ):
+        out = self._board(tmp_path, monkeypatch, [
+            (2.5, "1", "ZZ99", 1.9), (2.5, "2", "AA01", 1.9),
+        ])
+        assert out["player_id_a"][0] == "AA01"
+        assert out["player_id_b"][0] == "ZZ99"
+
+    def test_the_line_is_a_threshold_on_margin_a(self, tmp_path, monkeypatch):
+        """Feed +2.5 on its first participant. With that participant being a,
+        a covers iff margin_a > -2.5, so the board emits -2.5."""
+        out = self._board(tmp_path, monkeypatch, [
+            (2.5, "1", "AA01", 1.9), (2.5, "2", "ZZ99", 1.9),
+        ])
+        assert out["points"][0] == -2.5
+
+    def test_the_line_flips_with_the_feed_ordering(self, tmp_path, monkeypatch):
+        out = self._board(tmp_path, monkeypatch, [
+            (2.5, "1", "ZZ99", 1.9), (2.5, "2", "AA01", 1.9),
+        ])
+        assert out["points"][0] == 2.5
+
+    def test_a_rung_stays_one_row_with_both_sides(self, tmp_path, monkeypatch):
+        """Both feed rows must land on ONE ledger line. If the sign transform
+        disagreed between them the rung would split into two one-sided ones —
+        which is what passing the oriented pair as input used to do."""
+        out = self._board(tmp_path, monkeypatch, [
+            (2.5, "1", "AA01", 1.9), (2.5, "2", "ZZ99", 2.1),
+        ])
+        assert out.height == 1
+        assert out["over_odds"][0] == 1.9 and out["under_odds"][0] == 2.1
+        assert out["p_over"][0] is not None
+
+    def test_totals_boards_carry_null_player_ids(self, tmp_path, monkeypatch):
+        """Named-outcome markets have no player, and the columns are required by
+        BOARD_SCHEMA — so they must be present and null, not absent."""
+        d = tmp_path / "pinnacle"
+        d.mkdir(parents=True, exist_ok=True)
+        pl.DataFrame({
+            "match_uid": [self.UID] * 2, "points": [22.5, 22.5],
+            "side": ["Over", "Under"], "odds": [1.9, 1.9],
+            "fetched_at": [T0 - timedelta(seconds=300)] * 2,
+            "active": [True] * 2, "event_status": ["NOT_STARTED"] * 2,
+        }).write_parquet(d / "total_games.parquet")
+        monkeypatch.setattr(paths, "stage_root", lambda: tmp_path)
+        out = board_at(
+            pl.DataFrame({"match_uid": [self.UID], "t": [T0]}),
+            "total_games", books=["pinnacle"],
+        )
+        assert out.height == 1
+        assert out["player_id_a"].null_count() == 1
+        assert out["player_id_b"].null_count() == 1

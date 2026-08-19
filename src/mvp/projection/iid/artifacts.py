@@ -41,7 +41,43 @@ logger = logging.getLogger(__name__)
 
 PROJECTION_JSON = "projection.json"
 PMF_PARQUET = "total_games_pmf.parquet"
+SPREAD_PMF_PARQUET = "game_spread_pmf.parquet"
 BACKTEST_PARQUET = "backtest.parquet"
+SPREAD_BACKTEST_PARQUET = "backtest_game_spread.parquet"
+
+# Per-market ledger names. ONE FILE PER MARKET, not one file with a `market`
+# column doing the separating: `rank.py`'s own contract is "one table per
+# (instrument, market), never a pooled market", and the two markets' outcome
+# columns differ (`actual_total` / `actual_spread`), which `vertical_relaxed`
+# cannot concatenate anyway.
+#
+# `total_games` keeps the historic bare name so existing fingerprint dirs stay
+# readable without a migration.
+BACKTEST_PARQUET_BY_MARKET: dict[str, str] = {
+    "total_games": BACKTEST_PARQUET,
+    "game_spread": SPREAD_BACKTEST_PARQUET,
+}
+
+
+def backtest_name(market: str) -> str:
+    """Ledger filename for one market. Raises rather than deriving a name that no
+    reader looks for."""
+    try:
+        return BACKTEST_PARQUET_BY_MARKET[market]
+    except KeyError:
+        raise ValueError(
+            f"no ledger name for market {market!r}; "
+            f"known: {sorted(BACKTEST_PARQUET_BY_MARKET)}"
+        ) from None
+
+# Per-market pmf artifact names. A SIBLING file rather than extra columns on the
+# totals one: that file's contract is read by the CLV POC and appears in every
+# fingerprint dir, and widening it would change what those readers see for a
+# market they do not price.
+PMF_PARQUET_BY_MARKET: dict[str, str] = {
+    "total_games": PMF_PARQUET,
+    "game_spread": SPREAD_PMF_PARQUET,
+}
 
 # Pre-cutover artifacts, kept named so the cutover can DELETE them from every
 # fingerprint dir. `_canonicalize_iid_config` hashes data / features / metrics /
@@ -143,15 +179,30 @@ def read_projection_json(fp_dir: Path) -> dict[str, Any] | None:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def write_pmf_parquet(fp_dir: Path, pmf: pl.DataFrame) -> Path:
-    """Persist the per-match total-games pmf — the input to CLV scoring.
+def write_pmf_parquet(
+    fp_dir: Path, pmf: pl.DataFrame, *, market: str = "total_games"
+) -> Path:
+    """Persist one market's per-match pmf — the input to pricing and CLV scoring.
 
     Mirrors what scripts/oddspapi/iid_project_dump.py produces, except keyed by
     fingerprint instead of a single fixed path that every run overwrote. That
     overwrite is the reason CLV could not previously be compared across configs.
+
+    `market` defaults to totals so existing callers are unchanged. Each market
+    gets its own file (`PMF_PARQUET_BY_MARKET`) rather than shared columns,
+    because the outcome column differs per market — `actual_total` against
+    `actual_spread` — and a reader that knows one market should not have to know
+    the other's schema to open the file.
     """
+    try:
+        name = PMF_PARQUET_BY_MARKET[market]
+    except KeyError:
+        raise ValueError(
+            f"no pmf artifact name for market {market!r}; "
+            f"known: {sorted(PMF_PARQUET_BY_MARKET)}"
+        ) from None
     fp_dir.mkdir(parents=True, exist_ok=True)
-    path = fp_dir / PMF_PARQUET
+    path = fp_dir / name
     pmf.write_parquet(path)
     return path
 

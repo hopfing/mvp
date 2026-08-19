@@ -17,7 +17,9 @@ from __future__ import annotations
 import polars as pl
 import pytest
 
+from mvp.projection.iid import evaluation
 from mvp.projection.iid.evaluation import (
+    add_clv,
     add_mean_covers,
     bets,
     cumulative,
@@ -146,13 +148,13 @@ class TestBetsOnOneSidedRungs:
     def test_an_over_only_rung_is_taken_as_an_over(self):
         b = bets(self._settled(over=2.0, under=None), min_edge=-1.0)
         assert b.height == 1
-        assert b["side"][0] == "over"
+        assert b["side_pos"][0] == "a"
         assert b["odds"][0] == pytest.approx(2.0)
 
     def test_an_under_only_rung_is_taken_as_an_under(self):
         b = bets(self._settled(over=None, under=2.0), min_edge=-1.0)
         assert b.height == 1
-        assert b["side"][0] == "under"
+        assert b["side_pos"][0] == "b"
         assert b["odds"][0] == pytest.approx(2.0)
 
     def test_the_edge_belongs_to_the_side_actually_chosen(self):
@@ -171,7 +173,7 @@ class TestBetsSelection:
         s = settle(price(_board(22.5, over=1.5, under=5.0), _pmf()),
                    _pmf(actual=24.0))
         b = bets(s, min_edge=-1.0)
-        assert b["side"][0] == "under"
+        assert b["side_pos"][0] == "b"
 
     def test_min_edge_is_a_floor_not_a_constant(self):
         s = settle(price(_board(22.5, over=2.0, under=2.0), _pmf()),
@@ -225,12 +227,12 @@ class TestLivenessIsPerSide:
     def test_a_rung_live_on_one_side_is_still_a_bet(self):
         b = bets(self._settled(over=True, under=False), min_edge=-1.0)
         assert b.height == 1
-        assert b["side"][0] == "over"
+        assert b["side_pos"][0] == "a"
 
     def test_the_dead_side_is_not_selectable_even_with_the_better_edge(self):
         """Odds carry forward from the last tick, so a pulled leg keeps a price."""
         b = bets(self._settled(over=False, under=True), min_edge=-1.0)
-        assert b["side"][0] == "under"
+        assert b["side_pos"][0] == "b"
 
     def test_a_rung_dead_on_both_sides_is_not_a_bet(self):
         assert bets(self._settled(over=False, under=False), min_edge=-1.0).is_empty()
@@ -306,9 +308,32 @@ class TestUnpivotSides:
         assert (out["edge"] < 0).any()
 
     def test_rung_context_is_repeated_on_both_sides(self):
+        """Properties of the RUNG or the pair are duplicated; properties of one
+        side are not. `p_over` used to sit in the first group and describes one
+        side, so it left the under row holding the over's number."""
         out = unpivot_sides(self._settled())
-        for col in ("match_uid", "book", "points", "p_over", "actual_total"):
+        for col in ("match_uid", "book", "points", "actual_total"):
             assert out[col].n_unique() == 1
+        assert "p_over" not in out.columns
+
+    def test_book_p_is_per_side_and_complements(self):
+        """The book's de-vigged probability for THIS row's side, mirroring
+        `model_p`. Together they make `edge_novig = model_p - book_p` hold on
+        every row rather than only on the a side."""
+        settled = self._settled(over=2.5, under=1.6)
+        out = unpivot_sides(settled)
+        by_pos = dict(zip(out["side_pos"].to_list(), out["book_p"].to_list()))
+        assert by_pos["a"] == pytest.approx(settled["p_over"][0])
+        assert by_pos["a"] + by_pos["b"] == pytest.approx(1.0)
+
+    def test_side_pos_is_positional_and_side_is_the_label(self):
+        """`side_pos` is what the two-way complements branch on; `side` is what a
+        reader sees. For totals they line up; for spread they will not."""
+        out = unpivot_sides(self._settled())
+        assert sorted(out["side_pos"].to_list()) == ["a", "b"]
+        assert sorted(out["side"].to_list()) == ["over", "under"]
+        pairs = dict(zip(out["side_pos"].to_list(), out["side"].to_list()))
+        assert pairs == {"a": "over", "b": "under"}
 
     def test_empty_in_empty_out(self):
         assert unpivot_sides(pl.DataFrame()).is_empty()
@@ -548,9 +573,13 @@ class TestCLV:
     """
 
     def _ledger(self, side="over", odds=2.0, points=22.0):
+        # `side_pos` is what add_clv branches on -- the complement is against the
+        # reference board's A-SIDE probability, which is positional. `side` rides
+        # along as the label a reader sees.
         return pl.DataFrame({
             "match_uid": ["m1"], "book": ["dk"], "points": [points],
-            "side": [side], "odds": [odds], "anchor": ["open"],
+            "side": [side], "side_pos": ["a" if side == "over" else "b"],
+            "odds": [odds], "anchor": ["open"],
         })
 
     def _ref(self, monkeypatch, p_over=0.60, points=22.0, books=("pinnacle",)):
@@ -613,3 +642,358 @@ class TestCLV:
         out = add_clv(self._ledger())
         assert "clv" in out.columns
         assert out["clv"][0] is None
+
+
+class TestCumulativeSpread:
+    """The spread pmf is signed and offset-stored. Reading it 0-based does not
+    raise -- it shifts every lookup, which is why the offset travels with the
+    data and is asserted rather than assumed."""
+
+    @staticmethod
+    def _spread_pmf(offset: int = 3, mass=None) -> pl.DataFrame:
+        mass = mass if mass is not None else [0.0, 0.0, 0.25, 0.5, 0.25, 0.0, 0.0]
+        return pl.DataFrame({
+            "match_uid": ["m1"],
+            "spread_offset": [offset],
+            "spread_pmf": [mass],
+        })
+
+    def test_index_is_signed_around_zero(self):
+        cum = cumulative(self._spread_pmf(), market="game_spread")
+        assert cum["games"].to_list() == [-3, -2, -1, 0, 1, 2, 3]
+
+    def test_cumulative_reads_at_the_signed_margin(self):
+        cum = cumulative(self._spread_pmf(), market="game_spread")
+        at = dict(zip(cum["games"].to_list(), cum["p_at_or_below"].to_list()))
+        assert at[-1] == pytest.approx(0.25)
+        assert at[0] == pytest.approx(0.75)
+        assert at[3] == pytest.approx(1.0)
+
+    def test_totals_is_unchanged_and_still_zero_based(self):
+        """The offset path must not leak into the market that has no offset."""
+        cum = cumulative(pl.DataFrame({
+            "match_uid": ["m1"], "total_games_pmf": [[0.2, 0.3, 0.5]],
+        }))
+        assert cum["games"].to_list() == [0, 1, 2]
+
+    def test_missing_offset_column_raises(self):
+        """Without it the signed support cannot be recovered, and a 0-based read
+        would put every margin `offset` places out."""
+        pmf = self._spread_pmf().drop("spread_offset")
+        with pytest.raises(ValueError, match="spread_offset"):
+            cumulative(pmf, market="game_spread")
+
+    def test_non_constant_offset_raises(self):
+        """Two offsets in one frame means two incompatible supports were
+        concatenated; picking either silently mis-indexes the other."""
+        pmf = pl.concat([self._spread_pmf(3), self._spread_pmf(4).with_columns(
+            pl.lit("m2").alias("match_uid"),
+            pl.lit([0.0] * 9).alias("spread_pmf"),
+        )], how="vertical_relaxed")
+        with pytest.raises(ValueError, match="not constant"):
+            cumulative(pmf, market="game_spread")
+
+    def test_unknown_market_raises(self):
+        with pytest.raises(ValueError, match="no pmf schema"):
+            cumulative(self._spread_pmf(), market="moneyline")
+
+
+class TestComplementsAreLockedToPosition:
+    """The two-way complements must branch on `side_pos`, never on `side`.
+
+    For totals the two coincide, so a suite built only on totals fixtures stays
+    green if either branch is reverted to `side == "over"`. These fixtures put a
+    NON-positional label on the rows -- `fav`/`dog`, as spread will -- so the two
+    disagree and a `side`-keyed branch produces the wrong complement.
+
+    This is the failure the plan calls its most dangerous class: silent,
+    self-consistent, and invisible to every ledger invariant.
+    """
+
+    def test_add_clv_complements_on_position_not_label(self, monkeypatch):
+        from mvp.oddspapi import anchors as anchors_mod
+        from mvp.oddspapi import board as board_mod
+
+        monkeypatch.setattr(board_mod, "available_books", lambda m: ["pinnacle"])
+        monkeypatch.setattr(
+            anchors_mod, "close",
+            lambda m=None, **kw: pl.DataFrame({"match_uid": ["m1"], "t": [0]}),
+        )
+        monkeypatch.setattr(
+            board_mod, "board_at",
+            lambda times, market, **kw: pl.DataFrame({
+                "match_uid": ["m1"], "book": ["pinnacle"],
+                "points": [2.5], "p_over": [0.70],
+            }),
+        )
+        # The `a` row is labelled `dog` and the `b` row `fav`: the label is the
+        # OPPOSITE of the position, which is what a real spread ledger produces
+        # on any rung where the lower-id player is not the favourite.
+        ledger = pl.DataFrame({
+            "match_uid": ["m1", "m1"], "book": ["dk", "dk"],
+            "points": [2.5, 2.5], "anchor": ["open", "open"],
+            "side": ["dog", "fav"], "side_pos": ["a", "b"],
+            "odds": [2.0, 2.0],
+        })
+        out = add_clv(ledger, market="game_spread").sort("side_pos")
+        assert out["p_ref_close"].to_list() == pytest.approx([0.70, 0.30])
+
+    def test_mean_covers_complements_on_position_not_label(self):
+        """`expected_spread` is E[margin_a], so the a side covers when it exceeds
+        the line regardless of which side carries the `fav` label."""
+        ledger = pl.DataFrame({
+            "match_uid": ["m1", "m1"],
+            "points": [2.5, 2.5],
+            "side": ["dog", "fav"], "side_pos": ["a", "b"],
+        })
+        pmf = pl.DataFrame({"match_uid": ["m1"], "expected_spread": [4.0]})
+        out = add_mean_covers(ledger, pmf, market="game_spread").sort("side_pos")
+        # E[margin_a] = 4.0 > 2.5, so the A side covers and B does not, whatever
+        # the labels say.
+        assert out["mean_covers"].to_list() == [True, False]
+
+    def test_mean_covers_requires_side_pos(self):
+        """A ledger without it cannot be branched correctly, so refuse rather
+        than fall back to `side`."""
+        ledger = pl.DataFrame({
+            "match_uid": ["m1"], "points": [2.5], "side": ["fav"],
+        })
+        pmf = pl.DataFrame({"match_uid": ["m1"], "expected_spread": [4.0]})
+        with pytest.raises(ValueError, match="side_pos"):
+            add_mean_covers(ledger, pmf, market="game_spread")
+
+
+class TestFavouriteLabelling:
+    """`fav`/`dog` is a property of the (match, book, anchor) block, taken from
+    the sign of its main line — not of the rung, and not from the shorter price."""
+
+    @staticmethod
+    def _settled(main_line: float, extra_lines=(), book="dk"):
+        lines = [main_line, *extra_lines]
+        n = len(lines)
+        return pl.DataFrame({
+            "match_uid": ["m1"] * n, "book": [book] * n,
+            "points": list(lines),
+            "is_main_line": [True] + [False] * (n - 1),
+            "over_odds": [2.0] * n, "under_odds": [1.8] * n,
+            "model_p_over": [0.5] * n, "model_p_under": [0.5] * n,
+            "edge_over": [0.0] * n, "edge_under": [0.0] * n,
+            "pnl_over": [0.0] * n, "pnl_under": [0.0] * n,
+            "over_won": [True] * n, "actual_spread": [1.0] * n,
+        })
+
+    def test_positive_main_line_makes_a_the_favourite(self):
+        """Ledger frame: a positive line means a must WIN by more than X."""
+        out = unpivot_sides(self._settled(3.5), market="game_spread")
+        assert dict(zip(out["side_pos"], out["side"])) == {"a": "fav", "b": "dog"}
+
+    def test_negative_main_line_makes_a_the_underdog(self):
+        out = unpivot_sides(self._settled(-3.5), market="game_spread")
+        assert dict(zip(out["side_pos"], out["side"])) == {"a": "dog", "b": "fav"}
+
+    def test_zero_main_line_is_pickem(self):
+        out = unpivot_sides(self._settled(0.0), market="game_spread")
+        assert set(out["side"].to_list()) == {"pk"}
+
+    def test_every_rung_inherits_the_blocks_label(self):
+        """A bet on the favourite at a long line is still a bet on the favourite.
+        Assigning per rung from the shorter price would flip along the ladder."""
+        out = unpivot_sides(
+            self._settled(3.5, extra_lines=(-6.5, -2.5, 8.5)), market="game_spread"
+        )
+        for pos, expected in (("a", "fav"), ("b", "dog")):
+            labels = out.filter(pl.col("side_pos") == pos)["side"].unique().to_list()
+            assert labels == [expected], f"{pos} drifted across rungs: {labels}"
+
+    def test_a_block_with_no_main_line_is_null_not_guessed(self):
+        """`_flag_main_line` needs a live two-sided rung; a block with none has no
+        sign to read. Null rather than a default, and harmless because both
+        readers of `side` filter to main-line rows first."""
+        df = self._settled(3.5).with_columns(pl.lit(False).alias("is_main_line"))
+        out = unpivot_sides(df, market="game_spread")
+        assert out["side"].null_count() == out.height
+
+    def test_totals_labels_are_unaffected(self):
+        out = unpivot_sides(self._settled(22.5).rename({"actual_spread": "actual_total"}))
+        assert dict(zip(out["side_pos"], out["side"])) == {"a": "over", "b": "under"}
+
+
+class TestOrientationAssert:
+    """The pmf's `a` and the board's `a` are defined independently and can
+    disagree. Nothing downstream notices: relabelling and re-signing together
+    leave §7's correlation criterion unchanged, so this guard is the only thing
+    between a mismatch and a silently mirrored ledger."""
+
+    @staticmethod
+    def _pmf(a_is_uid_min: bool, uid: str = "m1"):
+        return pl.DataFrame({
+            "match_uid": [uid],
+            "spread_offset": [3],
+            "spread_pmf": [[0.0, 0.0, 0.25, 0.5, 0.25, 0.0, 0.0]],
+            "a_is_uid_min": [a_is_uid_min],
+        })
+
+    @staticmethod
+    def _board(uid: str = "m1"):
+        return pl.DataFrame({
+            "match_uid": [uid], "book": ["dk"], "points": [0.5],
+            "over_odds": [2.0], "under_odds": [1.9], "p_over": [0.5],
+        })
+
+    def test_agreement_prices_normally(self):
+        out = price(self._board(), self._pmf(True), market="game_spread")
+        assert out.height == 1
+
+    def test_disagreement_raises(self):
+        with pytest.raises(ValueError, match="orientation mismatch"):
+            price(self._board(), self._pmf(False), market="game_spread")
+
+    def test_only_priced_matches_are_checked(self):
+        """A mismatched match nobody quotes is not an error — asserting over the
+        whole projection would fire on ~11.5% of the test set immediately."""
+        pmf = pl.concat([self._pmf(True, "m1"), self._pmf(False, "m2")])
+        out = price(self._board("m1"), pmf, market="game_spread")
+        assert out.height == 1
+
+    def test_totals_frames_without_the_column_are_unaffected(self):
+        board = self._board().with_columns(pl.lit(21.5).alias("points"))
+        pmf = pl.DataFrame({
+            "match_uid": ["m1"], "total_games_pmf": [[0.0] * 21 + [0.5, 0.5]],
+        })
+        assert price(board, pmf).height == 1
+
+    def test_a_spread_pmf_without_the_column_raises(self):
+        """Absent is fine for a market with no orientation to check. For spread
+        the column is mandatory, and skipping BECAUSE the operand is missing is
+        the same fail-open the guard exists to prevent."""
+        pmf = self._pmf(True).drop("a_is_uid_min")
+        with pytest.raises(ValueError, match="missing `a_is_uid_min`"):
+            price(self._board(), pmf, market="game_spread")
+
+    def test_a_null_flag_is_treated_as_disagreement(self):
+        """An unknown orientation is exactly the state this refuses to price
+        through — reading null as agreement would fail open."""
+        pmf = self._pmf(True).with_columns(
+            pl.lit(None, dtype=pl.Boolean).alias("a_is_uid_min")
+        )
+        with pytest.raises(ValueError, match="orientation mismatch"):
+            price(self._board(), pmf, market="game_spread")
+
+
+class TestSpreadSettlement:
+    """Settling against the realised margin rather than the realised total.
+
+    The comparison is identical in shape for both markets because both are
+    already in the a-frame — `actual_spread` is `games_a - games_b` and `points`
+    is a threshold on that same quantity — so what is under test is that the
+    right COLUMN is read, not that the arithmetic differs.
+    """
+
+    @staticmethod
+    def _priced(points):
+        return pl.DataFrame({
+            "match_uid": ["m1"], "book": ["dk"], "points": [points],
+            "over_odds": [2.0], "under_odds": [1.9],
+            "model_p_over": [0.5], "model_p_under": [0.5],
+            "edge_over": [0.0], "edge_under": [0.0],
+            "p_push": [0.0],
+        })
+
+    @staticmethod
+    def _outcomes(margin):
+        return pl.DataFrame({"match_uid": ["m1"], "actual_spread": [margin]})
+
+    def test_the_a_side_wins_when_the_margin_beats_the_line(self):
+        out = settle(self._priced(2.5), self._outcomes(4.0), market="game_spread")
+        assert out["over_won"][0] is True
+        assert out["pnl_over"][0] > 0 and out["pnl_under"][0] < 0
+
+    def test_the_a_side_loses_when_it_does_not(self):
+        out = settle(self._priced(2.5), self._outcomes(1.0), market="game_spread")
+        assert out["over_won"][0] is False
+
+    def test_a_negative_line_settles_correctly(self):
+        """`margin_a = -3` against a -4.5 line: a lost by 3, which beats losing
+        by more than 4.5, so the a side covers."""
+        out = settle(self._priced(-4.5), self._outcomes(-3.0), market="game_spread")
+        assert out["over_won"][0] is True
+
+    def test_a_whole_number_line_pushes(self):
+        """A whole-number spread pushes exactly as a whole-number total does —
+        stake returned, pnl 0 on BOTH sides, not a loss on either."""
+        out = settle(self._priced(3.0), self._outcomes(3.0), market="game_spread")
+        assert out["is_push"][0] is True
+        assert out["pnl_over"][0] == 0.0 and out["pnl_under"][0] == 0.0
+
+    def test_the_totals_column_is_not_accepted_for_spread(self):
+        """Passing a totals outcomes frame must raise rather than settle the
+        spread against a total, which would score every rung nonsensically."""
+        totals = pl.DataFrame({"match_uid": ["m1"], "actual_total": [21.0]})
+        with pytest.raises(ValueError, match="actual_spread"):
+            settle(self._priced(2.5), totals, market="game_spread")
+
+    def test_totals_settlement_is_unchanged(self):
+        out = settle(
+            self._priced(21.5),
+            pl.DataFrame({"match_uid": ["m1"], "actual_total": [24.0]}),
+        )
+        assert out["over_won"][0] is True
+
+
+
+class TestMarketFailureIsolation:
+    """A market the stage tree does not carry must not take the other one down.
+
+    `build_ledger` raises when no entry book carries the market. Letting that
+    propagate loses the ledger that already succeeded — and after the per-market
+    split there IS another one to lose.
+    """
+
+    def test_one_missing_market_does_not_lose_the_other(self, monkeypatch, tmp_path):
+        from mvp.projection.iid import evaluation as ev
+
+        calls = []
+
+        def fake_build(pmf, *, market, **kw):
+            calls.append(market)
+            if market == "game_spread":
+                raise ev.MarketNotCarried("no entry books carry game_spread")
+            return pl.DataFrame({"match_uid": ["m1"], "anchor": ["open"]})
+
+        class _Run:
+            fp_dir = tmp_path
+            def pmf_for(self, market):
+                return pl.DataFrame({"match_uid": ["m1"]})
+
+        monkeypatch.setattr(ev, "build_ledger", fake_build)
+        monkeypatch.setattr(
+            "mvp.projection.iid.projection_run.run_projection",
+            lambda *a, **k: _Run(),
+        )
+        out = ev.run_backtest(tmp_path / "cfg.yaml")
+
+        assert calls == ["total_games", "game_spread"], "both attempted"
+        assert (tmp_path / "backtest.parquet").exists(), "totals ledger survived"
+        assert not (tmp_path / "backtest_game_spread.parquet").exists(), (
+            "nothing written for the missing market, so the trial retries"
+        )
+        assert set(out) == {"total_games", "game_spread"}
+
+    def test_the_raise_site_and_the_catch_agree(self, monkeypatch):
+        """Driving the REAL condition rather than patching `build_ledger`: if the
+        raise at the top of `build_ledger` ever changes type, this fails rather
+        than silently unhooking the catch above it."""
+        from mvp.oddspapi import board as board_mod
+        from mvp.projection.iid import evaluation as ev
+
+        monkeypatch.setattr(board_mod, "entry_books", lambda m: [])
+        with pytest.raises(ev.MarketNotCarried, match="no entry books carry"):
+            ev.build_ledger(
+                pl.DataFrame({"match_uid": ["m1"], "actual_total": [22.0]}),
+                market="total_games",
+            )
+
+    def test_it_is_a_runtimeerror_so_existing_callers_still_catch_it(self):
+        from mvp.projection.iid import evaluation as ev
+
+        assert issubclass(ev.MarketNotCarried, RuntimeError)

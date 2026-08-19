@@ -22,7 +22,7 @@ import polars as pl
 
 from mvp.model.tuning import _MAXIMIZE_METRICS
 from mvp.projection.iid.artifacts import (
-    BACKTEST_PARQUET,
+    backtest_name,
     discover_fp_dirs,
     read_clv_json,
     read_projection_json,
@@ -65,6 +65,10 @@ MARKETS: tuple[MarketSpec, ...] = (
         sides=("favorite", "underdog"), side_labels=("fav", "dog"),
     ),
 )
+
+# Market order for reading per-market ledgers. Derived from `MARKETS` rather than
+# spelled again, so a market added there is read without a second edit.
+MARKET_KEYS: tuple[str, ...] = tuple(spec.key for spec in MARKETS)
 
 
 @dataclass
@@ -279,39 +283,47 @@ def _betting_summary(
     `n_all` keeps the all-rungs count so the gap to the main-line set stays
     visible.
     """
-    path = fp_dir / BACKTEST_PARQUET
-    if not path.exists():
-        return None
-    df = pl.read_parquet(path)
-    if df.is_empty():
-        return None
-    required = {"anchor", "is_main_line", "side", "edge", "pnl", "won", "market"}
-    missing = required - set(df.columns)
-    if missing:
-        logger.warning(
-            "%s: ledger missing %s — betting summary skipped",
-            fp_dir.name, sorted(missing),
-        )
-        return None
-
-    at_anchor = df.filter(pl.col("anchor") == anchor)
-    if at_anchor.is_empty():
-        logger.warning("%s: no rows at anchor %s", fp_dir.name, anchor)
-        return None
-    # Entry books only. Reference prices are on the board deliberately (they are
-    # the CLV benchmark) and are not takeable.
-    if "role" in at_anchor.columns:
-        at_anchor = at_anchor.filter(pl.col("role") == "entry")
-    # A side quoted but no longer live is a carried-forward price, not an offer.
-    if "live_side" in at_anchor.columns:
-        at_anchor = at_anchor.filter(pl.col("live_side").fill_null(True))
-    at_anchor = at_anchor.drop_nulls(["odds", "edge"])
-
     out: dict[str, Any] = {"anchor": anchor, "markets": {}}
-    for market in at_anchor["market"].unique().sort().to_list():
-        sub = at_anchor.filter(pl.col("market") == market)
-        mains = sub.filter(pl.col("is_main_line").fill_null(False))
-        entry: dict[str, Any] = {"n_all": sub.height, "n_main": mains.height}
+    required = {"anchor", "is_main_line", "side", "edge", "pnl", "won", "market"}
+
+    # One file per market. A market with no ledger is NORMAL, not an incomplete
+    # dir: every fingerprint written before spreads existed has a totals ledger
+    # and nothing else. Skipping the missing one keeps the betting table
+    # populated for the market that does have data instead of blanking both.
+    for market in MARKET_KEYS:
+        path = fp_dir / backtest_name(market)
+        if not path.exists():
+            continue
+        df = pl.read_parquet(path)
+        if df.is_empty():
+            continue
+        missing = required - set(df.columns)
+        if missing:
+            logger.warning(
+                "%s: %s ledger missing %s — betting summary skipped",
+                fp_dir.name, market, sorted(missing),
+            )
+            continue
+
+        at_anchor = df.filter(pl.col("anchor") == anchor)
+        if at_anchor.is_empty():
+            logger.warning(
+                "%s: no %s rows at anchor %s", fp_dir.name, market, anchor
+            )
+            continue
+        # Entry books only. Reference prices are on the board deliberately (they
+        # are the CLV benchmark) and are not takeable.
+        if "role" in at_anchor.columns:
+            at_anchor = at_anchor.filter(pl.col("role") == "entry")
+        # A side quoted but no longer live is a carried-forward price, not an offer.
+        if "live_side" in at_anchor.columns:
+            at_anchor = at_anchor.filter(pl.col("live_side").fill_null(True))
+        at_anchor = at_anchor.drop_nulls(["odds", "edge"])
+        if at_anchor.is_empty():
+            continue
+
+        mains = at_anchor.filter(pl.col("is_main_line").fill_null(False))
+        entry: dict[str, Any] = {"n_all": at_anchor.height, "n_main": mains.height}
         for policy in SELECTION_POLICIES:
             picked = _select_one_per_match(mains, policy)
             entry[policy] = {

@@ -81,6 +81,22 @@ class ProjectionRun:
     test_df: pl.DataFrame
     output: ProjectionOutput
     pmf: pl.DataFrame
+    spread_pmf: pl.DataFrame
+
+    def pmf_for(self, market: str) -> pl.DataFrame:
+        """The pmf frame this market prices against.
+
+        Both are computed from one `ProjectionOutput` over one `test_df`, so they
+        are row-aligned with each other by construction -- there is no second
+        projection and no chance of pricing one market against another's matches.
+        """
+        by_market = {"total_games": self.pmf, "game_spread": self.spread_pmf}
+        try:
+            return by_market[market]
+        except KeyError:
+            raise ValueError(
+                f"no pmf for market {market!r}; known: {sorted(by_market)}"
+            ) from None
 
 
 def artifact_path(config: IIDProjectionConfig, config_path: Path) -> Path:
@@ -290,6 +306,58 @@ def build_pmf_frame(test_df: pl.DataFrame, out: ProjectionOutput) -> pl.DataFram
     })
 
 
+def build_spread_pmf_frame(
+    test_df: pl.DataFrame, out: ProjectionOutput
+) -> pl.DataFrame:
+    """Per-match game-spread pmf, in the SAME a/b frame as the totals one.
+
+    `spread_pmf` is indexed by SIGNED MARGIN with an offset: element i is
+    P(games_a - games_b == i - spread_offset), so the support runs -offset..+offset
+    rather than 0..n. The offset is written rather than inferred — it is a storage
+    constant (`chain.py`), and a reader that assumes 0-based would land every
+    lookup `offset` places out with nothing raising.
+
+    `actual_spread` is `a - b` from the KEPT row, which is what `spread_cal_errs`
+    frames the pmf against. Note that is the kept row's margin, not necessarily
+    `min(player_id, opp_id)`'s: `_collapse_to_match_rows` keeps the lowest
+    SURVIVING `player_id`, and a match reaching it with one perspective row keeps
+    that row whichever id it has.
+
+    `a_is_uid_min` records exactly that. `match_uid`'s fifth underscore-separated
+    component is `min(player_id, opp_id)` by construction, so the flag says
+    whether this row's `a` is the id the uid names — which is the ordinal anything
+    joining prices derives independently. Pricing asserts it over the rows it
+    keeps, turning a silent mis-attribution into a loud one at the only point both
+    definitions are in scope.
+    """
+    if not (test_df["match_uid"].to_numpy() == out.match_uid).all():
+        raise ValueError(
+            "test_df and ProjectionOutput are not row-aligned; the pmf would pair "
+            "each match with another match's distribution"
+        )
+    dist = out.distribution
+    return pl.DataFrame({
+        "match_uid": test_df["match_uid"],
+        "circuit": test_df["circuit"],
+        "surface": test_df["surface"],
+        "round": test_df["round"],
+        "best_of": test_df["best_of"].cast(pl.Int64),
+        "actual_spread": (
+            test_df["_target_games_a"] - test_df["_target_games_b"]
+        ).cast(pl.Float64),
+        "a_is_uid_min": (
+            test_df["player_id"]
+            == test_df["match_uid"].str.split("_").list.get(4)
+        ),
+        "p_match_win_a": dist.p_match_win_a,
+        "expected_spread": dist.expected_spread,
+        "spread_offset": pl.Series(
+            [dist.spread_offset] * test_df.height, dtype=pl.Int64
+        ),
+        "spread_pmf": [row.tolist() for row in dist.spread_pmf],
+    })
+
+
 def run_projection(
     config_path: Path | str,
     *,
@@ -323,6 +391,11 @@ def run_projection(
     fp_dir = fp_dir_for(config, config_path)
     pmf = build_pmf_frame(test_df, out)
     logger.info("Wrote per-match total-games pmf -> %s", write_pmf_parquet(fp_dir, pmf))
+    spread_pmf = build_spread_pmf_frame(test_df, out)
+    logger.info(
+        "Wrote per-match game-spread pmf -> %s",
+        write_pmf_parquet(fp_dir, spread_pmf, market="game_spread"),
+    )
 
     return ProjectionRun(
         fp_dir=fp_dir,
@@ -330,5 +403,6 @@ def run_projection(
         config_path=config_path,
         test_df=test_df,
         output=out,
+        spread_pmf=spread_pmf,
         pmf=pmf,
     )

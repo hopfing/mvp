@@ -192,6 +192,45 @@ class TestPmfParquet:
         assert back["match_uid"].to_list() == ["m1", "m2"]
         assert back["total_games_pmf"][0].to_list() == [0.1, 0.9]
 
+    def test_markets_write_to_separate_files(self, tmp_path, data_root):
+        """Sibling files, not shared columns: the outcome column differs per
+        market, so one file per market keeps each readable without knowing the
+        other's schema."""
+        cfg_path = _write_config(tmp_path)
+        cfg = IIDProjectionConfig.from_file(str(cfg_path))
+        fp_dir = artifacts.record_run(cfg, cfg_path)
+        totals = pl.DataFrame({"match_uid": ["m1"], "actual_total": [21.0]})
+        spread = pl.DataFrame({"match_uid": ["m1"], "actual_spread": [3.0]})
+
+        t_path = artifacts.write_pmf_parquet(fp_dir, totals)
+        s_path = artifacts.write_pmf_parquet(fp_dir, spread, market="game_spread")
+
+        assert t_path != s_path
+        assert t_path.name == artifacts.PMF_PARQUET
+        assert s_path.name == artifacts.SPREAD_PMF_PARQUET
+        assert "actual_spread" not in pl.read_parquet(t_path).columns
+        assert "actual_total" not in pl.read_parquet(s_path).columns
+
+    def test_default_market_is_totals(self, tmp_path, data_root):
+        """Existing callers pass no market and must keep writing the same file."""
+        cfg_path = _write_config(tmp_path)
+        cfg = IIDProjectionConfig.from_file(str(cfg_path))
+        fp_dir = artifacts.record_run(cfg, cfg_path)
+        pmf = pl.DataFrame({"match_uid": ["m1"], "actual_total": [21.0]})
+        assert artifacts.write_pmf_parquet(fp_dir, pmf).name == artifacts.PMF_PARQUET
+
+    def test_unknown_market_raises_rather_than_inventing_a_name(
+        self, tmp_path, data_root
+    ):
+        """A market with no registered artifact name would otherwise get a
+        silently-derived filename that no reader looks for."""
+        cfg_path = _write_config(tmp_path)
+        cfg = IIDProjectionConfig.from_file(str(cfg_path))
+        fp_dir = artifacts.record_run(cfg, cfg_path)
+        pmf = pl.DataFrame({"match_uid": ["m1"]})
+        with pytest.raises(ValueError, match="no pmf artifact name"):
+            artifacts.write_pmf_parquet(fp_dir, pmf, market="moneyline")
+
 
 class TestClvJson:
     def test_missing_returns_none(self, tmp_path):

@@ -9,6 +9,7 @@ import pytest
 
 from mvp.projection.iid.rank import (
     SELECTION_POLICIES,
+    _betting_summary,
     collect_rows,
     format_rank_table,
 )
@@ -24,7 +25,7 @@ def eval_root(tmp_path, monkeypatch):
 
 def _make_run(
     eval_root, fp, *, crps=2.90, source="parent", run_id=None,
-    with_backtest=False, with_clv=False, folds=(2.85, 2.95),
+    with_backtest=False, with_clv=False, folds=(2.85, 2.95), totals_only=False,
 ):
     d = eval_root / fp
     d.mkdir(parents=True, exist_ok=True)
@@ -50,23 +51,40 @@ def _make_run(
         # collapse has something to choose between. A `close` row is present so
         # the anchor filter is exercised: without it, the headline would silently
         # average open and close together.
+        # ONE FILE PER MARKET. The `market` column stays on the rows -- readers
+        # group by it -- but it no longer does the separating, because the two
+        # markets' outcome columns differ and cannot share a frame.
         pl.DataFrame({
-            "match_uid": ["m1", "m1", "m1", "m2", "m1", "m1"],
-            "book":      ["dk", "dk", "br", "dk", "dk", "dk"],
-            "market":    ["total_games"] * 4 + ["game_spread", "total_games"],
-            "points":    [21.5, 24.5, 21.5, 22.5, -3.5, 21.5],
-            "side":      ["over", "over", "over", "under", "p1", "over"],
-            "anchor":    ["open", "open", "open", "open", "open", "close"],
-            "role":      ["entry"] * 6,
-            "is_main_line": [True, False, True, True, True, True],
-            "live_side": [True] * 6,
-            "odds":      [2.00, 3.50, 2.10, 1.85, 1.95, 2.40],
-            "model_p":   [0.53, 0.38, 0.53, 0.56, 0.55, 0.53],
-            "edge":      [0.03, 0.09, 0.05, 0.02, 0.04, 0.11],
-            "edge_novig": [0.02, 0.07, 0.04, 0.01, 0.03, 0.09],
-            "pnl":       [1.00, -1.0, 1.10, -1.0, 0.95, 1.40],
-            "won":       [True, False, True, False, True, True],
+            "match_uid": ["m1", "m1", "m1", "m2", "m1"],
+            "book":      ["dk", "dk", "br", "dk", "dk"],
+            "market":    ["total_games"] * 5,
+            "points":    [21.5, 24.5, 21.5, 22.5, 21.5],
+            "side":      ["over", "over", "over", "under", "over"],
+            "side_pos":  ["a", "a", "a", "b", "a"],
+            "anchor":    ["open", "open", "open", "open", "close"],
+            "role":      ["entry"] * 5,
+            "is_main_line": [True, False, True, True, True],
+            "live_side": [True] * 5,
+            "odds":      [2.00, 3.50, 2.10, 1.85, 2.40],
+            "model_p":   [0.53, 0.38, 0.53, 0.56, 0.53],
+            "edge":      [0.03, 0.09, 0.05, 0.02, 0.11],
+            "edge_novig": [0.02, 0.07, 0.04, 0.01, 0.09],
+            "pnl":       [1.00, -1.0, 1.10, -1.0, 1.40],
+            "won":       [True, False, True, False, True],
         }).write_parquet(d / "backtest.parquet")
+        pl.DataFrame({
+            "match_uid": ["m1"], "book": ["dk"], "market": ["game_spread"],
+            "points": [-3.5], "side": ["fav"], "side_pos": ["a"],
+            "anchor": ["open"], "role": ["entry"],
+            "is_main_line": [True], "live_side": [True],
+            "odds": [1.95], "model_p": [0.55], "edge": [0.04],
+            "edge_novig": [0.03], "pnl": [0.95], "won": [True],
+        }).write_parquet(d / "backtest_game_spread.parquet")
+    if totals_only:
+        # A dir predating spreads: totals ledger, no spread ledger. This is what
+        # every existing fingerprint dir looks like after the per-market split,
+        # so the reader must skip the missing market rather than blank the table.
+        (d / "backtest_game_spread.parquet").unlink(missing_ok=True)
     if with_clv:
         (d / "clv.json").write_text(json.dumps({
             "n": 3800, "avg_clvpin": 0.0031, "positive_rate": 0.54,
@@ -360,3 +378,42 @@ class TestGateContribution:
         _make_run(eval_root, "aaa111", with_backtest=True)
         stats = collect_rows()[0].betting["markets"]["total_games"]["main"]
         assert stats["n_gated"] <= stats["n"]
+
+
+class TestLegacyTotalsOnlyDirs:
+    """Every fingerprint dir written before spreads existed has a totals ledger
+    and no spread one. The per-market read must treat that as normal."""
+
+    def test_a_totals_only_dir_still_reports_totals(self, eval_root):
+        _make_run(eval_root, "aaa111", with_backtest=True, totals_only=True)
+        s = _betting_summary(eval_root / "aaa111")
+        assert s is not None, "a dir with a totals ledger must not read as empty"
+        assert list(s["markets"]) == ["total_games"]
+        assert s["markets"]["total_games"]["n_all"] == 4
+
+    def test_the_missing_market_is_absent_not_zeroed(self, eval_root):
+        """Absent, not a zero row — a zero would read as 'we priced it and found
+        nothing' rather than 'this dir predates the market'."""
+        _make_run(eval_root, "aaa111", with_backtest=True, totals_only=True)
+        s = _betting_summary(eval_root / "aaa111")
+        assert "game_spread" not in s["markets"]
+
+    def test_the_totals_betting_table_still_renders_the_run(self, eval_root):
+        """The failure this guards: blanking the TOTALS betting table across
+        every existing artifact because the spread file is missing. Table 3 is
+        totals betting; Table 4 is spread betting."""
+        _make_run(eval_root, "aaa111", with_backtest=True, run_id="run_a",
+                  totals_only=True)
+        lines = format_rank_table()
+        start = next(i for i, ln in enumerate(lines) if "Table 3" in ln)
+        end = next(i for i, ln in enumerate(lines) if "Table 4" in ln)
+        assert any("run_a" in ln for ln in lines[start:end])
+
+    def test_the_spread_betting_table_omits_it(self, eval_root):
+        """Correctly absent, not zeroed — the dir predates the market."""
+        _make_run(eval_root, "aaa111", with_backtest=True, run_id="run_a",
+                  totals_only=True)
+        lines = format_rank_table()
+        start = next(i for i, ln in enumerate(lines) if "Table 4" in ln)
+        end = next(i for i, ln in enumerate(lines) if "Table 5" in ln)
+        assert not any("run_a" in ln for ln in lines[start:end])
