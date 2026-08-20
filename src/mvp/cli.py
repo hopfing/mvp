@@ -2067,12 +2067,27 @@ def _is_iid_discovery(config_path: Path) -> bool:
     IID discovery configs have a top-level `serve_model` key (instead of
     `model`), since the thing being optimized is the serve win prob
     estimator that feeds the tennis chain.
+
+    `serve_model` alone is NOT sufficient. A two-level component FS config
+    carries both `serve_model` (the fixed sets for the two components it is not
+    selecting) and `scoring_model` (the search estimator) — and this predicate
+    is tested before `_is_serve_discovery`, so matching on `serve_model` alone
+    routed those runs to `_cmd_experiment_iid`. That path builds an
+    `IIDDiscoveryConfig`, which has no `serve_component` field; pydantic
+    dropped the key silently, so the run completed, looked normal, and selected
+    nothing for the component it was launched to select. Requiring the serve
+    discovery markers to be ABSENT is what keeps the two families disjoint.
     """
     import yaml
 
     with open(config_path) as f:
         raw = yaml.safe_load(f)
-    return isinstance(raw.get("serve_model"), dict)
+    if not isinstance(raw.get("serve_model"), dict):
+        return False
+    return not (
+        isinstance(raw.get("scoring_model"), dict)
+        or isinstance(raw.get("model_forms"), list)
+    )
 
 
 def _is_serve_discovery(config_path: Path) -> bool:
