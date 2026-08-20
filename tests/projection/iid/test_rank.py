@@ -332,6 +332,14 @@ class TestFormatting:
         assert "overall score" not in out
 
 
+def _rung(uid, book, points, side, odds, model_p, edge, main, pnl=0.0, won=True):
+    return {
+        "match_uid": uid, "market": "total_games", "book": book,
+        "points": points, "side": side, "odds": odds, "model_p": model_p,
+        "edge": edge, "is_main_line": main, "pnl": pnl, "won": won,
+    }
+
+
 class TestSelectionPolicyTieBreak:
     """`model_p` is a function of (match, line, side) and does NOT vary by book.
 
@@ -342,18 +350,10 @@ class TestSelectionPolicyTieBreak:
 
     def _mains(self):
         # Two books on the same line: identical model_p, different odds.
-        return pl.DataFrame({
-            "match_uid": ["m1", "m1"],
-            "market": ["total_games"] * 2,
-            "book": ["dk", "br"],
-            "points": [21.5, 21.5],
-            "side": ["over", "over"],
-            "odds": [2.00, 2.20],
-            "model_p": [0.53, 0.53],
-            "edge": [0.03, 0.08],
-            "pnl": [1.00, 1.20],
-            "won": [True, True],
-        })
+        return pl.DataFrame([
+            _rung("m1", "dk", 21.5, "over", 2.00, 0.53, 0.03, True, 1.00),
+            _rung("m1", "br", 21.5, "over", 2.20, 0.53, 0.08, True, 1.20),
+        ])
 
     def test_safest_takes_the_best_price_among_tied_lines(self):
         from mvp.projection.iid.rank import _select_one_per_match
@@ -368,6 +368,76 @@ class TestSelectionPolicyTieBreak:
 
         picked = _select_one_per_match(self._mains(), "max_edge")
         assert picked["odds"][0] == pytest.approx(2.20)
+
+
+class TestSelectionCandidateSets:
+    """The policies do not share a candidate set; that is deliberate.
+
+    `safest` walks the whole ladder restricted to rungs with edge; `main` and
+    `max_edge` see main lines only.
+    """
+
+    def _ladder(self):
+        # One match. Main line 24.5. Alternate rungs either side of it.
+        # model_p falls as the over line rises — the pmf's cumulative.
+        return pl.DataFrame([
+            _rung("m1", "dk", 21.5, "over", 1.45, 0.74, -0.01, False),
+            _rung("m1", "dk", 22.5, "over", 1.60, 0.68, 0.09, False),
+            _rung("m1", "dk", 24.5, "over", 1.91, 0.58, 0.11, True),
+            _rung("m1", "dk", 27.5, "over", 3.10, 0.36, 0.12, False),
+        ])
+
+    def test_safest_takes_the_easiest_rung_that_still_has_edge(self):
+        from mvp.projection.iid.rank import _select_one_per_match
+
+        picked = _select_one_per_match(self._ladder(), "safest")
+        assert picked.height == 1
+        # NOT 21.5 (highest model_p but no edge) and NOT 24.5 (the main line).
+        assert picked["points"][0] == pytest.approx(22.5)
+
+    def test_max_edge_stays_on_the_main_line(self):
+        from mvp.projection.iid.rank import _select_one_per_match
+
+        picked = _select_one_per_match(self._ladder(), "max_edge")
+        # 27.5 carries the largest edge but is an alternate rung.
+        assert picked["points"][0] == pytest.approx(24.5)
+
+    def test_main_stays_on_the_main_line(self):
+        from mvp.projection.iid.rank import _select_one_per_match
+
+        picked = _select_one_per_match(self._ladder(), "main")
+        assert picked["points"][0] == pytest.approx(24.5)
+
+    def test_safest_bets_nothing_when_no_rung_has_edge(self):
+        """Previously this match was 'selected' and then dropped by the gate,
+        which is indistinguishable from never having been offered a price."""
+        from mvp.projection.iid.rank import _select_one_per_match
+
+        dead = pl.DataFrame([
+            _rung("m1", "dk", 21.5, "over", 1.45, 0.74, -0.01, False),
+            _rung("m1", "dk", 24.5, "over", 1.60, 0.58, -0.07, True),
+        ])
+        assert _select_one_per_match(dead, "safest").height == 0
+        assert _select_one_per_match(dead, "main").height == 1
+
+    def test_safest_shops_the_ladder_across_books(self):
+        """A rung dead at one book and live at another is still a candidate."""
+        from mvp.projection.iid.rank import _select_one_per_match
+
+        split = pl.DataFrame([
+            _rung("m1", "dk", 22.5, "over", 1.40, 0.68, -0.05, False),
+            _rung("m1", "br", 22.5, "over", 1.60, 0.68, 0.09, False),
+            _rung("m1", "dk", 24.5, "over", 1.91, 0.58, 0.11, True),
+        ])
+        picked = _select_one_per_match(split, "safest")
+        assert picked["points"][0] == pytest.approx(22.5)
+        assert picked["book"][0] == "br"
+
+    def test_unknown_policy_raises(self):
+        from mvp.projection.iid.rank import _select_one_per_match
+
+        with pytest.raises(ValueError, match="unknown selection policy"):
+            _select_one_per_match(self._ladder(), "cheapest")
 
 
 class TestGateContribution:
