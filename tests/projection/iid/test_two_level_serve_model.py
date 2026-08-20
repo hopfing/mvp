@@ -464,3 +464,57 @@ class TestPromotedConfigIncludeList:
                      "player_vs_opp_style_resid_flat_diff"):
             inc = self._emit([spec])["features"]["include"]
             assert inc == [spec], inc
+
+
+class TestConstantBranchFit:
+    """`_ConstantBranch` stands in for an unselected win branch. It shares no
+    base class with the score-state model, so it needs the branch filter as a
+    module-level function rather than a method — the call that was missing.
+    """
+
+    @staticmethod
+    def _points():
+        return pl.DataFrame({
+            "match_uid": ["m1"] * 6,
+            "serve": [1, 1, 1, 2, 2, 2],
+            "point_won_by_server": [True, True, False, True, False, False],
+        })
+
+    def test_it_fits_the_rate_of_its_own_branch(self):
+        from mvp.projection.iid.two_level_serve_model import _ConstantBranch
+
+        for branch, expected in ((1, 2 / 3), (2, 1 / 3)):
+            b = _ConstantBranch(serve_branch=branch)
+            b.fit(pl.DataFrame({"match_uid": ["m1"]}), preloaded_points=self._points())
+            assert b._rate == pytest.approx(expected), f"branch {branch}"
+
+    def test_the_branches_differ(self):
+        """If the filter were dropped, both branches would fit the pooled rate
+        and the fallback would be silently wrong rather than absent."""
+        from mvp.projection.iid.two_level_serve_model import _ConstantBranch
+
+        rates = []
+        for branch in (1, 2):
+            b = _ConstantBranch(serve_branch=branch)
+            b.fit(pl.DataFrame({"match_uid": ["m1"]}), preloaded_points=self._points())
+            rates.append(b._rate)
+        assert rates[0] != rates[1]
+
+    def test_predict_returns_the_fitted_rate(self):
+        from mvp.projection.iid.two_level_serve_model import _ConstantBranch
+
+        b = _ConstantBranch(serve_branch=1)
+        b.fit(pl.DataFrame({"match_uid": ["m1"]}), preloaded_points=self._points())
+        df = pl.DataFrame({"match_uid": ["m1", "m1"]})
+        first, second = b.predict_state_fn(df)
+        assert first(None).tolist() == pytest.approx([2 / 3, 2 / 3])
+
+    def test_an_empty_branch_raises(self):
+        """No points on the branch means no rate to fall back to — better than
+        silently returning 0.5."""
+        from mvp.projection.iid.two_level_serve_model import _ConstantBranch
+
+        only_first = self._points().filter(pl.col("serve") == 1)
+        b = _ConstantBranch(serve_branch=2)
+        with pytest.raises(ValueError, match="no training points on this branch"):
+            b.fit(pl.DataFrame({"match_uid": ["m1"]}), preloaded_points=only_first)

@@ -227,6 +227,30 @@ def swap_side_opp_specs(match_level_features: list[str]) -> list[str]:
     return specs
 
 
+def apply_serve_branch(
+    points: pl.DataFrame, serve_branch: int | None
+) -> pl.DataFrame:
+    """Restrict point rows to one branch of the serve tree. `None` keeps all.
+
+    Module level because two unrelated estimators need it: the score-state model
+    and `_ConstantBranch`, which has no model at all and shares no base class
+    with it. Duplicating six lines of filter across those two is how the two
+    branches quietly stop meaning the same thing.
+
+    The missing-`serve` case raises rather than passing the frame through: a
+    branch model silently trained on BOTH branches is a wrong model that scores
+    plausibly and raises nothing.
+    """
+    if serve_branch is None:
+        return points
+    if "serve" not in points.columns:
+        raise ValueError(
+            "serve_branch set but the point frame has no `serve` column; "
+            "the branch filter cannot be applied silently"
+        )
+    return points.filter(pl.col("serve") == serve_branch)
+
+
 def swap_side_partner_specs(match_level_features: list[str]) -> list[str]:
     """Every counterpart column a mirror feature is read from, either side.
 
@@ -581,19 +605,12 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
     def _apply_serve_branch(self, points: pl.DataFrame) -> pl.DataFrame:
         """Restrict rows to this model's branch of the serve tree.
 
-        Deliberately a method called at both point-loading sites rather than an
+        Deliberately called at both point-loading sites rather than passed as an
         argument to the read: `fit` and `score_test_points` each take a
         `preloaded_points` frame from the FS selector, and a filter applied only
         to the parquet read would be skipped exactly when FS is driving.
         """
-        if self.serve_branch is None:
-            return points
-        if "serve" not in points.columns:
-            raise ValueError(
-                "serve_branch set but the point frame has no `serve` column; "
-                "the branch filter cannot be applied silently"
-            )
-        return points.filter(pl.col("serve") == self.serve_branch)
+        return apply_serve_branch(points, self.serve_branch)
 
     def fit(
         self,

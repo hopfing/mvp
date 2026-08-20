@@ -55,6 +55,7 @@ from mvp.projection.iid.serve_model import (
     ScoreStateChainServeModel,
     ServeStateFn,
     ServeWinProbEstimator,
+    apply_serve_branch,
     neutral_score_state,
     resolve_match_feature_cols,
 )
@@ -340,7 +341,7 @@ class _ConstantBranch:
             points = pl.read_parquet(
                 path, columns=["match_uid", "serve", "point_won_by_server"]
             ).filter(pl.col("match_uid").is_in(df["match_uid"].unique().to_list()))
-        rows = _apply_serve_branch(points, self.serve_branch)
+        rows = apply_serve_branch(points, self.serve_branch)
         won = rows["point_won_by_server"].drop_nulls()
         if len(won) == 0:
             raise ValueError(
