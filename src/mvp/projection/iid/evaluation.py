@@ -997,15 +997,17 @@ def print_backtest_summary(path: Path | str) -> None:
         print(f"Ledger at {path} is empty")
         return
 
+    schema = df["schema_version"][0] if "schema_version" in df.columns else "?"
+    neg = int((df["edge"] < 0).sum())
     print(f"\n{path}")
-    print(f"  {df.height:,} rows | schema_version="
-          f"{df['schema_version'][0] if 'schema_version' in df.columns else '?'}")
-    print(f"  {df['match_uid'].n_unique():,} matches, "
-          f"{df['book'].n_unique()} books")
+    print(f"  {df.height:,} rows | {df['match_uid'].n_unique():,} matches | "
+          f"{df['book'].n_unique()} books | {neg / df.height:.1%} negative edge "
+          f"| schema_version={schema}")
 
-    by_anchor = (
-        df.group_by("anchor")
-        .agg(
+    _print_headline(df)
+
+    by_anchor = _in_board_order(
+        df.group_by("anchor").agg(
             pl.len().alias("rows"),
             pl.col("match_uid").n_unique().alias("matches"),
             pl.col("is_main_line").sum().alias("main_rows"),
@@ -1013,24 +1015,97 @@ def print_backtest_summary(path: Path | str) -> None:
             pl.col("is_push").sum().alias("pushes"),
         )
     )
-    by_anchor = _in_board_order(by_anchor)
-    print(f"\n  {'anchor':>10} {'rows':>8} {'matches':>8} {'main':>7} "
-          f"{'avg_edge':>9} {'pushes':>7}")
+    print(f"\n  by anchor")
+    print(f"  {_KEY_HEAD('anchor')} {'rows':>8} {'matches':>8} {'main':>8} "
+          f"{'avg edge%':>10} {'pushes':>7}")
     for r in by_anchor.iter_rows(named=True):
-        print(f"  {r['anchor']:>10} {r['rows']:>8,} {r['matches']:>8,} "
-              f"{r['main_rows']:>7,} {r['avg_edge']:>9.4f} {r['pushes']:>7,}")
+        print(f"  {_KEY_CELL(r['anchor'])} {r['rows']:>8,} {r['matches']:>8,} "
+              f"{r['main_rows']:>8,} {r['avg_edge']*100:>+10.2f} "
+              f"{r['pushes']:>7,}")
 
-    neg = int((df["edge"] < 0).sum())
-    print(f"\n  negative-edge rows: {neg:,} ({neg / df.height:.1%})")
+    _print_policy_tables(df)
+    print("\n  Config-vs-config comparison: iid-rank\n")
 
-    _print_edge_curve(df)
-    print("  Config-vs-config comparison: iid-rank\n")
+
+# Every table in this view carries the same trailing metric block, in the same
+# order at the same widths, so a column means the same thing and sits in the same
+# place wherever you look. Each table supplies only its own leading key columns.
+_KEY_W = 9
+_METRIC_HEAD = (
+    f"{'N':>7} {'Hit%':>6} {'ROI%':>7} {'Units':>9} "
+    f"{'avg edge%':>10} {'CLV%':>8} {'CLV+%':>7}"
+)
+
+
+def _KEY_HEAD(name: str) -> str:  # noqa: N802 - formatting helper, not a class
+    return f"{name:>{_KEY_W}}"
+
+
+def _KEY_CELL(value: object) -> str:  # noqa: N802
+    return f"{value!s:>{_KEY_W}}"
+
+
+def _metric_cells(sub: pl.DataFrame, *, has_clv: bool) -> str:
+    """The shared metric block for one row set. Empty cells read `--`."""
+    won = sub["won"].drop_nulls()
+    hit = f"{won.mean()*100:.1f}" if won.len() else "--"
+    clv = sub["clv"].drop_nulls() if has_clv else None
+    live = clv is not None and clv.len() > 0
+    clv_s = f"{clv.mean()*100:+.2f}" if live else "--"
+    clv_p = f"{(clv > 0).mean()*100:.1f}" if live else "--"
+    return (
+        f"{sub.height:>7,} {hit:>6} {sub['pnl'].mean()*100:>+7.2f} "
+        f"{sub['pnl'].sum():>+9.1f} {sub['edge'].mean()*100:>+10.2f} "
+        f"{clv_s:>8} {clv_p:>7}"
+    )
+
+
+def _takeable(df: pl.DataFrame) -> pl.DataFrame:
+    """Rows a bet could actually have been placed into: entry books, live side,
+    priced. Every table below starts here."""
+    rows = df
+    if "role" in rows.columns:
+        rows = rows.filter(pl.col("role") == "entry")
+    if "live_side" in rows.columns:
+        rows = rows.filter(pl.col("live_side").fill_null(True))
+    return rows.drop_nulls(["edge", "pnl"])
+
+
+def _print_headline(df: pl.DataFrame) -> None:
+    """What each policy did on positive edge, per anchor.
+
+    `main` is gated to `edge > 0` here so the three sit on the same footing;
+    `safest` and `max_edge` already are by definition. Everything below this
+    table breaks these same rows down a different way.
+    """
+    from mvp.projection.iid.rank import SELECTION_POLICIES, _select_one_per_match
+
+    need = {"anchor", "is_main_line", "edge", "pnl", "won", "match_uid", "market"}
+    if not need <= set(df.columns):
+        return
+    rows = _takeable(df)
+    if rows.is_empty():
+        return
+
+    has_clv = "clv" in rows.columns
+    print("\n  headline: edge > 0, one bet per match")
+    print(f"  {_KEY_HEAD('anchor')} {_KEY_HEAD('policy')} {_METRIC_HEAD}")
+    for anchor in _anchors_in_board_order(rows):
+        at = rows.filter(pl.col("anchor") == anchor)
+        for policy in SELECTION_POLICIES:
+            sub = _select_one_per_match(at, policy).filter(pl.col("edge") > 0)
+            if sub.is_empty():
+                continue
+            print(
+                f"  {_KEY_CELL(anchor)} {_KEY_CELL(policy)} "
+                f"{_metric_cells(sub, has_clv=has_clv)}"
+            )
 
 
 def _anchors_in_board_order(df: pl.DataFrame) -> list[str]:
     """Anchors present in `df`, in the order the board reaches them.
 
-    NOT alphabetical, which renders close/formed2/open and reads the price path
+    Not alphabetical, which renders close/formed2/open and reads the price path
     backwards. Anything outside `DEFAULT_ANCHORS` is appended rather than
     dropped, so an unrecognised anchor stays visible instead of vanishing.
     """
@@ -1064,26 +1139,140 @@ _CURVE_BANDS: tuple[tuple[str, float, float], ...] = (
 )
 
 
-def _print_edge_curve(df: pl.DataFrame) -> None:
-    """ROI by edge band, per anchor, per selection policy.
+# Edge bands. Rows inside every policy table below, never a table of their
+# own -- a standalone band table is just this one's marginal.
+_CURVE_BANDS: tuple[tuple[str, float, float], ...] = (
+    ("<0", -1.0, 0.0),
+    ("0-2pp", 0.0, 0.02),
+    ("2-5pp", 0.02, 0.05),
+    ("5-10pp", 0.05, 0.10),
+    ("10pp+", 0.10, 1.0),
+)
 
-    The question this answers is where the model's claimed edge starts being
-    real. If ROI rose with the band the edge would be honest; a peak in the
-    middle says the largest claimed edges are the least trustworthy, which is
-    the selection effect an edge filter creates.
 
-    Policy is a dimension here, not a hidden filter. `safest` and `max_edge`
-    read the whole ladder, so a table computed on main lines alone would be
-    diagnosing a row set two of the three policies never draw from. Each policy
-    is one coherent population -- one bet per match, its own candidate set --
-    which is what makes a band comparison mean anything. Pooling every rung is
-    not a population at all, since the same claimed edge is priced differently
-    at different ladder depths.
+# 100% `main` and carry nothing.
+LADDER_POLICIES: tuple[str, ...] = ("safest", "max_edge")
+DEPTH_CLASSES: tuple[str, ...] = ("main", "easier", "harder", "level", "unknown")
 
-    `main` alone has a `<0` row. The other two carry the edge restriction in
-    their definitions (`rank.py:_select_one_per_match`), so a negative band
-    cannot exist for them: `safest` walking past a live rung to reach a dead one
-    is exactly what that restriction rules out.
+
+def _classify_depth(picked: pl.DataFrame, at_anchor: pl.DataFrame) -> pl.DataFrame:
+    """Tag each picked bet against the consensus main line on its own side.
+
+    The baseline is `_select_one_per_match(.., "main")`'s own pick, not a
+    consensus rule re-derived here. Books disagree on the main line — up to
+    three distinct ones per match at close — so "the main line" needs a
+    tiebreak, and the `main` policy already has one. Two definitions of the
+    consensus line is how they drift apart.
+
+    Direction is read off `model_p`, which is the probability the bet wins:
+    higher than the baseline means the more forgiving number, lower means the
+    harder one. `model_p` does not vary by book, so the baseline is unambiguous
+    once the line is fixed.
+
+    `level` is a different rung carrying the same win probability — the pmf has
+    no mass between the two. `unknown` is a match whose baseline line is not
+    quoted on the side the policy picked.
+    """
+    from mvp.projection.iid.rank import _select_one_per_match
+
+    base = (
+        _select_one_per_match(at_anchor, "main")
+        .select("match_uid", "market", pl.col("points").alias("_base_pts"))
+    )
+    if base.is_empty():
+        return picked.with_columns(pl.lit("unknown").alias("depth"))
+    # `model_p` at the baseline line, per side. Book-invariant, so `first()`.
+    base_mp = (
+        at_anchor.join(base, on=["match_uid", "market"], how="inner")
+        .filter(pl.col("points") == pl.col("_base_pts"))
+        .group_by(["match_uid", "market", "side"])
+        .agg(
+            pl.col("model_p").first().alias("_base_mp"),
+            pl.col("_base_pts").first(),
+        )
+    )
+    j = picked.join(base_mp, on=["match_uid", "market", "side"], how="left")
+    return j.with_columns(
+        pl.when(pl.col("_base_mp").is_null())
+        .then(pl.lit("unknown"))
+        .when(pl.col("points") == pl.col("_base_pts"))
+        .then(pl.lit("main"))
+        .when(pl.col("model_p") > pl.col("_base_mp"))
+        .then(pl.lit("easier"))
+        .when(pl.col("model_p") < pl.col("_base_mp"))
+        .then(pl.lit("harder"))
+        .otherwise(pl.lit("level"))
+        .alias("depth")
+    )
+
+
+
+
+def _banded_rows(
+    sub: pl.DataFrame, *, has_clv: bool, indent: str
+) -> list[str]:
+    """One line per edge band present in `sub`."""
+    out = []
+    for name, lo, hi in _CURVE_BANDS:
+        band = sub.filter((pl.col("edge") >= lo) & (pl.col("edge") < hi))
+        if band.is_empty():
+            continue
+        out.append(
+            f"{indent}{_KEY_CELL(name)} {_metric_cells(band, has_clv=has_clv)}"
+        )
+    return out
+
+
+def _print_banded_table(
+    title: str,
+    frames: dict[str, pl.DataFrame],
+    *,
+    key: str,
+    key_label: str,
+    anchors: list[str],
+    has_clv: bool,
+    key_order: tuple[str, ...] | None = None,
+) -> None:
+    """anchor x `key` x edge band, for one policy's picks.
+
+    Bands are a row dimension in every table rather than a table of their own.
+    A standalone band table is the marginal of this one, so it only repeats what
+    is already here a row at a time.
+    """
+    lines: list[str] = []
+    for anchor in anchors:
+        picked = frames.get(anchor)
+        if picked is None or picked.is_empty() or key not in picked.columns:
+            continue
+        values = key_order or tuple(
+            sorted(picked[key].drop_nulls().unique().to_list())
+        )
+        for value in values:
+            sub = picked.filter(pl.col(key) == value)
+            if sub.is_empty():
+                continue
+            head = f"  {_KEY_CELL(anchor)} {_KEY_CELL(value)} "
+            for row in _banded_rows(sub, has_clv=has_clv, indent=head):
+                lines.append(row)
+    if not lines:
+        return
+    print(f"\n  {title}")
+    print(f"  {_KEY_HEAD('anchor')} {_KEY_HEAD(key_label)} "
+          f"{_KEY_HEAD('band')} {_METRIC_HEAD}")
+    for line in lines:
+        print(line)
+
+
+def _print_policy_tables(df: pl.DataFrame) -> None:
+    """Every breakdown, grouped by selection policy.
+
+    One policy's tables sit together, so reading a policy end to end does not
+    mean scanning three tables for its rows. Each policy is its own population
+    -- one bet per match off its own candidate set -- and each table breaks that
+    population down a different way with the edge band as the inner row.
+
+    `main` gets no ladder-depth table: it is on the consensus main line by
+    definition, so every row would read `main`.
 
     Selection comes from `rank.py`, never a second filter written here. Two
     definitions of `safest` is how they drift apart.
@@ -1093,75 +1282,34 @@ def _print_edge_curve(df: pl.DataFrame) -> None:
     need = {"anchor", "is_main_line", "edge", "pnl", "won", "match_uid", "market"}
     if not need <= set(df.columns):
         return
-    rows = df
-    if "role" in rows.columns:
-        rows = rows.filter(pl.col("role") == "entry")
-    if "live_side" in rows.columns:
-        rows = rows.filter(pl.col("live_side").fill_null(True))
-    rows = rows.drop_nulls(["edge", "pnl"])
+    rows = _takeable(df)
     if rows.is_empty():
         return
 
-    anchors = _anchors_in_board_order(rows)
-    picked = {
-        (anchor, policy): _select_one_per_match(
-            rows.filter(pl.col("anchor") == anchor), policy
-        )
-        for anchor in anchors
-        for policy in SELECTION_POLICIES
-    }
-
     has_clv = "clv" in rows.columns
-    print("\n  ROI and CLV by edge band, one bet per match:")
-    print(f"  {'anchor':>8} {'policy':>9} {'band':>7} {'N':>7} {'Hit%':>6} "
-          f"{'ROI%':>7} {'Units':>9} {'avg edge%':>10} {'CLV%':>8} {'CLV+%':>7}")
-    for anchor in anchors:
-        for policy in SELECTION_POLICIES:
-            sub = picked[(anchor, policy)]
-            if sub.is_empty():
-                continue
-            for name, lo, hi in _CURVE_BANDS:
-                band = sub.filter((pl.col("edge") >= lo) & (pl.col("edge") < hi))
-                if band.is_empty():
-                    continue
-                won = band["won"].drop_nulls()
-                hit = f"{won.mean()*100:.1f}" if won.len() else "--"
-                clv = band["clv"].drop_nulls() if has_clv else None
-                clv_s = (
-                    f"{clv.mean()*100:+.2f}"
-                    if clv is not None and clv.len() else "--"
-                )
-                clvp = (
-                    f"{(clv > 0).mean()*100:.1f}"
-                    if clv is not None and clv.len() else "--"
-                )
-                print(
-                    f"  {anchor:>8} {policy:>9} {name:>7} {band.height:>7,} "
-                    f"{hit:>6} {band['pnl'].mean()*100:>+7.2f} "
-                    f"{band['pnl'].sum():>+9.1f} "
-                    f"{band['edge'].mean()*100:>+10.2f} {clv_s:>8} {clvp:>7}"
-                )
+    anchors = _anchors_in_board_order(rows)
+    at_anchor = {a: rows.filter(pl.col("anchor") == a) for a in anchors}
 
-    if "side" not in rows.columns:
-        return
-    # A tuning change often floods one side rather than moving overall ROI, so
-    # the side split is where that shows. It lives here rather than in
-    # `iid-rank` because the ranking table's cell groups are the selection
-    # policies; this is per-config detail.
-    print("\n  by side, one bet per match:")
-    print(f"  {'anchor':>8} {'policy':>9} {'side':>6} {'N':>7} {'Hit%':>6} "
-          f"{'ROI%':>7} {'Units':>9}")
-    for anchor in anchors:
-        for policy in SELECTION_POLICIES:
-            sub = picked[(anchor, policy)].filter(pl.col("edge") >= 0.0)
-            if sub.is_empty():
-                continue
-            for side in sorted(sub["side"].drop_nulls().unique().to_list()):
-                sd = sub.filter(pl.col("side") == side)
-                won = sd["won"].drop_nulls()
-                hit = f"{won.mean()*100:.1f}" if won.len() else "--"
-                print(
-                    f"  {anchor:>8} {policy:>9} {side:>6} {sd.height:>7,} "
-                    f"{hit:>6} {sd['pnl'].mean()*100:>+7.2f} "
-                    f"{sd['pnl'].sum():>+9.1f}"
-                )
+    for policy in SELECTION_POLICIES:
+        picked = {a: _select_one_per_match(at_anchor[a], policy) for a in anchors}
+        if all(p.is_empty() for p in picked.values()):
+            continue
+        _print_banded_table(
+            f"{policy} - by side", picked, key="side", key_label="side",
+            anchors=anchors, has_clv=has_clv,
+        )
+        if policy not in LADDER_POLICIES:
+            continue
+        depth_cols = {"points", "model_p", "side"}
+        if not depth_cols <= set(rows.columns):
+            continue
+        tagged = {
+            a: _classify_depth(picked[a], at_anchor[a])
+            for a in anchors
+            if not picked[a].is_empty()
+        }
+        _print_banded_table(
+            f"{policy} - by ladder depth vs the consensus main line",
+            tagged, key="depth", key_label="depth", anchors=anchors,
+            has_clv=has_clv, key_order=DEPTH_CLASSES,
+        )

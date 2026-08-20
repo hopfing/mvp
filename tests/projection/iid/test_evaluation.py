@@ -1052,11 +1052,16 @@ def _curve_row(uid, book, points, side, odds, model_p, edge, main, pnl, won,
     }
 
 
-class TestEdgeCurvePolicyDimension:
-    """The band curve reports per selection policy, not on a main-line subset.
 
-    `safest` and `max_edge` read the whole ladder, so a curve computed on main
-    lines alone diagnoses a row set two of the three policies never draw from.
+
+class TestPolicyTables:
+    """The lower view is grouped by selection policy, with the edge band as the
+    inner row of every table.
+
+    `safest` and `max_edge` read the whole ladder, so a table computed on main
+    lines alone would diagnose a row set two of the three policies never draw
+    from. A standalone band table is the marginal of these and only repeats what
+    they already carry.
     """
 
     @staticmethod
@@ -1073,51 +1078,97 @@ class TestEdgeCurvePolicyDimension:
             _curve_row("m3", "dk", 25.5, "over", 1.80, 0.50, -0.10, True, 0.80, True),
         ])
 
-    def _tables(self, capsys):
-        """(band table lines, side table lines) -- the two must not be summed."""
-        evaluation._print_edge_curve(self._ledger())
-        out = capsys.readouterr().out
-        head, _, tail = out.partition("by side")
-        keep = lambda blk: [
-            ln for ln in blk.splitlines()
-            if ln.strip() and "anchor" not in ln and "ROI and CLV" not in ln
+    def _out(self, capsys):
+        evaluation._print_policy_tables(self._ledger())
+        return capsys.readouterr().out
+
+    @staticmethod
+    def _sections(out):
+        """Section titles in the order printed."""
+        return [
+            ln.strip() for ln in out.splitlines()
+            if " - by " in ln and "anchor" not in ln
         ]
-        return keep(head), keep(tail), out
 
-    def test_every_policy_appears(self, capsys):
-        _, _, out = self._tables(capsys)
+    @staticmethod
+    def _rows(out, title):
+        """Data rows under one section title, headers excluded."""
+        keep, seen = [], False
+        for ln in out.splitlines():
+            if " - by " in ln and "anchor" not in ln:
+                seen = ln.strip() == title
+                continue
+            if seen and ln.strip() and "anchor" not in ln:
+                keep.append(ln.split())
+        return keep
+
+    def test_every_policy_gets_tables(self, capsys):
+        titles = self._sections(self._out(capsys))
         for policy in ("main", "safest", "max_edge"):
-            assert policy in out, policy
+            assert any(t.startswith(f"{policy} - by") for t in titles), policy
 
-    def test_header_carries_no_parenthetical_commentary(self, capsys):
-        """Console output reports numbers; what the row set is belongs in the
-        docstring."""
-        _, _, out = self._tables(capsys)
-        assert "main line, entry books" not in out
-        assert "OFFER set" not in out
+    def test_a_policys_tables_are_grouped_together(self, capsys):
+        """Reading one policy end to end should not mean scanning every table
+        for its rows."""
+        titles = self._sections(self._out(capsys))
+        owners = [t.split(" - ")[0] for t in titles]
+        assert owners == sorted(owners, key=owners.index)
+        assert len(set(owners)) == len(
+            [i for i, o in enumerate(owners) if i == 0 or owners[i - 1] != o]
+        )
+
+    def test_main_has_no_ladder_depth_table(self, capsys):
+        """It sits on the consensus main line by definition, so every row would
+        read `main`."""
+        titles = self._sections(self._out(capsys))
+        assert "main - by side" in titles
+        assert not any(
+            t.startswith("main - by ladder depth") for t in titles
+        ), titles
+
+    def test_bands_are_rows_in_every_table(self, capsys):
+        out = self._out(capsys)
+        for title in self._sections(out):
+            rows = self._rows(out, title)
+            assert rows, title
+            bands = {b for _, _, b, *_ in rows}
+            assert bands <= {n for n, _, _ in evaluation._CURVE_BANDS}, title
+
+    def test_no_standalone_band_table(self, capsys):
+        """Its rows are the marginal of the policy tables."""
+        out = self._out(capsys)
+        assert "by edge band" not in out
 
     def test_ladder_policies_have_no_negative_band(self, capsys):
         """They carry the edge restriction in their definitions, so a `<0` row
         cannot exist for them. `main` is ungated and keeps its."""
-        bands, _, _ = self._tables(capsys)
-        neg = [ln for ln in bands if ln.split()[2] == "<0"]
-        assert neg, "expected a <0 row for main"
-        assert all(ln.split()[1] == "main" for ln in neg), neg
+        out = self._out(capsys)
+        for title in self._sections(out):
+            bands = {b for _, _, b, *_ in self._rows(out, title)}
+            if title.startswith("main "):
+                assert "<0" in bands, title
+            else:
+                assert "<0" not in bands, title
 
     def test_the_deep_rung_reaches_max_edge_but_not_main(self, capsys):
         """m1's 12pp edge is on an alternate rung. `main` cannot see it."""
-        bands, _, out = self._tables(capsys)
-        cells = [(ln.split()[1], ln.split()[2]) for ln in bands]
-        assert ("max_edge", "10pp+") in cells, out
-        assert not any(p == "main" and b == "10pp+" for p, b in cells), out
+        out = self._out(capsys)
+        assert "10pp+" in {b for _, _, b, *_ in self._rows(out, "max_edge - by side")}
+        assert "10pp+" not in {b for _, _, b, *_ in self._rows(out, "main - by side")}
 
     def test_one_bet_per_match_per_policy(self, capsys):
-        """Three matches in, so no policy may report more than three bets across
-        its bands -- otherwise correlated rungs count as separate bets."""
-        bands, _, _ = self._tables(capsys)
+        """Three matches in, so a policy's side table cannot total more than
+        three bets -- otherwise correlated rungs count as separate bets."""
+        out = self._out(capsys)
         for policy in ("main", "safest", "max_edge"):
-            n = sum(int(ln.split()[3]) for ln in bands if ln.split()[1] == policy)
-            assert n <= 3, f"{policy} reported {n} bets over 3 matches"
+            rows = self._rows(out, f"{policy} - by side")
+            assert sum(int(r[3]) for r in rows) <= 3, (policy, rows)
+
+    def test_header_carries_no_parenthetical_commentary(self, capsys):
+        out = self._out(capsys)
+        assert "entry books" not in out
+        assert "OFFER set" not in out
+        assert "one bet per match" not in out
 
     def test_selection_is_not_reimplemented_here(self):
         """One definition of each policy. Two is how they drift apart -- the
@@ -1125,7 +1176,48 @@ class TestEdgeCurvePolicyDimension:
         removed from `rank.py`."""
         import inspect
 
-        body = inspect.getsource(evaluation._print_edge_curve).split('"""')[2]
+        body = inspect.getsource(evaluation._print_policy_tables).split('"""')[2]
         assert "_select_one_per_match" in body
         # Required as a column so `main` can be selected; never filtered on here.
         assert 'filter(pl.col("is_main_line")' not in body
+
+
+class TestLadderDepthClassification:
+    """A pick is classed against the consensus main line on its own side.
+
+    `model_p` is the probability the bet wins, so above the baseline is the more
+    forgiving number and below it the harder one -- which is the question the
+    band curve cannot answer, since both land in whatever band their edge falls
+    in regardless of where the market's own number sat.
+    """
+
+    @staticmethod
+    def _at_anchor():
+        return pl.DataFrame([
+            _curve_row("m1", "dk", 21.5, "under", 1.45, 0.30, -0.02, False, -1.0, False),
+            _curve_row("m1", "dk", 22.5, "under", 1.91, 0.52, 0.01, True, 0.91, True),
+            _curve_row("m1", "dk", 23.5, "under", 1.80, 0.58, 0.04, False, 0.80, True),
+        ])
+
+    def _classify(self, points):
+        at = self._at_anchor()
+        picked = at.filter(pl.col("points") == points)
+        return evaluation._classify_depth(picked, at)["depth"][0]
+
+    def test_the_baseline_itself_is_main(self):
+        assert self._classify(22.5) == "main"
+
+    def test_a_higher_win_probability_is_easier(self):
+        """under 23.5 wins more often than the 22.5 main line."""
+        assert self._classify(23.5) == "easier"
+
+    def test_a_lower_win_probability_is_harder(self):
+        assert self._classify(21.5) == "harder"
+
+    def test_the_baseline_is_the_main_policys_own_pick(self):
+        """Books disagree on the main line, so `the` main line needs a tiebreak.
+        Re-deriving one here is a second definition waiting to drift."""
+        import inspect
+
+        src = inspect.getsource(evaluation._classify_depth)
+        assert '_select_one_per_match(at_anchor, "main")' in src
