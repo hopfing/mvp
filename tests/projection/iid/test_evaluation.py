@@ -1040,3 +1040,92 @@ class TestAnchorDisplayOrder:
             self._frame(list(reversed(evaluation.DEFAULT_ANCHORS)))
         )
         assert got == list(evaluation.DEFAULT_ANCHORS)
+
+
+def _curve_row(uid, book, points, side, odds, model_p, edge, main, pnl, won,
+               anchor="open"):
+    return {
+        "match_uid": uid, "market": "total_games", "book": book,
+        "points": points, "side": side, "odds": odds, "model_p": model_p,
+        "edge": edge, "is_main_line": main, "pnl": pnl, "won": won,
+        "anchor": anchor, "role": "entry", "live_side": True,
+    }
+
+
+class TestEdgeCurvePolicyDimension:
+    """The band curve reports per selection policy, not on a main-line subset.
+
+    `safest` and `max_edge` read the whole ladder, so a curve computed on main
+    lines alone diagnoses a row set two of the three policies never draw from.
+    """
+
+    @staticmethod
+    def _ledger():
+        # m1: main line 24.5 with a small edge, a live shallow alternate, a dead
+        # shallower one, and a deep alternate carrying the biggest edge.
+        # m2: main line only, positive. m3: main line only, negative.
+        return pl.DataFrame([
+            _curve_row("m1", "dk", 22.5, "over", 1.60, 0.68, 0.03, False, 0.60, True),
+            _curve_row("m1", "dk", 24.5, "over", 1.91, 0.58, 0.01, True, 0.91, True),
+            _curve_row("m1", "dk", 27.5, "over", 3.10, 0.36, 0.12, False, -1.0, False),
+            _curve_row("m1", "dk", 21.5, "over", 1.45, 0.74, -0.02, False, -1.0, False),
+            _curve_row("m2", "dk", 23.5, "over", 1.95, 0.55, 0.07, True, -1.0, False),
+            _curve_row("m3", "dk", 25.5, "over", 1.80, 0.50, -0.10, True, 0.80, True),
+        ])
+
+    def _tables(self, capsys):
+        """(band table lines, side table lines) -- the two must not be summed."""
+        evaluation._print_edge_curve(self._ledger())
+        out = capsys.readouterr().out
+        head, _, tail = out.partition("by side")
+        keep = lambda blk: [
+            ln for ln in blk.splitlines()
+            if ln.strip() and "anchor" not in ln and "ROI and CLV" not in ln
+        ]
+        return keep(head), keep(tail), out
+
+    def test_every_policy_appears(self, capsys):
+        _, _, out = self._tables(capsys)
+        for policy in ("main", "safest", "max_edge"):
+            assert policy in out, policy
+
+    def test_header_carries_no_parenthetical_commentary(self, capsys):
+        """Console output reports numbers; what the row set is belongs in the
+        docstring."""
+        _, _, out = self._tables(capsys)
+        assert "main line, entry books" not in out
+        assert "OFFER set" not in out
+
+    def test_ladder_policies_have_no_negative_band(self, capsys):
+        """They carry the edge restriction in their definitions, so a `<0` row
+        cannot exist for them. `main` is ungated and keeps its."""
+        bands, _, _ = self._tables(capsys)
+        neg = [ln for ln in bands if ln.split()[2] == "<0"]
+        assert neg, "expected a <0 row for main"
+        assert all(ln.split()[1] == "main" for ln in neg), neg
+
+    def test_the_deep_rung_reaches_max_edge_but_not_main(self, capsys):
+        """m1's 12pp edge is on an alternate rung. `main` cannot see it."""
+        bands, _, out = self._tables(capsys)
+        cells = [(ln.split()[1], ln.split()[2]) for ln in bands]
+        assert ("max_edge", "10pp+") in cells, out
+        assert not any(p == "main" and b == "10pp+" for p, b in cells), out
+
+    def test_one_bet_per_match_per_policy(self, capsys):
+        """Three matches in, so no policy may report more than three bets across
+        its bands -- otherwise correlated rungs count as separate bets."""
+        bands, _, _ = self._tables(capsys)
+        for policy in ("main", "safest", "max_edge"):
+            n = sum(int(ln.split()[3]) for ln in bands if ln.split()[1] == policy)
+            assert n <= 3, f"{policy} reported {n} bets over 3 matches"
+
+    def test_selection_is_not_reimplemented_here(self):
+        """One definition of each policy. Two is how they drift apart -- the
+        main-line filter this view used to apply was a stale copy of one already
+        removed from `rank.py`."""
+        import inspect
+
+        body = inspect.getsource(evaluation._print_edge_curve).split('"""')[2]
+        assert "_select_one_per_match" in body
+        # Required as a column so `main` can be selected; never filtered on here.
+        assert 'filter(pl.col("is_main_line")' not in body

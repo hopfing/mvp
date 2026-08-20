@@ -147,15 +147,21 @@ class TestBettingSummary:
         # and m2. The fifth totals row is at `close` and must not be among them.
         assert b["markets"]["total_games"]["n_all"] == 4
 
-    def test_alternate_lines_are_excluded_from_the_headline(self, eval_root):
+    def test_alternate_lines_reach_the_ladder_policies_but_not_main(self, eval_root):
         """The 24.5 rung carries the biggest edge (0.09) and is not a main line.
-        If it leaked in, `max_edge` would take it for m1."""
+
+        `main` cannot see it — consensus is defined only on main lines. The two
+        ladder policies must, or `max_edge` is really 'largest edge among main
+        lines', which is a different policy.
+        """
         _make_run(eval_root, "aaa111", with_backtest=True)
         b = collect_rows()[0].betting["markets"]["total_games"]
         assert b["n_all"] == 4      # three main-line rungs + the alternate
-        assert b["n_main"] == 3     # the alternate drops out
-        # m1 -> best main-line edge 0.05 (br), m2 -> 0.02. Not the 0.09 alternate.
-        assert b["max_edge"]["avg_edge"] == pytest.approx(0.035)
+        assert b["n_main"] == 3     # what `main` is confined to
+        # max_edge: m1 -> the 0.09 alternate, m2 -> 0.02.
+        assert b["max_edge"]["avg_edge"] == pytest.approx(0.055)
+        # main: m1 -> best main-line edge 0.05 (br), m2 -> 0.02.
+        assert b["main"]["avg_edge"] == pytest.approx(0.035)
 
     def test_one_bet_per_match_not_one_per_book(self, eval_root):
         """m1's main line is quoted by two books. Counting both would weight the
@@ -395,12 +401,46 @@ class TestSelectionCandidateSets:
         # NOT 21.5 (highest model_p but no edge) and NOT 24.5 (the main line).
         assert picked["points"][0] == pytest.approx(22.5)
 
-    def test_max_edge_stays_on_the_main_line(self):
+    def test_max_edge_takes_the_deepest_rung_with_the_largest_edge(self):
+        """The other end of the same eligible set `safest` reads. Restricting it
+        to main lines made it 'largest edge among main lines', a policy nobody
+        asked for."""
         from mvp.projection.iid.rank import _select_one_per_match
 
         picked = _select_one_per_match(self._ladder(), "max_edge")
-        # 27.5 carries the largest edge but is an alternate rung.
+        assert picked["points"][0] == pytest.approx(27.5)
+
+    def test_safest_and_max_edge_bracket_the_same_set(self):
+        from mvp.projection.iid.rank import _select_one_per_match
+
+        lad = self._ladder()
+        shallow = _select_one_per_match(lad, "safest")["points"][0]
+        deep = _select_one_per_match(lad, "max_edge")["points"][0]
+        live = lad.filter(pl.col("edge") > 0)["points"].to_list()
+        assert shallow == pytest.approx(min(live))
+        assert deep == pytest.approx(max(live))
+
+    def test_max_edge_will_not_take_a_rung_with_no_edge(self):
+        """A bigger `model_p`/odds gap on a dead rung is not an edge."""
+        from mvp.projection.iid.rank import _select_one_per_match
+
+        lad = pl.DataFrame([
+            _rung("m1", "dk", 21.5, "over", 1.45, 0.74, -0.30, False),
+            _rung("m1", "dk", 24.5, "over", 1.91, 0.58, 0.04, True),
+        ])
+        picked = _select_one_per_match(lad, "max_edge")
+        assert picked.height == 1
         assert picked["points"][0] == pytest.approx(24.5)
+
+    def test_max_edge_bets_nothing_when_no_rung_has_edge(self):
+        from mvp.projection.iid.rank import _select_one_per_match
+
+        dead = pl.DataFrame([
+            _rung("m1", "dk", 21.5, "over", 1.45, 0.74, -0.01, False),
+            _rung("m1", "dk", 24.5, "over", 1.60, 0.58, -0.07, True),
+        ])
+        assert _select_one_per_match(dead, "max_edge").height == 0
+        assert _select_one_per_match(dead, "main").height == 1
 
     def test_main_stays_on_the_main_line(self):
         from mvp.projection.iid.rank import _select_one_per_match

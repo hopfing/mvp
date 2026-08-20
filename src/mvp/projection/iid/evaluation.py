@@ -1065,21 +1065,35 @@ _CURVE_BANDS: tuple[tuple[str, float, float], ...] = (
 
 
 def _print_edge_curve(df: pl.DataFrame) -> None:
-    """ROI by edge band, per anchor, on main-line entry rows.
+    """ROI by edge band, per anchor, per selection policy.
 
     The question this answers is where the model's claimed edge starts being
     real. If ROI rose with the band the edge would be honest; a peak in the
     middle says the largest claimed edges are the least trustworthy, which is
     the selection effect an edge filter creates.
 
-    One bet per (match, book) is NOT enforced here — this view is about the
-    edge/return relationship across the offer set, not about a runnable
-    strategy. Strategy selection is `iid-rank`'s job.
+    Policy is a dimension here, not a hidden filter. `safest` and `max_edge`
+    read the whole ladder, so a table computed on main lines alone would be
+    diagnosing a row set two of the three policies never draw from. Each policy
+    is one coherent population -- one bet per match, its own candidate set --
+    which is what makes a band comparison mean anything. Pooling every rung is
+    not a population at all, since the same claimed edge is priced differently
+    at different ladder depths.
+
+    `main` alone has a `<0` row. The other two carry the edge restriction in
+    their definitions (`rank.py:_select_one_per_match`), so a negative band
+    cannot exist for them: `safest` walking past a live rung to reach a dead one
+    is exactly what that restriction rules out.
+
+    Selection comes from `rank.py`, never a second filter written here. Two
+    definitions of `safest` is how they drift apart.
     """
-    need = {"anchor", "is_main_line", "edge", "pnl", "won"}
+    from mvp.projection.iid.rank import SELECTION_POLICIES, _select_one_per_match
+
+    need = {"anchor", "is_main_line", "edge", "pnl", "won", "match_uid", "market"}
     if not need <= set(df.columns):
         return
-    rows = df.filter(pl.col("is_main_line").fill_null(False))
+    rows = df
     if "role" in rows.columns:
         rows = rows.filter(pl.col("role") == "entry")
     if "live_side" in rows.columns:
@@ -1088,29 +1102,45 @@ def _print_edge_curve(df: pl.DataFrame) -> None:
     if rows.is_empty():
         return
 
+    anchors = _anchors_in_board_order(rows)
+    picked = {
+        (anchor, policy): _select_one_per_match(
+            rows.filter(pl.col("anchor") == anchor), policy
+        )
+        for anchor in anchors
+        for policy in SELECTION_POLICIES
+    }
+
     has_clv = "clv" in rows.columns
-    print("\n  ROI and CLV by edge band (main line, entry books):")
-    print(f"  {'anchor':>8} {'band':>7} {'N':>7} {'Hit%':>6} {'ROI%':>7} "
-          f"{'Units':>9} {'avg edge%':>10} {'CLV%':>8} {'CLV+%':>7}")
-    for anchor in _anchors_in_board_order(rows):
-        sub = rows.filter(pl.col("anchor") == anchor)
-        for name, lo, hi in _CURVE_BANDS:
-            band = sub.filter((pl.col("edge") >= lo) & (pl.col("edge") < hi))
-            if band.is_empty():
+    print("\n  ROI and CLV by edge band, one bet per match:")
+    print(f"  {'anchor':>8} {'policy':>9} {'band':>7} {'N':>7} {'Hit%':>6} "
+          f"{'ROI%':>7} {'Units':>9} {'avg edge%':>10} {'CLV%':>8} {'CLV+%':>7}")
+    for anchor in anchors:
+        for policy in SELECTION_POLICIES:
+            sub = picked[(anchor, policy)]
+            if sub.is_empty():
                 continue
-            won = band["won"].drop_nulls()
-            hit = f"{won.mean()*100:.1f}" if won.len() else "--"
-            clv = band["clv"].drop_nulls() if has_clv else None
-            clv_s = f"{clv.mean()*100:+.2f}" if clv is not None and clv.len() else "--"
-            clvp = (
-                f"{(clv > 0).mean()*100:.1f}"
-                if clv is not None and clv.len() else "--"
-            )
-            print(
-                f"  {anchor:>8} {name:>7} {band.height:>7,} {hit:>6} "
-                f"{band['pnl'].mean()*100:>+7.2f} {band['pnl'].sum():>+9.1f} "
-                f"{band['edge'].mean()*100:>+10.2f} {clv_s:>8} {clvp:>7}"
-            )
+            for name, lo, hi in _CURVE_BANDS:
+                band = sub.filter((pl.col("edge") >= lo) & (pl.col("edge") < hi))
+                if band.is_empty():
+                    continue
+                won = band["won"].drop_nulls()
+                hit = f"{won.mean()*100:.1f}" if won.len() else "--"
+                clv = band["clv"].drop_nulls() if has_clv else None
+                clv_s = (
+                    f"{clv.mean()*100:+.2f}"
+                    if clv is not None and clv.len() else "--"
+                )
+                clvp = (
+                    f"{(clv > 0).mean()*100:.1f}"
+                    if clv is not None and clv.len() else "--"
+                )
+                print(
+                    f"  {anchor:>8} {policy:>9} {name:>7} {band.height:>7,} "
+                    f"{hit:>6} {band['pnl'].mean()*100:>+7.2f} "
+                    f"{band['pnl'].sum():>+9.1f} "
+                    f"{band['edge'].mean()*100:>+10.2f} {clv_s:>8} {clvp:>7}"
+                )
 
     if "side" not in rows.columns:
         return
@@ -1118,19 +1148,20 @@ def _print_edge_curve(df: pl.DataFrame) -> None:
     # the side split is where that shows. It lives here rather than in
     # `iid-rank` because the ranking table's cell groups are the selection
     # policies; this is per-config detail.
-    print("\n  by side (edge>=0, main line, entry books):")
-    print(f"  {'anchor':>8} {'side':>6} {'N':>7} {'Hit%':>6} {'ROI%':>7} "
-          f"{'Units':>9}")
-    gated = rows.filter(pl.col("edge") >= 0.0)
-    for anchor in _anchors_in_board_order(gated):
-        sub = gated.filter(pl.col("anchor") == anchor)
-        for side in sorted(sub["side"].unique().to_list()):
-            s = sub.filter(pl.col("side") == side)
-            if s.is_empty():
+    print("\n  by side, one bet per match:")
+    print(f"  {'anchor':>8} {'policy':>9} {'side':>6} {'N':>7} {'Hit%':>6} "
+          f"{'ROI%':>7} {'Units':>9}")
+    for anchor in anchors:
+        for policy in SELECTION_POLICIES:
+            sub = picked[(anchor, policy)].filter(pl.col("edge") >= 0.0)
+            if sub.is_empty():
                 continue
-            won = s["won"].drop_nulls()
-            hit = f"{won.mean()*100:.1f}" if won.len() else "--"
-            print(
-                f"  {anchor:>8} {side:>6} {s.height:>7,} {hit:>6} "
-                f"{s['pnl'].mean()*100:>+7.2f} {s['pnl'].sum():>+9.1f}"
-            )
+            for side in sorted(sub["side"].drop_nulls().unique().to_list()):
+                sd = sub.filter(pl.col("side") == side)
+                won = sd["won"].drop_nulls()
+                hit = f"{won.mean()*100:.1f}" if won.len() else "--"
+                print(
+                    f"  {anchor:>8} {policy:>9} {side:>6} {sd.height:>7,} "
+                    f"{hit:>6} {sd['pnl'].mean()*100:>+7.2f} "
+                    f"{sd['pnl'].sum():>+9.1f}"
+                )

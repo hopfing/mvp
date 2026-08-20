@@ -167,33 +167,37 @@ def _select_one_per_match(bets: pl.DataFrame, policy: str) -> pl.DataFrame:
     set. Which rungs a policy may consider is part of the policy, so each takes
     its own candidate set here.
 
+    `safest` and `max_edge` are the two ends of one eligible set: every rung on
+    the ladder that still shows edge. One walks to the shallow end, the other to
+    the deep end. `main` is the separate baseline.
+
       main     — main lines only. The consensus line (the one most books have as
                  their main), at the best price among books offering it. The
                  neutral baseline: bet the number the market agrees on, shop the
-                 price. Consensus is only defined on main lines.
-      safest   — the whole ladder, restricted to rungs that still show edge, and
-                 of those the easiest to beat. `model_p` is P(this bet wins),
-                 read off the pmf's cumulative, so within a side it is monotone
-                 in the line by construction: ordering by it IS ordering by
-                 ladder position. The edge restriction is part of the DEFINITION,
-                 not a reporting gate — "safest" over the whole board is just the
-                 most extreme rung on offer, which is nothing anyone would run.
-                 Restricting after the collapse instead let the policy pick a
-                 dead rung and drop a match that had a live one.
-      max_edge — main lines only. Largest edge; longer odds, and the policy most
-                 exposed to the model being wrong about the price. Deliberately
-                 NOT given the ladder: over the full ladder it walks UP to the
-                 deepest longshot rung, where model and book disagree most. That
-                 is a different policy, not a better version of this one.
+                 price. Main lines are the whole candidate set here because
+                 consensus is not defined anywhere else.
+      safest   — the shallow end: of the rungs with edge, the easiest to beat.
+                 `model_p` is P(this bet wins), read off the pmf's cumulative, so
+                 within a side it is monotone in the line by construction, and
+                 ordering by it is ordering by ladder position.
+      max_edge — the deep end: of the same rungs, the largest edge. Longer odds,
+                 and the policy most exposed to the model being wrong about the
+                 price.
+
+    The edge restriction on both is part of what they mean, not a reporting gate.
+    "Safest" over the whole board is just the most extreme rung on offer, and
+    "largest edge" over a board with no edge on it is the least-bad losing bet.
+    Applying it after the collapse instead let a policy name a dead rung and drop
+    a match that had a live one.
     """
     if policy not in SELECTION_POLICIES:
         raise ValueError(f"unknown selection policy: {policy!r}")
     if bets.is_empty():
         return bets
-    if policy == "safest":
-        bets = bets.filter(pl.col("edge") > 0)
-    else:
+    if policy == "main":
         bets = bets.filter(pl.col("is_main_line").fill_null(False))
+    else:
+        bets = bets.filter(pl.col("edge") > 0)
     if bets.is_empty():
         return bets
     # Ties are broken on `odds` for every policy. `model_p` in particular is a
@@ -239,9 +243,10 @@ def _policy_stats(picked: pl.DataFrame, *, gate: float = 0.0) -> dict[str, Any]:
     single-model view, not here. This table exists to rank configs, and a curve
     per config per policy buries that under its own rows.
 
-    `safest` carries the edge restriction in its own definition, so for that
-    policy `n == n_gated` and the two unit figures coincide. That is the policy
-    reporting honestly, not the gate failing to bite.
+    `safest` and `max_edge` carry the edge restriction in their own definitions,
+    so for those two `n == n_gated` and the unit figures coincide. That is the
+    policy reporting honestly, not the gate failing to bite. Only `main`, the
+    unrestricted baseline, shows a gap.
     """
     if picked.is_empty():
         return {"n": 0, "n_gated": 0, "hit_rate": None, "roi": None,
@@ -304,14 +309,14 @@ def _betting_summary(
 
     **No edge gate here.** The threshold is reported across `EDGE_BANDS` instead,
     so it stays a read-time choice rather than an assumption baked into the
-    comparison — and the crossover is visible instead of guessed. `safest` is the
-    one exception, and it is not a gate: an edge restriction is what makes that
-    policy mean anything (see `_select_one_per_match`).
+    comparison — and the crossover is visible instead of guessed. `safest` and
+    `max_edge` are the exception, and it is not a gate: an edge restriction is
+    what makes those two mean anything (see `_select_one_per_match`).
 
-    Policies get the FULL anchor frame, not a main-line subset — each applies its
-    own candidate filter. `n_all` and `n_main` keep both counts so the size of
-    the ladder `safest` draws on stays visible beside the main-line set the other
-    two are confined to.
+    Policies get the whole anchor frame, not a main-line subset — each applies
+    its own candidate filter. `n_all` and `n_main` keep both counts so the size
+    of the ladder those two draw on stays visible beside the main-line set
+    `main` is confined to.
     """
     out: dict[str, Any] = {"anchor": anchor, "markets": {}}
     required = {"anchor", "is_main_line", "side", "edge", "pnl", "won", "market"}
