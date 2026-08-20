@@ -1001,8 +1001,7 @@ def print_backtest_summary(path: Path | str) -> None:
     print(f"  {df.height:,} rows | schema_version="
           f"{df['schema_version'][0] if 'schema_version' in df.columns else '?'}")
     print(f"  {df['match_uid'].n_unique():,} matches, "
-          f"{df['book'].n_unique()} books, "
-          f"{df['market'].n_unique()} market(s)")
+          f"{df['book'].n_unique()} books")
 
     by_anchor = (
         df.group_by("anchor")
@@ -1013,8 +1012,8 @@ def print_backtest_summary(path: Path | str) -> None:
             pl.col("edge").mean().alias("avg_edge"),
             pl.col("is_push").sum().alias("pushes"),
         )
-        .sort("anchor")
     )
+    by_anchor = _in_board_order(by_anchor)
     print(f"\n  {'anchor':>10} {'rows':>8} {'matches':>8} {'main':>7} "
           f"{'avg_edge':>9} {'pushes':>7}")
     for r in by_anchor.iter_rows(named=True):
@@ -1022,11 +1021,35 @@ def print_backtest_summary(path: Path | str) -> None:
               f"{r['main_rows']:>7,} {r['avg_edge']:>9.4f} {r['pushes']:>7,}")
 
     neg = int((df["edge"] < 0).sum())
-    print(f"\n  negative-edge rows: {neg:,} ({neg / df.height:.1%}) — the ledger "
-          "is the OFFER set; selection happens at read time.")
+    print(f"\n  negative-edge rows: {neg:,} ({neg / df.height:.1%})")
 
     _print_edge_curve(df)
     print("  Config-vs-config comparison: iid-rank\n")
+
+
+def _anchors_in_board_order(df: pl.DataFrame) -> list[str]:
+    """Anchors present in `df`, in the order the board reaches them.
+
+    NOT alphabetical, which renders close/formed2/open and reads the price path
+    backwards. Anything outside `DEFAULT_ANCHORS` is appended rather than
+    dropped, so an unrecognised anchor stays visible instead of vanishing.
+    """
+    present = set(df["anchor"].unique().to_list())
+    known = [a for a in DEFAULT_ANCHORS if a in present]
+    return known + sorted(present - set(known))
+
+
+def _in_board_order(df: pl.DataFrame) -> pl.DataFrame:
+    """Sort an anchor-keyed summary frame into board order."""
+    order = {a: i for i, a in enumerate(_anchors_in_board_order(df))}
+    return (
+        df.with_columns(
+            pl.col("anchor")
+            .replace_strict(order, return_dtype=pl.Int32).alias("_ord")
+        )
+        .sort("_ord")
+        .drop("_ord")
+    )
 
 
 # Edge bands for the single-model curve. This is where the curve belongs: it is
@@ -1069,7 +1092,7 @@ def _print_edge_curve(df: pl.DataFrame) -> None:
     print("\n  ROI and CLV by edge band (main line, entry books):")
     print(f"  {'anchor':>8} {'band':>7} {'N':>7} {'Hit%':>6} {'ROI%':>7} "
           f"{'Units':>9} {'avg edge%':>10} {'CLV%':>8} {'CLV+%':>7}")
-    for anchor in sorted(rows["anchor"].unique().to_list()):
+    for anchor in _anchors_in_board_order(rows):
         sub = rows.filter(pl.col("anchor") == anchor)
         for name, lo, hi in _CURVE_BANDS:
             band = sub.filter((pl.col("edge") >= lo) & (pl.col("edge") < hi))
@@ -1099,7 +1122,7 @@ def _print_edge_curve(df: pl.DataFrame) -> None:
     print(f"  {'anchor':>8} {'side':>6} {'N':>7} {'Hit%':>6} {'ROI%':>7} "
           f"{'Units':>9}")
     gated = rows.filter(pl.col("edge") >= 0.0)
-    for anchor in sorted(gated["anchor"].unique().to_list()):
+    for anchor in _anchors_in_board_order(gated):
         sub = gated.filter(pl.col("anchor") == anchor)
         for side in sorted(sub["side"].unique().to_list()):
             s = sub.filter(pl.col("side") == side)

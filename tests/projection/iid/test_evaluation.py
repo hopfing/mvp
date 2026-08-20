@@ -997,3 +997,46 @@ class TestMarketFailureIsolation:
         from mvp.projection.iid import evaluation as ev
 
         assert issubclass(ev.MarketNotCarried, RuntimeError)
+
+
+class TestAnchorDisplayOrder:
+    """Anchors render in the order the board reaches them, not alphabetically.
+
+    `sorted()` gives close/formed2/open, which reads the price path backwards
+    in every table of the backtest view.
+    """
+
+    @staticmethod
+    def _frame(anchors):
+        return pl.DataFrame({"anchor": anchors, "rows": list(range(len(anchors)))})
+
+    def test_board_order_not_alphabetical(self):
+        got = evaluation._anchors_in_board_order(
+            self._frame(["close", "open", "formed2"])
+        )
+        assert got == ["open", "formed2", "close"]
+        assert got != sorted(got)
+
+    def test_a_missing_anchor_is_skipped_not_padded(self):
+        got = evaluation._anchors_in_board_order(self._frame(["close", "open"]))
+        assert got == ["open", "close"]
+
+    def test_an_unknown_anchor_is_appended_not_dropped(self):
+        """Dropping it would silently hide rows the ledger actually carries."""
+        got = evaluation._anchors_in_board_order(
+            self._frame(["formed3", "close", "open"])
+        )
+        assert got == ["open", "close", "formed3"]
+
+    def test_frame_sort_follows_the_same_order(self):
+        out = evaluation._in_board_order(self._frame(["close", "open", "formed2"]))
+        assert out["anchor"].to_list() == ["open", "formed2", "close"]
+        # The payload must ride along with its key, not be re-sorted separately.
+        assert out["rows"].to_list() == [1, 2, 0]
+
+    def test_order_matches_the_anchor_constant(self):
+        """If DEFAULT_ANCHORS is ever reordered, the view follows it."""
+        got = evaluation._anchors_in_board_order(
+            self._frame(list(reversed(evaluation.DEFAULT_ANCHORS)))
+        )
+        assert got == list(evaluation.DEFAULT_ANCHORS)
