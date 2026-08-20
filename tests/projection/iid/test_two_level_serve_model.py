@@ -6,6 +6,8 @@ behaviour. The ones that matter operationally are the branch filter surviving
 that differ only in a component's feature list.
 """
 
+import pickle
+
 import numpy as np
 import polars as pl
 import pytest
@@ -518,3 +520,88 @@ class TestConstantBranchFit:
         b = _ConstantBranch(serve_branch=2)
         with pytest.raises(ValueError, match="no training points on this branch"):
             b.fit(pl.DataFrame({"match_uid": ["m1"]}), preloaded_points=only_first)
+
+
+class TestPickleRoundTrip:
+    """A two-level model must survive `joblib.dump` — `_save_artifact` pickles
+    `projector.serve_model` on every non-cached `iid-project` / `iid-backtest`.
+
+    `_engine` holds the global FeatureRegistry, whose `register_diff` /
+    `register_sum` / `register_matchup` closures pickle cannot resolve by
+    qualified name. `ScoreStateChainServeModel` scrubs it in `__getstate__`, so
+    both win branches were already safe; `FirstServeInModel` did not, and was
+    the single unscrubbed reference that made EVERY two-level model unsavable.
+    Latent until the first two-level backtest — `_engine` is set in `__init__`
+    whether or not the arm holds features, so an empty first_in fails too.
+    """
+
+    @staticmethod
+    def _engine_with_registry_closures():
+        """Stand-in for a FeatureEngine: holds a closure pickle cannot name."""
+        def _outer():
+            def _diff():
+                return None
+            return _diff
+
+        class _FakeEngine:
+            def __init__(self):
+                self.registry = {"x_diff": _outer()}
+
+        return _FakeEngine()
+
+    def _model(self, **overrides):
+        from mvp.projection.iid.two_level_serve_model import TwoLevelServeModel
+
+        kwargs = dict(
+            model_type="xgboost",
+            first_in_match_features=[],
+            first_in_point_features=[],
+            win_first_match_features=[],
+            win_first_point_features=[],
+            win_second_match_features=[],
+            win_second_point_features=[],
+            engine=self._engine_with_registry_closures(),
+        )
+        kwargs.update(overrides)
+        return TwoLevelServeModel(**kwargs)
+
+    def test_the_bare_engine_is_the_thing_pickle_chokes_on(self):
+        """Guards the test itself: if the stand-in were picklable, the round-trip
+        assertions below would pass for the wrong reason."""
+        with pytest.raises(Exception):
+            pickle.dumps(self._engine_with_registry_closures())
+
+    def test_round_trips_with_every_component_empty(self):
+        restored = pickle.loads(pickle.dumps(self._model()))
+        assert restored._first_in._engine is None
+
+    def test_round_trips_with_first_in_holding_features(self):
+        m = self._model(
+            first_in_match_features=["player_svc_first_serve_in_pct(days=730)"],
+        )
+        restored = pickle.loads(pickle.dumps(m))
+        assert restored._first_in._engine is None
+        # The feature list itself must survive — nulling the engine must not
+        # take the configuration with it.
+        assert restored._first_in.match_level_features == [
+            "player_svc_first_serve_in_pct(days=730)"
+        ]
+
+    def test_round_trips_with_all_three_arms_holding_features(self):
+        m = self._model(
+            first_in_match_features=["player_svc_first_serve_in_pct(days=730)"],
+            win_first_match_features=["player_glicko_rd_diff"],
+            win_second_match_features=["player_elo_surface_indoor"],
+        )
+        restored = pickle.loads(pickle.dumps(m))
+        assert restored._first_in._engine is None
+        assert restored._win_first._engine is None
+        assert restored._win_second._engine is None
+
+    def test_first_serve_in_base_rate_survives(self):
+        """The fallback `f` is what an unfitted arm predicts, so losing it on
+        save would silently change every projection made from the artifact."""
+        m = self._model()
+        m._first_in._base_rate = 0.6176
+        restored = pickle.loads(pickle.dumps(m))
+        assert restored._first_in._base_rate == pytest.approx(0.6176)

@@ -124,6 +124,21 @@ class FirstServeInModel:
         # — a wrong global here would bias every match in the same direction.
         self._base_rate: float = 0.62
 
+    def __getstate__(self) -> dict[str, Any]:
+        # Same reason as ScoreStateChainServeModel.__getstate__ (serve_model.py):
+        # _engine holds the global FeatureRegistry, whose register_diff/_sum/
+        # _matchup closures pickle cannot resolve by qualified name. The win
+        # branches scrub themselves; without this the first_in arm was the one
+        # unscrubbed engine reference in a TwoLevelServeModel, so NO two-level
+        # model could be saved — latent until the first two-level backtest,
+        # since `_engine` is set here whether or not the arm has features.
+        #
+        # Safe to drop: `_match_features` rebuilds a fresh engine when this is
+        # None, exactly as the win branches do.
+        state = self.__dict__.copy()
+        state["_engine"] = None
+        return state
+
     # -- helpers -------------------------------------------------------
     def _resolve_cols(self) -> tuple[list[str], list[bool]]:
         return resolve_match_feature_cols(self.match_level_features)
@@ -441,8 +456,6 @@ class TwoLevelServeModel(ServeWinProbEstimator):
             point_level_features=self.first_in_point_features,
             params=self.first_in_params, **shared,
         )
-        self._fi_a: np.ndarray | None = None
-        self._fi_b: np.ndarray | None = None
 
     # -- interface -----------------------------------------------------
     @property
