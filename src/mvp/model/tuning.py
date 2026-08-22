@@ -63,6 +63,185 @@ def _is_iid_config(raw: dict) -> bool:
 # Trailing forward folds held search-blind for selection (classification only).
 _DEFAULT_OUTER_FOLDS = 4
 
+# `serve_model` param blocks a study can search, mirroring the split
+# `ServeModelConfig` already makes. `params` drives the two win branches (one
+# implementation separated by a fit-time row filter, similar scale, same grain);
+# `first_in_params` drives the mixing weight, which is a different grain, a
+# different target, and ~45x fewer rows.
+_SERVE_BLOCKS: frozenset[str] = frozenset({"params", "first_in_params"})
+
+
+# Joint two-level search. The two blocks are not separable: the objective only
+# exists on the composed `p = f*w1 + (1-f)*w2`, so a `params` trial can only be
+# scored against SOME `first_in_params`, and vice versa. A sequential ladder
+# therefore returns the end of an arbitrary path rather than the best pair. One
+# study samples both and scores the composite once.
+WIN_PREFIX = "win_"
+FIRST_IN_PREFIX = "fi_"
+
+# Knobs that cannot do anything on the first_in arm, so spending a TPE dimension
+# on them is pure cost against an objective the study already struggles to
+# separate (see the pruning note in `run`).
+#   scale_pos_weight / max_delta_step — classifier knobs. `first_in` is an
+#     XGBRegressor on a rate (two_level_serve_model.py:301-311); there is no
+#     class balance for either to act on.
+#   colsample_bylevel / bynode — three multiplicative feature samplers stacked
+#     over ~6 candidate columns cannot differentiate. `colsample_bytree` stays.
+_FIRST_IN_DROP = frozenset(
+    {"scale_pos_weight", "max_delta_step", "colsample_bylevel", "colsample_bynode"}
+)
+# Depth past the feature count has nothing left to split on.
+_FIRST_IN_NARROW: dict[str, dict[str, Any]] = {
+    "max_depth": {"type": "int", "low": 3, "high": 6},
+}
+
+
+def _prefixed_space(
+    space: dict[str, dict[str, Any]], prefix: str,
+) -> dict[str, dict[str, Any]]:
+    """Namespace a search space, conditions included.
+
+    `condition.param` names a SIBLING key (`tree_method` gates `grow_policy`,
+    `max_bin`, `colsample_bynode`), and `_suggest_params` resolves it by exact
+    name. Prefixing the keys without prefixing the references would leave every
+    conditional looking up a name that no longer exists — it would silently read
+    None and skip the param rather than raise.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    for name, spec in space.items():
+        s = dict(spec)
+        cond = s.get("condition")
+        if cond is not None:
+            s["condition"] = {**cond, "param": f"{prefix}{cond['param']}"}
+        out[f"{prefix}{name}"] = s
+    return out
+
+
+def two_level_joint_space(
+    base: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """One flat space covering both serve_model param blocks."""
+    first_in = {k: v for k, v in base.items() if k not in _FIRST_IN_DROP}
+    first_in.update(
+        {k: v for k, v in _FIRST_IN_NARROW.items() if k in first_in}
+    )
+    return {
+        **_prefixed_space(base, WIN_PREFIX),
+        **_prefixed_space(first_in, FIRST_IN_PREFIX),
+    }
+
+
+def split_joint_params(flat: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """A joint trial's flat params back into (win-branch, first_in) blocks.
+
+    STRICT. An unprefixed key is not a key with no home — it is proof the caller
+    is reading a FLAT-namespace study as a joint one, and the only two things
+    that can follow are wrong. Dropping it silently was the live bug: a flat
+    study's bare `max_depth` matched neither prefix, both blocks came back empty,
+    the merge onto the base config was a no-op, and `iid-sweep` wrote N
+    byte-identical configs that all hashed to one fingerprint and overwrote each
+    other — N trials evaluated, none of them exercised, no error anywhere.
+    """
+    win: dict[str, Any] = {}
+    first_in: dict[str, Any] = {}
+    foreign: list[str] = []
+    for k, v in flat.items():
+        if k.startswith(WIN_PREFIX):
+            win[k[len(WIN_PREFIX):]] = v
+        elif k.startswith(FIRST_IN_PREFIX):
+            first_in[k[len(FIRST_IN_PREFIX):]] = v
+        else:
+            foreign.append(k)
+    if foreign:
+        raise ValueError(
+            f"split_joint_params: {sorted(foreign)} carry neither the "
+            f"'{WIN_PREFIX}' nor the '{FIRST_IN_PREFIX}' prefix, so these params "
+            "were not written by a joint two-level search. Whatever produced "
+            f"them is in the '{NAMESPACE_FLAT}' namespace and its params belong "
+            "in one serve_model block, unsplit."
+        )
+    return win, first_in
+
+
+# The key namespace a study's trials are encoded in. Stamped on the study rather
+# than re-derived by each reader: jointness is a property of how the trials
+# ALREADY on disk were written, and every input to that decision (the config's
+# first_in features, the caller's --serve-block) can change afterwards.
+PARAM_NAMESPACE_ATTR = "param_namespace"
+NAMESPACE_JOINT = "two_level_joint"
+NAMESPACE_FLAT = "flat"
+
+
+def is_joint_two_level(
+    serve_model: dict[str, Any] | None, serve_block: str | None,
+) -> bool:
+    """Does a search over this config sample BOTH serve_model param blocks?
+
+    ONE definition, called by the writer (`HyperparamTuner`) and — only to stamp
+    or validate the study attr — never by a reader deciding how to interpret
+    trials that already exist. A second copy of this predicate is exactly what
+    broke `iid-sweep`: it tested two of the three conditions, so a two-level
+    config whose first_in arm is intercept-only read as joint on the sweep side
+    and flat on the tuner side.
+
+    The third condition is the one that got dropped. A first_in arm with no
+    features never fits a model (`FirstServeInModel` leaves `_model = None` and
+    returns its training base rate), so `first_in_params` is dead config and
+    there is only one searchable block — flat, like a single-level model.
+    """
+    if serve_block is not None:
+        return False
+    sm = serve_model or {}
+    if sm.get("type") != "two_level":
+        return False
+    return bool(
+        sm.get("first_in_match_features") or sm.get("first_in_point_features")
+    )
+
+
+def study_param_namespace(study: "optuna.Study") -> str:
+    """Which namespace THIS study's trials are in, from the study itself.
+
+    Prefers the stamp; falls back to reading the trials, so studies written
+    before the stamp existed are still interpretable without a re-tune. The
+    trials are the ground truth here — the stamp only records what the writer
+    believed at creation.
+    """
+    stamped = study.user_attrs.get(PARAM_NAMESPACE_ATTR)
+    if stamped is not None:
+        return stamped
+    for t in study.trials:
+        if not t.params:
+            continue
+        if any(
+            k.startswith((WIN_PREFIX, FIRST_IN_PREFIX)) for k in t.params
+        ):
+            return NAMESPACE_JOINT
+        return NAMESPACE_FLAT
+    return NAMESPACE_FLAT
+
+
+def tuning_study_key(config_stem: str, serve_block: str | None = None) -> str:
+    """Optuna study name for a config, or for one block of it.
+
+    ONE definition, imported by both the writer (`HyperparamTuner`) and the
+    readers (`mvp tune-review`, `sweep.py`). Two copies would let a reader open
+    a study the writer never wrote — or worse, the wrong block's, since a
+    single-block study suggests bare param names either way.
+
+    `None` is the normal case and keeps the bare stem: a classification or
+    single-level config, or a two-level config searched JOINTLY.
+
+    Every override is suffixed, `params` included. A joint study over the same
+    config uses PREFIXED param names (`win_max_depth`), so letting a bare-name
+    `--serve-block params` study share the stem would resume one as the other
+    and reinterpret every value.
+    """
+    if serve_block is None:
+        return config_stem
+    return f"{config_stem}__{serve_block}"
+
+
 DEFAULT_SEARCH_SPACES: dict[str, dict[str, dict[str, Any]]] = {
     "xgb_regressor": {
         "max_depth": {"type": "int", "low": 3, "high": 5},
@@ -341,8 +520,31 @@ class HyperparamTuner:
         n_startup_trials: int | None = None,
         outer_folds: int | None = None,
         seed: int | None = None,
+        serve_block: str | None = None,
     ) -> None:
         self.config_path = Path(config_path)
+        # `serve_block` is an OVERRIDE, not the normal path. Default None means
+        # "search everything this config has": one block for a classification or
+        # single-level config, and BOTH blocks jointly for a two-level one.
+        #
+        # Joint, because the two blocks are not separable. A two-level model is
+        # three fits — win branches on ~3.0M and ~1.9M point rows, `first_in` on
+        # ~68k match-grain rows against a different target — and the objective
+        # exists only on the composed `p = f*w1 + (1-f)*w2`. So a `params` trial
+        # can only be scored against SOME `first_in_params` and vice versa: the
+        # fits are independent (disjoint rows), the OPTIMA are not. Tuning them
+        # in sequence returns the end of an arbitrary path — best `params` given
+        # whatever `f` happened to be sitting there, then best `f` given that —
+        # not the best pair. Nothing in the repo measures that interaction as
+        # weak, and a nonlinear metric over a weighted composite has no reason
+        # to be additive in the two blocks.
+        #
+        # The override survives for a deliberate single-block re-search once the
+        # joint study has run. It must never be the default: silently searching
+        # `params` alone leaves `first_in` inheriting whatever `params` wins
+        # (serve_model.py:140), which reads as a tuned model when a third of it
+        # never was.
+        self._requested_block = serve_block
         self.matches_path = matches_path
         self.cache_dir = cache_dir
         self.n_startup_trials = n_startup_trials
@@ -399,6 +601,66 @@ class HyperparamTuner:
             self.model_type = self.base_config["serve_model"].get("model_type", "xgboost")
         else:
             self.model_type = self.base_config["model"]["type"]
+
+        stype = (
+            self.base_config.get("serve_model", {}).get("type")
+            if self.is_iid else None
+        )
+        self.is_two_level = stype == "two_level"
+        # A first_in arm with no features is INTERCEPT-ONLY: FirstServeInModel
+        # sets `_model = None` and returns its training base rate
+        # (two_level_serve_model.py:193-199), so `first_in_params` is never read.
+        # Searching it would spend a third of the dimensions on values that
+        # cannot move the score — against an objective the study already
+        # struggles to separate on. `two_level_flat` is exactly this config.
+        sm_cfg = self.base_config.get("serve_model", {}) if self.is_iid else {}
+        self.first_in_is_fitted = bool(
+            sm_cfg.get("first_in_match_features")
+            or sm_cfg.get("first_in_point_features")
+        )
+        # Joint whenever the config has two SEARCHABLE blocks and the caller
+        # named none. Through the shared predicate, not a local expression —
+        # `iid-sweep` kept its own copy of this and lost a condition off it.
+        self.joint_two_level = is_joint_two_level(sm_cfg, self._requested_block)
+        self.param_namespace = (
+            NAMESPACE_JOINT if self.joint_two_level else NAMESPACE_FLAT
+        )
+        # The single block a non-joint run writes. Meaningless when joint.
+        self.serve_block = self._requested_block or "params"
+
+        if self._requested_block is not None:
+            if self._requested_block not in _SERVE_BLOCKS:
+                raise ValueError(
+                    f"serve_block must be one of {sorted(_SERVE_BLOCKS)}; "
+                    f"got {self._requested_block!r}"
+                )
+            if not self.is_iid:
+                raise ValueError(
+                    f"serve_block={self._requested_block!r} is meaningless for a "
+                    "classification config — it has no serve_model."
+                )
+            if not self.is_two_level:
+                raise ValueError(
+                    f"serve_block={self._requested_block!r} requires "
+                    f"serve_model.type=two_level; got {stype!r}. A single-level "
+                    "model is one fit and has only `params`."
+                )
+            if (
+                self._requested_block == "first_in_params"
+                and not self.first_in_is_fitted
+            ):
+                raise ValueError(
+                    "serve_block='first_in_params' but the first_in arm has no "
+                    "features, so it is intercept-only and never reads that "
+                    "block. Give it features or tune `params`."
+                )
+            logger.warning(
+                "%s: --serve-block searches ONE of two coupled blocks. The "
+                "objective only exists on the composed p, so this trades the "
+                "joint search for a conditional one — the result is the best "
+                "%s given whatever the other block is fixed at.",
+                self.config_path.stem, self._requested_block,
+            )
 
         # Objective source. CLASSIFICATION and IID: metrics.objective from the
         # config — one source, no --metric, no default, absent = hard error
@@ -458,7 +720,12 @@ class HyperparamTuner:
         if search_space is not None:
             self.search_space = dict(search_space)
         elif self.model_type in DEFAULT_SEARCH_SPACES:
-            self.search_space = dict(DEFAULT_SEARCH_SPACES[self.model_type])
+            base_space = DEFAULT_SEARCH_SPACES[self.model_type]
+            self.search_space = (
+                two_level_joint_space(base_space)
+                if self.joint_two_level
+                else dict(base_space)
+            )
         else:
             raise ValueError(
                 f"No default search space for model type '{self.model_type}'"
@@ -532,6 +799,14 @@ class HyperparamTuner:
         # parallel study.optimize retry on a transient write lock rather than
         # raising OperationalError. No effect when running serially.
         storage = f"sqlite:///{self.db_path}?timeout=30"
+        # One study per (config, block). The two blocks suggest the SAME param
+        # names — max_depth, learning_rate, ... — so sharing a study name under
+        # `load_if_exists=True` would resume the win-branch trials as if they
+        # were first_in ones and silently reinterpret every value.
+        self.study_key = tuning_study_key(
+            self.config_path.stem,
+            None if self.joint_two_level else self._requested_block,
+        )
 
         # Create or load study
         directions = [
@@ -590,7 +865,7 @@ class HyperparamTuner:
         # )
 
         self.study = optuna.create_study(
-            study_name=self.config_path.stem,
+            study_name=self.study_key,
             storage=storage,
             directions=directions,
             load_if_exists=True,
@@ -628,6 +903,36 @@ class HyperparamTuner:
             else:
                 self.study.set_user_attr("objective_frame", self.objective_frame)
                 self.study.set_user_attr("outer_folds", self.outer_folds)
+
+        # Param namespace, same stamp-and-refuse shape as objective_frame above
+        # and for the same reason: a study's trials are encoded ONE way, and
+        # mixing encodings makes them mutually unreadable rather than merely
+        # incomparable. Jointness is derived from the config's first_in feature
+        # lists, so editing those under an existing study would silently flip the
+        # namespace and start writing `win_max_depth` into a study whose earlier
+        # trials say `max_depth` — leaving a study no reader can interpret as a
+        # whole. Studies written before this stamp existed carry no attr; they
+        # are read back through `study_param_namespace`, which infers from the
+        # trials, and are stamped here once that inference agrees.
+        prior_namespace = self.study.user_attrs.get(PARAM_NAMESPACE_ATTR)
+        if len(self.study.trials) > 0:
+            observed = study_param_namespace(self.study)
+            if observed != self.param_namespace:
+                raise ValueError(
+                    f"study '{self.study_key}' holds {len(self.study.trials)} "
+                    f"trial(s) in the '{observed}' param namespace, but this run "
+                    f"would write '{self.param_namespace}'. A two-level config "
+                    "searches both blocks jointly (prefixed param names) only "
+                    "while its first_in arm has features; changing "
+                    "`first_in_match_features` / `first_in_point_features` or "
+                    "passing --serve-block flips that. Trials in two namespaces "
+                    f"cannot be read together — use a fresh study (rename the "
+                    f"config or delete {self.db_path})."
+                )
+            if prior_namespace is None:
+                self.study.set_user_attr(PARAM_NAMESPACE_ATTR, observed)
+        else:
+            self.study.set_user_attr(PARAM_NAMESPACE_ATTR, self.param_namespace)
 
         # Objective metric name(s). A trial's `values[0]` is a bare number —
         # nothing in the study said WHICH metric it was, nor in which frame, so
@@ -701,9 +1006,29 @@ class HyperparamTuner:
             )
 
     def _get_base_params(self) -> dict[str, Any]:
-        if self.is_iid:
-            return self.base_config.get("serve_model", {}).get("params", {})
-        return self.base_config.get("model", {}).get("params", {})
+        """The config's incumbent params, in the study's own key namespace.
+
+        Feeds the baseline trial and the per-trial merge, so it has to match
+        whatever `search_space` suggests: prefixed for a joint two-level study,
+        bare otherwise.
+        """
+        if not self.is_iid:
+            return self.base_config.get("model", {}).get("params") or {}
+        sm = self.base_config.get("serve_model", {})
+        # `or {}` throughout, not `.get(k, {})`: an explicit `params:` with no
+        # body parses as None, and callers build `dict(...)` from this.
+        win = sm.get("params") or {}
+        # An empty `first_in_params` means the arm INHERITS `params`
+        # (serve_model.py:140), so that is its true starting point — not an
+        # empty baseline. Enqueueing `{}` would make trial 0 a random draw and
+        # throw away the incumbent the config actually runs.
+        first_in = sm.get("first_in_params") or win
+        if self.joint_two_level:
+            return {
+                **{f"{WIN_PREFIX}{k}": v for k, v in win.items()},
+                **{f"{FIRST_IN_PREFIX}{k}": v for k, v in first_in.items()},
+            }
+        return win if self.serve_block == "params" else first_in
 
     def _enqueue_baseline(self) -> None:
         """Enqueue the current config params as the first trial (skip on resume)."""
@@ -852,23 +1177,34 @@ class HyperparamTuner:
             self._objective_metric_value(result, m) for m in self.metrics
         )
 
-    def _run_one(
-        self, params: dict[str, Any], trial: optuna.Trial | None = None,
-    ) -> dict[str, Any]:
-        """Run a single param combination through the appropriate runner.
+    def _build_trial_config(self, params: dict[str, Any]) -> Path:
+        """One trial's config, written to a temp file for the runner to load.
 
-        When `trial` is provided, the underlying runner reports the per-fold
-        tuning objective (metrics.objective) and may raise optuna.TrialPruned
-        mid-run.
+        Extracted from `_run_one` so which block a trial writes is checkable
+        without standing up a fit — that choice is the whole of the two-level
+        tuning fix, and it was previously reachable only by running a model.
         """
         config = dict(self.base_config)
         if self.is_iid:
             config["serve_model"] = dict(config["serve_model"])
-            base_params = dict(config["serve_model"].get("params") or {})
-            base_params.update(params)
-            if self._per_trial_n_jobs is not None:
-                base_params["n_jobs"] = self._per_trial_n_jobs
-            config["serve_model"]["params"] = base_params
+            # Start from each block's effective values, so a trial that leaves a
+            # key unsampled keeps what the config runs rather than dropping it.
+            merged = dict(self._get_base_params())
+            merged.update(params)
+            if self.joint_two_level:
+                win, first_in = split_joint_params(merged)
+                if self._per_trial_n_jobs is not None:
+                    win["n_jobs"] = self._per_trial_n_jobs
+                    first_in["n_jobs"] = self._per_trial_n_jobs
+                # BOTH blocks, every trial. A joint trial is one complete model;
+                # writing only one would leave the other inheriting this trial's
+                # win-branch values and score something the trial did not name.
+                config["serve_model"]["params"] = win
+                config["serve_model"]["first_in_params"] = first_in
+            else:
+                if self._per_trial_n_jobs is not None:
+                    merged["n_jobs"] = self._per_trial_n_jobs
+                config["serve_model"][self.serve_block] = merged
         else:
             config["model"] = dict(config["model"])
             base_params = dict(config["model"].get("params") or {})
@@ -886,7 +1222,18 @@ class HyperparamTuner:
             mode="w", suffix=".yaml", delete=False,
         ) as f:
             yaml.dump(config, f, default_flow_style=False)
-            temp_path = Path(f.name)
+            return Path(f.name)
+
+    def _run_one(
+        self, params: dict[str, Any], trial: optuna.Trial | None = None,
+    ) -> dict[str, Any]:
+        """Run a single param combination through the appropriate runner.
+
+        When `trial` is provided, the underlying runner reports the per-fold
+        tuning objective (metrics.objective) and may raise optuna.TrialPruned
+        mid-run.
+        """
+        temp_path = self._build_trial_config(params)
 
         try:
             t0 = time.perf_counter()

@@ -130,20 +130,20 @@ class TestBuildTrialConfig:
     def test_merges_into_serve_model_params(self, tmp_path, trials):
         base = tmp_path / "cfg.yaml"
         base.write_text(IID_YAML, encoding="utf-8")
-        out = sweep.build_trial_config(base, {}, trials[2])
+        out = sweep.build_trial_config(base, {}, trials[2], joint=False)
         assert out["serve_model"]["params"]["max_depth"] == 5
         assert out["serve_model"]["params"]["learning_rate"] == 0.05
 
     def test_preserves_params_the_trial_does_not_set(self, tmp_path, trials):
         base = tmp_path / "cfg.yaml"
         base.write_text(IID_YAML, encoding="utf-8")
-        out = sweep.build_trial_config(base, {}, trials[2])
+        out = sweep.build_trial_config(base, {}, trials[2], joint=False)
         assert out["serve_model"]["params"]["n_jobs"] == 4
 
     def test_pinned_params_win(self, tmp_path, trials):
         base = tmp_path / "cfg.yaml"
         base.write_text(IID_YAML, encoding="utf-8")
-        out = sweep.build_trial_config(base, {"max_depth": 7}, trials[2])
+        out = sweep.build_trial_config(base, {"max_depth": 7}, trials[2], joint=False)
         assert out["serve_model"]["params"]["max_depth"] == 7
 
     def test_classification_config_is_rejected(self, tmp_path, trials):
@@ -153,7 +153,7 @@ class TestBuildTrialConfig:
             encoding="utf-8",
         )
         with pytest.raises(ValueError, match="no `serve_model:` block"):
-            sweep.build_trial_config(base, {}, trials[0])
+            sweep.build_trial_config(base, {}, trials[0], joint=False)
 
     def test_result_is_a_loadable_config(self, tmp_path, trials):
         from mvp.projection.iid.config import IIDProjectionConfig
@@ -162,7 +162,7 @@ class TestBuildTrialConfig:
         base.write_text(IID_YAML, encoding="utf-8")
         out_path = tmp_path / "materialized.yaml"
         out_path.write_text(
-            yaml.safe_dump(sweep.build_trial_config(base, {}, trials[2])),
+            yaml.safe_dump(sweep.build_trial_config(base, {}, trials[2], joint=False)),
             encoding="utf-8",
         )
         cfg = IIDProjectionConfig.from_file(str(out_path))
@@ -250,3 +250,198 @@ class TestMaterialize:
         entries = sweep.materialize(str(untuned), 5, out_dir=tmp_path / "out")
         assert len(entries) == 1
         assert entries[0].trial_number == -1
+
+
+TWO_LEVEL_YAML = dedent("""
+    data:
+      date_range:
+        start: 2023-01-01
+        end: 2026-01-01
+    features:
+      include:
+        - player_glicko_diff
+    serve_model:
+      type: two_level
+      model_type: xgboost
+      first_in_match_features:
+        - player_glicko_diff
+      first_in_point_features: []
+      first_in_params: {}
+      win_first_match_features:
+        - player_glicko_diff
+      win_first_point_features: []
+      win_second_match_features:
+        - player_glicko_diff
+      win_second_point_features: []
+      params:
+        n_estimators: 100
+        max_depth: 3
+        n_jobs: 4
+    validation:
+      type: date_expanding
+      initial_train_months: 12
+      test_months: 6
+""")
+
+
+class TestSweepServeBlock:
+    """A sweep must materialize the block the trials were SEARCHING.
+
+    `mvp tune` writes one study per (config, block) because both blocks suggest
+    identical param names. A sweep that hardcodes the config stem opens the
+    win-branch study for a config whose `first_in` block was tuned, and then
+    writes those params into `params` — reproducing neither trial.
+    """
+
+    @pytest.fixture
+    def two_level(self, tmp_path):
+        p = tmp_path / "tl.yaml"
+        p.write_text(TWO_LEVEL_YAML, encoding="utf-8")
+        return p
+
+    def test_first_in_trials_land_in_first_in_params(self, two_level, trials):
+        out = sweep.build_trial_config(
+            two_level, {}, trials[2], "first_in_params", joint=False)
+        assert out["serve_model"]["first_in_params"]["max_depth"] == 5
+        # The win branches keep what the config had.
+        assert out["serve_model"]["params"]["max_depth"] == 3
+
+    def test_params_trials_leave_first_in_alone(self, two_level, trials):
+        out = sweep.build_trial_config(two_level, {}, trials[2], "params", joint=False)
+        assert out["serve_model"]["params"]["max_depth"] == 5
+        assert out["serve_model"]["first_in_params"] == {}
+
+    def test_empty_first_in_block_starts_from_params(self, two_level, trials):
+        """`first_in_params: {}` runs on `params` (serve_model.py:140), so the
+        unsampled keys must carry over rather than vanish."""
+        out = sweep.build_trial_config(
+            two_level, {}, trials[2], "first_in_params", joint=False)
+        fi = out["serve_model"]["first_in_params"]
+        assert fi["n_estimators"] == 100      # inherited, not sampled
+        assert fi["max_depth"] == 5           # sampled, overrides the inherited 3
+
+    def test_unknown_block_is_refused(self, two_level, trials):
+        with pytest.raises(ValueError, match="serve_block must be None or one of"):
+            sweep.build_trial_config(
+                two_level, {}, trials[2], "win_first_params", joint=False)
+
+    def test_load_study_uses_the_same_key_the_tuner_wrote(self, tmp_path):
+        """One definition of the key, or the sweep opens a study that isn't
+        there — or worse, the wrong block's."""
+        from mvp.model.tuning import tuning_study_key
+
+        db = tmp_path / "tl.db"
+        storage = f"sqlite:///{db}"
+        for block in ("params", "first_in_params"):
+            s = optuna.create_study(
+                study_name=tuning_study_key("tl", block),
+                storage=storage, direction="minimize",
+            )
+            s.add_trial(_trial(3 if block == "params" else 8, 0.05, 1.0))
+
+        _st, _p, params_trials = sweep.load_study("tl", tmp_path, "params")
+        _st, _p, fi_trials = sweep.load_study("tl", tmp_path, "first_in_params")
+        assert params_trials[0].params["max_depth"] == 3
+        assert fi_trials[0].params["max_depth"] == 8
+
+    def test_a_missing_block_names_what_is_present(self, tmp_path):
+        db = tmp_path / "tl.db"
+        s = optuna.create_study(
+            study_name="tl", storage=f"sqlite:///{db}", direction="minimize",
+        )
+        s.add_trial(_trial(3, 0.05, 1.0))
+        with pytest.raises(RuntimeError, match="present: tl"):
+            sweep.load_study("tl", tmp_path, "first_in_params")
+
+
+# A two-level config whose first_in arm has NO features. That arm is
+# intercept-only, so `mvp tune` searches it FLAT — one block, bare param names —
+# and the study's trials look exactly like a single-level config's.
+# `projections/two_level_flat.yaml` is this shape.
+TWO_LEVEL_FLAT_YAML = TWO_LEVEL_YAML.replace(
+    "      first_in_match_features:\n        - player_glicko_diff\n",
+    "      first_in_match_features: []\n",
+)
+
+
+class TestFlatNamespaceTwoLevel:
+    """The bug: a flat study read as joint materializes the base config, N times.
+
+    `build_trial_config` re-derived jointness as "two_level and no --serve-block",
+    dropping the tuner's third condition (`first_in_is_fitted`). For a config of
+    this shape the tuner wrote bare param names and the sweep split them under
+    the joint convention, where they matched neither prefix and were discarded.
+    Every materialized config came out identical to the base, all hashed to one
+    fingerprint, and each run overwrote the last — `iid-rank` showed one row for
+    five trials, with no error and nothing in the sweep output to say so.
+    """
+
+    @pytest.fixture
+    def flat_two_level(self, tmp_path):
+        p = tmp_path / "tlf.yaml"
+        p.write_text(TWO_LEVEL_FLAT_YAML, encoding="utf-8")
+        return p
+
+    def test_bare_trials_reach_params(self, flat_two_level, trials):
+        out = sweep.build_trial_config(flat_two_level, {}, trials[2], joint=False)
+        assert out["serve_model"]["params"]["max_depth"] == 5
+        assert out["serve_model"]["params"]["learning_rate"] == 0.05
+
+    def test_dead_first_in_block_is_left_alone(self, flat_two_level, trials):
+        """The joint branch expanded `first_in_params: {}` into a copy of
+        `params`. That arm never fits a model, so the block is inert — but it is
+        in the fingerprint's optional keys, so writing it split the hash off the
+        base config's for no reason."""
+        out = sweep.build_trial_config(flat_two_level, {}, trials[2], joint=False)
+        assert out["serve_model"]["first_in_params"] == {}
+
+    def test_distinct_trials_produce_distinct_configs(self, flat_two_level, trials):
+        """The whole point of a sweep. Under the bug these were byte-identical."""
+        rendered = {
+            yaml.safe_dump(
+                sweep.build_trial_config(flat_two_level, {}, t, joint=False),
+                default_flow_style=False,
+            )
+            for t in trials[:3]
+        }
+        assert len(rendered) == 3
+
+    def test_reading_a_flat_study_as_joint_is_refused(self, flat_two_level, trials):
+        """Belt and braces: if the namespace is ever wrong again, it raises here
+        instead of quietly writing the base config."""
+        with pytest.raises(ValueError, match="neither the 'win_' nor the 'fi_'"):
+            sweep.build_trial_config(flat_two_level, {}, trials[2], joint=True)
+
+    def test_naming_a_block_on_a_joint_study_is_refused(self, flat_two_level, trials):
+        with pytest.raises(ValueError, match="contradiction"):
+            sweep.build_trial_config(
+                flat_two_level, {}, trials[2], "params", joint=True,
+            )
+
+
+class TestFingerprintCollisionWarning:
+    def test_colliding_entries_are_named(self, caplog):
+        entries = [
+            sweep.SweepEntry(
+                unique_stem=f"cfg__h0{i}_t{i}", parent_stem="cfg",
+                trial_number=i, rank=i, config_path=None, fp=fp,
+            )
+            for i, fp in enumerate(("aaa", "aaa", "bbb"), 1)
+        ]
+        with caplog.at_level("WARNING"):
+            sweep._warn_fingerprint_collisions(entries)
+        assert "2 entries hash to one fingerprint" in caplog.text
+        assert "cfg__h01_t1" in caplog.text and "cfg__h02_t2" in caplog.text
+        assert "bbb" not in caplog.text
+
+    def test_distinct_fingerprints_are_quiet(self, caplog):
+        entries = [
+            sweep.SweepEntry(
+                unique_stem=f"cfg__h0{i}_t{i}", parent_stem="cfg",
+                trial_number=i, rank=i, config_path=None, fp=f"fp{i}",
+            )
+            for i in (1, 2)
+        ]
+        with caplog.at_level("WARNING"):
+            sweep._warn_fingerprint_collisions(entries)
+        assert caplog.text == ""

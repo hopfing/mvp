@@ -945,6 +945,18 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     tune_parser.add_argument(
+        "--serve-block", choices=["params", "first_in_params"], default=None,
+        help=(
+            "[two-level IID only] OVERRIDE: search one serve_model param "
+            "block instead of both. By default a two-level config is tuned "
+            "JOINTLY — the objective exists only on the composed p, so a "
+            "params trial is only scorable against some first_in_params and "
+            "vice versa. Use this for a deliberate single-block re-search "
+            "after a joint study; the result is conditional on whatever the "
+            "other block is fixed at."
+        ),
+    )
+    tune_parser.add_argument(
         "--n-startup-trials", type=int, default=None,
         help=(
             "Startup trials for both TPE sampler and MedianPruner — "
@@ -1011,6 +1023,13 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
     tune_review_parser.add_argument(
         "--sort", type=str, nargs="+", default=None,
         help="Metric(s) to sort by (default: the study's own objective)",
+    )
+    tune_review_parser.add_argument(
+        "--serve-block", choices=["params", "first_in_params"], default=None,
+        help=(
+            "[two-level IID only] Review a single-block override study "
+            "instead of the config's main (joint) one."
+        ),
     )
     tune_review_parser.add_argument(
         "--dashboard", action="store_true",
@@ -1141,6 +1160,13 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         "--sort", default=None,
         help="Trial metric to rank by (required for --select topn). Bare metric "
              "name, e.g. iid_crps_total_games — IID studies have no holdout block.",
+    )
+    iid_sweep_parser.add_argument(
+        "--serve-block", choices=["params", "first_in_params"], default=None,
+        help=(
+            "[two-level IID only] Sweep a single-block override study "
+            "instead of the config's main (joint) one."
+        ),
     )
     iid_sweep_parser.add_argument(
         "--dry-run", action="store_true",
@@ -1399,6 +1425,7 @@ def cmd_tune(args: argparse.Namespace) -> int:
         n_startup_trials=args.n_startup_trials,
         outer_folds=args.outer_folds,
         seed=args.seed,
+        serve_block=args.serve_block,
     )
 
     if args.cap is not None:
@@ -1475,10 +1502,26 @@ def cmd_tune_review(args: argparse.Namespace) -> int:
         return 0
 
     storage = f"sqlite:///{db_path}"
-    study = optuna.load_study(
-        study_name=config_path.stem,
-        storage=storage,
-    )
+    # One db per config, one study per (config, block) — `tune` suffixes any
+    # block other than `params`, so reviewing the bare stem would silently show
+    # the win-branch study for a config whose first_in block was the one tuned.
+    from mvp.model.tuning import tuning_study_key
+
+    study_key = tuning_study_key(config_path.stem, args.serve_block)
+    try:
+        study = optuna.load_study(study_name=study_key, storage=storage)
+    except KeyError:
+        import optuna as _optuna
+
+        present = sorted(
+            s.study_name
+            for s in _optuna.get_all_study_summaries(storage=storage)
+        )
+        print(
+            f"No study '{study_key}' in {db_path}.\n"
+            f"Studies present: {', '.join(present) or '(none)'}"
+        )
+        return 1
 
     state_counts = _state_counts(study)
     print(f"Study: {study.study_name}")
@@ -3039,6 +3082,7 @@ def cmd_iid_sweep(args: argparse.Namespace) -> int:
         sort=args.sort,
         dry_run=args.dry_run,
         refresh=args.refresh,
+        serve_block=args.serve_block,
     )
     if args.dry_run:
         return 0

@@ -27,7 +27,14 @@ from mvp.model.sweep_select import (
     select_diverse,
     select_top,
 )
-from mvp.model.tuning import _decode_params
+from mvp.model.tuning import (
+    _SERVE_BLOCKS,
+    NAMESPACE_JOINT,
+    _decode_params,
+    split_joint_params,
+    study_param_namespace,
+    tuning_study_key,
+)
 from mvp.projection.iid.artifacts import (
     BACKTEST_PARQUET,
     PMF_PARQUET,
@@ -66,13 +73,32 @@ class SweepResult:
     skipped: list[str] = field(default_factory=list)
 
 
-def load_study(stem: str, state_dir: Path | None = None):
-    """Load a config's tuning study. Study name == config stem."""
+def load_study(
+    stem: str, state_dir: Path | None = None, serve_block: str | None = None,
+):
+    """Load one (config, block) tuning study.
+
+    A two-level config has one study per serve_model param block, since both
+    blocks suggest identical param names. Keyed through `tuning_study_key` so
+    the sweep opens the same study the tuner wrote — hardcoding the stem here
+    would silently sweep the win-branch trials for a config whose `first_in`
+    block was the one tuned.
+    """
     tuning_dir = state_dir or (get_data_root() / "tuning")
     db = tuning_dir / f"{stem}.db"
     if not db.exists():
         raise FileNotFoundError(f"no tuning study: {db}")
-    study = optuna.load_study(study_name=stem, storage=f"sqlite:///{db}")
+    key = tuning_study_key(stem, serve_block)
+    try:
+        study = optuna.load_study(study_name=key, storage=f"sqlite:///{db}")
+    except KeyError:
+        present = sorted(
+            s.study_name
+            for s in optuna.get_all_study_summaries(storage=f"sqlite:///{db}")
+        )
+        raise RuntimeError(
+            f"no study '{key}' in {db}; present: {', '.join(present) or '(none)'}"
+        ) from None
     pinned = study.user_attrs.get("pinned_params") or {}
     trials = [
         t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE
@@ -82,12 +108,39 @@ def load_study(stem: str, state_dir: Path | None = None):
     return study, pinned, trials
 
 
-def build_trial_config(base_path: Path, pinned: dict, trial) -> dict:
-    """Base config + this trial's hyperparameters merged into serve_model.params.
+def build_trial_config(
+    base_path: Path, pinned: dict, trial, serve_block: str | None = None,
+    *, joint: bool,
+) -> dict:
+    """Base config + this trial's hyperparameters merged into its serve_model block.
 
     Same merge the tuner performs per trial, so a materialized config reproduces
-    exactly what the trial scored.
+    exactly what the trial scored — which means it must write the block the
+    trial was SEARCHING. Writing a `first_in_params` trial into `params` would
+    hand the win branches settings tuned for a 68k-row match-grain fit and leave
+    the arm the trial was about untouched, so the config would reproduce nothing.
+
+    `joint` is REQUIRED and comes from the study (`study_param_namespace`), not
+    from this config file. It used to be re-derived here as "two_level and no
+    --serve-block", which is the tuner's predicate minus its third condition:
+    a two-level config whose first_in arm has no features is searched FLAT,
+    because that arm never fits a model. Trials of such a study carry bare param
+    names, the joint branch split them into nothing, and every materialized
+    config came out identical to the base — five trials evaluated, none of them
+    exercised. Reading it off the study also survives an edit to the config's
+    first_in feature lists, which would otherwise change the answer under trials
+    that were already written.
     """
+    if serve_block is not None and serve_block not in _SERVE_BLOCKS:
+        raise ValueError(
+            f"serve_block must be None or one of {sorted(_SERVE_BLOCKS)}; "
+            f"got {serve_block!r}"
+        )
+    if joint and serve_block is not None:
+        raise ValueError(
+            f"joint=True with serve_block={serve_block!r}: a joint study samples "
+            "both blocks, so naming one is a contradiction."
+        )
     base = yaml.safe_load(base_path.read_text(encoding="utf-8"))
     if "serve_model" not in base:
         raise ValueError(
@@ -96,9 +149,28 @@ def build_trial_config(base_path: Path, pinned: dict, trial) -> dict:
         )
     decoded = _decode_params({**trial.params, **pinned})
     base["serve_model"] = dict(base["serve_model"])
-    params = dict(base["serve_model"].get("params") or {})
-    params.update(decoded)
-    base["serve_model"]["params"] = params
+
+    # An empty `first_in_params` inherits `params` at build time
+    # (serve_model.py:140), so that is the block's effective starting point.
+    win_base = dict(base["serve_model"].get("params") or {})
+    fi_base = dict(base["serve_model"].get("first_in_params") or win_base)
+
+    if joint:
+        # A joint trial's params are prefixed and describe BOTH blocks. Writing
+        # them into `params` unsplit would put `win_max_depth` in the config as
+        # a literal key and leave both arms on their old values — the trial
+        # would reproduce nothing.
+        win_new, fi_new = split_joint_params(decoded)
+        win_base.update(win_new)
+        fi_base.update(fi_new)
+        base["serve_model"]["params"] = win_base
+        base["serve_model"]["first_in_params"] = fi_base
+        return base
+
+    block = serve_block or "params"
+    current = fi_base if block == "first_in_params" else win_base
+    current.update(decoded)
+    base["serve_model"][block] = current
     return base
 
 
@@ -130,6 +202,7 @@ def materialize(
     sort: str | None = None,
     out_dir: Path | None = None,
     state_dir: Path | None = None,
+    serve_block: str | None = None,
 ) -> list[SweepEntry]:
     """Write one runnable config per selected trial; return the entries.
 
@@ -152,14 +225,22 @@ def materialize(
             config_path=cfg_path, fp=fp_dir_for(cfg, cfg_path).name,
         )]
 
-    _study, pinned, trials = load_study(stem, state_dir=state_dir)
+    study, pinned, trials = load_study(
+        stem, state_dir=state_dir, serve_block=serve_block,
+    )
+    # How the trials on disk are encoded, from the study — never re-derived from
+    # the config file. See `build_trial_config`.
+    joint = study_param_namespace(study) == NAMESPACE_JOINT
     chosen = select_trials(trials, n_trials, select=select, sort=sort)
     tag = "h" if select == "topn" else "d"
 
     entries: list[SweepEntry] = []
     for rank, t in enumerate(chosen, 1):
-        unique_stem = f"{stem}__{tag}{rank:02d}_t{t.number}"
-        cfg_dict = build_trial_config(base_path, pinned, t)
+        # Block in the stem, so a params sweep and a first_in sweep of the same
+        # config cannot overwrite each other's materialized configs.
+        block_tag = "" if serve_block is None else f"_{serve_block[:2]}"
+        unique_stem = f"{stem}__{tag}{rank:02d}{block_tag}_t{t.number}"
+        cfg_dict = build_trial_config(base_path, pinned, t, serve_block, joint=joint)
         cfg_path = out_dir / f"{unique_stem}.yaml"
         cfg_path.write_text(
             yaml.safe_dump(cfg_dict, default_flow_style=False), encoding="utf-8",
@@ -174,7 +255,33 @@ def materialize(
             fp=fp_dir_for(cfg, cfg_path).name,
             sort_value=t.user_attrs.get(sort) if sort else None,
         ))
+    _warn_fingerprint_collisions(entries)
     return entries
+
+
+def _warn_fingerprint_collisions(entries: list[SweepEntry]) -> None:
+    """Two entries sharing a fingerprint are one evaluation, not two.
+
+    The fingerprint keys the output dir, so colliding entries write over each
+    other and `iid-rank` shows a single row for the pair. That is the SYMPTOM
+    the silent param drop presented as — five trials, one dir — and with
+    --refresh (which forces every entry to run) there was nothing in the output
+    to distinguish it from five real evaluations. A collision is still possible
+    without that bug, whenever two trials differ only in params the canonical
+    form doesn't hash, so this warns rather than raises.
+    """
+    by_fp: dict[str, list[str]] = {}
+    for e in entries:
+        by_fp.setdefault(e.fp, []).append(e.unique_stem)
+    for fp, stems in by_fp.items():
+        if len(stems) > 1:
+            logger.warning(
+                "%s: %d entries hash to one fingerprint (%s) and will overwrite "
+                "each other — %s. They differ only in fields the canonical form "
+                "does not hash, so this is ONE evaluation, not %d.",
+                stems[0].split("__")[0], len(stems), fp, ", ".join(stems),
+                len(stems),
+            )
 
 
 def run_entry(entry: SweepEntry, *, refresh: bool = False) -> str:
@@ -241,11 +348,13 @@ def run_sweep(
     sort: str | None = None,
     dry_run: bool = False,
     refresh: bool = False,
+    serve_block: str | None = None,
 ) -> SweepResult:
     result = SweepResult()
     for config_arg in configs:
         entries = materialize(
             config_arg, n_trials, select=select, sort=sort,
+            serve_block=serve_block,
         )
         result.entries.extend(entries)
         label = "diverse (maximin over HP space)" if select == "diverse" else f"sort={sort}"
