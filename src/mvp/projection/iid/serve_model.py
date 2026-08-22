@@ -251,6 +251,32 @@ def apply_serve_branch(
     return points.filter(pl.col("serve") == serve_branch)
 
 
+def _require_preloaded_cols(
+    needed: list[str], available: set[str], serve_branch: int | None,
+) -> None:
+    """Every configured match feature must be in the preloaded frame.
+
+    The selection below is `[c for c in needed if c in available]`, so a spec the
+    caller forgot to preload is dropped and the branch trains on FEWER features
+    than it was configured with — no error, no log, just a worse model whose
+    metrics look ordinary. That is the failure this guards: it would make every
+    tuned result quietly wrong rather than obviously broken.
+
+    `FirstServeInModel._match_features` already raises for the same reason; the
+    win branches did not, which is the asymmetry this closes.
+    """
+    absent = [c for c in needed if c not in available]
+    if not absent:
+        return
+    where = "" if serve_branch is None else f" [serve=={serve_branch}]"
+    raise KeyError(
+        f"ScoreStateChainServeModel{where}: match features absent from the "
+        f"preloaded frame: {sorted(absent)}. The caller must preload every spec "
+        f"this branch reads — for a two_level model that is the UNION of the "
+        f"three components' match features."
+    )
+
+
 def swap_side_partner_specs(match_level_features: list[str]) -> list[str]:
     """Every counterpart column a mirror feature is read from, either side.
 
@@ -682,6 +708,7 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
                     for _, _, full_name, params in [parse_feature_spec(spec)]
                 ]
                 available = set(preloaded_match_features.columns)
+                _require_preloaded_cols(needed, available, self.serve_branch)
                 sel = ["match_uid", "player_id", "opp_id"] + [c for c in needed if c in available]
                 matches_features = preloaded_match_features.select(sel).rename(
                     {"player_id": "server_id", "opp_id": "returner_id"}
@@ -784,21 +811,61 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
         against `point_won_by_server`. Returns metrics with `point_` prefixes
         so they coexist with the chain's match-grain classification metrics.
         """
+        from mvp.model.metrics import compute_metrics
+
+        if self._model is None:
+            raise RuntimeError("score_test_points called before fit")
+        joined = self.build_test_point_frame(
+            df,
+            preloaded_match_features=preloaded_match_features,
+            preloaded_points=preloaded_points,
+        )
+        if joined is None or len(joined) == 0:
+            return {}
+
+        feature_cols = self._match_feature_cols + self.point_level_features
+        X = joined.select(feature_cols).to_numpy()
+        y = joined["point_won_by_server"].cast(pl.Int64).to_numpy()
+
+        y_prob = self._model.predict_proba(X)
+        raw = compute_metrics(y, y_prob)
+        return {f"point_{k}": v for k, v in raw.items()}
+
+    def build_test_point_frame(
+        self,
+        df: pl.DataFrame,
+        *,
+        preloaded_match_features: "pl.DataFrame | None" = None,
+        preloaded_points: "pl.DataFrame | None" = None,
+    ) -> "pl.DataFrame | None":
+        """Held-out points joined to their match features, ready to select from.
+
+        The frame half of `score_test_points`, extracted so a caller that needs
+        the ROWS rather than a metric dict does not have to rebuild this join.
+        The two-level step-3 comparison is that caller: it needs `win_first` and
+        `win_second` evaluated at EVERY test point so the composite can be formed,
+        but each branch model filters to its own half of the serve tree, so no
+        per-branch call can produce it. Reconstructing the join in a script
+        instead would be an approximation of the engine rather than the engine.
+
+        Returns `None` when there is nothing to score, matching the empty cases
+        `score_test_points` already returned `{}` for.
+
+        `serve_branch` still applies — build the frame from an instance whose
+        branch is `None` to get both halves.
+        """
         from mvp.common.base_job import get_data_root, get_local_data_root
         from mvp.model.engine import FeatureEngine, build_column_name, parse_feature_spec
-        from mvp.model.metrics import compute_metrics
         from mvp.projection.iid.score_state_features import (
             DERIVED_POINT_FEATURES,
             add_derived_point_features,
         )
 
-        if self._model is None:
-            raise RuntimeError("score_test_points called before fit")
         if "match_uid" not in df.columns:
             raise ValueError("score_test_points: df missing match_uid column")
         test_uids = df["match_uid"].unique().to_list()
         if not test_uids:
-            return {}
+            return None
 
         points_path = self._points_path or (
             get_data_root() / "aggregate" / "atptour" / "match_beats_points.parquet"
@@ -818,7 +885,7 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
             )
         points = self._apply_serve_branch(points)
         if len(points) == 0:
-            return {}
+            return None
 
         if self.match_level_features:
             if preloaded_match_features is not None:
@@ -828,6 +895,7 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
                     for _, _, full_name, params in [parse_feature_spec(spec)]
                 ]
                 available = set(preloaded_match_features.columns)
+                _require_preloaded_cols(needed, available, self.serve_branch)
                 sel = ["match_uid", "player_id", "opp_id"] + [c for c in needed if c in available]
                 matches_features = preloaded_match_features.select(sel).rename(
                     {"player_id": "server_id", "opp_id": "returner_id"}
@@ -869,15 +937,8 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
 
         joined = joined.filter(pl.col("point_won_by_server").is_not_null())
         if len(joined) == 0:
-            return {}
-
-        feature_cols = self._match_feature_cols + self.point_level_features
-        X = joined.select(feature_cols).to_numpy()
-        y = joined["point_won_by_server"].cast(pl.Int64).to_numpy()
-
-        y_prob = self._model.predict_proba(X)
-        raw = compute_metrics(y, y_prob)
-        return {f"point_{k}": v for k, v in raw.items()}
+            return None
+        return joined
 
     def _match_feature_values(self, df: pl.DataFrame, *, swap: bool) -> np.ndarray:
         """Build the match-level feature matrix in server-perspective.

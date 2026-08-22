@@ -14,6 +14,7 @@ from mvp.projection.iid.serve_model import (
     IdentityServeModel,
     MatchupServeModel,
     ScoreStateChainServeModel,
+    neutral_score_state,
 )
 
 
@@ -1033,3 +1034,274 @@ class TestArtifactSchemaDrift:
         b = self._stale(surface_circuit_offset=None)
         a.surface_circuit_offset["Hard/tour"] = 0.02
         assert b.surface_circuit_offset == {}
+
+
+class TestBuildTestPointFrame:
+    """`build_test_point_frame` is the frame half of `score_test_points`.
+
+    It exists because the two-level step-3 comparison needs `win_first` and
+    `win_second` evaluated at every test point so the composite can be formed,
+    while each branch model filters to its own half of the serve tree — so no
+    per-branch call can produce that frame. Rebuilding the join in a script
+    would approximate the engine rather than use it.
+    """
+
+    @staticmethod
+    def _points(tmp_path, n_matches=40):
+        rng = np.random.default_rng(11)
+        rows: list[dict] = []
+        for i in range(n_matches):
+            for j in range(60):
+                serve = 1 if j % 3 else 2          # 2/3 first serves
+                is_bp = bool(rng.random() < 0.2)
+                p_true = (0.35 if is_bp else 0.70) - (0.15 if serve == 2 else 0.0)
+                rows.append({
+                    "match_uid": f"m{i:03d}",
+                    "server_id": f"p{i * 2:04d}",
+                    "returner_id": f"p{i * 2 + 1:04d}",
+                    "point_won_by_server": int(rng.random() < p_true),
+                    "is_break_point": is_bp,
+                    "serve": serve,
+                })
+        path = tmp_path / "points.parquet"
+        pl.DataFrame(rows).write_parquet(path)
+        return path, [f"m{i:03d}" for i in range(n_matches)]
+
+    def _fitted(self, points_path, train_uids, *, serve_branch=None):
+        m = ScoreStateChainServeModel(
+            model_type="logistic",
+            match_level_features=[],
+            point_level_features=["is_break_point"],
+            points_path=points_path,
+            serve_branch=serve_branch,
+        )
+        m.fit(pl.DataFrame({"match_uid": train_uids,
+                            "best_of": [3] * len(train_uids)}))
+        return m
+
+    def test_returns_the_rows_score_test_points_scores(self, tmp_path):
+        path, uids = self._points(tmp_path)
+        m = self._fitted(path, uids[:30])
+        test_df = pl.DataFrame({"match_uid": uids[30:], "best_of": [3] * 10})
+
+        frame = m.build_test_point_frame(test_df)
+
+        assert frame is not None
+        assert "point_won_by_server" in frame.columns
+        assert "is_break_point" in frame.columns
+        assert frame["point_won_by_server"].null_count() == 0
+        assert set(frame["match_uid"].unique().to_list()) == set(uids[30:])
+
+    def test_an_unbranched_instance_returns_both_serve_halves(self, tmp_path):
+        """The reason the method exists. A branched instance cannot produce the
+        rows the composite needs, because it filters to its own half."""
+        path, uids = self._points(tmp_path)
+        test_df = pl.DataFrame({"match_uid": uids[30:], "best_of": [3] * 10})
+
+        both = self._fitted(path, uids[:30]).build_test_point_frame(test_df)
+        first = self._fitted(
+            path, uids[:30], serve_branch=1
+        ).build_test_point_frame(test_df)
+        second = self._fitted(
+            path, uids[:30], serve_branch=2
+        ).build_test_point_frame(test_df)
+
+        assert set(both["serve"].unique().to_list()) == {1, 2}
+        assert first["serve"].unique().to_list() == [1]
+        assert second["serve"].unique().to_list() == [2]
+        assert both.height == first.height + second.height
+
+    def test_returns_none_when_there_are_no_test_matches(self, tmp_path):
+        """`None`, not an empty frame — `score_test_points` returned `{}` for
+        this case and the split must not turn it into a crash."""
+        path, uids = self._points(tmp_path)
+        m = self._fitted(path, uids[:30])
+        empty = pl.DataFrame({"match_uid": [], "best_of": []},
+                             schema={"match_uid": pl.Utf8, "best_of": pl.Int64})
+
+        assert m.build_test_point_frame(empty) is None
+        assert m.score_test_points(empty) == {}
+
+    def test_returns_none_when_the_branch_filter_empties_the_points(self, tmp_path):
+        rows = [{
+            "match_uid": "m000", "server_id": "p0", "returner_id": "p1",
+            "point_won_by_server": i % 3 != 0,   # both classes; logistic needs 2
+            "is_break_point": i % 5 == 0, "serve": 1,
+        } for i in range(40)]
+        path = tmp_path / "first_only.parquet"
+        pl.DataFrame(rows).write_parquet(path)
+        train = pl.DataFrame({"match_uid": ["m000"], "best_of": [3]})
+
+        m = ScoreStateChainServeModel(
+            model_type="logistic", match_level_features=[],
+            point_level_features=["is_break_point"],
+            points_path=path, serve_branch=1,
+        )
+        m.fit(train)
+        m.serve_branch = 2          # no rows on this branch
+
+        assert m.build_test_point_frame(train) is None
+        assert m.score_test_points(train) == {}
+
+    def test_score_test_points_scores_exactly_this_frame(self, tmp_path):
+        """The wrapper must not re-filter. If it did, the metric would describe
+        a different row set than the one a caller reconstructs."""
+        path, uids = self._points(tmp_path)
+        m = self._fitted(path, uids[:30])
+        test_df = pl.DataFrame({"match_uid": uids[30:], "best_of": [3] * 10})
+
+        frame = m.build_test_point_frame(test_df)
+        metrics = m.score_test_points(test_df)
+
+        cols = m._match_feature_cols + m.point_level_features
+        y = frame["point_won_by_server"].cast(pl.Int64).to_numpy()
+        y_prob = m._model.predict_proba(frame.select(cols).to_numpy())
+        from mvp.model.metrics import compute_metrics
+
+        expected = compute_metrics(y, y_prob)
+        for k, v in expected.items():
+            assert metrics[f"point_{k}"] == pytest.approx(v)
+
+    def test_before_fit_still_raises_from_the_wrapper(self, tmp_path):
+        path, _ = self._points(tmp_path, n_matches=1)
+        m = ScoreStateChainServeModel(
+            model_type="logistic", match_level_features=[],
+            point_level_features=["is_break_point"], points_path=path,
+        )
+        with pytest.raises(RuntimeError, match="before fit"):
+            m.score_test_points(pl.DataFrame({"match_uid": ["m000"],
+                                              "best_of": [3]}))
+
+
+class TestPreloadedMatchFeatures:
+    """The runner materializes match features once and hands them to every fit.
+
+    Nothing covered this path before — not even for `score_state`, which has
+    shipped with it for some time. The risk it carries is silent: the selection
+    is `[c for c in needed if c in available]`, so a spec the caller forgot to
+    preload is dropped and the branch trains on fewer features than configured,
+    with no error and metrics that look ordinary.
+    """
+
+    @staticmethod
+    def _points(tmp_path):
+        rng = np.random.default_rng(3)
+        rows = []
+        for i in range(30):
+            for j in range(40):
+                rows.append({
+                    "match_uid": f"m{i:03d}",
+                    "server_id": f"p{i * 2:04d}",
+                    "returner_id": f"p{i * 2 + 1:04d}",
+                    "point_won_by_server": int(rng.random() < 0.65),
+                    "is_break_point": bool(j % 7 == 0),
+                    "serve": 1 if j % 3 else 2,
+                })
+        path = tmp_path / "points.parquet"
+        pl.DataFrame(rows).write_parquet(path)
+        return path
+
+    @staticmethod
+    def _preload():
+        """What `engine.compute(..., extra_columns=[player_id, opp_id, match_uid])`
+        returns: TWO mirrored rows per match, one per player perspective."""
+        rng = np.random.default_rng(5)
+        rows = []
+        for i in range(30):
+            a, b = f"p{i * 2:04d}", f"p{i * 2 + 1:04d}"
+            va, vb = float(rng.normal()), float(rng.normal())
+            rows.append({"match_uid": f"m{i:03d}", "player_id": a, "opp_id": b,
+                         "player_glicko_rd": va, "opp_glicko_rd": vb})
+            rows.append({"match_uid": f"m{i:03d}", "player_id": b, "opp_id": a,
+                         "player_glicko_rd": vb, "opp_glicko_rd": va})
+        return pl.DataFrame(rows)
+
+    def _model(self, points_path, **kw):
+        return ScoreStateChainServeModel(
+            model_type="logistic",
+            match_level_features=["player_glicko_rd"],
+            point_level_features=["is_break_point"],
+            points_path=points_path,
+            **kw,
+        )
+
+    def _df(self):
+        return pl.DataFrame({
+            "match_uid": [f"m{i:03d}" for i in range(30)],
+            "best_of": [3] * 30,
+        })
+
+    def test_a_missing_spec_raises_instead_of_training_on_fewer_features(
+        self, tmp_path,
+    ):
+        """The whole point. Silently dropping it would make every tuned result
+        quietly wrong rather than obviously broken."""
+        m = self._model(self._points(tmp_path))
+        without = self._preload().drop("player_glicko_rd")
+        with pytest.raises(KeyError, match="absent from the preloaded frame"):
+            m.fit(self._df(), preloaded_match_features=without)
+
+    def test_the_error_names_the_missing_spec(self, tmp_path):
+        m = self._model(self._points(tmp_path))
+        without = self._preload().drop("player_glicko_rd")
+        with pytest.raises(KeyError, match="player_glicko_rd"):
+            m.fit(self._df(), preloaded_match_features=without)
+
+    def test_the_branch_is_named_so_a_two_level_failure_is_locatable(
+        self, tmp_path,
+    ):
+        """Three branches share this class; without the branch the message
+        cannot say which of them was misconfigured."""
+        m = self._model(self._points(tmp_path), serve_branch=2)
+        without = self._preload().drop("player_glicko_rd")
+        with pytest.raises(KeyError, match=r"serve==2"):
+            m.fit(self._df(), preloaded_match_features=without)
+
+    def test_preloading_matches_computing_it_directly(self, tmp_path):
+        """The preload's entire safety rests on the two paths being equivalent,
+        and nothing checked that they are."""
+        points_path = self._points(tmp_path)
+        preload = self._preload()
+        direct = self._model(points_path)
+        direct._engine = _StubEngine(preload)
+        viapre = self._model(points_path)
+
+        direct.fit(self._df())
+        viapre.fit(self._df(), preloaded_match_features=preload)
+
+        assert direct._match_feature_cols == viapre._match_feature_cols
+        # Compare what the two fits actually PREDICT, not their internals — that
+        # is the equivalence the preload's safety rests on.
+        df = self._df().join(
+            preload.filter(
+                pl.col("player_id") < pl.col("opp_id")
+            ).select("match_uid", "player_id", "opp_id", "player_glicko_rd",
+                     "opp_glicko_rd"),
+            on="match_uid", how="inner",
+        )
+        state = neutral_score_state()
+        a_direct, b_direct = direct.predict_state_fn(df)
+        a_pre, b_pre = viapre.predict_state_fn(df)
+        np.testing.assert_allclose(a_direct(state), a_pre(state), rtol=1e-9)
+        np.testing.assert_allclose(b_direct(state), b_pre(state), rtol=1e-9)
+
+    def test_extra_columns_in_the_preload_are_ignored(self, tmp_path):
+        """The union of three components' specs is a superset for any one
+        branch, so every branch sees columns it did not ask for."""
+        m = self._model(self._points(tmp_path))
+        wide = self._preload().with_columns(
+            pl.lit(1.0).alias("player_something_else"),
+        )
+        m.fit(self._df(), preloaded_match_features=wide)
+        assert m._match_feature_cols == ["server_glicko_rd"]
+
+
+class _StubEngine:
+    """Stands in for FeatureEngine so the non-preload path returns the same
+    frame the preload does — isolating the comparison to the code path."""
+
+    def __init__(self, frame):
+        self._frame = frame
+
+    def compute(self, feature_specs=None, extra_columns=None, **_):
+        return self._frame
