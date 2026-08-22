@@ -605,3 +605,81 @@ class TestPickleRoundTrip:
         m._first_in._base_rate = 0.6176
         restored = pickle.loads(pickle.dumps(m))
         assert restored._first_in._base_rate == pytest.approx(0.6176)
+
+
+class TestTwoLevelEmitterIncludeList:
+    """The two-level branch of the emitter must use the same partner resolver.
+
+    It used to pair `player_X` with `opp_X` inline and unconditionally, skipping
+    the `is_diff` check the one-level branch gets from
+    `swap_side_partner_specs`. `TestEmitterIncludeList` above never caught it
+    because its `_emit` leaves `serve_component` unset, so every one of those
+    tests exercises the one-level path only.
+
+    The cost was that all four Phase-B configs were unrunnable:
+    `opp_vs_opp_style_resid_flat_diff` is in no registry and produced by no
+    transform, so `_resolve_dependencies` raises KeyError on it.
+    """
+
+    W1 = ["opp_ret_elo_surface_indoor_matchup", "player_glicko_rd_diff"]
+    W2 = ["player_elo_surface_indoor", "player_vs_opp_style_resid_flat_diff"]
+
+    def _emit(self, selected, component="first_in"):
+        cfg = ServeDiscoveryConfig(
+            data={"date_range": {"start": "2023-01-01", "end": "2026-01-01"}},
+            metric="iid_crps_spread",
+            serve_component=component,
+            serve_model={
+                "type": "two_level",
+                "model_type": "xgboost",
+                "first_in_match_features": [],
+                "first_in_point_features": [],
+                "win_first_match_features": list(self.W1),
+                "win_first_point_features": [],
+                "win_second_match_features": list(self.W2),
+                "win_second_point_features": [],
+            },
+        )
+        return cfg.to_iid_projection_config_dict(
+            selected_match_level=list(selected),
+            selected_point_level=[],
+            model_type="xgboost",
+        )["features"]["include"]
+
+    def test_transform_output_diff_gets_no_invented_opp_twin(self):
+        """The crash. Carried in from `win_second`, not from this run's pick."""
+        inc = self._emit(["player_tourn_svc_df_pct"])
+        assert "player_vs_opp_style_resid_flat_diff" in inc
+        assert "opp_vs_opp_style_resid_flat_diff" not in inc
+
+    def test_registry_diffs_get_no_opp_twin_either(self):
+        inc = self._emit(["player_tourn_svc_df_pct"])
+        assert "player_glicko_rd_diff" in inc
+        assert "opp_glicko_rd_diff" not in inc
+
+    def test_every_component_is_declared_not_just_the_selected_one(self):
+        """The non-selected components are carried forward and read at predict
+        time, so an include list built from this run's picks alone emits a config
+        that loads and then fails on a missing column."""
+        inc = self._emit(["player_tourn_svc_df_pct"])
+        for spec in self.W1 + self.W2 + ["player_tourn_svc_df_pct"]:
+            assert spec in inc, spec
+
+    def test_mirror_features_still_get_their_partner(self):
+        inc = self._emit(["player_surface_matches(days=30)"])
+        assert "opp_surface_matches(days=30)" in inc
+        # `opp_`-prefixed selections need the player-side column too.
+        assert "player_ret_elo_surface_indoor_matchup" in inc
+
+    def test_include_matches_the_partner_resolver(self):
+        """Same invariant the one-level branch is held to, over all components."""
+        from mvp.projection.iid.serve_model import swap_side_partner_specs
+
+        picked = ["player_tourn_svc_df_pct", "player_surface_matches(days=30)"]
+        inc = self._emit(picked)
+        allspecs = picked + self.W1 + self.W2
+        assert set(inc) == set(allspecs) | set(swap_side_partner_specs(allspecs))
+
+    def test_no_duplicates(self):
+        inc = self._emit(["player_glicko_rd_diff"])   # also in W1
+        assert len(inc) == len(set(inc))

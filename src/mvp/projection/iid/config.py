@@ -354,26 +354,33 @@ class ServeDiscoveryConfig(BaseModel):
             # config that loads, then fails at predict on a missing column.
             from mvp.model.engine import parse_feature_spec as _parse
 
-            for spec in (
+            component_specs = (
                 serve_block["first_in_match_features"]
                 + serve_block["win_first_match_features"]
                 + serve_block["win_second_match_features"]
-            ):
-                prefix, base_name, full_name, params = _parse(spec)
-                swap = (
-                    f"opp_{base_name}" if prefix == "player"
-                    else f"player_{base_name}" if prefix == "opp"
-                    else full_name
-                )
+            )
+            for spec in component_specs:
+                _prefix, _base, full_name, params = _parse(spec)
                 if params:
                     ps = ", ".join(f"{k}={v}" for k, v in params.items())
-                    pair = (f"{full_name}({ps})", f"{swap}({ps})")
+                    own_spec = f"{full_name}({ps})"
                 else:
-                    pair = (full_name, swap)
-                for s in pair:
-                    if s not in seen:
-                        include_specs.append(s)
-                        seen.add(s)
+                    own_spec = full_name
+                if own_spec not in seen:
+                    include_specs.append(own_spec)
+                    seen.add(own_spec)
+            # Partners through the SAME helper the one-level path above uses.
+            # This loop used to pair `player_X` with `opp_X` inline and
+            # unconditionally, which re-introduced the crash this docstring
+            # describes: a transform-output diff has only a `player_` column, so
+            # the emitted `opp_` partner is in no registry and no transform and
+            # `_resolve_dependencies` raises KeyError on it. Every two-level
+            # config that selected `player_vs_opp_style_resid_flat_diff` — all
+            # four Phase-B arms — was unrunnable.
+            for partner in swap_side_partner_specs(component_specs):
+                if partner not in seen:
+                    include_specs.append(partner)
+                    seen.add(partner)
 
         return {
             "description": (
