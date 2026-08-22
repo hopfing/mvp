@@ -508,9 +508,16 @@ def render_betting(
     so the pair is what carries the signal — the same reason `model/rank.py`
     prints `Uo>=0` next to `Uo_all`.
 
-    Sorted by the `max_edge` gated units, and the sort is named in the title
-    rather than left implicit: ranking on the ungated number would rank configs
-    by how much vig they paid.
+    Sorted by the `main` gated units, and the sort is named in the title rather
+    than left implicit: ranking on the ungated number would rank configs by how
+    much vig they paid.
+
+    `main` and not `max_edge`. `safest` and `max_edge` are the two ENDS of the
+    eligible ladder — they exist so the spread around the main line is visible,
+    which is something to read, not to rank on. Ranking on the deepest rung
+    ordered configs by a bet set that is not the one placed: it put a run at #2
+    on +15.3 max_edge units while its main line returned +1.5, above the run
+    holding the best main-line result in the table.
 
     The edge-band curve is deliberately NOT here. It is a property of one
     config, and a curve per config per policy turns a ranking table into
@@ -525,9 +532,11 @@ def render_betting(
     anchor = (scored[0].betting or {}).get("anchor", "?")
     w = max(_name_width(scored), 12)
     lines += [
-        f"Anchor={anchor}, main line only, entry books, one bet per match.",
+        f"Anchor={anchor}, entry books, one bet per match.",
+        "main is the consensus main line; safest and max_edge read the whole "
+        "ladder and carry an edge>0 restriction, so their U>=0 equals U_all.",
         "Policy cells: ROI% / U>=0 / U_all / CLV% (gate is edge>=0). Sorted by "
-        "max_edge U>=0 desc.",
+        "main U>=0 desc.",
         "CLV is vs the reference book's de-vigged close and is negative by the "
         "entry vig — compare it between configs, never read it as a level.",
     ]
@@ -546,7 +555,7 @@ def render_betting(
     lines += [band, header, "-" * len(header)]
 
     def _rank_key(r: RankRow) -> float:
-        s = (_market_of(r, spec.key) or {}).get("max_edge") or {}
+        s = (_market_of(r, spec.key) or {}).get("main") or {}
         u = s.get("units_gated")
         return u if u is not None else -1e18
 

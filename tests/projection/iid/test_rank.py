@@ -317,11 +317,15 @@ class TestFormatting:
         _make_run(eval_root, "aaa111", with_backtest=True, run_id="run_a")
         out = "\n".join(format_rank_table())
         assert "Anchor=open" in out
-        assert "main line only" in out
         assert "one bet per match" in out
+        # Not "main line only" — that was true of all three policies once, and
+        # is now true only of `main`. The caption must name which candidate set
+        # each policy reads or it misdescribes two of the three columns.
+        assert "main line only" not in out
+        assert "safest and max_edge read the whole ladder" in out
         # The sort must be named, or the reader cannot tell whether configs were
         # ranked on the gated number or the vig-dominated one.
-        assert "Sorted by max_edge U>=0 desc" in out
+        assert "Sorted by main U>=0 desc" in out
         assert "never pooled" in out
 
     def test_reports_what_is_missing(self, eval_root):
@@ -527,3 +531,74 @@ class TestLegacyTotalsOnlyDirs:
         start = next(i for i, ln in enumerate(lines) if "Table 4" in ln)
         end = next(i for i, ln in enumerate(lines) if "Table 5" in ln)
         assert not any("run_a" in ln for ln in lines[start:end])
+
+
+class TestBettingTableOrdering:
+    """Ranked on `main`, the bet set that actually gets placed.
+
+    It ranked on `max_edge` — the DEEPEST rung with edge, one end of the
+    eligible ladder. `safest` and `max_edge` are there so the spread around the
+    main line is visible, not to order configs by: ranking on the deepest rung
+    put a run second on +15.3 max_edge units whose main line returned +1.5,
+    above the run holding the best main-line result in the table.
+    """
+
+    def _row(self, fp, *, main_u, max_edge_u):
+        from mvp.projection.iid.rank import RankRow
+
+        def cell(u):
+            return {"roi": u / 1000, "units_gated": u, "units_all": u, "clv": -0.02}
+
+        return RankRow(
+            fp=fp, run_ids=[fp],
+            betting={
+                "anchor": "open",
+                "markets": {
+                    "total_games": {
+                        "main": cell(main_u),
+                        "safest": cell(0.0),
+                        "max_edge": cell(max_edge_u),
+                        "n_bets": 100, "hit_rate": 0.53,
+                    },
+                },
+            },
+        )
+
+    def _order(self, rows):
+        from mvp.projection.iid.rank import MARKETS, render_betting
+
+        spec = next(m for m in MARKETS if m.key == "total_games")
+        out = render_betting(rows, spec, 3)
+        return [
+            ln.split()[1] for ln in out
+            if ln.strip()[:1].isdigit() and len(ln.split()) > 1
+        ]
+
+    def test_best_main_ranks_first(self):
+        rows = [
+            self._row("low_main", main_u=1.5, max_edge_u=15.3),
+            self._row("best_main", main_u=32.0, max_edge_u=8.9),
+        ]
+        assert self._order(rows)[0] == "best_main"
+
+    def test_a_strong_deep_rung_does_not_promote_a_dead_main_line(self):
+        """The exact inversion the old key produced."""
+        rows = [
+            self._row("dead_main", main_u=1.5, max_edge_u=99.0),
+            self._row("live_main", main_u=26.0, max_edge_u=-50.0),
+        ]
+        assert self._order(rows) == ["live_main", "dead_main"]
+
+    def test_a_missing_main_cell_sinks(self):
+        from mvp.projection.iid.rank import RankRow
+
+        present = self._row("has_main", main_u=-99.0, max_edge_u=500.0)
+        absent = RankRow(
+            fp="no_main", run_ids=["no_main"],
+            betting={"anchor": "open", "markets": {"total_games": {
+                "max_edge": {"roi": 0.5, "units_gated": 500.0,
+                             "units_all": 500.0, "clv": -0.02},
+                "n_bets": 100, "hit_rate": 0.53,
+            }}},
+        )
+        assert self._order([absent, present]) == ["has_main", "no_main"]
