@@ -68,6 +68,29 @@ from mvp.projection.iid.stateful_chain import match_distribution_from_state_fn
 
 logger = logging.getLogger(__name__)
 
+
+def live_partial_scores(
+    restored: dict[str, float],
+    candidate_match: list[str],
+    candidate_point: list[str],
+) -> dict[str, float]:
+    """Restored mid-round scores, minus candidates the pool no longer offers.
+
+    The candidate pool is rebuilt from the config on every run, so trimming the
+    candidate list and resuming is a supported edit — the whole point of the
+    frozen config living in the run dir. The checkpoint, though, carries a score
+    for every candidate the interrupted round had reached, and the round's
+    leader can be one of the ones just removed. Unfiltered, the round then
+    selects a feature that is not in the pool and the run dies at the point of
+    selection.
+
+    The completed-rounds replay guards the same hazard with `if feat in
+    candidate_*`; this path had no equivalent. Dropping a removed candidate's
+    score is the whole fix: it simply is not eligible to win the round.
+    """
+    live = set(candidate_match) | set(candidate_point)
+    return {k: v for k, v in restored.items() if k in live}
+
 # Point features the chain cannot represent. Two distinct mechanisms:
 #
 # `point_num` — the deuce closed-form in stateful_chain.hold_from_state_fn
@@ -355,11 +378,20 @@ class ServeDiscoverySelector:
                 )
             current_score = cp.best_metric
             round_idx = cp.current_round
-            partial_round_scores = dict(cp.current_round_scores)
+            partial_round_scores = live_partial_scores(
+                cp.current_round_scores, candidate_match, candidate_point
+            )
+            dropped = len(cp.current_round_scores) - len(partial_round_scores)
             logger.info(
                 "Resumed from checkpoint: %d completed rounds, current score=%.6f, partial scores for %d candidates",
                 len(rounds), current_score, len(partial_round_scores),
             )
+            if dropped:
+                logger.warning(
+                    "Dropped %d restored round-%d score(s) for candidates no "
+                    "longer in the pool; they will not be selected this round",
+                    dropped, round_idx,
+                )
         else:
             if selected_match or selected_point:
                 current_score = self._score_cv(base_df, fs_splits, selected_match, selected_point)

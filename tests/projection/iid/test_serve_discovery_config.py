@@ -230,3 +230,65 @@ class TestChainIncompatiblePointFeatures:
         for keep in ("is_break_point", "is_tiebreak", "sets_won_asymmetry",
                      "game_points_diff", "tiebreak_point_diff"):
             assert keep not in _CHAIN_INCOMPATIBLE_POINT_FEATURES
+
+
+class TestResumeAfterAPoolTrim:
+    """Trimming the candidate list and resuming is a supported edit.
+
+    The run rebuilds its pool from the frozen config every time, but the
+    checkpoint still carries a score for every candidate the interrupted round
+    had reached. When one of those is a candidate that was just removed — and it
+    can be the round's leader — the round would select a feature the pool no
+    longer offers and the run dies at the point of selection. That is what killed
+    a live base_w2 round 9 after `opp_svc_elo_matchup` was pulled from the pool.
+    """
+
+    RESTORED = {
+        "player_glicko_rd_diff": 2.6742,
+        "opp_svc_elo_matchup": 2.6708,        # the leader, and now removed
+        "player_ret_pts_won_pct_matchup": 2.6801,
+        "sets_won_asymmetry": 2.6755,
+    }
+
+    @staticmethod
+    def _live(restored, match, point):
+        from mvp.projection.iid.serve_discovery import live_partial_scores
+
+        return live_partial_scores(restored, match, point)
+
+    def test_a_removed_candidate_cannot_win_the_round(self):
+        kept = self._live(
+            self.RESTORED,
+            ["player_glicko_rd_diff"],
+            ["sets_won_asymmetry"],
+        )
+        assert "opp_svc_elo_matchup" not in kept
+        assert min(kept, key=kept.get) == "player_glicko_rd_diff"
+
+    def test_surviving_scores_are_kept_verbatim(self):
+        """Re-scoring them would throw away the round's work."""
+        kept = self._live(
+            self.RESTORED, ["player_glicko_rd_diff"], ["sets_won_asymmetry"],
+        )
+        assert kept == {
+            "player_glicko_rd_diff": 2.6742,
+            "sets_won_asymmetry": 2.6755,
+        }
+
+    def test_point_candidates_count_as_live(self):
+        """The pool spans both grains; filtering on the match list alone would
+        silently discard every point candidate's restored score."""
+        kept = self._live(self.RESTORED, [], ["sets_won_asymmetry"])
+        assert kept == {"sets_won_asymmetry": 2.6755}
+
+    def test_an_untrimmed_pool_is_left_alone(self):
+        kept = self._live(
+            self.RESTORED,
+            ["player_glicko_rd_diff", "opp_svc_elo_matchup",
+             "player_ret_pts_won_pct_matchup"],
+            ["sets_won_asymmetry"],
+        )
+        assert kept == self.RESTORED
+
+    def test_trimming_everything_leaves_nothing_restored(self):
+        assert self._live(self.RESTORED, [], []) == {}
