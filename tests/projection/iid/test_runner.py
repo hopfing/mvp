@@ -268,3 +268,80 @@ class TestRunnerHelpers:
         # m2 → "ada" (lex smaller than "ben")
         kept = sorted(zip(collapsed["match_uid"].to_list(), collapsed["player_id"].to_list()))
         assert kept == [("m1", "anna"), ("m2", "ada")]
+
+
+class TestPreloadMatchSpecs:
+    """Which match features the runner materializes once for the whole run.
+
+    Two-level configs were excluded from the preload entirely, so each of their
+    three branches re-read points and re-ran `engine.compute` per fold — three
+    times the reload a single-level config pays, multiplied again by trial count
+    under `mvp tune`.
+    """
+
+    @staticmethod
+    def _cfg(**kw):
+        from mvp.projection.iid.config import ServeModelConfig
+
+        return ServeModelConfig(**kw)
+
+    def test_single_level_uses_its_own_field(self):
+        from mvp.projection.iid.runner import preload_match_specs
+
+        cfg = self._cfg(type="score_state", match_level_features=["player_glicko_rd"])
+        assert preload_match_specs(cfg) == ["player_glicko_rd"]
+
+    def test_two_level_unions_all_three_components(self):
+        from mvp.projection.iid.runner import preload_match_specs
+
+        cfg = self._cfg(
+            type="two_level",
+            first_in_match_features=["player_a"],
+            win_first_match_features=["player_b"],
+            win_second_match_features=["player_c"],
+        )
+        assert preload_match_specs(cfg) == ["player_a", "player_b", "player_c"]
+
+    def test_two_level_ignores_the_single_level_field(self):
+        """`match_level_features` is inert under type=two_level. Reading it
+        would preload nothing and leave every branch recomputing per fold."""
+        from mvp.projection.iid.runner import preload_match_specs
+
+        cfg = self._cfg(
+            type="two_level",
+            match_level_features=["player_never_used"],
+            win_first_match_features=["player_b"],
+        )
+        assert preload_match_specs(cfg) == ["player_b"]
+
+    def test_shared_specs_are_deduped_once(self):
+        """Components overlap heavily in practice — base_fi and base_w2 both
+        select player_glicko_rd_diff. Computing it twice is wasted work."""
+        from mvp.projection.iid.runner import preload_match_specs
+
+        cfg = self._cfg(
+            type="two_level",
+            first_in_match_features=["player_a", "player_shared"],
+            win_first_match_features=["player_shared"],
+            win_second_match_features=["player_shared", "player_b"],
+        )
+        assert preload_match_specs(cfg) == [
+            "player_a", "player_shared", "player_b",
+        ]
+
+    def test_no_swap_side_partners_are_added(self):
+        """`engine.compute` returns two mirrored ROWS per match, so fit-time
+        joins get the returner's values from the row. Partners are a
+        predict-time need met by `features.include`; requesting them here only
+        triggers mirror self-joins nothing at fit time selects."""
+        from mvp.projection.iid.runner import preload_match_specs
+
+        cfg = self._cfg(
+            type="two_level", win_first_match_features=["player_glicko_rd"],
+        )
+        assert preload_match_specs(cfg) == ["player_glicko_rd"]
+
+    def test_a_two_level_config_with_no_features_preloads_nothing(self):
+        from mvp.projection.iid.runner import preload_match_specs
+
+        assert preload_match_specs(self._cfg(type="two_level")) == []

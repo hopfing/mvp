@@ -46,6 +46,35 @@ from mvp.projection.iid.serve_model import (
 run_logger = logging.getLogger(__name__)
 
 
+def preload_match_specs(serve_model_config) -> list[str]:
+    """Match-level specs to materialize once for the whole run.
+
+    For `two_level` this is the deduped UNION of the three components', not
+    `match_level_features` — that field is the single-level one and is empty on
+    a two-level config, so reading it would preload nothing and silently leave
+    every branch recomputing per fold.
+
+    Deliberately WITHOUT swap-side partners. `engine.compute` returns two
+    mirrored rows per match, one per player perspective, and fit joins at
+    (match_uid, player_id -> server_id), so the returner's values arrive in the
+    ROW rather than in an `opp_` column. Partners are a predict-time need, met
+    separately by the config's `features.include`.
+
+    Order-preserving so the preloaded frame's column order is stable across runs
+    of the same config.
+    """
+    if serve_model_config.type == "two_level":
+        specs = (
+            list(serve_model_config.first_in_match_features)
+            + list(serve_model_config.win_first_match_features)
+            + list(serve_model_config.win_second_match_features)
+        )
+    else:
+        specs = list(serve_model_config.match_level_features)
+    seen: set[str] = set()
+    return [s for s in specs if not (s in seen or seen.add(s))]
+
+
 class IIDProjectionRunner:
     """Runner for executing IID projection experiments."""
 
@@ -223,25 +252,42 @@ class IIDProjectionRunner:
         all_metrics: list[dict[str, float]] = []
         all_predictions: list[dict[str, Any]] = []
 
-        # For score_state serve models, materialize points and match-level
-        # features once and reuse across folds. This avoids re-reading
-        # match_beats_points.parquet on every fold (in fit) and again per fold
-        # for score_test_points; the engine.compute call is also collapsed to
-        # a single call.
-        is_score_state = self.config.serve_model.type == "score_state"
+        # Materialize points and match-level features once and reuse across
+        # folds. This avoids re-reading match_beats_points.parquet on every fold
+        # (in fit) and again per fold for score_test_points; the engine.compute
+        # call is also collapsed to a single call.
+        #
+        # TWO_LEVEL IS INCLUDED. It was not, and the omission was invisible: a
+        # two-level model is three branch fits, so it paid the per-fold reload
+        # THREE times per fold rather than once, and `TwoLevelServeModel.fit`
+        # forwards both preloads to every branch already. Under `mvp tune`, which
+        # builds a fresh runner per trial, that repeats for every trial.
+        #
+        # The spec list is the union of the three components', NOT the
+        # single-level `match_level_features` (which is inert and empty on a
+        # two-level config, so gating alone would have preloaded nothing).
+        # Deliberately WITHOUT swap-side partners: `engine.compute` returns two
+        # mirrored rows per match, one per player perspective, and fit joins at
+        # (match_uid, player_id -> server_id), so the returner's values arrive in
+        # the ROW. Partners are a predict-time need, met separately by
+        # `features.include` (config.py's two-level block builder). Requesting
+        # them here would only trigger mirror self-joins nothing at fit time
+        # selects.
+        sm = self.config.serve_model
         preloaded_points_full: pl.DataFrame | None = None
         preloaded_match_features: pl.DataFrame | None = None
-        if is_score_state:
+        if sm.type in ("score_state", "two_level"):
             points_path = (
                 get_data_root() / "aggregate" / "atptour"
                 / "match_beats_points.parquet"
             )
             run_logger.info("Preloading points parquet from %s", points_path)
             preloaded_points_full = pl.read_parquet(points_path)
-            mlf = self.config.serve_model.match_level_features
+            mlf = preload_match_specs(sm)
             if mlf:
                 run_logger.info(
-                    "Preloading %d match-level features for score_state", len(mlf),
+                    "Preloading %d match-level features for %s",
+                    len(mlf), sm.type,
                 )
                 preloaded_match_features = self.engine.compute(
                     feature_specs=mlf,
@@ -281,7 +327,7 @@ class IIDProjectionRunner:
 
                 fold_train_points: pl.DataFrame | None = None
                 fold_test_points: pl.DataFrame | None = None
-                if is_score_state and preloaded_points_full is not None:
+                if preloaded_points_full is not None:
                     train_uids = train_df["match_uid"].unique().to_list()
                     test_uids = test_df["match_uid"].unique().to_list()
                     fold_train_points = preloaded_points_full.filter(
