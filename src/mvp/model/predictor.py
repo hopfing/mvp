@@ -45,6 +45,7 @@ from mvp.model.imputation import apply_imputation, build_imputation, fit_imputat
 from mvp.model.models import EnsembleModel, XGBoostMTLModel, get_model
 from mvp.model.offset import fit_offset, offset_margin, resolve_offset_col
 from mvp.model.registry import get_registry
+from mvp.model.symmetry import PairingError, symmetrize
 from mvp.model.splitters import make_splitter
 from mvp.model.weighting import sample_weights_from_frame
 
@@ -73,6 +74,46 @@ _PREDICTOR_EXTRA_COLS = [
 PREDICTION_TOLERANCE = 1e-4
 # Threshold for drift alerts (5% probability swing)
 DRIFT_THRESHOLD = 0.05
+
+
+def _odd_project_serving(
+    probs: np.ndarray, frame: "pl.DataFrame", target: str, what: str
+) -> np.ndarray:
+    """Odd-project both orientations of each match before the canonical dedup.
+
+    Without this the non-canonical prediction is computed and discarded, and
+    the surviving one is an arbitrary draw -- decided by draw position -- from
+    two estimates that differ by ~2pp. On the prod_roc run of 2026-08-23
+    (42,013 paired matches) that flipped which player was favoured on 2.39% of
+    them, and p feeds a Kelly stake on every match, not just the flipped ones.
+
+    Must run AFTER the calibrator. Platt is affine in the margin, so applying
+    it per row to a complementary pair breaks the invariant unless its
+    intercept is exactly zero (production fits land around 0.02).
+
+    `deciding_set` is EVEN under the orientation swap and must not be
+    odd-projected; the caller's target gate is enforced here too.
+
+    Unlike the eval path, a pairing failure here DEGRADES rather than raises:
+    this runs inside the live 15-minute loop, and a malformed frame should cost
+    the projection, not the betting cycle. It logs loudly instead.
+    """
+    if target != "won":
+        return probs
+    try:
+        out, n_pairs, n_solo = symmetrize(probs, frame["match_uid"].to_numpy())
+    except PairingError:
+        # Data problem only. A length mismatch is a plain ValueError and is
+        # deliberately NOT caught -- that means the probability vector no
+        # longer lines up with the frame, and serving unaveraged would hide a
+        # bug that corrupts every prediction silently.
+        logger.exception(
+            "%s: orientation pairing failed; serving UNAVERAGED predictions "
+            "for this cycle (the two sides of a match will not sum to 1)", what,
+        )
+        return probs
+    logger.debug("%s: odd-projected %d pair(s), %d unpaired", what, n_pairs, n_solo)
+    return out
 
 
 def _offset_margin_kwargs(
@@ -1217,24 +1258,20 @@ class ProductionPredictor:
             pending = pending.with_columns(
                 (pl.col("player_id") < pl.col("opp_id")).alias("_is_canonical")
             )
-        canonical = pending.filter(pl.col("_is_canonical"))
-        non_canonical = pending.filter(~pl.col("_is_canonical"))
-
-        if len(non_canonical) > 0:
-            seen_uids = set(canonical["match_uid"].to_list())
-            missing = non_canonical.filter(
-                ~pl.col("match_uid").is_in(list(seen_uids))
-            )
-            if len(missing) > 0:
-                canonical = pl.concat([canonical, missing], how="diagonal_relaxed")
+        # Predict on BOTH orientations, THEN dedup. The old order filtered to
+        # canonical first, so the non-canonical row's prediction was never
+        # computed -- there was nothing to project against. Scoring both costs
+        # 2x voter inference on pending matches; at the size of a 15-minute
+        # slate that is cheap relative to shipping an arbitrary orientation.
+        scored = pending
 
         # Predict
         aux_cols = artifact.get("aux_base_col_names", [])
         augmented_cols = list(feature_cols) + aux_cols
-        X = canonical.select(
+        X = scored.select(
             pl.col(c).cast(pl.Float64) for c in augmented_cols
         ).to_numpy()
-        circuit_arr = canonical["circuit"].to_numpy()
+        circuit_arr = scored["circuit"].to_numpy()
         if "impute_state" in artifact:
             X = apply_imputation(X, circuit_arr, artifact["impute_state"])
             X = X[:, :len(feature_cols)]
@@ -1250,7 +1287,7 @@ class ProductionPredictor:
         if emb_vocab is not None:
             emb_col_name = artifact.get("embedding_col", "player_id")
             emb_ids = np.array(
-                [emb_vocab.get(p, 0) for p in canonical[emb_col_name].to_list()]
+                [emb_vocab.get(p, 0) for p in scored[emb_col_name].to_list()]
             ).reshape(-1, 1)
             X = np.hstack([X, emb_ids.astype(np.float64)])
 
@@ -1261,7 +1298,7 @@ class ProductionPredictor:
         # artifact's own scaler, truncated to feature_cols.
         margin_kw = _offset_margin_kwargs(artifact, feature_cols, X)
         probs = (
-            model.predict_proba(X, df=canonical)
+            model.predict_proba(X, df=scored)
             if isinstance(model, EnsembleModel)
             else model.predict_proba(X, **margin_kw)
         )
@@ -1270,20 +1307,37 @@ class ProductionPredictor:
                 calibrator,
                 (SegmentedPlattCalibrator, SegmentedIsotonicCalibrator),
             ):
-                probs = calibrator.transform(probs, canonical)
+                probs = calibrator.transform(probs, scored)
             else:
                 probs = calibrator.transform(probs)
+
+        # Last per-row operation, after the calibrator -- see the helper.
+        probs = _odd_project_serving(probs, scored, self.target, "voter")
+        scored = scored.with_columns(pl.Series("_prob", probs))
+
+        # NOW dedup to one row per match. Post-projection the two orientations
+        # sum to 1 exactly, so which side survives no longer changes the number
+        # -- the flip below is an identity re-orientation, not a choice.
+        canonical = scored.filter(pl.col("_is_canonical"))
+        non_canonical = scored.filter(~pl.col("_is_canonical"))
+        if len(non_canonical) > 0:
+            seen_uids = set(canonical["match_uid"].to_list())
+            missing = non_canonical.filter(
+                ~pl.col("match_uid").is_in(list(seen_uids))
+            )
+            if len(missing) > 0:
+                canonical = pl.concat([canonical, missing], how="diagonal_relaxed")
 
         # For non-canonical rows that were included, flip the prob (winner only;
         # deciding_set prob is symmetric — no flip needed)
         is_deciding_set = self.target == "deciding_set"
         result: dict[str, float] = {}
-        for i, row in enumerate(canonical.iter_rows(named=True)):
+        for row in canonical.iter_rows(named=True):
             uid = row["match_uid"]
             # Scoped voters skip matches outside their training domain
             if in_scope_uids is not None and uid not in in_scope_uids:
                 continue
-            p = float(probs[i])
+            p = float(row["_prob"])
             is_canonical = row["_is_canonical"]
             if not is_canonical and not is_deciding_set:
                 p = 1.0 - p
@@ -1548,6 +1602,10 @@ class ProductionPredictor:
                 probs = calibrator.transform(probs, pending)
             else:
                 probs = calibrator.transform(probs)
+
+        # Both orientations are scored above; project before the dedup below
+        # discards one of them. Last per-row operation, after the calibrator.
+        probs = _odd_project_serving(probs, pending, self.target, "lead")
 
         # Add probabilities to pending matches
         pending = pending.with_columns(pl.Series("_prob", probs))
