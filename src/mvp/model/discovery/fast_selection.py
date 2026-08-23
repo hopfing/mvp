@@ -12,6 +12,7 @@ import polars as pl
 from sklearn.linear_model import LogisticRegression
 
 from mvp.model.config import apply_filters
+from mvp.model.symmetry import pair_index, symmetrize_indexed
 from mvp.model.discovery.config import DiscoveryConfig
 from mvp.model.completeness import is_incomplete_match
 from mvp.model.early_stopping import two_stage_fit
@@ -244,6 +245,11 @@ class FastForwardSelector:
         # resampled subsets are assigned to identical folds. All populated in
         # precompute(); empty/None under non-date splitters.
         self.row_dates: np.ndarray | None = None
+        self.row_uids: np.ndarray | None = None
+        # Folds already warned about low pairing. On the selector, not in the
+        # scorer closure, so a new scorer per round does not re-warn.
+        self._pair_warned: set[int] = set()
+        self._mtl_warned: bool = False
         self.tournament_key: np.ndarray | None = None
         self.fold_windows: list[tuple] = []
         # Per-column FS-time fill strategy and constant value, indexed parallel
@@ -598,6 +604,11 @@ class FastForwardSelector:
         # Frozen-geometry inputs for stability selection. Dates drive fold
         # assignment of resampled rows; tournament_key is the resample unit.
         self.row_dates = df["effective_match_date"].cast(pl.Date).to_numpy()
+        # Pairing key for the orientation projection in the scorer. Same
+        # lifecycle as row_dates: row-aligned to X_wide, subset by row_mask.
+        self.row_uids = (
+            df["match_uid"].to_numpy() if "match_uid" in df.columns else None
+        )
         if "tournament_id" in df.columns and "year" in df.columns:
             self.tournament_key = (
                 df.select(
@@ -625,6 +636,8 @@ class FastForwardSelector:
             self.y = self.y[row_mask]
             self.circuit = self.circuit[row_mask]
             self.row_dates = self.row_dates[row_mask]
+            if self.row_uids is not None:
+                self.row_uids = self.row_uids[row_mask]
             if self.tournament_key is not None:
                 self.tournament_key = self.tournament_key[row_mask]
             if self.y_aux is not None:
@@ -881,6 +894,28 @@ class FastForwardSelector:
         # asymmetric_logloss mirrors the training-side objective.
         metric_fn = _make_metric_fn(metric, lambda_over=model_params.get("lambda_over"))
 
+        # Orientation projection. FS runs its OWN fit/predict loop rather than
+        # going through ExperimentRunner, so it does not inherit the runner's
+        # projection -- without this, candidate feature sets are ranked on
+        # unsymmetrized two-orientation predictions while the tuning that
+        # follows scores the projected ones. That matters more here than
+        # elsewhere: the orientation bias grows with the number of SYMMETRIC
+        # features (_sum, _min) in a set, and choosing feature sets is exactly
+        # what FS does -- so it would be selecting under a bias that varies
+        # with the property it selects on.
+        #
+        # Pair indices depend only on the fold's test rows, which are identical
+        # across candidates, so they are computed once per fold and reused
+        # across the thousands of scorer calls rather than re-sorting each time.
+        _project = self.row_uids is not None and self.config.target == "won"
+        _pair_cache: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+        if self.row_uids is None:
+            logger.warning(
+                "no match_uid on the FS frame; candidates are ranked on "
+                "UNSYMMETRIZED predictions and will not be comparable to "
+                "runner-scored metrics"
+            )
+
         def scorer(features: list[str]) -> float:
             if not features:
                 return float("inf")
@@ -1065,11 +1100,53 @@ class FastForwardSelector:
                 # both score the primary head via metric_fn (predict_proba
                 # returns the primary head for the MTL model).
                 if is_mtl and mtl_select_on == "combined":
+                    if _project and not self._mtl_warned:
+                        logger.info(
+                            "MTL select_on=combined: the primary head is "
+                            "scored WITHOUT orientation averaging, so its "
+                            "component of the combined loss keeps the "
+                            "per-candidate bias. Rankings stay internally "
+                            "consistent (every candidate takes this branch) "
+                            "but are not comparable to non-combined runs."
+                        )
+                        self._mtl_warned = True
                     assert y_aux is not None
                     fold_metrics.append(
                         _compute_mtl_loss(model, X_test, y_test, y_aux[test_idx])
                     )
                 else:
+                    if _project:
+                        pair = _pair_cache.get(fold_idx)
+                        if pair is None:
+                            i_p, j_p, _ = pair_index(self.row_uids[test_idx])
+                            pair = (i_p, j_p)
+                            _pair_cache[fold_idx] = pair
+                            # Solo rows keep the CANDIDATE-DEPENDENT bias this
+                            # averaging exists to remove, so a collapsed
+                            # pairing silently reverts FS to the old failure
+                            # mode for those rows. The usual cause is an
+                            # eval_filter on an antisymmetric (_diff) feature:
+                            # it keeps exactly one side per match, so nothing
+                            # pairs and nothing is averaged.
+                            # WARN only, and once per fold per run. A scorer
+                            # is built per round and the cache lives in its
+                            # closure, so anything logged here otherwise
+                            # repeats every round -- and duplicates again under
+                            # parallel workers -- on top of the progress bar.
+                            # Healthy pairing is the norm and needs no line.
+                            frac = 2 * i_p.size / max(test_idx.size, 1)
+                            if frac < 0.5 and fold_idx not in self._pair_warned:
+                                self._pair_warned.add(fold_idx)
+                                logger.warning(
+                                    "fold %d: only %.0f%% of scored rows are "
+                                    "orientation pairs (%d pairs / %d rows) -- "
+                                    "unpaired rows are scored UNAVERAGED and "
+                                    "keep the per-candidate bias. Check "
+                                    "eval_filters.",
+                                    fold_idx + 1, 100 * frac, i_p.size,
+                                    test_idx.size,
+                                )
+                        y_prob = symmetrize_indexed(y_prob, *pair)
                     fold_metrics.append(metric_fn(y_test, y_prob))
 
             # One compact ES line per round (see _logged_es_rounds above). "fb"

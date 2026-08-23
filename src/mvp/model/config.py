@@ -430,6 +430,13 @@ class EarlyStoppingConfig(_StrictModel):
     a single metric) so it can't silently drift from what the run optimizes.
     ``ceiling`` is the n_estimators ceiling that early stopping selects rounds
     within.
+
+    NB the stopping metric is scored in the RAW orientation frame. XGBoost's
+    eval callback receives ``(y_true, y_pred)`` with no row identity, so the
+    two orientations of a match cannot be paired and averaged the way every
+    other scoring path now does. With ES enabled on a `won`-target run, the
+    stopping choice therefore optimizes a slightly different quantity than the
+    selection metric does.
     """
 
     enabled: bool = False
