@@ -318,10 +318,9 @@ def compute_restricted_logloss(
     the penalty makes under-coverage cost more than any achievable
     confident-region log loss.
 
-    DIAGNOSTIC-GRADE: ``target_coverage`` and ``lambda_cov`` are data-dependent
-    design constants — set so that zero coverage (penalty ~1.05) clearly
-    exceeds plausible confident-region log loss (~0.3-0.6). Prefer
-    beta_tail_score as the primary tail objective.
+    ``target_coverage`` and ``lambda_cov`` are data-dependent design constants —
+    set so that zero coverage (penalty ~1.05) clearly exceeds plausible
+    confident-region log loss (~0.3-0.6).
     """
     p = np.clip(y_prob, 1e-15, 1 - 1e-15)
     mask = np.abs(np.asarray(y_prob, dtype=float) - 0.5) > tau
@@ -336,9 +335,9 @@ def compute_weighted_concordance(y_true: np.ndarray, y_prob: np.ndarray) -> floa
     Somers' D = 2*AUC - 1, but each (positive, negative) pair is weighted by
     (|p_pos - 0.5| + |p_neg - 0.5|) / 2, so concordant orderings among confident
     predictions count more and near-0.5 pairs count ~nothing. A pure ranking
-    metric (no calibration signal) — suited to the voter / discrimination path.
-    Range [-1, 1]; 0 = no weighted skill. O(n log n) via searchsorted; ties in
-    p contribute 0 (neither concordant nor discordant).
+    metric (no calibration signal). Range [-1, 1]; 0 = no weighted skill.
+    O(n log n) via searchsorted; ties in p contribute 0 (neither concordant
+    nor discordant).
     """
     y = np.asarray(y_true)
     prob = np.asarray(y_prob, dtype=float)
@@ -405,9 +404,7 @@ def compute_partial_auc_tail(
     Averages the standardized partial AUC of the high-specificity corner
     (FPR <= beta) and the high-sensitivity corner (the flipped problem), so it
     rewards correct ranking among the model's most confident calls on *both*
-    sides. Ranking metric (no calibration signal) — voter / discrimination
-    path. Fallback for weighted_concordance when the confident tail is sparse.
-    Range ~[0.5, 1].
+    sides. Ranking metric (no calibration signal). Range ~[0.5, 1].
     """
     y = np.asarray(y_true)
     prob = np.asarray(y_prob, dtype=float)
@@ -454,11 +451,10 @@ def compute_metrics(
         "signed_calibration": compute_signed_calibration(y_true, y_prob),
         "error_rate_80plus": compute_error_rate_80plus(y_true, y_prob),
         "asymmetric_logloss": compute_asymmetric_logloss(y_true, y_prob, **asym_kwargs),
-        # Tail-sensitive objectives (see each compute_* docstring). Lead /
-        # calibration-sizing path: beta_tail_score, threshold_weighted_brier,
-        # restricted_logloss (lower = better).
-        # Voter / discrimination path: weighted_concordance, partial_auc_tail
-        # (higher = better — listed in tuning._MAXIMIZE_METRICS).
+        # Tail-sensitive objectives (see each compute_* docstring).
+        # Lower = better: beta_tail_score, threshold_weighted_brier,
+        # restricted_logloss. Higher = better: weighted_concordance,
+        # partial_auc_tail (listed in tuning._MAXIMIZE_METRICS).
         "beta_tail_score": compute_beta_tail_score(y_true, y_prob),
         "beta_tail_score_sharp": compute_beta_tail_score(y_true, y_prob, a=0.25, b=0.25),
         "threshold_weighted_brier": compute_threshold_weighted_brier(y_true, y_prob),
