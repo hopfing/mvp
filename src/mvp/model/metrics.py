@@ -311,12 +311,12 @@ def compute_restricted_logloss(
 ) -> float:
     """Log loss on confident predictions only, with a coverage guard (lower better).
 
-    Scores log loss over the subset |p - 0.5| > tau (the region where bets are
-    placed), then adds ``lambda_cov * max(0, target_coverage - coverage)``
-    where coverage is the fraction of predictions in that subset. Without the
-    guard the optimizer could win by collapsing predictions toward 0.5 to empty
-    the scored set; the penalty makes under-coverage cost more than any
-    achievable confident-region log loss.
+    Scores log loss over the subset |p - 0.5| > tau, then adds
+    ``lambda_cov * max(0, target_coverage - coverage)`` where coverage is the
+    fraction of predictions in that subset. Without the guard the optimizer
+    could win by collapsing predictions toward 0.5 to empty the scored set;
+    the penalty makes under-coverage cost more than any achievable
+    confident-region log loss.
 
     DIAGNOSTIC-GRADE: ``target_coverage`` and ``lambda_cov`` are data-dependent
     design constants — set so that zero coverage (penalty ~1.05) clearly
