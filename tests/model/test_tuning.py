@@ -12,6 +12,7 @@ import polars as pl
 import pytest
 
 from mvp.model.tuning import DEFAULT_SEARCH_SPACES, HIDDEN_LAYERS_MAP, HyperparamTuner, _decode_params, suggest_params
+from mvp.model.tuning import _OBJECTIVE_FRAME, _OBJECTIVE_FRAME_CAL
 
 
 class TestSuggestParams:
@@ -743,7 +744,7 @@ validation:
         )
         assert tuner.outer_folds == 2
         assert tuner.seed == 123
-        assert tuner.study.user_attrs.get("objective_frame") == "forward_cal_v1"
+        assert tuner.study.user_attrs.get("objective_frame") == _OBJECTIVE_FRAME_CAL
         assert tuner.study.user_attrs.get("outer_folds") == 2
 
     def test_run_one_uses_forward_objective(
@@ -791,7 +792,7 @@ validation:
             config_path=sample_config, state_dir=tmp_path / "tuning", outer_folds=1
         )
         assert tuner.search_calibrated is True
-        assert tuner.study.user_attrs.get("objective_frame") == "forward_cal_v1"
+        assert tuner.study.user_attrs.get("objective_frame") == _OBJECTIVE_FRAME_CAL
 
     def test_ranking_objective_stays_raw_frame(self, tmp_path):
         """A pure-ranking objective (roc_auc) is Platt-invariant, so the study
@@ -825,7 +826,7 @@ validation:
             config_path=cfg, state_dir=tmp_path / "tuning", outer_folds=4
         )
         assert tuner.search_calibrated is False
-        assert tuner.study.user_attrs.get("objective_frame") == "forward_v2"
+        assert tuner.study.user_attrs.get("objective_frame") == _OBJECTIVE_FRAME
 
     def test_objective_metric_value_routes_by_frame(self, sample_config, tmp_path):
         """In a calibrated-frame study, prob-scale metrics read metrics_calibrated,
@@ -917,7 +918,7 @@ validation:
             outer_folds=4,
         )
         assert tuner.outer_folds == 4
-        assert tuner.study.user_attrs.get("objective_frame") == "forward_cal_v1"
+        assert tuner.study.user_attrs.get("objective_frame") == _OBJECTIVE_FRAME_CAL
 
     def test_preflight_covers_date_expanding(self, tmp_path):
         """date_expanding configs (the real de_ family) are preflighted too."""
@@ -961,7 +962,7 @@ validation:
         tuner = HyperparamTuner(
             config_path=cfg, state_dir=tmp_path / "tuning", outer_folds=4
         )
-        assert tuner.study.user_attrs.get("objective_frame") == "forward_cal_v1"
+        assert tuner.study.user_attrs.get("objective_frame") == _OBJECTIVE_FRAME_CAL
 
     def test_preflight_failure_leaves_no_study(self, tmp_path):
         """A construction rejected by preflight must not create/stamp a study, so a
@@ -996,7 +997,7 @@ validation:
                 config_path=cfg, state_dir=tmp_path / "tuning", outer_folds=1
             )
         # Proceeds: study is created and stamped, not rejected.
-        assert tuner.study.user_attrs.get("objective_frame") == "forward_cal_v1"
+        assert tuner.study.user_attrs.get("objective_frame") == _OBJECTIVE_FRAME_CAL
         assert any(
             "trustworthy forward-aligned tune" in r.message and r.levelno == logging.WARNING
             for r in caplog.records

@@ -34,12 +34,16 @@ _PROJECTION_MODEL_TYPES = {"xgb_regressor", "linear", "ridge"}
 # objective. Studies from the legacy within-window inner-CV objective lack it (or
 # carry a different value) and are refused for resume — the two objectives are
 # numerically incomparable. Bump this string on any future objective-frame change.
-_OBJECTIVE_FRAME = "forward_v2"
+# v3: predictions are odd-projected across the two player orientations before
+# any metric is taken, so every objective value describes one antisymmetric
+# estimate per match rather than two independent per-orientation ones. Numbers
+# are NOT comparable across this bump; old studies correctly refuse to resume.
+_OBJECTIVE_FRAME = "forward_v3"
 # Calibrated-frame search: probability-scale objectives search on the calibrated
 # out-of-fold metric, not raw. Numerically distinct from the raw-frame objective,
 # so it carries its own marker and won't resume against a raw-frame study (or vice
 # versa). Bump on any future calibrated-objective-frame change.
-_OBJECTIVE_FRAME_CAL = "forward_cal_v1"
+_OBJECTIVE_FRAME_CAL = "forward_cal_v2"
 
 # Maximize metrics: the classification set (single-sourced from metrics.py,
 # includes the tail-sensitive ranking objectives weighted_concordance /

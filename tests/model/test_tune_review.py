@@ -3,6 +3,7 @@
 import optuna
 import pytest
 
+from mvp.model.tuning import _OBJECTIVE_FRAME, _OBJECTIVE_FRAME_CAL
 from mvp.model.tune_review import (
     _is_new_pipeline_study,
     _objective_key,
@@ -695,7 +696,7 @@ class TestObjectiveKey:
         """A calibrated-frame study optimizes `cal_<metric>`, not the raw metric."""
         study = self._study(
             tmp_path, "stamped",
-            {"objective_metrics": ["log_loss"], "objective_frame": "forward_cal_v1"},
+            {"objective_metrics": ["log_loss"], "objective_frame": _OBJECTIVE_FRAME_CAL},
             {"log_loss": 0.61, "cal_log_loss": 0.60},
             0.60,
         )
@@ -704,7 +705,7 @@ class TestObjectiveKey:
     def test_stamped_raw_study_resolves_to_bare_key(self, tmp_path):
         study = self._study(
             tmp_path, "stamped_raw",
-            {"objective_metrics": ["log_loss"], "objective_frame": "forward_v2"},
+            {"objective_metrics": ["log_loss"], "objective_frame": _OBJECTIVE_FRAME},
             {"log_loss": 0.60, "cal_log_loss": 0.59},
             0.60,
         )
@@ -746,7 +747,7 @@ class TestObjectiveKey:
             study_name="obj", storage=storage, direction="minimize"
         )
         study.set_user_attr("objective_metrics", ["log_loss"])
-        study.set_user_attr("objective_frame", "forward_cal_v1")
+        study.set_user_attr("objective_frame", _OBJECTIVE_FRAME_CAL)
         # Trial 0 wins the objective; trial 1 wins the held-out block.
         for cal_ll, hc_ll in ((0.5966, 0.5997), (0.5972, 0.5991)):
             study.add_trial(

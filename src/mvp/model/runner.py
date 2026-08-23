@@ -49,6 +49,7 @@ from mvp.model.models import EnsembleModel, XGBoostMTLModel, get_model
 from mvp.model.offset import fit_offset, offset_margin, resolve_offset_col
 from mvp.model.registry import get_registry
 from mvp.model.splitters import BaseSplitter, make_splitter
+from mvp.model.symmetry import symmetrize, validate_pairing
 from mvp.model.weighting import sample_weights_from_frame
 
 
@@ -138,6 +139,26 @@ def _calibrated_objective_metrics(
 
 class ExperimentRunner:
     """Runner for executing experiments."""
+
+    # Set in run() at data prep; False for targets that are even under the
+    # orientation swap. Declared here so _odd_project is safe if run() bailed
+    # before reaching the gate.
+    _symmetry_on: bool = False
+
+    def _odd_project(self, y_prob: np.ndarray, frame: "pl.DataFrame") -> np.ndarray:
+        """Odd-project one fold's predictions onto the antisymmetric component.
+
+        ALIGNMENT CONTRACT: `frame` must be the exact frame `y_prob` was
+        predicted from, in the same row order. `validate_pairing` checks the
+        frame; it cannot check that the probability vector still lines up with
+        it. A single re-sort between predicting and calling this would pass
+        every validation and silently pair the wrong predictions -- so pull
+        both from the same object, in the same place, with nothing between.
+        """
+        if not self._symmetry_on:
+            return y_prob
+        out, _, _ = symmetrize(y_prob, frame["match_uid"].to_numpy())
+        return out
 
     def __init__(
         self,
@@ -753,6 +774,49 @@ class ExperimentRunner:
         # Drop rows with no outcome (e.g., future/unfinished matches)
         df = df.filter(pl.col(target_col).is_not_null())
 
+        # Orientation symmetry. Each match is scored TWICE, once per player
+        # orientation, and the model is not antisymmetric under that swap -- the
+        # two predictions do not sum to 1 and the even component is noise the
+        # measured number should not carry.
+        #
+        # `deciding_set` is EVEN under the swap: both rows carry the identical
+        # match-level label, so the two probabilities should be EQUAL, not
+        # complementary. Odd-projecting it destroys the prediction silently.
+        # Hence the gate -- symmetry.symmetrize cannot detect the target itself.
+        #
+        # Validated ONCE here rather than per fold: splits are on
+        # effective_match_date and both rows of a match share it, so a pair can
+        # never straddle a fold boundary and every fold frame inherits a valid
+        # pairing from this check.
+        self._symmetry_on = self.config.target == "won"
+        if self._symmetry_on:
+            missing = [
+                c for c in ("match_uid", "player_id", "opp_id")
+                if c not in df.columns
+            ]
+            if missing:
+                raise ValueError(
+                    f"orientation symmetry needs {missing} on the prepared "
+                    "frame; without them predictions cannot be paired and "
+                    "every metric would silently carry the even component"
+                )
+            n_pairs, n_solo = validate_pairing(
+                df["match_uid"].to_numpy(),
+                df[target_col].to_numpy(),
+                df["player_id"].to_numpy(),
+                df["opp_id"].to_numpy(),
+                df["effective_match_date"].to_numpy(),
+            )
+            run_logger.info(
+                "Orientation pairing validated: %d pairs, %d unpaired row(s)",
+                n_pairs, n_solo,
+            )
+        else:
+            run_logger.info(
+                "target=%s is not odd under the orientation swap; predictions "
+                "are NOT symmetrized", self.config.target,
+            )
+
         # Get feature columns from config
         feature_cols = get_feature_columns(feature_specs)
 
@@ -1263,6 +1327,14 @@ class ExperimentRunner:
                 else:
                     y_prob = model.predict_proba(X_test)
                     y_prob_train = model.predict_proba(X_train)
+                # Applied before ANY metric is taken, so fold metrics, the
+                # calibrated objective, the holdout block, the regrouping and
+                # the persisted fold predictions all describe one quantity.
+                # test_df/train_df are the frames these were predicted from --
+                # see the alignment contract on _odd_project.
+                y_prob_raw = y_prob
+                y_prob = self._odd_project(y_prob, test_df)
+                y_prob_train = self._odd_project(y_prob_train, train_df)
                 metrics = compute_metrics(y_test, y_prob, lambda_over=lambda_over_eval)
                 all_metrics.append(metrics)
 
@@ -1311,6 +1383,12 @@ class ExperimentRunner:
                     "df": test_df,
                     "y_true": y_test,
                     "y_prob": y_prob,
+                    # The unprojected twin of y_prob at this stage, so
+                    # y_prob == _odd_project(y_prob_raw) holds on append. That
+                    # invariant does NOT survive the calibrate=True mutation
+                    # below, which reassigns y_prob to a calibrated value while
+                    # y_prob_raw stays pre-calibration.
+                    "y_prob_raw": y_prob_raw,
                 })
 
                 # Capture fold metadata for the per-fold report
@@ -1445,9 +1523,13 @@ class ExperimentRunner:
                         [all_predictions[i]["df"] for i in iter_idxs],
                         how="diagonal_relaxed",
                     )
+                    c_y_prob_raw = np.concatenate(
+                        [all_predictions[i]["y_prob_raw"] for i in iter_idxs]
+                    )
                     regrouped_predictions.append({
                         "y_true": c_y_true,
                         "y_prob": c_y_prob,
+                        "y_prob_raw": c_y_prob_raw,
                         "df": c_df,
                     })
                     regrouped_metrics.append(compute_metrics(c_y_true, c_y_prob, lambda_over=lambda_over_eval))
@@ -1505,6 +1587,19 @@ class ExperimentRunner:
                         pl.lit(fold_idx + 1).cast(pl.Int32).alias("fold_idx"),
                         pl.Series("y_test", pred["y_true"]).cast(pl.Int64),
                         pl.Series("y_prob", pred["y_prob"]).cast(pl.Float64),
+                        # The unprojected twin of y_prob at this pipeline
+                        # stage: y_prob == _odd_project(y_prob_raw). After the
+                        # projection e_n == -e_c exactly, so this is the only
+                        # surviving record of per-orientation disagreement --
+                        # the signal that surfaced this defect, and what any
+                        # future drift monitoring would read.
+                        # CAVEAT: this parquet is built BEFORE the stacking
+                        # meta refit and before calibration, so on a stacking
+                        # run the pair recorded here is the pre-meta SUB-MEAN's
+                        # disagreement, not the reported model's.
+                        pl.Series(
+                            "y_prob_raw", pred["y_prob_raw"]
+                        ).cast(pl.Float64),
                     )
                 )
             fold_predictions_df = (
@@ -1638,17 +1733,44 @@ class ExperimentRunner:
 
                 # Predict on full set so holdout preds also get stacked probs
                 y_prob_stacked = model._meta_model.predict_proba(X_meta)[:, 1]
-                avg_metrics = compute_metrics(
-                    y_meta[:n_tuning_samples],
-                    y_prob_stacked[:n_tuning_samples],
-                    lambda_over=lambda_over_eval,
-                )
 
+                # The meta model is a logistic over sub-probs plus meta
+                # features; it is NOT antisymmetric even when its inputs are,
+                # so its output needs projecting in its own right. This
+                # assignment also OVERWRITES the per-fold y_prob set earlier --
+                # and pred_dict is shared with tuning_/holdout_predictions --
+                # so without projecting here the calibrator fit, avg_metrics
+                # and the holdout block would all silently revert to the raw
+                # frame while the study carries a symmetrized frame marker.
                 offset = 0
                 for pred_dict in all_predictions:
                     n = len(pred_dict["y_true"])
-                    pred_dict["y_prob"] = y_prob_stacked[offset:offset + n]
+                    stacked = y_prob_stacked[offset:offset + n]
+                    pred_dict["y_prob"] = self._odd_project(
+                        stacked, pred_dict["df"]
+                    )
+                    pred_dict["y_prob_raw"] = stacked
                     offset += n
+                # The offset walk and every read-back below assume X_meta/y_meta
+                # rows align with all_predictions order, and that tuning folds
+                # occupy the leading n_tuning_samples rows. Both predate this
+                # change -- fit_meta already bet the model on them -- but they
+                # were bets, so make them checks. Label arrays, exact equality.
+                assert offset == len(y_prob_stacked), (
+                    f"stacked walk covered {offset} of {len(y_prob_stacked)} rows"
+                )
+                assert np.array_equal(
+                    y_meta[:n_tuning_samples],
+                    np.concatenate([p["y_true"] for p in tuning_predictions]),
+                ), "y_meta tuning rows do not align with tuning_predictions"
+
+                avg_metrics = compute_metrics(
+                    y_meta[:n_tuning_samples],
+                    np.concatenate(
+                        [p["y_prob"] for p in all_predictions]
+                    )[:n_tuning_samples],
+                    lambda_over=lambda_over_eval,
+                )
 
             # Concat tuning-fold OOF preds for calibrator fitting and/or
             # raw-metric computation.
@@ -1770,6 +1892,20 @@ class ExperimentRunner:
                         type(calibrator).__name__,
                         calibrator.n_segments,
                     )
+                # Re-project after calibration. Platt is affine in the margin,
+                # so applying it per row to a complementary pair breaks the
+                # invariant: sigmoid(a*g+b) + sigmoid(-a*g+b) != 1 unless b = 0.
+                # For a global fit on the balanced projected pool b is ~0 and the
+                # deviation is negligible, but SEGMENTED calibrators carry a
+                # separate intercept per segment, where it is structural rather
+                # than small. Projection is idempotent on an already-complementary
+                # pair, so the second application is free where it isn't needed.
+                # This must be the LAST per-row operation.
+                for pred_dict in tuning_predictions:
+                    pred_dict["y_prob"] = self._odd_project(
+                        pred_dict["y_prob"], pred_dict["df"]
+                    )
+
                 # Holdout: deployed calibrator (never saw holdout data)
                 for pred_dict in holdout_predictions:
                     if is_segmented:
@@ -1780,6 +1916,9 @@ class ExperimentRunner:
                         pred_dict["y_prob"] = calibrator.transform(
                             pred_dict["y_prob"]
                         )
+                    pred_dict["y_prob"] = self._odd_project(
+                        pred_dict["y_prob"], pred_dict["df"]
+                    )
 
                 # Recompute per-fold and avg metrics on calibrated predictions
                 # so the per-fold report matches the headline (both reflect the
@@ -1792,6 +1931,9 @@ class ExperimentRunner:
                     [p["y_prob"] for p in tuning_predictions]
                 )
                 avg_metrics = compute_metrics(combined_y_true_oof, calibrated_y_prob, lambda_over=lambda_over_eval)
+                # NB `raw_` now means projected-but-uncalibrated, not
+                # unprojected. Comparing raw_* against a pre-symmetrization run
+                # crosses the frame boundary like every other metric here.
                 for k, v in raw_metrics.items():
                     avg_metrics[f"raw_{k}"] = v
             else:
