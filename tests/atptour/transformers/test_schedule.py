@@ -207,11 +207,24 @@ FIXTURE_SINGLES = _wrap(_singles_div())
 
 FIXTURE_DOUBLES = _wrap(_doubles_div())
 
+# Deliberately a different pair from FIXTURE_SINGLES: the same two players on
+# the same date under a different round is a source relabel, which _dedup now
+# collapses to a single row.
 FIXTURE_NO_COURT = _wrap(
     _singles_div(
         court=None,
         round_str="F",
+        p1_flag="ita",
+        p1_slug="jannik-sinner",
+        p1_id="s0ag",
+        p1_first="J.",
+        p1_last="Sinner",
         p1_rank="",
+        p2_flag="esp",
+        p2_slug="carlos-alcaraz",
+        p2_id="a0e2",
+        p2_first="C.",
+        p2_last="Alcaraz",
         p2_rank="",
     )
 )
@@ -748,7 +761,15 @@ class TestFullTransformerRun:
     def test_multiple_matches(self, tmp_path):
         html = _wrap(
             _singles_div(),
-            _singles_div(round_str="F"),
+            _singles_div(
+                round_str="F",
+                p1_slug="jannik-sinner",
+                p1_id="s0ag",
+                p1_last="Sinner",
+                p2_slug="carlos-alcaraz",
+                p2_id="a0e2",
+                p2_last="Alcaraz",
+            ),
         )
         _write_schedule_html(
             tmp_path,
@@ -1060,3 +1081,69 @@ class TestConsolidate:
         xf = ScheduleTransformer(tournament, data_root=tmp_path)
         result = xf.consolidate()
         assert result is None
+
+
+class TestStaleRoundLabelDedup:
+    """Collapse a match the source relabelled mid-tournament (R128 -> Q1)."""
+
+    @staticmethod
+    def _row(round_str, p1_id, p2_id, snapshot, match_date=date(2026, 8, 24)):
+        ids = "_".join(sorted([p1_id, p2_id]))
+        return {
+            "match_uid": f"2026_560_SGL_{round_str}_{ids}",
+            "round": round_str,
+            "draw_type": DrawType.singles.value,
+            "match_date": match_date,
+            "schedule_day": 1,
+            "p1_id": p1_id,
+            "p2_id": p2_id,
+            "p1_partner_id": None,
+            "p2_partner_id": None,
+            "snapshot_timestamp": snapshot,
+        }
+
+    @staticmethod
+    def _dedup(rows):
+        xf = ScheduleTransformer.__new__(ScheduleTransformer)
+        xf.tournament = _make_tournament()
+        df = pl.DataFrame(rows, schema_overrides={"p1_partner_id": pl.Utf8,
+                                                  "p2_partner_id": pl.Utf8})
+        return xf._dedup(df)
+
+    def test_stale_round_label_dropped(self):
+        """The label from the latest snapshot wins; the stale one is dropped."""
+        out = self._dedup([
+            self._row("R128", "AAAA", "BBBB", datetime(2026, 8, 24, 13, 45)),
+            self._row("Q1", "AAAA", "BBBB", datetime(2026, 8, 24, 14, 15)),
+        ])
+        assert out["match_uid"].to_list() == ["2026_560_SGL_Q1_AAAA_BBBB"]
+
+    def test_same_date_rematch_still_served_keeps_both(self):
+        """A tie means both matches are still on the page -- not a relabel.
+
+        A relabelled uid stops being served and falls behind; two real matches
+        between one pair on a single date tie on the latest snapshot. Dropping
+        either would delete a genuine match, so the group is left alone.
+        """
+        same = datetime(2026, 8, 24, 14, 0)
+        a = self._row("Q3", "AAAA", "BBBB", same)
+        b = self._row("R32", "AAAA", "BBBB", same)
+        for rows in ([a, b], [b, a]):
+            out = self._dedup(rows)
+            assert sorted(out["match_uid"].to_list()) == [
+                "2026_560_SGL_Q3_AAAA_BBBB",
+                "2026_560_SGL_R32_AAAA_BBBB",
+            ]
+
+    def test_lucky_loser_rematch_on_another_day_survives(self):
+        """Same pair, different round, different date is a real rematch."""
+        out = self._dedup([
+            self._row("Q3", "AAAA", "BBBB", datetime(2026, 8, 24, 12, 0),
+                      match_date=date(2026, 8, 24)),
+            self._row("R32", "AAAA", "BBBB", datetime(2026, 8, 26, 12, 0),
+                      match_date=date(2026, 8, 26)),
+        ])
+        assert sorted(out["match_uid"].to_list()) == [
+            "2026_560_SGL_Q3_AAAA_BBBB",
+            "2026_560_SGL_R32_AAAA_BBBB",
+        ]

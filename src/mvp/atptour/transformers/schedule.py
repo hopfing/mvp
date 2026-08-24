@@ -483,6 +483,82 @@ class ScheduleTransformer(BaseJob):
             )
             has_uid = has_uid.filter(~pl.col("match_uid").is_in(list(replaced_uids)))
 
+        # Drop stale round labels: the source occasionally relabels a match
+        # mid-tournament (US Open 2026 served qualifying as R128 for ~22 hours
+        # before correcting it to Q1). Round is part of match_uid, so the old
+        # label survives as a second uid that no later snapshot refreshes --
+        # frozen on its last-seen status, and re-emitted downstream forever.
+        # Collapse a physical match onto the label from the latest snapshot.
+        #
+        # Keyed on the same sorted player IDs match_uid is built from, plus
+        # draw_type and match_date. A legitimate rematch between the same
+        # players under a different round -- a qualifying meeting followed by a
+        # lucky-loser rematch in the main draw -- has always fallen on its own
+        # date, so it is never collapsed. match_date rather than schedule_day:
+        # it is non-null by schema, where schedule_day is a source-controlled
+        # ordinal that could be renumbered by the same edit that relabels the
+        # round, silently splitting rows that belong together.
+        #
+        # Runs AFTER the replaced-draw-entry pass above, and the order matters:
+        # when an opponent is swapped and the round is then relabelled -- the
+        # US Open 2026 sequence -- this order clears both. Reversing it fixes
+        # the opposite sequence instead and reintroduces the one that actually
+        # happens, so do not swap them.
+        relabelled_uids: set[str] = set()
+        day_scoped = has_uid.filter(pl.col("round") != "RR")
+        if len(day_scoped) > 0:
+            pair_key = (
+                pl.concat_list(
+                    [
+                        pl.col("p1_id"),
+                        pl.col("p2_id"),
+                        pl.col("p1_partner_id"),
+                        pl.col("p2_partner_id"),
+                    ]
+                )
+                .list.drop_nulls()
+                .list.sort()
+                .list.join("_")
+            )
+            relabelled = (
+                day_scoped.with_columns(pair_key.alias("_pair_key"))
+                .group_by(["_pair_key", "draw_type", "match_date"])
+                .agg(
+                    pl.col("match_uid"),
+                    pl.col("round"),
+                    pl.col("snapshot_timestamp"),
+                )
+                .filter(pl.col("round").list.n_unique() > 1)
+            )
+            for row in relabelled.iter_rows(named=True):
+                # Keep the label from the latest snapshot -- but only when one
+                # row is STRICTLY latest. The two cases separate cleanly on
+                # that: a relabel leaves the stale uid behind, because the
+                # source stops serving it and its last-seen snapshot falls
+                # back, whereas two genuinely distinct matches between the same
+                # pair on one date are both re-served in every snapshot and so
+                # tie on the maximum. Collapsing a tie would silently delete a
+                # real match, so leave the group alone and let a later snapshot
+                # separate them.
+                timestamps = row["snapshot_timestamp"]
+                latest = max(timestamps)
+                if timestamps.count(latest) > 1:
+                    continue
+                keep_uid = row["match_uid"][timestamps.index(latest)]
+                relabelled_uids.update(
+                    uid for uid in row["match_uid"] if uid != keep_uid
+                )
+
+        if relabelled_uids:
+            logger.info(
+                "Dropped %d stale round labels for %s",
+                len(relabelled_uids),
+                self.tournament.logging_id,
+            )
+            has_uid = has_uid.filter(
+                ~pl.col("match_uid").is_in(list(relabelled_uids))
+            )
+
         df = pl.concat([has_uid, no_uid])
         df = df.drop("snapshot_timestamp")
         dupes_removed = before - len(df)
