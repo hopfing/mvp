@@ -1,7 +1,7 @@
 winner:
   active:
-    artifact: data/models/exp1206_23_offset_h37_t134.joblib
-    config: models/production/exp1206_23_offset_h37_t134.yaml
+    artifact: data/models/ew1206_23_log_os_22__h19_t238.joblib
+    config: models/production/ew1206_23_log_os_22__h19_t238.yaml
     filters:
       circuit:
       - tour
@@ -10,8 +10,14 @@ winner:
     train_date_range:
       end: '2026-06-30'
       start: '2022-01-01'
-    trained_at: '2026-08-16T03:46:37.269283+00:00'
+    trained_at: '2026-08-24T22:28:38.475514+00:00'
   history:
+  - artifact: data/models/exp1206_23_offset_h37_t134.joblib
+    config: models/production/archive/exp1206_23_offset_h37_t134.yaml
+    replaced_at: '2026-08-24'
+    train_date_range:
+      end: '2026-06-30'
+      start: '2022-01-01'
   - artifact: data/models/exp1206_23_bri_v3_02_t197.joblib
     config: models/production/archive/exp1206_23_bri_v3_02_t197.yaml
     replaced_at: '2026-08-15'

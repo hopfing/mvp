@@ -1,0 +1,60 @@
+data:
+  date_range:
+    start: 2022-01-01
+    end: 2025-12-31  
+  filters:
+    circuit:
+    - tour
+    - chal
+    draw_type: singles
+features:
+  include:
+  - opp_age
+  - opp_opp_elo_faced_avg
+  - opp_surface_matches(days=180)
+  - player_age
+  - player_elo_surface_indoor_diff
+  - player_glicko_rd_diff
+  - player_height_diff
+  - player_level_gap_pts
+  - player_match_count_diff(days=30)
+  - player_opp_elo_faced_avg_diff(days=730)
+  - player_surface_dominance_ratio_diff(days=365)
+  - player_surface_games_margin_per_set_lost(days=365)
+  - player_surface_matches_diff(days=180)
+  - player_surface_style_sp_ue_rate(days=180)
+  - player_svc_first_serve_win_pct(days=30)
+  - player_tourn_pts_service_lost_per_match_diff
+  - player_vs_opp_style_resid_flat_diff
+  - surface_df_pct_sum(days=30)
+model:
+  params:
+    colsample_bylevel: 0.5359775731204489
+    colsample_bynode: 0.6014331973755015
+    colsample_bytree: 0.9370593540701813
+    gamma: 2.318531460723099
+    grow_policy: lossguide
+    learning_rate: 0.01441051004614331
+    max_bin: 128
+    max_delta_step: 5
+    max_depth: 8
+    max_leaves: 208
+    min_child_weight: 12
+    n_estimators: 900
+    random_state: 42
+    reg_alpha: 0.1578344368973031
+    reg_lambda: 1.1651924279016515
+    scale_pos_weight: 0.9524848963898433
+    subsample: 0.6402277440650002
+    tree_method: hist
+    n_jobs: 4
+  type: xgboost
+offset:
+  feature: player_elo_surface_indoor_diff
+  params: {}
+  type: logistic
+target: won
+validation:
+  initial_train_months: 12
+  test_months: 6
+  type: date_expanding
