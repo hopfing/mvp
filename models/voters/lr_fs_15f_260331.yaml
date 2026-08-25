@@ -1,6 +1,6 @@
 data:
   date_range:
-    end: 2025-12-31
+    end: 2026-06-30
     start: 2020-01-01
   filters:
     circuit:
