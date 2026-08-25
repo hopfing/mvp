@@ -831,8 +831,78 @@ class TestMergePredictions:
         assert result["date"][0] == "2024-01-15"  # CT conversion of Jan 16 3am UTC
         assert result["time"][0] == "21:00"
         assert result["tournament_day"][0] == "2024-01-15"
-        # Prediction columns should NOT be updated
+
+    def test_prediction_columns_refreshed_on_open_rows(self):
+        row = _make_sheet_row(
+            match_uid="2024-0001-MS001",
+            prediction="P1",
+            pred_prob="0.65",
+            consensus="1.0",
+            age_diff="-4.2",
+            model_version="v1",
+            predicted_at="2024-01-14T12:00:00",
+            stake="",
+        )
+        existing = _sheet_df([row])
+        # The pick has flipped since the row was first written.
+        new = prepare_predictions(_make_predictions(
+            p1_win_prob=0.40, p2_win_prob=0.60, consensus=0.5,
+            player_age_diff=-4.2, model_version="v2",
+            predicted_at=datetime(2024, 1, 15, 8, 0, 0),
+        ))
+        matches = _matches_df({
+            "match_uid": ["2024-0001-MS001"],
+            "won": [None],
+            "player_id": ["A"],
+            "opp_id": ["B"],
+        })
+        result = merge_predictions(existing, new, matches)
+        assert len(result) == 1
+        assert result["prediction"][0] == "P2"
+        assert result["pred_prob"][0] == "0.6"
+        assert result["consensus"][0] == "0.5"
+        # age_diff is oriented on the pick, so it flips sign with it.
+        assert result["age_diff"][0] == "4.2"
+        assert result["model_version"][0] == "v2"
+        assert result["predicted_at"][0] == "2024-01-15T08:00:00"
+
+    def test_prediction_columns_frozen_once_bet_placed(self):
+        row = _make_sheet_row(
+            match_uid="2024-0001-MS001",
+            prediction="P1",
+            pred_prob="0.65",
+            consensus="1.0",
+            age_diff="-4.2",
+            model_version="v1",
+            predicted_at="2024-01-14T12:00:00",
+            stake="25",
+            date="2024-01-14",
+        )
+        existing = _sheet_df([row])
+        new = prepare_predictions(_make_predictions(
+            p1_win_prob=0.40, p2_win_prob=0.60, consensus=0.5,
+            player_age_diff=-4.2, model_version="v2",
+            predicted_at=datetime(2024, 1, 15, 8, 0, 0),
+            scheduled_datetime=datetime(2024, 1, 16, 3, 0, 0),
+            effective_match_date=date(2024, 1, 16),
+        ))
+        matches = _matches_df({
+            "match_uid": ["2024-0001-MS001"],
+            "won": [None],
+            "player_id": ["A"],
+            "opp_id": ["B"],
+        })
+        result = merge_predictions(existing, new, matches)
+        assert len(result) == 1
+        # Schedule still refreshes on a bet row...
+        assert result["date"][0] == "2024-01-15"
+        # ...but the prediction is frozen at what was bet on.
+        assert result["prediction"][0] == "P1"
         assert result["pred_prob"][0] == "0.65"
+        assert result["consensus"][0] == "1.0"
+        assert result["age_diff"][0] == "-4.2"
+        assert result["model_version"][0] == "v1"
+        assert result["predicted_at"][0] == "2024-01-14T12:00:00"
 
     def test_book2_filled_when_two_books_tie_at_best(self):
         row = _make_sheet_row(match_uid="M1", prediction="P1", stake="", book="", book2="")

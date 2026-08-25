@@ -435,8 +435,21 @@ def merge_predictions(
     new_uids = set(new_predictions["match_uid"].to_list())
     truly_new = new_uids - existing_uids
 
-    # 2a. Update schedule/logistics columns on existing rows
+    # 2a. Update schedule/logistics columns on existing rows. Prediction
+    # columns refresh too, but only while no bet is on the row: the predictor
+    # re-scores pending matches every tick as ratings move, and an open row
+    # should carry its current opinion (the alert edge and kelly_stake read
+    # pred_prob). Once a stake is entered the prediction freezes, so a settled
+    # bet records what the model said when it was placed. age_diff and
+    # model_version/predicted_at travel with the prediction: age_diff is
+    # oriented on the pick and flips sign with it, and the other two describe
+    # which fit produced the number.
     REFRESH_COLUMNS = {"date", "time", "round", "tournament", "surface", "circuit", "tournament_day"}
+    PREDICTION_REFRESH_COLUMNS = {
+        "prediction", "pred_prob", "consensus", "age_diff",
+        "model_version", "predicted_at",
+    }
+    all_refresh = REFRESH_COLUMNS | PREDICTION_REFRESH_COLUMNS
     if existing_uids and len(new_predictions) > 0:
         refresh_lookup: dict[str, dict[str, str]] = {}
         refresh_preds = new_predictions.filter(
@@ -445,17 +458,19 @@ def merge_predictions(
         for row in refresh_preds.iter_rows(named=True):
             refresh_lookup[row["match_uid"]] = {
                 col: str(row[col]) if row[col] is not None else ""
-                for col in REFRESH_COLUMNS
+                for col in all_refresh
                 if col in row
             }
 
         if refresh_lookup:
-            updated_cols: dict[str, list[str]] = {col: [] for col in REFRESH_COLUMNS}
+            updated_cols: dict[str, list[str]] = {col: [] for col in all_refresh}
             for row in existing.iter_rows(named=True):
                 uid = row.get("match_uid", "")
                 refreshed = refresh_lookup.get(uid)
-                for col in REFRESH_COLUMNS:
-                    if refreshed and refreshed.get(col):
+                has_stake = bool((row.get("stake") or "").strip())
+                for col in all_refresh:
+                    frozen = has_stake and col in PREDICTION_REFRESH_COLUMNS
+                    if refreshed and refreshed.get(col) and not frozen:
                         updated_cols[col].append(refreshed[col])
                     else:
                         updated_cols[col].append(row.get(col, ""))
