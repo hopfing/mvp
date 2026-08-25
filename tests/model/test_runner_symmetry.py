@@ -101,6 +101,20 @@ def test_raw_column_is_preserved_and_actually_differs(paired_matches, tmp_path):
     assert max(diffs) > 0, "y_prob_raw is identical to y_prob"
 
 
+def test_fold_predictions_carry_calibrated_column(paired_matches, tmp_path):
+    """y_prob in the fold parquet is pre-calibration by construction (the
+    frame is built before the calibrator runs). y_prob_cal must be the
+    post-calibration OOF, aligned row-for-row with the pred dicts."""
+    results = _run(tmp_path, paired_matches, _CONFIG)
+    df = results["fold_predictions_df"]
+    assert df is not None and "y_prob_cal" in df.columns
+    cal = np.concatenate([p["y_prob"] for p in results["all_predictions"]])
+    assert df.height == len(cal)
+    assert np.allclose(df["y_prob_cal"].to_numpy(), cal)
+    gap = np.abs(df["y_prob_cal"].to_numpy() - df["y_prob"].to_numpy()).max()
+    assert gap > 0, "y_prob_cal equals y_prob -- calibrator never touched it"
+
+
 def test_gate_holds_for_an_even_target(paired_matches, tmp_path):
     """deciding_set is EVEN under the swap. Odd-projecting it would force
     equal probabilities apart; the run must leave it alone rather than raise

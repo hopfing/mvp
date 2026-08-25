@@ -2183,6 +2183,28 @@ class ExperimentRunner:
                 logger.log_artifact(temp_path)
                 run_id = logger.run_id
 
+                # Calibrated OOF alongside the pre-calibration y_prob. The fold
+                # frames were built before the calibration block, which mutates
+                # each pred dict's y_prob in place (nested-CV fit on tuning
+                # folds, deployed calibrator on holdout, both re-projected).
+                # Re-read the same dicts in the same order so the column aligns
+                # row-for-row; if anything reordered them, skip rather than
+                # write a misaligned column. Absent on calibrate=False runs.
+                if self.calibrate and fold_predictions_df is not None:
+                    y_prob_cal = np.concatenate(
+                        [p["y_prob"] for p in all_predictions]
+                    )
+                    if len(y_prob_cal) == fold_predictions_df.height:
+                        fold_predictions_df = fold_predictions_df.with_columns(
+                            pl.Series("y_prob_cal", y_prob_cal).cast(pl.Float64)
+                        )
+                    else:
+                        run_logger.warning(
+                            "fold_predictions: y_prob_cal skipped "
+                            "(%d preds vs %d rows)",
+                            len(y_prob_cal), fold_predictions_df.height,
+                        )
+
                 # Mirror diagnostics + config snapshot to the fingerprint dir
                 # so evaluation artifacts can be looked up by content hash.
                 try:
@@ -2246,6 +2268,7 @@ class ExperimentRunner:
             "last_fold_X_test": X_test,
             "last_fold_y_test": y_test,
             "all_predictions": all_predictions,
+            "fold_predictions_df": fold_predictions_df,
             "per_model_oof": all_per_model_predictions if is_ensemble else [],
             "holdout_metrics": holdout_metrics,
             "holdout_fold_metrics": holdout_fold_metrics,

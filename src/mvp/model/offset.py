@@ -63,9 +63,23 @@ def fit_offset(
     # do not need shrinkage.
     params = {"max_iter": 1000, "C": 1e6, **(cfg.params or {})}
     col = np.asarray(X[:, col_idx], dtype=np.float64).reshape(-1, 1)
+    _require_finite(col, cfg.feature, "the training fold")
     model = LogisticRegression(**params)
     model.fit(col, y)
     return model
+
+
+def _require_finite(col: np.ndarray, feature: str, where: str) -> None:
+    """A null offset value has no log-odds. sklearn would raise an opaque
+    error on fit and return NaN on decision_function; name the fix instead."""
+    bad = int((~np.isfinite(col)).sum())
+    if bad:
+        raise ValueError(
+            f"offset feature {feature!r} is null/non-finite on {bad} of "
+            f"{col.shape[0]} rows in {where}. Every row the offset touches "
+            f"needs a value: restrict rows with `filters: {{{feature}: "
+            f"not_null}}`, or inject the value before scoring."
+        )
 
 
 def offset_margin(model: LogisticRegression, X: np.ndarray, col_idx: int) -> np.ndarray:
@@ -75,4 +89,5 @@ def offset_margin(model: LogisticRegression, X: np.ndarray, col_idx: int) -> np.
     docstring).
     """
     col = np.asarray(X[:, col_idx], dtype=np.float64).reshape(-1, 1)
+    _require_finite(col, f"column {col_idx}", "the rows being scored")
     return model.decision_function(col)

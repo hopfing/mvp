@@ -24,6 +24,24 @@ features:
 {offset}"""
 
 
+class TestOffsetNullRows:
+    """A null offset value has no log-odds; both entry points must say so."""
+
+    def test_fit_offset_names_the_feature_and_the_fix(self):
+        X = np.array([[1.0], [np.nan], [3.0], [4.0]])
+        y = np.array([0, 1, 1, 0])
+        with pytest.raises(ValueError, match=r"player_x.*1 of 4 rows.*not_null"):
+            fit_offset(X, 0, y, OffsetConfig(feature="player_x"))
+
+    def test_offset_margin_refuses_null_rows_at_scoring(self):
+        rng = np.random.default_rng(0)
+        X = rng.normal(size=(50, 1))
+        y = (X[:, 0] + rng.normal(size=50) > 0).astype(int)
+        model = fit_offset(X, 0, y, OffsetConfig(feature="player_x"))
+        with pytest.raises(ValueError, match="rows being scored"):
+            offset_margin(model, np.array([[0.5], [np.nan]]), 0)
+
+
 class TestOffsetConfigValidation:
     """ExperimentConfig.validate_offset."""
 

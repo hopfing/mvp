@@ -59,10 +59,16 @@ def apply_filters(df: pl.DataFrame, filters: dict[str, Any]) -> pl.DataFrame:
       - list: membership (col in values)
       - dict with min/max: range (col >= min, col <= max)
       - dict with abs_min/abs_max: absolute value range (abs(col) >= abs_min, abs(col) <= abs_max)
+      - the string "not_null": keep rows where col is not null. For joinable
+        features that are null where no source row exists (market prior, lead
+        prior) and are consumed by something that cannot take a null, such as
+        an offset's logistic.
     """
     for col, value in filters.items():
         if isinstance(value, list):
             df = df.filter(pl.col(col).is_in(value))
+        elif value == "not_null":
+            df = df.filter(pl.col(col).is_not_null())
         elif isinstance(value, dict):
             if "min" in value:
                 df = df.filter(pl.col(col) >= value["min"])

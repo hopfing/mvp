@@ -17,6 +17,15 @@ def sample_df():
 
 
 class TestApplyFilters:
+    def test_not_null_keeps_only_populated_rows(self):
+        df = pl.DataFrame({"prior": [0.3, None, 1.2, None], "k": [1, 2, 3, 4]})
+        result = apply_filters(df, {"prior": "not_null"})
+        assert result["k"].to_list() == [1, 3]
+
+    def test_not_null_string_is_not_treated_as_equality(self):
+        df = pl.DataFrame({"prior": ["not_null", None]})
+        assert len(apply_filters(df, {"prior": "not_null"})) == 1
+
     def test_range_min_and_max(self, sample_df):
         result = apply_filters(sample_df, {"elo_diff": {"min": -50, "max": 30}})
         assert len(result) == 3
