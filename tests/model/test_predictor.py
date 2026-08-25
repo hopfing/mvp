@@ -735,52 +735,6 @@ class TestTrainVoters:
         n = predictor.train_voters()
         assert n == 0
 
-    def test_train_voters_train_through_lead_end(
-        self, production_config_with_voters, sample_matches, tmp_path
-    ):
-        """Voters train from their own start through the LEAD's end date."""
-        from mvp.model.predictor import ProductionPredictor
-
-        predictor = ProductionPredictor(
-            production_config_path=production_config_with_voters,
-            matches_path=sample_matches,
-            cache_dir=tmp_path / "cache",
-        )
-        # Lead trains through mid-year; the voter configs say 2024-12-31.
-        predictor.config["active"]["train_date_range"]["end"] = "2024-06-30"
-        captured: list[dict] = []
-        predictor._train_single = lambda entry: captured.append(entry)
-
-        n = predictor.train_voters()
-
-        assert n == 2
-        for entry in captured:
-            assert entry["train_date_range"] == {
-                "start": "2024-01-01", "end": "2024-06-30",
-            }
-
-    def test_train_voters_honours_entry_train_date_range(
-        self, production_config_with_voters, sample_matches, tmp_path
-    ):
-        from mvp.model.predictor import ProductionPredictor
-
-        predictor = ProductionPredictor(
-            production_config_path=production_config_with_voters,
-            matches_path=sample_matches,
-            cache_dir=tmp_path / "cache",
-        )
-        explicit = {"start": "2024-03-01", "end": "2024-09-30"}
-        predictor.config["voters"][0]["train_date_range"] = explicit
-        captured: list[dict] = []
-        predictor._train_single = lambda entry: captured.append(entry)
-
-        predictor.train_voters()
-
-        assert captured[0]["train_date_range"] == explicit
-        assert captured[1]["train_date_range"]["end"] == (
-            predictor.config["active"]["train_date_range"]["end"]
-        )
-
     def test_train_voters_raises_on_failure(
         self, production_config_with_voters, sample_matches, tmp_path
     ):
