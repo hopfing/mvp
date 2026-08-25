@@ -45,7 +45,13 @@ from mvp.model.imputation import apply_imputation, build_imputation, fit_imputat
 from mvp.model.models import EnsembleModel, XGBoostMTLModel, get_model
 from mvp.model.offset import fit_offset, offset_margin, resolve_offset_col
 from mvp.model.registry import get_registry
-from mvp.model.symmetry import PairingError, symmetrize
+from mvp.model.symmetry import (
+    PairingError,
+    pair_index,
+    symmetrize,
+    symmetrize_indexed,
+    validate_pairing,
+)
 from mvp.model.splitters import make_splitter
 from mvp.model.weighting import sample_weights_from_frame
 
@@ -89,7 +95,11 @@ def _odd_project_serving(
 
     Must run AFTER the calibrator. Platt is affine in the margin, so applying
     it per row to a complementary pair breaks the invariant unless its
-    intercept is exactly zero (production fits land around 0.02).
+    intercept is exactly zero. Since `_train_single` fits on PROJECTED OOF the
+    intercept is now ~0 by construction (2e-4 on the shipped lead config) and
+    the two orders very nearly agree -- but a SEGMENTED calibrator carries a
+    separate intercept per segment, where the difference is structural, so the
+    ordering stays load-bearing.
 
     `deciding_set` is EVEN under the orientation swap and must not be
     odd-projected; the caller's target gate is enforced here too.
@@ -112,8 +122,53 @@ def _odd_project_serving(
             "for this cycle (the two sides of a match will not sum to 1)", what,
         )
         return probs
-    logger.debug("%s: odd-projected %d pair(s), %d unpaired", what, n_pairs, n_solo)
+    # Unpaired rows are served UNPROJECTED -- the pre-2026-08-23 behaviour, an
+    # arbitrary orientation worth ~2pp on p and a Kelly stake behind it. That
+    # degradation is silent by construction, so it needs a floor above DEBUG:
+    # the live loop runs at DEBUG-off, and a pairing collapse would otherwise
+    # look exactly like a healthy cycle. Same 50% floor the FS path uses.
+    #
+    # The floor, not a non-zero count, is the trigger. A steady trickle of solo
+    # rows is normal (46 of 63,696 settled matches in the production
+    # population), and warning on those would train the eye to skip the line.
+    paired = 2 * n_pairs
+    if paired < 0.5 * len(probs):
+        logger.warning(
+            "%s: only %d of %d scored rows are orientation pairs (%d "
+            "unpaired) -- unpaired rows are served UNAVERAGED and their two "
+            "sides will not sum to 1", what, paired, len(probs), n_solo,
+        )
+    else:
+        logger.debug("%s: odd-projected %d pair(s), %d unpaired", what, n_pairs, n_solo)
     return out
+
+
+def _reproject_oof(pred_dicts: list[dict], on: bool, what: str) -> None:
+    """Re-project OOF fold predictions in place, after a calibrator ran.
+
+    Platt is affine in the margin, so applying it per row to a complementary
+    pair breaks the invariant: sigmoid(a*g + b) + sigmoid(-a*g + b) != 1 unless
+    b = 0. On a projected pool the global fit's b is ~0 (measured 2e-4 on the
+    shipped lead config) and the deviation is negligible, but a SEGMENTED
+    calibrator carries a separate intercept per segment, where it is structural
+    rather than small -- and the nested fold-out fits are separate fits again.
+    Projection is idempotent on an already-complementary pair, so the second
+    application costs nothing where it isn't needed.
+
+    Rescans for the pair index rather than reusing the fold's: eval_filters may
+    have restricted these frames after the index was built, and this runs once
+    per fold, not per trial.
+
+    Mirrors runner.py's post-calibration re-projection. Must be the LAST
+    per-row operation on these predictions.
+    """
+    if not on:
+        return
+    for pred in pred_dicts:
+        pred["y_prob"], _, _ = symmetrize(
+            pred["y_prob"], pred["df"]["match_uid"].to_numpy()
+        )
+    logger.debug("%s: re-projected %d fold(s) after calibration", what, len(pred_dicts))
 
 
 def _offset_margin_kwargs(
@@ -521,6 +576,61 @@ class ProductionPredictor:
         # Drop rows without outcomes
         df = df.filter(pl.col(target_col).is_not_null())
 
+        # Orientation symmetry for the OOF predictions the calibrator is fit
+        # on. Each match appears TWICE, once per player orientation, and the
+        # model is not antisymmetric under that swap, so a pair's two raw
+        # probabilities do not sum to 1 (measured on the shipped lead config:
+        # pair sums 0.73-1.21, |even| component 0.094 in logit space).
+        #
+        # That even component enters the Platt fit as noise in the REGRESSOR,
+        # which attenuates the slope, and its non-zero mean lands in the
+        # intercept. Both are artefacts of the frame, not of the model: fitting
+        # the same pool projected moves slope 0.9377 -> 0.9503 and intercept
+        # +0.0360 -> +0.0002. Serving projects AFTER the calibrator, so the
+        # intercept cancels there and only the attenuated slope ships -- worth
+        # up to 0.30pp on p, always toward 0.5.
+        #
+        # `deciding_set` is EVEN under the swap: both rows carry the identical
+        # match-level label, so the two probabilities should be EQUAL, not
+        # complementary. Odd-projecting it destroys the prediction silently --
+        # symmetrize cannot detect the target itself, so this gate is it.
+        #
+        # Validated ONCE here, matching runner.py. Splits are on
+        # effective_match_date and both rows of a match share it (verified: 0
+        # of 63,650 paired matches in the production population disagree), so a
+        # pair cannot straddle a date-based fold boundary. df_deploy below is
+        # df under a further date restriction, so it inherits this pairing;
+        # the index-based splitters can strand at most the single match sitting
+        # on each row-position cut, and those rows pass through unprojected.
+        symmetry_on = config.target == "won"
+        if symmetry_on:
+            missing = [
+                c for c in ("match_uid", "player_id", "opp_id")
+                if c not in df.columns
+            ]
+            if missing:
+                raise ValueError(
+                    f"orientation symmetry needs {missing} on the training "
+                    "frame; without them OOF predictions cannot be paired and "
+                    "the calibrator would silently fit the even component"
+                )
+            n_pairs, n_solo = validate_pairing(
+                df["match_uid"].to_numpy(),
+                df[target_col].to_numpy(),
+                df["player_id"].to_numpy(),
+                df["opp_id"].to_numpy(),
+                df["effective_match_date"].to_numpy(),
+            )
+            logger.info(
+                "Orientation pairing validated: %d pairs, %d unpaired row(s)",
+                n_pairs, n_solo,
+            )
+        else:
+            logger.info(
+                "target=%s is not odd under the orientation swap; OOF "
+                "predictions are NOT symmetrized", config.target,
+            )
+
         # For date_sliding validation, the deployed model fits on the last
         # train_months window — same shape as one sliding fold — while
         # temporal CV continues to span the full pool. Matches live
@@ -807,6 +917,48 @@ class ProductionPredictor:
                     y_prob_test = fold_model.predict_proba(X_test_fold)
                     sub_preds = []
 
+                # Odd-project before ANYTHING else touches these rows, so the
+                # calibrator, the nested-CV folds and the cal_tiers sidecar all
+                # describe the same quantity serving computes.
+                #
+                # Projected on the FULL test fold, ahead of the eval_filters
+                # restriction below. runner.py restricts before predicting and
+                # therefore projects the restricted frame; here both sides are
+                # already scored, and an eval_filter on an ANTISYMMETRIC
+                # feature (`..._diff > 0`) keeps exactly one side per match, so
+                # filtering first would collapse the pairing and leave the
+                # specialist calibrator -- the case eval_filters exists for --
+                # fit on exactly the unprojected values this removes. Serving
+                # projects across the whole slate, so projecting first is also
+                # the closer match to it.
+                #
+                # Each sub of an ensemble is non-antisymmetric in its own
+                # right, so each is projected separately. Complementarity
+                # survives probability-space averaging, so the re-averaged
+                # ensemble OOF below stays complementary.
+                if symmetry_on:
+                    pair_i, pair_j, pair_solo = pair_index(
+                        test_df["match_uid"].to_numpy()
+                    )
+                    # Unpaired rows pass through UNPROJECTED and keep the even
+                    # component, so a collapsed pairing silently reverts this
+                    # fold to the old behaviour rather than failing. Warn below
+                    # a floor; the healthy path already logs its pair count
+                    # once, up front.
+                    if 2 * pair_i.size < 0.5 * len(test_df):
+                        logger.warning(
+                            "Temporal CV fold %d: only %d of %d test rows are "
+                            "orientation pairs (%d unpaired) -- unpaired rows "
+                            "enter the calibrator UNPROJECTED and carry the "
+                            "even component",
+                            fold_idx + 1, 2 * pair_i.size, len(test_df),
+                            pair_solo.size,
+                        )
+                    y_prob_test = symmetrize_indexed(y_prob_test, pair_i, pair_j)
+                    sub_preds = [
+                        symmetrize_indexed(sp, pair_i, pair_j) for sp in sub_preds
+                    ]
+
                 # A model whose training distribution is deliberately skewed
                 # (group sample_weight toward one surface/court cell) serves a
                 # narrower population than it trains on. The FIT above stays on
@@ -890,6 +1042,15 @@ class ProductionPredictor:
                         per_sub_fold_predictions[sub_idx], sub_cal_cfg
                     )
                     model.set_sub_calibrator(sub_idx, sub_deployed_cal)
+                    # The nested fits just reassigned each fold's y_prob to a
+                    # per-row calibrated value; restore complementarity before
+                    # these are averaged into the ensemble OOF, or the top-level
+                    # fit inherits whatever intercept the sub cals introduced.
+                    _reproject_oof(
+                        per_sub_fold_predictions[sub_idx],
+                        symmetry_on,
+                        f"sub {sub_idx} cal",
+                    )
 
                 strategy = (config.model.params or {}).get("strategy", "average")
                 for fold_idx, ensemble_pred_dict in enumerate(fold_predictions):
@@ -937,6 +1098,11 @@ class ProductionPredictor:
                     "n_thresholds=%d, y range=[%.4f, %.4f]",
                     calibrator.n_thresholds, calibrator.y_min, calibrator.y_max,
                 )
+
+            # Last per-row operation on the OOF buffer: the nested fold-out
+            # fits above reassigned every y_prob, and calibrated_preds is what
+            # the cal_tiers sidecar is computed from.
+            _reproject_oof(fold_predictions, symmetry_on, "temporal CV cal")
 
             calibrated_preds = fold_predictions
         else:
@@ -1023,6 +1189,36 @@ class ProductionPredictor:
                 else:
                     oof_probs[val_idx] = fold_model.predict_proba(X[val_idx])
 
+            # Odd-project the completed OOF vector, same reasoning as the
+            # temporal-CV path. Projected once over the whole vector rather
+            # than per fold: this splitter shuffles, so a match's two rows can
+            # land in different folds, and each row's prediction is still
+            # out-of-fold for its own row either way.
+            #
+            # Aligned with df_deploy, which is what X/y and every val_idx index
+            # into. NB this path's OOF is leaky for a paired frame in a way
+            # projection does not fix and does not worsen: a random split puts
+            # roughly half of each test row's TWIN in the training fold, and for
+            # `won` the twin carries the flipped outcome of the same match.
+            # Untouched here because it is a splitter choice, not a symmetry
+            # one; it is also why every production config carries a temporal
+            # validation block and takes the branch above.
+            if symmetry_on:
+                oof_probs, n_pairs_kf, n_solo_kf = symmetrize(
+                    oof_probs, df_deploy["match_uid"].to_numpy()
+                )
+                if 2 * n_pairs_kf < 0.5 * len(df_deploy):
+                    logger.warning(
+                        "K-fold OOF: only %d of %d rows are orientation pairs "
+                        "(%d unpaired) -- unpaired rows enter the calibrator "
+                        "UNPROJECTED and carry the even component",
+                        2 * n_pairs_kf, len(df_deploy), n_solo_kf,
+                    )
+                per_sub_oof_probs = [
+                    symmetrize(sp, df_deploy["match_uid"].to_numpy())[0]
+                    for sp in per_sub_oof_probs
+                ]
+
             # Per-sub calibration (ensemble-only). Fit each sub's deployed
             # calibrator on its OOF and attach to model. Then recompute
             # ensemble OOF = mean of sub-cal'd outputs so top-level cal fits
@@ -1068,6 +1264,14 @@ class ProductionPredictor:
                     oof_probs = np.average(stacked, axis=0, weights=model._weights)
                 else:
                     oof_probs = np.mean(stacked, axis=0)
+                # Each sub cal is affine in the margin at best, so applying it
+                # per row broke the complementarity the projection above
+                # established. Restore it before the top-level fit, or that fit
+                # inherits the sub cals' intercepts. See _reproject_oof.
+                if symmetry_on:
+                    oof_probs, _, _ = symmetrize(
+                        oof_probs, df_deploy["match_uid"].to_numpy()
+                    )
 
             calibrator = make_calibrator(cal_cfg) if cal_cfg else PlattCalibrator()
             if isinstance(
