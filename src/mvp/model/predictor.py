@@ -1550,20 +1550,30 @@ class ProductionPredictor:
         return result
 
     def train_voters(self) -> int:
-        """Train all voter models using each config's native filters."""
+        """Train all voter models using each config's native filters.
+
+        A voter trains from its own config's start date through the SAME end
+        date as the lead (``active.train_date_range.end``). The voter config's
+        own ``date_range.end`` is the discovery window it was selected on, not
+        a deploy constraint -- honouring it here left the voter months behind
+        the lead on every retrain. A voter entry may carry an explicit
+        ``train_date_range`` (the shape the backtest passes) to override both.
+        """
         voters = self.config.get("voters", [])
+        lead_end = self.config["active"]["train_date_range"]["end"]
         for voter in voters:
             name = voter.get("name", "unnamed")
             logger.info("Training voter: %s", name)
             # Build training entry: config's own data.filters + voter's date range/artifact
             voter_config = ExperimentConfig.from_file(voter["config"])
+            train_range = voter.get("train_date_range") or {
+                "start": voter_config.data.date_range.start.isoformat(),
+                "end": str(lead_end),
+            }
             train_entry = {
                 "config": voter["config"],
                 "artifact": voter["artifact"],
-                "train_date_range": {
-                    "start": voter_config.data.date_range.start.isoformat(),
-                    "end": voter_config.data.date_range.end.isoformat(),
-                },
+                "train_date_range": train_range,
                 "filters": voter_config.data.filters,
             }
             self._train_single(train_entry)
