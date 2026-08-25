@@ -22,6 +22,26 @@ def _make_bets() -> pl.DataFrame:
     })
 
 
+def test_filter_model_prefers_frozen_bet_model_version():
+    from mvp.analysis.dashboard.bets import _filter_model
+
+    ds = pl.DataFrame({
+        "match_uid": ["m1", "m2", "m3"],
+        "model_version": ["new", "new", "new"],
+        "bet_model_version": ["old", "new", None],
+    })
+    assert _filter_model(ds, "new")["match_uid"].to_list() == ["m2"]
+    assert _filter_model(ds, "old")["match_uid"].to_list() == ["m1"]
+    assert _filter_model(ds, None).height == 3
+
+
+def test_filter_model_falls_back_to_model_version():
+    from mvp.analysis.dashboard.bets import _filter_model
+
+    ds = pl.DataFrame({"match_uid": ["m1", "m2"], "model_version": ["old", "new"]})
+    assert _filter_model(ds, "new")["match_uid"].to_list() == ["m2"]
+
+
 def test_flipped_bets_selects_only_flips():
     from mvp.analysis.dashboard.bets import _flipped_bets
 

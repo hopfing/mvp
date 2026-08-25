@@ -23,6 +23,10 @@ SHEET_COLUMNS = [
     # from predictions.parquet's p1_win_prob that gets overwritten when the
     # live prediction drifts/flips before the match settles.
     "prediction",
+    # Frozen with `prediction` at stake entry: which fit was live when the bet
+    # was placed. predictions.parquet's model_version is replaced whenever a
+    # later lead re-scores a still-pending match, so it can't attribute bets.
+    "model_version",
     "bet_side",
     "bet_odds",
     "stake",
@@ -217,8 +221,15 @@ def _join_sheet_data(ds: pl.DataFrame, sheet_data: pl.DataFrame | None) -> pl.Da
 
     # Rename the sheet's frozen model pick so it can't be confused with the
     # live pred_side computed downstream from (overwritable) predictions.parquet.
+    renames = {}
     if "prediction" in sheet_subset.columns:
-        sheet_subset = sheet_subset.rename({"prediction": "bet_pred_side"})
+        renames["prediction"] = "bet_pred_side"
+    # Same for the sheet's frozen model_version, so `model_version` keeps
+    # describing the fit behind this row's p1_win_prob.
+    if "model_version" in sheet_subset.columns:
+        renames["model_version"] = "bet_model_version"
+    if renames:
+        sheet_subset = sheet_subset.rename(renames)
 
     ds = ds.join(sheet_subset, on="match_uid", how="left")
 

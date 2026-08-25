@@ -20,6 +20,21 @@ def _filter_bets(ds: pl.DataFrame) -> pl.DataFrame:
     return bets
 
 
+def _filter_model(ds: pl.DataFrame, model_version: str | None) -> pl.DataFrame:
+    """Filter to one model, attributing bets to the model live when placed.
+
+    ``bet_model_version`` is the sheet's copy, frozen at stake entry.
+    ``model_version`` comes from predictions.parquet, which is replaced when a
+    later lead re-scores a still-pending match — filtering on it hands the
+    previous lead's open bets to the new one. Falls back to ``model_version``
+    on datasets built before the column existed.
+    """
+    if model_version is None:
+        return ds
+    col = "bet_model_version" if "bet_model_version" in ds.columns else "model_version"
+    return ds.filter(pl.col(col) == model_version)
+
+
 def _headline_stats(bets: pl.DataFrame) -> dict:
     """Compute headline stats from filtered bets."""
     n = len(bets)
@@ -851,8 +866,7 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
 
     # --- Controls ---
     model_version = model_selector(ds, key="bets")
-    if model_version is not None:
-        ds = ds.filter(pl.col("model_version") == model_version)
+    ds = _filter_model(ds, model_version)
 
     def _on_gran_change():
         gran = st.session_state["bets_granularity"]

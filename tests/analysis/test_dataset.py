@@ -63,6 +63,26 @@ class TestUnifiedDataset:
         m2 = ds.filter(pl.col("match_uid") == "m2")
         assert m2["bet_pred_side"][0] == "P2"
 
+    def test_sheet_model_version_carried_as_bet_model_version(
+        self, sample_predictions, sample_sheet_data
+    ):
+        """The sheet's frozen `model_version` joins as `bet_model_version`;
+        `model_version` still describes the prediction row."""
+        from mvp.analysis.dataset import build_analysis_dataset
+
+        ds = build_analysis_dataset(
+            predictions=sample_predictions.with_columns(
+                pl.lit("new_model").alias("model_version")
+            ),
+            sheet_data=sample_sheet_data,
+        )
+
+        assert "bet_model_version" in ds.columns
+        assert "model_version_right" not in ds.columns
+        m1 = ds.filter(pl.col("match_uid") == "m1")
+        assert m1["bet_model_version"][0] == "old_model"
+        assert m1["model_version"][0] == "new_model"
+
     def test_circuit_normalization_from_sheet(
         self, sample_predictions, sample_sheet_data
     ):

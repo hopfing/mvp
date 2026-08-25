@@ -37,6 +37,7 @@ def sample_sheet_data():
         "match_uid": ["m1", "m2", "m3"],
         "circuit": ["CH", "ATP", "CH"],
         "prediction": ["P1", "P2", ""],
+        "model_version": ["old_model", "old_model", "new_model"],
         "p1_odds": ["2.10", "1.80", ""],
         "p2_odds": ["1.75", "2.00", ""],
         "bet_side": ["P1", "P2", ""],
