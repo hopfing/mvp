@@ -126,20 +126,26 @@ def _col_letter(index: int) -> str:
 COL_LETTERS = {col["name"]: _col_letter(i) for i, col in enumerate(COLUMN_SCHEMA)}
 
 
-def _resolve_lead_sidecar_path(production_yaml: Path = Path("production.yaml")) -> Path | None:
-    """Locate the cal_tiers sidecar for the production lead artifact.
+def _resolve_shipped_sidecar_path(production_yaml: Path = Path("production.yaml")) -> Path | None:
+    """Locate the cal_tiers sidecar for the fit that ships the probability.
 
-    Reads `winner.active.artifact` (or top-level `active.artifact` for the
-    flat config shape) and returns `<artifact_dir>/<artifact_stem>_cal_tiers.json`
-    if it exists. Returns None when the config or sidecar is missing.
+    That is the LAST residual stage when `winner.stages` is configured — the
+    predictor stamps `model_version` with the stage that produced the shipped
+    number, so the tier must describe that same fit — else `winner.active`
+    (or top-level `active` for the flat config shape). Returns
+    `<artifact_dir>/<artifact_stem>_cal_tiers.json` if it exists, and None
+    when the config or the sidecar is missing.
     """
     if not production_yaml.exists():
         return None
     with open(production_yaml) as f:
         raw = yaml.safe_load(f) or {}
     section = raw.get("winner") or raw
-    active = (section or {}).get("active") or {}
-    artifact = active.get("artifact")
+    stages = (section or {}).get("stages") or []
+    if stages:
+        artifact = (stages[-1] or {}).get("artifact")
+    else:
+        artifact = ((section or {}).get("active") or {}).get("artifact")
     if not artifact:
         return None
     p = Path(artifact)
@@ -702,7 +708,7 @@ def merge_predictions(
     # (frozen-once-set). Crucially we must NOT fill blanks on pre-existing
     # rows: those bets were placed under earlier model state, and stamping
     # them with today's sidecar values poisons the historical analysis.
-    sidecar_path = _resolve_lead_sidecar_path()
+    sidecar_path = _resolve_shipped_sidecar_path()
     cal_lookup = load_cal_tiers_from_path(sidecar_path) if sidecar_path else {}
     if len(merged) > 0:
         new_cell_cal: list[str] = []

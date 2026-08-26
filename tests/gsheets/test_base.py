@@ -14,6 +14,7 @@ from mvp.gsheets.base import (
     PIPELINE_COLUMN_ORDER,
     PIPELINE_COLUMNS,
     USER_COLUMNS,
+    _resolve_shipped_sidecar_path,
     generate_formulas,
     merge_predictions,
     prepare_predictions,
@@ -571,7 +572,7 @@ class TestMergePredictions:
             },
         }))
         monkeypatch.setattr(
-            "mvp.gsheets.base._resolve_lead_sidecar_path", lambda: sidecar
+            "mvp.gsheets.base._resolve_shipped_sidecar_path", lambda: sidecar
         )
 
         existing = _sheet_df([])
@@ -603,7 +604,7 @@ class TestMergePredictions:
             },
         }))
         monkeypatch.setattr(
-            "mvp.gsheets.base._resolve_lead_sidecar_path", lambda: sidecar
+            "mvp.gsheets.base._resolve_shipped_sidecar_path", lambda: sidecar
         )
 
         row = _make_sheet_row(
@@ -641,7 +642,7 @@ class TestMergePredictions:
             },
         }))
         monkeypatch.setattr(
-            "mvp.gsheets.base._resolve_lead_sidecar_path", lambda: sidecar
+            "mvp.gsheets.base._resolve_shipped_sidecar_path", lambda: sidecar
         )
 
         # Pre-existing row from before the cal_tier feature shipped: blank
@@ -671,7 +672,7 @@ class TestMergePredictions:
 
     def test_cal_tier_blank_when_no_sidecar(self, monkeypatch):
         monkeypatch.setattr(
-            "mvp.gsheets.base._resolve_lead_sidecar_path", lambda: None
+            "mvp.gsheets.base._resolve_shipped_sidecar_path", lambda: None
         )
 
         existing = _sheet_df([])
@@ -1002,6 +1003,65 @@ class TestMergePredictions:
         result = merge_predictions(existing, new, matches)
         m1 = result.filter(pl.col("match_uid") == "M1")
         assert m1["p1_odds"][0] == "2.00"
+
+
+class TestResolveShippedSidecarPath:
+    """The tier must describe the fit that ships the probability, which is the
+    last residual stage whenever `winner.stages` is configured."""
+
+    @staticmethod
+    def _write(tmp_path, name):
+        (tmp_path / f"{name}_cal_tiers.json").write_text("{}")
+        return tmp_path / f"{name}.joblib"
+
+    def _yaml(self, tmp_path, body):
+        cfg = tmp_path / "production.yaml"
+        cfg.write_text(body)
+        return cfg
+
+    def test_prefers_last_stage_over_lead(self, tmp_path):
+        lead = self._write(tmp_path, "lead")
+        s1 = self._write(tmp_path, "stage1")
+        s2 = self._write(tmp_path, "stage2")
+        cfg = self._yaml(tmp_path, f"""
+winner:
+  active:
+    artifact: {lead.as_posix()}
+  stages:
+  - artifact: {s1.as_posix()}
+  - artifact: {s2.as_posix()}
+""")
+        assert _resolve_shipped_sidecar_path(cfg) == tmp_path / "stage2_cal_tiers.json"
+
+    def test_falls_back_to_active_without_stages(self, tmp_path):
+        lead = self._write(tmp_path, "lead")
+        cfg = self._yaml(tmp_path, f"""
+winner:
+  active:
+    artifact: {lead.as_posix()}
+""")
+        assert _resolve_shipped_sidecar_path(cfg) == tmp_path / "lead_cal_tiers.json"
+
+    def test_empty_stages_list_falls_back_to_active(self, tmp_path):
+        lead = self._write(tmp_path, "lead")
+        cfg = self._yaml(tmp_path, f"""
+winner:
+  active:
+    artifact: {lead.as_posix()}
+  stages: []
+""")
+        assert _resolve_shipped_sidecar_path(cfg) == tmp_path / "lead_cal_tiers.json"
+
+    def test_none_when_stage_sidecar_missing(self, tmp_path):
+        lead = self._write(tmp_path, "lead")
+        cfg = self._yaml(tmp_path, f"""
+winner:
+  active:
+    artifact: {lead.as_posix()}
+  stages:
+  - artifact: {(tmp_path / "nosidecar.joblib").as_posix()}
+""")
+        assert _resolve_shipped_sidecar_path(cfg) is None
 
 
 class TestColLetters:
