@@ -884,6 +884,12 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         "--parallel-candidates", type=int, default=None,
         help="Concurrent candidate fits in forward selection (None=auto, 1=serial)",
     )
+    exp_parser.add_argument(
+        "--nested-calibration", action="store_true",
+        help="Run the FS protocol nested inside each outer fold and report "
+             "headline vs realized gain (writes a JSON report; no model "
+             "config is produced)",
+    )
     resume_group = exp_parser.add_mutually_exclusive_group()
     resume_group.add_argument(
         "--resume", action="store_true",
@@ -2464,6 +2470,24 @@ def _cmd_experiment_classification(
     if not output_name.endswith(".yaml"):
         output_name = f"{output_name}.yaml"
     output_path = MODEL_DIR / output_name
+
+    if getattr(args, "nested_calibration", False):
+        from mvp.model.discovery.nested_calibration import run_nested_calibration
+
+        report = run_nested_calibration(
+            config_path=config_path,
+            run_dir=checkpoint_path.parent,
+            forward_max_workers=getattr(args, "parallel_candidates", None),
+            verbose=args.verbose,
+        )
+        evaluated = sum(1 for r in report.folds if r.gap is not None)
+        print(
+            f"\nNested calibration: {evaluated}/{len(report.folds)} folds "
+            f"evaluated; mean gap {report.mean_gap}, "
+            f"median gap {report.median_gap}"
+        )
+        print(f"Report: {checkpoint_path.parent / 'nested_calibration_report.json'}")
+        return 0
 
     discovery = FeatureDiscovery(
         config_path=config_path,
