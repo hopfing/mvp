@@ -30,17 +30,25 @@ if TYPE_CHECKING:  # pragma: no cover
 def resolve_offset_col(feature_cols: list[str], feature: str) -> int:
     """Index of the offset feature within `feature_cols`.
 
+    `feature` is a spec; a parameterised one (e.g. the residual stage's
+    ``player_prior_logit(model=<stem>)``) names a column that differs from
+    the spec, so the spec is resolved to its column first.
+
     Resolve against `feature_cols`, never the wider `augmented_cols`
     (`feature_cols + aux_base_col_names`): the two have different truncation
     points, and X is truncated to `len(feature_cols)` before the model sees it.
     """
+    from mvp.model.engine import build_column_name, parse_feature_spec
+
+    _prefix, _base, full_name, params = parse_feature_spec(feature)
+    column = build_column_name(full_name, params)
     try:
-        return feature_cols.index(feature)
+        return feature_cols.index(column)
     except ValueError:
         raise ValueError(
-            f"offset feature {feature!r} is not in feature_cols. It must be in "
-            f"features.include and must not be compute_only. Got "
-            f"{len(feature_cols)} columns."
+            f"offset feature {feature!r} (column {column!r}) is not in "
+            f"feature_cols. It must be in features.include and must not be "
+            f"compute_only. Got {len(feature_cols)} columns."
         ) from None
 
 

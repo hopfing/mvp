@@ -33,6 +33,12 @@ class FeatureDef:
     # code/cutoff change like any feature (no separate artifact to sync).
     transform: bool = False
     outputs: list[str] = field(default_factory=list)
+    # Transform-only: ``(**params) -> str`` naming the external artifacts the
+    # output depends on (e.g. an evaluation fingerprint + file mtimes). The
+    # engine stores it in the cache manifest and recomputes that one column
+    # group when it changes, so a joined-in artifact cannot go stale under
+    # the standard code/data cache key.
+    cache_salt: Callable[..., str] | None = None
     # Raw matches.parquet columns a transform's func reads directly (e.g.
     # "opp_elo"). Unlike an expr feature, a (df)->df transform can't be
     # introspected for its column needs, so it declares them; the engine adds
@@ -264,6 +270,7 @@ def register_transform(
     raw_columns: list[str] | None = None,
     params: list[str] | None = None,
     description: str = "",
+    cache_salt: Callable[..., str] | None = None,
 ) -> None:
     """Register a whole-matrix transform feature (``func``: df[, **params] -> df).
 
@@ -292,5 +299,6 @@ def register_transform(
             transform=True,
             outputs=outputs,
             transform_columns=raw_columns or [],
+            cache_salt=cache_salt,
         )
     )

@@ -11,6 +11,7 @@ from pydantic import BaseModel, field_validator, model_validator
 
 from mvp.model.config import EarlyStoppingConfig, MTLConfig, SampleWeightConfig
 from mvp.model.metrics import default_min_delta, metric_direction
+from mvp.model.prior_naming import prior_column, prior_spec
 
 logger = logging.getLogger(__name__)
 
@@ -345,11 +346,24 @@ class OffsetConfig(BaseModel):
     — which defeats the point of running an offset at all.
     """
 
-    feature: str
+    feature: str | None = None
+    # Residual-stage form: a config stem (or evaluation fingerprint) whose
+    # out-of-sample log-odds is the offset (features/prior.py). Expands to
+    # `feature = player_prior_logit(model=<stem>)`; DiscoveryConfig pins the
+    # column in discovery.features.base and filters rows to where it exists.
+    prior: str | None = None
     type: Literal["logistic"] = "logistic"
     # Passed to sklearn LogisticRegression. Default is slope + intercept, which
     # matches the functional form Elo/Glicko composites are constructed around.
     params: dict[str, Any] = {}
+
+    @model_validator(mode="after")
+    def resolve_prior(self) -> "OffsetConfig":
+        if (self.feature is None) == (self.prior is None):
+            raise ValueError("offset: set exactly one of `feature` or `prior`")
+        if self.prior is not None:
+            self.feature = prior_spec(self.prior)
+        return self
 
 
 class DiscoveryConfig(BaseModel):
@@ -405,6 +419,14 @@ class DiscoveryConfig(BaseModel):
                 "misalign with the folds they were fit on. Run one or the other."
             )
         feats = self.discovery.features
+        if off.prior is not None:
+            # Residual-stage sugar: pin the base model's column and restrict
+            # rows to where it exists (see model.config.OffsetConfig.prior).
+            if off.feature not in feats.base:
+                feats.base = [*feats.base, off.feature]
+            filters = dict(self.data.filters or {})
+            filters.setdefault(prior_column(off.prior), "not_null")
+            self.data.filters = filters
         if off.feature not in feats.base:
             raise ValueError(
                 f"offset.feature={off.feature!r} must also appear in "

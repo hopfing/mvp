@@ -528,14 +528,25 @@ class FeatureEngine:
         safe_name = re.sub(r"[^\w]", "_", spec)
         return self.cache_dir / f"{safe_name}.parquet"
 
-    def _is_cached(self, spec: str, cache_key: str) -> bool:
-        """Check if a feature is cached and valid."""
+    def _is_cached(
+        self, spec: str, cache_key: str, salt: str | None = None
+    ) -> bool:
+        """Check if a feature is cached and valid. ``salt`` (transforms with
+        a ``cache_salt``) must match what the manifest recorded at compute
+        time: it names external artifacts the standard key cannot see."""
         if self._manifest.get("cache_key") != cache_key:
             return False
-        if spec not in self._manifest.get("features", {}):
+        entry = self._manifest.get("features", {}).get(spec)
+        if entry is None:
+            return False
+        if salt is not None and entry.get("salt") != salt:
             return False
         cache_path = self._get_cache_path(spec)
         return cache_path.exists()
+
+    @staticmethod
+    def _transform_salt(feature_def, params: dict) -> str | None:
+        return feature_def.cache_salt(**params) if feature_def.cache_salt else None
 
     def _load_cached_feature(self, spec: str) -> pl.DataFrame:
         """Load a cached feature from disk."""
@@ -543,7 +554,8 @@ class FeatureEngine:
         return pl.read_parquet(cache_path)
 
     def _cache_feature(
-        self, spec: str, df: pl.DataFrame, columns: list[str], cache_key: str
+        self, spec: str, df: pl.DataFrame, columns: list[str], cache_key: str,
+        salt: str | None = None,
     ) -> None:
         """Cache a computed feature to disk."""
         cache_path = self._get_cache_path(spec)
@@ -553,10 +565,10 @@ class FeatureEngine:
         self._manifest["cache_key"] = cache_key
         if "features" not in self._manifest:
             self._manifest["features"] = {}
-        self._manifest["features"][spec] = {
-            "columns": columns,
-            "path": str(cache_path),
-        }
+        entry = {"columns": columns, "path": str(cache_path)}
+        if salt is not None:
+            entry["salt"] = salt
+        self._manifest["features"][spec] = entry
         self._save_manifest()
 
     def _compute_and_cache_feature(
@@ -1104,7 +1116,8 @@ class FeatureEngine:
             if params:
                 param_str = ",".join(f"{k}={v}" for k, v in params.items())
                 cache_spec = f"{base_name}({param_str})"
-            if self._is_cached(cache_spec, cache_key):
+            salt = self._transform_salt(feature_def, params)
+            if self._is_cached(cache_spec, cache_key, salt):
                 continue
 
             dep_cols_before = set(df.columns)
@@ -1128,7 +1141,7 @@ class FeatureEngine:
             self._feature_timings.append(
                 ("transform", cache_spec, time.perf_counter() - t0_t)
             )
-            self._cache_feature(cache_spec, out, output_cols, cache_key)
+            self._cache_feature(cache_spec, out, output_cols, cache_key, salt=salt)
 
             added_cols = [c for c in df.columns if c not in dep_cols_before]
             if added_cols:
@@ -1580,7 +1593,8 @@ class FeatureEngine:
                 output_cols = [
                     build_column_name(o, params) for o in feature_def.outputs
                 ]
-            if self._is_cached(cache_spec, cache_key):
+            salt = self._transform_salt(feature_def, params)
+            if self._is_cached(cache_spec, cache_key, salt):
                 cached_out = self._load_cached_feature(cache_spec).select(
                     ["match_uid", "player_id"] + output_cols
                 )
@@ -1591,7 +1605,7 @@ class FeatureEngine:
                 out = out.rename(
                     {o: build_column_name(o, params) for o in feature_def.outputs}
                 )
-            self._cache_feature(cache_spec, out, output_cols, cache_key)
+            self._cache_feature(cache_spec, out, output_cols, cache_key, salt=salt)
             df = df.join(out, on=["match_uid", "player_id"], how="left")
 
         elapsed = time.perf_counter() - t0

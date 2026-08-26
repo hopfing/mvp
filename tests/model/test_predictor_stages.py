@@ -29,11 +29,13 @@ import yaml
 def ensure_features_registered(isolated_registry):
     import mvp.model.features.elo
     import mvp.model.features.lead_prior
+    import mvp.model.features.prior
     import mvp.model.features.static
 
     importlib.reload(mvp.model.features.elo)
     importlib.reload(mvp.model.features.static)
     importlib.reload(mvp.model.features.lead_prior)
+    importlib.reload(mvp.model.features.prior)
 
 
 def _frame(n_settled: int, n_pending: int) -> tuple[pl.DataFrame, np.ndarray]:
@@ -317,5 +319,106 @@ class TestFallbacks:
             _predictor(prod, world).train()
 
         assert any(
-            "built from some_other_lead" in r.message for r in caplog.records
+            "prior of some_other_lead" in r.message for r in caplog.records
+        )
+
+
+class TestChain:
+    def test_second_stage_offsets_on_the_first_by_stem(self, world, monkeypatch, caplog):
+        """Stage 2 says `offset.prior: stage1`; its prior resolves from
+        stage 1's config file to that config's evaluation fingerprint, the
+        fold OOF there is spliced into the prior column, the OOF rule is
+        checked against it, and at serve time stage 2 conditions on stage
+        1's live output (chain), so pending matches ship as stage2."""
+        import mvp.model.features.prior as pr
+
+        tmp = world["tmp"]
+        prod = _write_configs(tmp, with_stage=True)
+        (tmp / "stage2.yaml").write_text(yaml.dump({
+            "data": {"date_range": _RANGE, "filters": _FILTERS},
+            "features": {"include": ["player_elo_surface_diff"]},
+            "model": _XGB,
+            "offset": {"prior": "stage1"},
+            "target": "won",
+        }))
+        prod_d = yaml.safe_load(prod.read_text())
+        prod_d["stages"].append({
+            "config": str(tmp / "stage2.yaml"),
+            "artifact": str(tmp / "stage2.joblib"),
+            "train_date_range": _RANGE,
+            "filters": _FILTERS,  # no prior filter here: the config's sugar covers training
+        })
+        prod.write_text(yaml.dump(prod_d))
+
+        # stage 1's "evaluation": one fold of calibrated OOF over the settled
+        # rows, where the `model` command would have written it for that config
+        monkeypatch.setattr(pr, "CONFIG_DIRS", (tmp,))
+        monkeypatch.setattr(pr, "EVALUATIONS_ROOT", tmp / "evals")
+        pr._cached_frame.cache_clear()
+        src = pr.resolve_prior("stage1")
+        src.eval_dir.mkdir(parents=True)
+        oof = _prior_from(world["frame"], world["p_true"], in_sample=False)
+        pl.DataFrame({
+            "match_uid": oof["match_uid"], "player_id": oof["player_id"],
+            "effective_match_date": oof["effective_match_date"],
+            "fold_idx": 0, "y_prob_cal": oof["lead_prob"],
+        }).write_parquet(src.fold_predictions)
+
+        predictor = _predictor(prod, world)
+        with caplog.at_level(logging.INFO, logger="mvp.model.predictor"):
+            predictor.train()
+        assert (tmp / "stage2.joblib").exists()
+        assert any(
+            "stage2: OOF prior check passed" in r.message for r in caplog.records
+        )
+        assert not any("model before it in the chain" in r.message for r in caplog.records)
+
+        preds = predictor.predict()
+        assert len(preds) == 40
+        assert set(preds["model_version"].to_list()) == {"stage2"}
+        assert predictor._stage_errors == []
+        p1 = preds["p1_win_prob"].to_numpy()
+        lead = preds["lead_p1_win_prob"].to_numpy()
+        np.testing.assert_allclose(p1 + preds["p2_win_prob"].to_numpy(), 1.0)
+        assert np.corrcoef(_lg(p1), _lg(lead))[0, 1] > 0.9
+
+    def test_stage_pointing_at_the_wrong_base_warns(self, world, monkeypatch, caplog):
+        """A chain check: stage 2's prior must be the model before it."""
+        import mvp.model.features.prior as pr
+
+        tmp = world["tmp"]
+        prod = _write_configs(tmp, with_stage=True)
+        # a stage that offsets on the LEAD's stem while sitting after stage 1
+        (tmp / "stage2.yaml").write_text(yaml.dump({
+            "data": {"date_range": _RANGE, "filters": _FILTERS},
+            "features": {"include": ["player_elo_surface_diff"]},
+            "model": _XGB,
+            "offset": {"prior": "lead"},
+            "target": "won",
+        }))
+        prod_d = yaml.safe_load(prod.read_text())
+        prod_d["stages"].append({
+            "config": str(tmp / "stage2.yaml"),
+            "artifact": str(tmp / "stage2.joblib"),
+            "train_date_range": _RANGE, "filters": _FILTERS,
+        })
+        prod.write_text(yaml.dump(prod_d))
+        monkeypatch.setattr(pr, "CONFIG_DIRS", (tmp,))
+        monkeypatch.setattr(pr, "EVALUATIONS_ROOT", tmp / "evals")
+        pr._cached_frame.cache_clear()
+        src = pr.resolve_prior("lead")
+        src.eval_dir.mkdir(parents=True)
+        oof = _prior_from(world["frame"], world["p_true"], in_sample=False)
+        pl.DataFrame({
+            "match_uid": oof["match_uid"], "player_id": oof["player_id"],
+            "effective_match_date": oof["effective_match_date"],
+            "fold_idx": 0, "y_prob_cal": oof["lead_prob"],
+        }).write_parquet(src.fold_predictions)
+
+        with caplog.at_level(logging.WARNING, logger="mvp.model.predictor"):
+            _predictor(prod, world).train()
+        assert any(
+            "stage2 offsets on the prior of lead but the model before it in the "
+            "chain is stage1" in r.message
+            for r in caplog.records
         )

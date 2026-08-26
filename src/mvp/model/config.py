@@ -8,6 +8,8 @@ import polars as pl
 import yaml
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
+from mvp.model.prior_naming import prior_column, prior_spec
+
 
 class _StrictModel(BaseModel):
     """Base model with extra='forbid' so typos in YAML configs surface as validation errors."""
@@ -133,13 +135,28 @@ class OffsetConfig(_StrictModel):
 
     Mirrors ``discovery.config.OffsetConfig``; a feature set discovered under an
     offset is trained under the same one. See ExperimentConfig.validate_offset.
+
+    ``prior: <config stem or evaluation fingerprint>`` is the residual-stage
+    form: offset on that model's out-of-sample log-odds, resolved from its
+    evaluation artifacts (features/prior.py). It expands to ``feature =
+    player_prior_logit(model=<stem>)``, and ExperimentConfig pins that column
+    in ``features.include`` and filters rows to where it is not null.
     """
 
-    feature: str
+    feature: str | None = None
+    prior: str | None = None
     type: Literal["logistic"] = "logistic"
     # Passed to sklearn LogisticRegression. Slope + intercept by default, which
     # matches the functional form Elo/Glicko composites are constructed around.
     params: dict[str, Any] = {}
+
+    @model_validator(mode="after")
+    def resolve_prior(self) -> "OffsetConfig":
+        if (self.feature is None) == (self.prior is None):
+            raise ValueError("offset: set exactly one of `feature` or `prior`")
+        if self.prior is not None:
+            self.feature = prior_spec(self.prior)
+        return self
 
 
 class EnsembleBaseModelRef(_StrictModel):
@@ -504,6 +521,16 @@ class ExperimentConfig(_StrictModel):
                 "base_margin, so margins would go unsliced."
             )
         feats = self.features
+        if off.prior is not None and feats is not None:
+            # Residual-stage sugar: the base model's column is pinned and the
+            # rows restricted to where it exists (the offset's logistic
+            # cannot take a null; a row the base model never scored out of
+            # sample has no residual to fit).
+            if off.feature not in feats.include:
+                feats.include.append(off.feature)
+            filters = dict(self.data.filters or {})
+            filters.setdefault(prior_column(off.prior), "not_null")
+            self.data.filters = filters
         if feats is None or off.feature not in feats.include:
             raise ValueError(
                 f"offset.feature={off.feature!r} must be listed in "

@@ -145,6 +145,11 @@ def get_all_feature_specs(window_sizes: list[int] | None = None) -> list[str]:
             has_days = (
                 "days" in feature_def.params and len(feature_def.params) == 1
             )
+            if feature_def.params and not has_days:
+                # Parameterised by something other than a window (e.g. the
+                # prior's `model=<stem>`): no enumerable variants, and the
+                # bare output cannot be computed. Base/offset use only.
+                continue
             for out in feature_def.outputs:
                 if has_days:
                     if include_alltime:
@@ -550,6 +555,16 @@ class FeatureDiscovery:
         # directly and would raise mid-precompute. Config validators can't catch
         # this: it depends on the resolved pool, not on config fields.
         offset_cfg = self.config.offset
+        if (
+            offset_cfg is not None
+            and offset_cfg.prior is not None
+            and offset_cfg.feature not in all_features
+        ):
+            # The prior transform is parameterised by model, so enumeration
+            # never lists it; the stage's own prior spec joins the pool here
+            # (it is also seeded in `base`, so it is a column of the matrix,
+            # not a candidate).
+            all_features = [*all_features, offset_cfg.feature]
         if offset_cfg is not None and offset_cfg.feature not in all_features:
             raise ValueError(
                 f"offset.feature={offset_cfg.feature!r} is not in the resolved "
@@ -763,6 +778,22 @@ class FeatureDiscovery:
                     f"their families stay untestable: {skipped[:6]}"
                 )
             matrix_specs = list(all_features) + extra
+
+        # Residual stage: make sure the base model's evaluation exists before
+        # the matrix is built. This is the one place regeneration is allowed
+        # (a `model` run on the base config) -- the discovery driver runs on
+        # the dev box by definition; the engine and production train refuse
+        # with the command instead.
+        off = self.config.offset
+        if off is not None and off.prior is not None:
+            from mvp.model.features.prior import ensure_prior_artifacts, resolve_prior
+
+            source = resolve_prior(off.prior)
+            self._log(
+                f"offset.prior {off.prior}: {source.config_path} -> evaluation "
+                f"{source.fp}"
+            )
+            ensure_prior_artifacts(source, regenerate=True)
 
         cand_workers, cand_n_jobs = self._resolve_candidate_parallelism(method)
         if method == "forward":

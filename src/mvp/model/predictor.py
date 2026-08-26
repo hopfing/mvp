@@ -2,6 +2,7 @@
 
 
 import json
+from dataclasses import dataclass
 import logging
 import warnings
 from datetime import UTC, datetime, timedelta
@@ -41,6 +42,8 @@ from mvp.model.features._score_helpers import (
     total_games_won as _total_games_won,
 )
 from mvp.model.features import lead_prior as _lead_prior
+from mvp.model.features import prior as _prior
+from mvp.model.prior_naming import prior_column, prior_model_of
 from mvp.model.features.elo import surface_elo_expr
 from mvp.model.imputation import apply_imputation, build_imputation, fit_imputation
 from mvp.model.models import EnsembleModel, XGBoostMTLModel, get_model
@@ -96,22 +99,67 @@ def _logit(p: np.ndarray) -> np.ndarray:
     return np.log(p / (1 - p))
 
 
-def _assert_prior_is_oof(df: pl.DataFrame, what: str) -> None:
-    """Refuse to train a stage on any row the lead saw in-sample.
+@dataclass(frozen=True)
+class _PriorBinding:
+    """How a residual stage's config is tied to the model it corrects: the
+    offset column pair and, for `offset.prior` configs, the base model's
+    config stem. `model is None` is the legacy lead-prior transform
+    (`player_lead_logit`, read from the fixed prior parquet)."""
 
-    Joins the training rows to the prior parquet and requires, for every row
-    carrying a lead logit, a prior row whose `prior_train_end` is strictly
-    before the match. Rows with a null logit are not checked here: the
-    entry's `player_lead_logit: not_null` filter has already dropped them,
-    and the offset's finite-input guard catches any that slip through.
-    No-op for configs that do not carry the prior (the lead, voters).
-    """
-    if _LEAD_LOGIT_COL not in df.columns:
-        return
-    prior = pl.read_parquet(_lead_prior.prior_path()).select(
-        "match_uid", "player_id", pl.col("prior_train_end").cast(pl.Date),
+    logit_col: str
+    prob_col: str
+    model: str | None
+
+
+def _prior_binding(offset_feature: str | None) -> _PriorBinding | None:
+    if not offset_feature:
+        return None
+    if offset_feature == _LEAD_LOGIT_COL:
+        return _PriorBinding(_LEAD_LOGIT_COL, _LEAD_PROB_COL, None)
+    model = prior_model_of(offset_feature)
+    if model is None:
+        return None
+    return _PriorBinding(prior_column(model), f"player_prior_prob_{model}", model)
+
+
+def _prior_rows(binding: _PriorBinding) -> tuple[pl.DataFrame, str | None]:
+    """(match_uid, player_id, prior_train_end) for the bound prior, and the
+    stem of the model that produced it (None when unknown)."""
+    if binding.model is None:
+        prior = pl.read_parquet(_lead_prior.prior_path())
+        meta_path = _lead_prior.prior_path().with_suffix(".json")
+        built_from = (
+            json.loads(meta_path.read_text(encoding="utf-8")).get("config_stem")
+            if meta_path.exists() else None
+        )
+    else:
+        _source, prior = _prior.prior_frame(binding.model)
+        built_from = binding.model
+    return (
+        prior.select(
+            "match_uid", "player_id", pl.col("prior_train_end").cast(pl.Date),
+        ),
+        built_from,
     )
-    rows = df.filter(pl.col(_LEAD_LOGIT_COL).is_not_null()).select(
+
+
+def _assert_prior_is_oof(
+    df: pl.DataFrame, what: str, offset_feature: str | None
+) -> None:
+    """Refuse to train a stage on any row its base model saw in-sample.
+
+    Joins the training rows to the base model's OOF rows and requires, for
+    every row carrying a prior logit, a prior row whose `prior_train_end` is
+    strictly before the match. Rows with a null logit are not checked here:
+    the not-null filter has already dropped them, and the offset's
+    finite-input guard catches any that slip through. No-op for configs
+    without a prior offset (the lead, voters).
+    """
+    binding = _prior_binding(offset_feature)
+    if binding is None or binding.logit_col not in df.columns:
+        return
+    prior, _ = _prior_rows(binding)
+    rows = df.filter(pl.col(binding.logit_col).is_not_null()).select(
         "match_uid", "player_id",
         pl.col("effective_match_date").cast(pl.Date).alias("_day"),
     )
@@ -122,56 +170,62 @@ def _assert_prior_is_oof(df: pl.DataFrame, what: str) -> None:
         raise ValueError(
             f"{what}: residual-stage training rows violate the OOF rule -- "
             f"{leaked} row(s) dated on/before the prior's train end, "
-            f"{missing} row(s) with a lead logit but no prior row. A stage "
-            "trains only on the lead's out-of-sample output; rebuild the prior "
-            "(scripts/build_lead_prior.py) or fix the entry's train_date_range."
+            f"{missing} row(s) with a prior logit but no prior row. A stage "
+            "trains only on its base model's out-of-sample output; re-evaluate "
+            "the base model or fix the entry's train_date_range."
         )
+    dropped = df.height - rows.height
     logger.info(
-        "%s: OOF prior check passed on %d rows (prior train end < match date)",
-        what, joined.height,
+        "%s: OOF prior check passed on %d rows (prior train end < match date); "
+        "%d row(s) in range without a prior row were filtered out",
+        what, joined.height, dropped,
     )
 
 
-def _check_prior_lead(df: pl.DataFrame, active_config: str | Path) -> None:
-    """Warn when the prior on disk was built from a different lead than
-    `active`. The OOF date check cannot tell a stale prior from a fresh one:
-    after a lead REPLACEMENT the dates still line up, only the numbers are
-    another model's. Rebuilding is a deliberate step (plan, "Decided"), and
-    config stems are not guaranteed to match across an evaluation snapshot
-    and its production copy, so this warns rather than refuses.
-    """
-    if _LEAD_LOGIT_COL not in df.columns:
+def _check_prior_chain(
+    offset_feature: str | None, expected_stem: str, what: str
+) -> None:
+    """Warn when a stage's prior is not the model before it in the chain.
+    The OOF date check cannot tell a stale prior from a fresh one: after a
+    base-model REPLACEMENT the dates still line up, only the numbers are
+    another model's. Config stems are not guaranteed to match across an
+    evaluation snapshot and its production copy, so this warns rather than
+    refuses."""
+    binding = _prior_binding(offset_feature)
+    if binding is None:
         return
-    meta_path = _lead_prior.prior_path().with_suffix(".json")
-    if not meta_path.exists():
+    if binding.model is None:
+        meta_path = _lead_prior.prior_path().with_suffix(".json")
+        if not meta_path.exists():
+            logger.warning(
+                "lead prior has no %s sidecar; cannot verify which lead built it",
+                meta_path.name,
+            )
+            return
+        built_from = json.loads(meta_path.read_text(encoding="utf-8")).get("config_stem")
+    else:
+        built_from = binding.model
+    if built_from != expected_stem:
         logger.warning(
-            "lead prior has no %s sidecar; cannot verify which lead built it",
-            meta_path.name,
-        )
-        return
-    meta = json.loads(meta_path.read_text(encoding="utf-8"))
-    built_from = meta.get("config_stem")
-    active_stem = Path(active_config).stem
-    if built_from != active_stem:
-        logger.warning(
-            "lead prior was built from %s (fp %s) but the active lead is %s; if "
-            "the lead was replaced, rebuild the prior "
-            "(scripts/build_lead_prior.py) before training stages",
-            built_from, meta.get("lead_fp"), active_stem,
+            "%s offsets on the prior of %s but the model before it in the chain "
+            "is %s; if that model was replaced, point the stage at the new one "
+            "(offset.prior) and retrain",
+            what, built_from, expected_stem,
         )
 
 
-def _fill_lead_logit(
-    df: pl.DataFrame, values: dict[tuple[str, str], float]
+def _fill_prior_logit(
+    df: pl.DataFrame, values: dict[tuple[str, str], float], binding: _PriorBinding
 ) -> pl.DataFrame:
-    """Fill the lead-prior columns for rows the prior parquet cannot cover.
+    """Fill the prior columns for rows the OOF rows cannot cover.
 
-    Pending matches have no out-of-sample row in `lead_prior.parquet`, so the
-    transform leaves `player_lead_logit` null there and a stage could not
-    score them. The lead's live prediction is the right value: it is exactly
-    what the stage conditions on when the bet is placed. Supplied values win
-    for the keyed rows; every other row keeps what the transform produced.
+    Pending matches have no out-of-sample row, so the transform leaves the
+    prior logit null there and a stage could not score them. The base
+    model's live prediction is the right value: it is exactly what the stage
+    conditions on when the bet is placed. Supplied values win for the keyed
+    rows; every other row keeps what the transform produced.
     """
+    logit_col, prob_col = binding.logit_col, binding.prob_col
     inj = pl.DataFrame({
         "match_uid": [k[0] for k in values],
         "player_id": [k[1] for k in values],
@@ -179,19 +233,19 @@ def _fill_lead_logit(
     })
     out = df.join(inj, on=["match_uid", "player_id"], how="left")
     logit_expr = (
-        pl.coalesce(pl.col("_inj_logit"), pl.col(_LEAD_LOGIT_COL))
-        if _LEAD_LOGIT_COL in out.columns else pl.col("_inj_logit")
+        pl.coalesce(pl.col("_inj_logit"), pl.col(logit_col))
+        if logit_col in out.columns else pl.col("_inj_logit")
     )
     prob_fallback = (
-        pl.col(_LEAD_PROB_COL) if _LEAD_PROB_COL in out.columns
+        pl.col(prob_col) if prob_col in out.columns
         else pl.lit(None, dtype=pl.Float64)
     )
     return out.with_columns(
-        logit_expr.alias(_LEAD_LOGIT_COL),
+        logit_expr.alias(logit_col),
         pl.when(pl.col("_inj_logit").is_not_null())
         .then(1.0 / (1.0 + (-pl.col("_inj_logit")).exp()))
         .otherwise(prob_fallback)
-        .alias(_LEAD_PROB_COL),
+        .alias(prob_col),
     ).drop("_inj_logit")
 
 
@@ -607,11 +661,14 @@ class ProductionPredictor:
             assert config.features is not None
             return config, config.features.include, None
 
-    def _train_single(self, entry: dict) -> None:
+    def _train_single(self, entry: dict, previous_stem: str | None = None) -> None:
         """Train a single model from an entry dict and save its artifact.
 
         Args:
             entry: Dict with keys config, artifact, train_date_range, filters.
+            previous_stem: For a residual stage, the config stem of the model
+                before it in the chain (the lead for the first stage); its
+                prior is checked against that.
         """
         config, feature_specs, base_model_specs = self._resolve_entry_features(entry)
         is_ensemble = config.model.type == "ensemble"
@@ -681,6 +738,11 @@ class ProductionPredictor:
 
         if entry.get("filters"):
             df = apply_filters(df, entry["filters"])
+        if config.offset is not None and config.offset.prior is not None:
+            # A residual stage trains only where its base model scored out of
+            # sample: the config's sugar filter, applied here as well so the
+            # production entry does not have to repeat it.
+            df = apply_filters(df, {prior_column(config.offset.prior): "not_null"})
 
         # Residual stage (a config carrying the lead prior): rule 1 of the
         # residual-stage plan, enforced before anything is fit; then a check
@@ -689,9 +751,14 @@ class ProductionPredictor:
         # stage being backtested as the lead (backtest.py builds `active` from
         # the config under test), where `active`'s stem is the stage's own
         # and the comparison would cry wolf on every fold.
-        _assert_prior_is_oof(df, Path(entry["config"]).stem)
+        offset_feature = config.offset.feature if config.offset else None
+        _assert_prior_is_oof(df, Path(entry["config"]).stem, offset_feature)
         if entry is not self.config["active"]:
-            _check_prior_lead(df, self.config["active"]["config"])
+            _check_prior_chain(
+                offset_feature,
+                previous_stem or Path(self.config["active"]["config"]).stem,
+                Path(entry["config"]).stem,
+            )
 
         # Resolve target column(s). Primary at index 0; aux targets appended
         # when config.mtl is set. Single-task path: target_cols has length 1
@@ -1487,9 +1554,11 @@ class ProductionPredictor:
         lead's OUT-OF-SAMPLE prior parquet, never on the artifact fit here.
         """
         self._train_single(self.config["active"])
+        previous = Path(self.config["active"]["config"]).stem
         for stage in self.config.get("stages") or []:
             logger.info("Training stage %s", Path(stage["config"]).stem)
-            self._train_single(stage)
+            self._train_single(stage, previous_stem=previous)
+            previous = Path(stage["config"]).stem
 
     def load(self) -> dict[str, Any]:
         """Load the trained production model.
@@ -1535,9 +1604,9 @@ class ProductionPredictor:
         matches that don't pass the entry's config filters (the voter only
         votes on matches within its training domain).
 
-        `fill_lead_logit` maps (match_uid, player_id) -> lead log-odds and
+        `fill_lead_logit` maps (match_uid, player_id) -> the base model's log-odds and
         is how a residual stage scores pending matches, which have no
-        out-of-sample prior row (see `_fill_lead_logit`).
+        out-of-sample prior row (see `_fill_prior_logit`).
 
         Returns {match_uid: p1_win_prob}, p1 being the canonical player
         (draw_p1_id, else the lexically smaller id) -- the same rule
@@ -1564,7 +1633,9 @@ class ProductionPredictor:
         all_specs = feature_specs + [s for s in extra if s not in feature_specs]
         df = engine.compute(all_specs, extra_columns=_PREDICTOR_EXTRA_COLS)
         if fill_lead_logit:
-            df = _fill_lead_logit(df, fill_lead_logit)
+            binding = _prior_binding(config.offset.feature if config.offset else None)
+            if binding is not None:
+                df = _fill_prior_logit(df, fill_lead_logit, binding)
 
         # Determine in-scope match UIDs for scoped voters
         in_scope_uids: set[str] | None = None

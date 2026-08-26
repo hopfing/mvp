@@ -210,6 +210,11 @@ def _canonicalize_config(
     for key in ("offset", "mtl"):
         block = dump.get(key)
         if block:
+            if key == "offset" and block.get("prior") is None:
+                # `prior` (residual-stage sugar) was added after these
+                # fingerprints were first written; a null must not enter the
+                # hash or every existing offset evaluation is orphaned.
+                block = {k: v for k, v in block.items() if k != "prior"}
             canon[key] = _deep_sort(block)
 
     es = dump.get("early_stopping")
