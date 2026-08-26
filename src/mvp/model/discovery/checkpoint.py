@@ -25,6 +25,11 @@ class SelectionCheckpoint:
     # is off). Restored on resume so cut features are not resurrected. Defaulted
     # for back-compat with checkpoints written before pruning existed.
     pruned_features: list[str] = field(default_factory=list)
+    # Family-unit runs: accepted families reduced to the members the
+    # within-family pick kept ({family id: [member specs]}). Restored on
+    # resume so later rounds condition on the deployed columns, not the
+    # block. Defaulted for back-compat.
+    refined_families: dict[str, list[str]] = field(default_factory=dict)
 
 
 def save_checkpoint(path: Path, cp: SelectionCheckpoint) -> None:

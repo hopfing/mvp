@@ -107,10 +107,47 @@ class FamilyRebuildPlan:
     # Parent engine columns required but absent from the matrix. Non-empty
     # means the family cannot be tested by this bar — reported, not guessed.
     missing: list[str]
+    # Matchup members whose registry entry declares no parents (custom
+    # expressions): shifted as their own per-side column instead of rebuilt.
+    # The opponent's half of the stat moves with the player's sequence — a
+    # coarser null than the rebuild, still detached from the match.
+    approximated: list[str] = field(default_factory=list)
 
 
 def _windowed(name: str, params: dict) -> str:
     return build_column_name(name, params)
+
+
+def _spec(name: str, params: dict) -> str:
+    return f"{name}(days={params['days']})" if "days" in params else name
+
+
+def rebuild_parent_specs(member_specs: list[str]) -> set[str]:
+    """Feature specs of the per-side parents the rebuild needs for these
+    members (``player_<stem>(days=N)`` form). Rating families carry only
+    their diff/matchup forms in a candidate pool, so their parents are not
+    in the FS matrix unless requested up front — discover.py adds these as
+    matrix-only columns (never candidates)."""
+    registry = get_registry()
+    out: set[str] = set()
+    for spec in member_specs:
+        prefix, base, _full_name, params = parse_feature_spec(spec)
+        if base.endswith("_diff") or base.endswith("_sum"):
+            stem = base[: base.rfind("_")]
+            out.update({_spec(f"player_{stem}", params), _spec(f"opp_{stem}", params)})
+        elif base.endswith("_matchup"):
+            try:
+                deps = list(registry.get(base).depends_on or [])
+            except KeyError:
+                deps = []
+            if len(deps) != 2:
+                continue  # shifted as its own column (see resolve_rebuild)
+            dep1, dep2 = deps
+            if prefix == "opp":
+                out.update({_spec(f"opp_{dep1}", params), _spec(f"player_{dep2}", params)})
+            else:
+                out.update({_spec(f"player_{dep1}", params), _spec(f"opp_{dep2}", params)})
+    return out
 
 
 def resolve_rebuild(
@@ -121,6 +158,7 @@ def resolve_rebuild(
     members: list[RebuildMember] = []
     shift_cols: set[str] = set()
     missing: set[str] = set()
+    approximated: set[str] = set()
 
     def _need(col: str) -> str:
         if col not in col_to_idx:
@@ -161,8 +199,13 @@ def resolve_rebuild(
                 fdef = None
             deps = list(getattr(fdef, "depends_on", []) or [])
             if fdef is None or len(deps) != 2:
-                missing.add(member_col)
+                # No declared parents (custom matchup expression): shift the
+                # member as its own per-side column. Approximation, logged
+                # on the plan, not a reason to leave the family untestable.
                 members.append(RebuildMember(col=member_col, kind="side"))
+                if member_col in col_to_idx:
+                    shift_cols.add(member_col)
+                    approximated.add(member_col)
                 continue
             dep1, dep2 = deps
             if prefix == "opp":
@@ -190,6 +233,7 @@ def resolve_rebuild(
         members=members,
         shift_cols=sorted(shift_cols),
         missing=sorted(missing),
+        approximated=sorted(approximated),
     )
 
 
@@ -445,8 +489,14 @@ def run_family_nulls(
     workers: int = 1,
     n_jobs: int | None = None,
     checkpoint_path: Path | None = None,
+    rebuild_ids: dict[str, str] | None = None,
 ) -> list[FamilyNullVerdict]:
     """Observed and null composite gains, and a p-value, per family.
+
+    ``rebuild_ids`` maps a candidate id to the family id its rebuild plan
+    should use when the two differ — the within-family pick tests single
+    members as one-column candidates, and their combiner parents are only
+    shifted if the plan knows which family they belong to.
 
     ``accepted_specs`` is the expanded accepted set (base seeds + accepted
     families' member columns). ``families`` maps family id -> member specs to
@@ -512,7 +562,9 @@ def run_family_nulls(
         fold_maps.append(maps_k)
 
     def _one(family: str, member_specs: list[str]) -> FamilyNullVerdict:
-        plan = resolve_rebuild(family, member_specs, fast.col_to_idx)
+        plan = resolve_rebuild(
+            (rebuild_ids or {}).get(family, family), member_specs, fast.col_to_idx
+        )
         if plan.missing:
             return FamilyNullVerdict(
                 family=family, p_value=None,
@@ -578,7 +630,13 @@ def run_family_nulls(
         )
 
     key = _verdict_key(accepted_specs, k, seed, min_agree)
-    restored = load_verdicts(checkpoint_path, key)
+    # Only families in THIS call's set are restored: under top_m the tested
+    # subset can shrink between attempts, and a stored verdict for a family
+    # outside it must not be folded into the max-null.
+    restored = {
+        f: v for f, v in load_verdicts(checkpoint_path, key).items()
+        if f in families
+    }
     items = [it for it in sorted(families.items()) if it[0] not in restored]
     if restored:
         logger.info(
@@ -753,3 +811,103 @@ def make_family_acceptance(
         return eligible, info
 
     return acceptance
+
+
+# ---------------------------------------------------------------------------
+# Within-family pick: family is the unit of evidence, columns the unit of
+# deployment
+# ---------------------------------------------------------------------------
+
+
+def refine_family(
+    fast: FastForwardSelector,
+    metric: str,
+    accepted_specs: list[str],
+    family: str,
+    members: list[str],
+    cfg,
+    direction: str = "minimize",
+    seed: int = 0,
+    workers: int = 1,
+    n_jobs: int | None = None,
+    _null_fn=run_family_nulls,
+) -> tuple[list[str], dict]:
+    """Reduce an accepted family to the members that earn their place.
+
+    Greedy over the family's members, each tested as a one-column candidate
+    against the family's own max-null (the best of the members' shifted
+    copies, per replicate): take the best member with p <= ``cfg.alpha``,
+    condition on it, repeat, up to ``cfg.max_members``. Fifteen candidates
+    instead of ~4,900, so the within-family max is a small optimism and the
+    null prices it.
+
+    If no member clears on its own while the block did, the signal is spread
+    across windows/forms and the block is kept whole — that branch is what
+    keeps corroboration from silently collapsing back to column-greedy.
+    """
+    picked: list[str] = []
+    passes: list[dict] = []
+    cap = cfg.max_members if cfg.max_members is not None else len(members)
+    while len(picked) < cap:
+        cands = [m for m in members if m not in picked]
+        if not cands:
+            break
+        verdicts = _null_fn(
+            fast, metric, accepted_specs + picked, {m: [m] for m in cands},
+            k=cfg.k, seed=seed + len(picked), min_agree=cfg.min_agree,
+            direction=direction, workers=workers, n_jobs=n_jobs,
+            rebuild_ids={m: family for m in cands},
+        )
+        testable = [v for v in verdicts if v.p_value is not None]
+        maxes = max_null(testable)
+        p_max = {v.family: max_null_p(v.observed_composite, maxes) for v in testable}
+        eligible = [v for v in testable if p_max[v.family] <= cfg.alpha]
+        best = max(eligible, key=lambda v: v.observed_composite, default=None)
+        passes.append({
+            "given": list(picked),
+            "max_null": maxes,
+            "p_max": p_max,
+            "observed": {v.family: v.observed_composite for v in testable},
+            "untestable": sorted(v.family for v in verdicts if v.p_value is None),
+            "picked": best.family if best is not None else None,
+        })
+        if best is None:
+            break
+        picked.append(best.family)
+
+    if not picked:
+        logger.info(
+            "    %s: no member clears alone; the block (%d columns) stays",
+            family, len(members),
+        )
+        return list(members), {"resolved": "block", "members": list(members), "passes": passes}
+    logger.info("    %s -> %s", family, ", ".join(picked))
+    return picked, {"resolved": "members", "members": picked, "passes": passes}
+
+
+def make_family_refiner(
+    fast: FastForwardSelector,
+    metric: str,
+    families: dict[str, list[str]],
+    cfg,
+    direction: str = "minimize",
+    workers: int = 1,
+    n_jobs: int | None = None,
+    _refine_fn=refine_family,
+):
+    """Post-acceptance hook for ``FeatureSelector.refine_fn``. ``families``
+    is the selector's own (shared) mapping, so accepted families already
+    reduced by earlier rounds expand to their kept members here."""
+
+    def refine(family: str, selected_ids: list[str]) -> tuple[list[str], dict]:
+        accepted_specs = [
+            c for fid in selected_ids if fid != family
+            for c in families.get(fid, [fid])
+        ]
+        return _refine_fn(
+            fast, metric, accepted_specs, family, list(families[family]), cfg,
+            direction=direction, seed=cfg.seed + 1000 + len(selected_ids),
+            workers=workers, n_jobs=n_jobs,
+        )
+
+    return refine

@@ -18,10 +18,13 @@ from mvp.model.discovery.shifted_null import (
     composite_gain,
     load_verdicts,
     make_family_acceptance,
+    make_family_refiner,
     max_null,
     max_null_p,
     negative_control_floor,
     null_verdicts_path,
+    rebuild_parent_specs,
+    refine_family,
     resolve_rebuild,
     run_family_nulls,
 )
@@ -141,6 +144,28 @@ class TestResolveRebuild:
         )
         # only the family's own stat is shifted; the cross-stat dep stays real
         assert plan.shift_cols == ["player_svc_first_serve_win_pct_30d"]
+
+    def test_parent_specs_for_combiner_members(self):
+        specs = rebuild_parent_specs([
+            "player_win_pct_diff(days=90)", "win_pct_sum", "player_win_pct(days=90)",
+        ])
+        assert specs == {
+            "player_win_pct(days=90)", "opp_win_pct(days=90)",
+            "player_win_pct", "opp_win_pct",
+        }
+
+    def test_matchup_without_declared_parents_is_shifted_as_itself(self):
+        # a matchup column whose registry entry has no depends_on: not a
+        # reason to leave the family untestable — it is shifted as its own
+        # per-side column and flagged as approximated on the plan
+        col_to_idx = {"player_ranking_points_diff": 0, "player_nodeps_matchup": 1}
+        plan = resolve_rebuild(
+            "nodeps", ["player_nodeps_matchup"], col_to_idx,
+        )
+        assert plan.missing == []
+        assert plan.shift_cols == ["player_nodeps_matchup"]
+        assert plan.approximated == ["player_nodeps_matchup"]
+        assert plan.members[0].kind == "side"
 
     def test_missing_parent_is_reported_not_guessed(self):
         plan = resolve_rebuild(
@@ -382,6 +407,36 @@ class TestRunFamilyNulls:
         assert [v.family for v in other] == [v.family for v in clean]
         assert len(log.read_text(encoding="utf-8").splitlines()) == 4
 
+        # a narrower tested set (top_m) restores only its own families: the
+        # other family's stored verdict must not enter this call's max-null
+        narrow = run_family_nulls(
+            fast, "log_loss", checkpoint_path=log,
+            **{**kwargs, "families": {"win_pct_diff": families["win_pct_diff"]}},
+        )
+        assert [v.family for v in narrow] == ["win_pct_diff"]
+        assert narrow[0] == clean[0]
+
+    def test_refine_family_end_to_end(
+        self, offset_config: Path, sample_matches: Path, tmp_path: Path
+    ):
+        """Members tested one at a time as one-column candidates; the diff
+        member's parents are shifted because the plan is keyed by the real
+        family id, so nothing comes back untestable."""
+        fast = _fast(offset_config, sample_matches, tmp_path / "cache")
+
+        class Cfg(_GateCfg):
+            k = 3
+            alpha = 1.0  # accept anything testable: exercises the loop, not the bar
+
+        kept, info = refine_family(
+            fast, "log_loss", [BASE_SPEC], "win_pct", list(FAMILY_SPECS), Cfg(),
+            n_jobs=1,
+        )
+        assert info["resolved"] == "members"
+        assert 1 <= len(kept) <= 3 and set(kept) <= set(FAMILY_SPECS)
+        assert info["passes"][0]["untestable"] == []
+        assert len(info["passes"][0]["max_null"]) == 3
+
 
 class _GateCfg:
     k = 20
@@ -390,6 +445,97 @@ class _GateCfg:
     min_control_pool = 4
     seed = 3
     top_m = None
+    max_members = 3
+
+
+class TestRefineFamily:
+    """Within-family pick with an injected null runner — engine-free."""
+
+    MEMBERS = ["m1", "m2", "m3"]
+
+    def _nulls(self, obs_by_pass, floor_by_pass):
+        calls = []
+
+        def fake(fast, metric, accepted, fams, **kwargs):
+            i = len(calls)
+            calls.append({"accepted": list(accepted), "cands": sorted(fams), **kwargs})
+            obs = obs_by_pass[i]
+            # m3's fakes are the round's best fake in every replicate
+            return [
+                FamilyNullVerdict(
+                    family=m, p_value=1 / 21, observed_composite=obs[m],
+                    null_composites=[floor_by_pass[i] if m == "m3" else 0.0] * 20,
+                )
+                for m in sorted(fams)
+            ]
+
+        return fake, calls
+
+    def test_picks_until_nothing_clears(self):
+        fake, calls = self._nulls(
+            obs_by_pass=[{"m1": 0.01, "m2": 0.005, "m3": 0.0},
+                         {"m2": 0.002, "m3": 0.0}],
+            floor_by_pass=[0.006, 0.003],
+        )
+        kept, info = refine_family(
+            None, "log_loss", ["base"], "fam", self.MEMBERS, _GateCfg(),
+            seed=5, workers=2, n_jobs=4, _null_fn=fake,
+        )
+        assert kept == ["m1"]
+        assert info["resolved"] == "members"
+        assert [p["picked"] for p in info["passes"]] == ["m1", None]
+        # pass 2 conditions on the pick, tests the rest, fresh seed
+        assert calls[0]["accepted"] == ["base"] and calls[0]["cands"] == self.MEMBERS
+        assert calls[1]["accepted"] == ["base", "m1"] and calls[1]["cands"] == ["m2", "m3"]
+        assert calls[0]["seed"] == 5 and calls[1]["seed"] == 6
+        # members are rebuilt as their family's columns, not as their own
+        assert calls[0]["rebuild_ids"] == {m: "fam" for m in self.MEMBERS}
+        assert calls[0]["workers"] == 2 and calls[0]["n_jobs"] == 4
+
+    def test_block_kept_when_no_member_clears_alone(self):
+        fake, _ = self._nulls(
+            obs_by_pass=[{"m1": 0.001, "m2": 0.001, "m3": 0.0}],
+            floor_by_pass=[0.002],
+        )
+        kept, info = refine_family(
+            None, "log_loss", ["base"], "fam", self.MEMBERS, _GateCfg(), _null_fn=fake,
+        )
+        assert kept == self.MEMBERS
+        assert info["resolved"] == "block"
+        assert len(info["passes"]) == 1
+
+    def test_cap_stops_the_pick(self):
+        class Cfg(_GateCfg):
+            max_members = 1
+
+        fake, calls = self._nulls(
+            obs_by_pass=[{"m1": 0.01, "m2": 0.009, "m3": 0.0}],
+            floor_by_pass=[0.001],
+        )
+        kept, _ = refine_family(
+            None, "log_loss", ["base"], "fam", self.MEMBERS, Cfg(), _null_fn=fake,
+        )
+        assert kept == ["m1"] and len(calls) == 1
+
+    def test_refiner_excludes_the_family_and_expands_kept_members(self):
+        families = {"fam": ["m1", "m2"], "other": ["o1", "o2"]}
+        seen = {}
+
+        def fake_refine(fast, metric, accepted, family, members, cfg, **kwargs):
+            seen.update(accepted=accepted, family=family, members=members, **kwargs)
+            return ["m2"], {"resolved": "members"}
+
+        refine = make_family_refiner(
+            None, "log_loss", families, _GateCfg(), workers=3, n_jobs=4,
+            _refine_fn=fake_refine,
+        )
+        families["other"] = ["o2"]  # an earlier round's pick, shared dict
+        kept, _ = refine("fam", ["base_col", "other", "fam"])
+        assert kept == ["m2"]
+        assert seen["accepted"] == ["base_col", "o2"]
+        assert seen["family"] == "fam" and seen["members"] == ["m1", "m2"]
+        assert seen["seed"] == _GateCfg.seed + 1000 + 3
+        assert seen["workers"] == 3 and seen["n_jobs"] == 4
 
 
 class TestMakeFamilyAcceptance:

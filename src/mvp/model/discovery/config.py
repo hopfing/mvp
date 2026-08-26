@@ -182,6 +182,12 @@ class FamilyAcceptanceConfig(BaseModel):
     # Cap on families null-tested per round (top by observed gain). None =
     # every scored family. Never silent: the cut is logged each round.
     top_m: int | None = None
+    # Within-family pick after a family is accepted: members are tested one
+    # at a time as single columns against the family's own max-null, and at
+    # most this many are kept; later rounds condition on the kept members.
+    # No member clearing alone keeps the block whole. None = no pick, the
+    # block enters as is (the original item-5 behaviour).
+    max_members: int | None = 3
 
 
 class DiscoveryOptions(BaseModel):

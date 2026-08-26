@@ -157,6 +157,7 @@ class FeatureSelector:
         first_cut_round: int = 3,
         families: dict[str, list[str]] | None = None,
         acceptance_fn: Callable[..., tuple[set[str], dict[str, Any]]] | None = None,
+        refine_fn: Callable[[str, list[str]], tuple[list[str], dict[str, Any]]] | None = None,
     ) -> None:
         """Initialize selector.
 
@@ -210,10 +211,20 @@ class FeatureSelector:
         # mapping to member columns; the scorer always receives columns via
         # _expand()/_cols(). Empty dict = classic per-column selection, where
         # every id is its own column and both helpers are identity.
-        self._families: dict[str, list[str]] = dict(families) if families else {}
+        # The mapping is SHARED with the caller (not copied): the acceptance
+        # gate and the refiner hold the same dict, and a within-family pick
+        # or a resume must be visible to them when they expand accepted ids.
+        self._families: dict[str, list[str]] = families if families else {}
         self._candidate_ids: list[str] = (
             list(self._families) if self._families else list(self.all_features)
         )
+        # Post-acceptance hook (family mode): (family id, selected ids) ->
+        # (kept member specs, info). The family's expansion is replaced by
+        # the kept members for every later round and for the result; the
+        # accepted set is re-scored so the next round's baseline is the
+        # deployed columns' metric, not the block's.
+        self.refine_fn = refine_fn
+        self._refined: dict[str, list[str]] = {}
         # Two-bar acceptance gate (family mode only). Called once per round
         # with (selected, best_metric, scores, fold_scores); returns the set
         # of families eligible to win plus a JSON-serializable info dict for
@@ -282,6 +293,9 @@ class FeatureSelector:
                 r.get("metric", 0.0) for r in cp.completed_rounds
             ]
             self._pruned_features = set(getattr(cp, "pruned_features", None) or [])
+            for fam, members in (getattr(cp, "refined_families", None) or {}).items():
+                self._families[fam] = list(members)
+                self._refined[fam] = list(members)
             remaining = (
                 set(self._candidate_ids) - set(selected) - self._pruned_features
             )
@@ -455,6 +469,7 @@ class FeatureSelector:
                         total_candidates=len(remaining),
                         scores=scores_this_round,
                         pruned_features=sorted(self._pruned_features),
+                        refined_families=self._refined,
                     )
 
             desc = f"Round {round_num}/{self.max_features}"
@@ -581,11 +596,28 @@ class FeatureSelector:
 
             # Add best feature
             selected.append(best_feature)
-            selected_metrics.append(best_feature_metric)
             remaining.remove(best_feature)
             best_metric = best_feature_metric
 
             logger.info("  + %s -> %s", best_feature, self._fmt_metric(best_metric))
+
+            # Within-family pick: replace the block by the members that earn
+            # their place, then re-score the accepted set so the next round's
+            # baseline (and the stop rule) is the deployed columns' metric.
+            refinement: dict[str, Any] | None = None
+            block_metric = best_feature_metric
+            if self.refine_fn is not None and best_feature in self._families:
+                kept, refinement = self.refine_fn(best_feature, list(selected))
+                self._families[best_feature] = list(kept)
+                self._refined[best_feature] = list(kept)
+                best_metric = self.scorer(self._expand(selected))
+                logger.info(
+                    "    kept %d column(s); accepted set re-scored -> %s "
+                    "(block %s)",
+                    len(kept), self._fmt_metric(best_metric),
+                    self._fmt_metric(block_metric),
+                )
+            selected_metrics.append(best_metric)
             progress_path.write_text(
                 "\n".join(f"{i+1}. {f}" for i, f in enumerate(selected))
             )
@@ -599,6 +631,8 @@ class FeatureSelector:
                 "action": "add",
                 "feature": best_feature,
                 "metric": best_metric,
+                "block_metric": block_metric,
+                "kept": list(self._families.get(best_feature, [best_feature])),
                 "round_ranking": sorted_results,
             })
             _append_fs_history(history_path, {
@@ -606,9 +640,12 @@ class FeatureSelector:
                 "action": "add",
                 "feature": best_feature,
                 "metric": best_metric,
+                "block_metric": block_metric,
+                "kept": list(self._families.get(best_feature, [best_feature])),
                 "ranking": sorted_results,
                 "fold_metrics": fold_scores_this_round,
                 "acceptance": gate_info,
+                "refinement": refinement,
             })
 
             # Bottom-cut: from the warmup round on, permanently drop the N
@@ -646,6 +683,7 @@ class FeatureSelector:
                     total_candidates=len(remaining),
                     scores={},
                     pruned_features=sorted(self._pruned_features),
+                    refined_families=self._refined,
                 )
 
             # Log round 1 rankings inline so interrupted runs still surface them
@@ -716,6 +754,7 @@ class FeatureSelector:
         total_candidates: int,
         scores: dict[str, float],
         pruned_features: list[str] | None = None,
+        refined_families: dict[str, list[str]] | None = None,
     ) -> None:
         """Write current selection state to checkpoint file."""
         run_name = path.stem
@@ -739,6 +778,9 @@ class FeatureSelector:
             direction=self.direction,
             max_features=self.max_features,
             pruned_features=list(pruned_features or []),
+            refined_families={
+                k: list(v) for k, v in (refined_families or {}).items()
+            },
         )
         save_checkpoint(path, cp)
 

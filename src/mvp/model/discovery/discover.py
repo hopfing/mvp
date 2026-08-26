@@ -26,7 +26,12 @@ from mvp.model.discovery.null_importance import (
     run_null_importance,
 )
 from mvp.model.discovery.selection import FeatureSelector, SelectionResult
-from mvp.model.discovery.shifted_null import make_family_acceptance
+from mvp.model.discovery.shifted_null import (
+    make_family_acceptance,
+    make_family_refiner,
+    rebuild_parent_specs,
+)
+from mvp.model.engine import get_feature_columns
 from mvp.model.metrics import fs_display_precision
 from mvp.model.discovery.stability import StabilityResult, run_stability_selection
 from mvp.model.discovery.sweeps import (
@@ -712,9 +717,56 @@ class FeatureDiscovery:
         else:
             self._log(f"Starting with {len(all_features)} features from registry...")
 
+        # Family-unit selection (redesign item 2): group the candidate pool
+        # into families and iterate those. Base/seed columns stay pinned as
+        # raw columns and are excluded from grouping. A non-empty unassigned
+        # residue is a hard error — the overlay in families.py must be
+        # extended, not guessed around. Grouped BEFORE the matrix is built:
+        # the shifted null rebuilds diff/matchup members from their per-side
+        # parents, and rating families carry only combiner forms in the pool,
+        # so the parents are added to the matrix as non-candidate columns.
+        families: dict[str, list[str]] | None = None
+        matrix_specs = list(all_features)
+        if method == "forward" and self.config.discovery.selection_unit == "family":
+            pool = [f for f in all_features if f not in set(base)]
+            families, unassigned = group_candidates(pool)
+            if unassigned:
+                raise ValueError(
+                    f"selection_unit=family: {len(unassigned)} candidates have "
+                    f"no family (extend families.py): {unassigned[:10]}"
+                )
+            sizes = sorted((len(v) for v in families.values()), reverse=True)
+            self._log(
+                f"family mode: {len(pool)} candidates -> {len(families)} "
+                f"families (largest {sizes[0] if sizes else 0} members)"
+            )
+            have = set(all_features)
+            parents = sorted(
+                s for m in families.values() for s in rebuild_parent_specs(m)
+                if s not in have
+            )
+            extra, skipped = [], []
+            for s in dict.fromkeys(parents):
+                try:
+                    get_feature_columns([s])
+                    extra.append(s)
+                except Exception:  # noqa: BLE001 — unknown spec: report, don't guess
+                    skipped.append(s)
+            if extra:
+                self._log(
+                    f"family mode: {len(extra)} per-side parent column(s) added "
+                    f"to the matrix for the null rebuild (not candidates)"
+                )
+            if skipped:
+                self._log(
+                    f"family mode: {len(skipped)} parent spec(s) not computable, "
+                    f"their families stay untestable: {skipped[:6]}"
+                )
+            matrix_specs = list(all_features) + extra
+
         cand_workers, cand_n_jobs = self._resolve_candidate_parallelism(method)
         if method == "forward":
-            scorer = self._create_fast_scorer(all_features, n_jobs=cand_n_jobs)
+            scorer = self._create_fast_scorer(matrix_specs, n_jobs=cand_n_jobs)
         else:
             scorer = self._create_scorer()
         importance_fn = self._create_importance_fn(all_features)
@@ -793,29 +845,10 @@ class FeatureDiscovery:
                 f"from forward round {pruning.first_cut_round} on"
             )
 
-        # Family-unit selection (redesign item 2): group the candidate pool
-        # into families and iterate those. Base/seed columns stay pinned as
-        # raw columns and are excluded from grouping. A non-empty unassigned
-        # residue is a hard error — the overlay in families.py must be
-        # extended, not guessed around.
-        families: dict[str, list[str]] | None = None
-        if method == "forward" and self.config.discovery.selection_unit == "family":
-            pool = [f for f in all_features if f not in set(base)]
-            families, unassigned = group_candidates(pool)
-            if unassigned:
-                raise ValueError(
-                    f"selection_unit=family: {len(unassigned)} candidates have "
-                    f"no family (extend families.py): {unassigned[:10]}"
-                )
-            sizes = sorted((len(v) for v in families.values()), reverse=True)
-            self._log(
-                f"family mode: {len(pool)} candidates -> {len(families)} "
-                f"families (largest {sizes[0] if sizes else 0} members)"
-            )
-
         # Two-bar acceptance gate: only with a family_acceptance block and
         # family mode (config validation ties the two together).
         acceptance_fn = None
+        refine_fn = None
         fam_cfg = self.config.discovery.family_acceptance
         if families is not None and fam_cfg is not None:
             fast_sel = getattr(self, "_fast_selector", None)
@@ -839,6 +872,20 @@ class FeatureDiscovery:
                 direction=direction, workers=cand_workers, n_jobs=cand_n_jobs,
                 checkpoint_path=checkpoint_path,
             )
+            # Within-family pick (family = unit of evidence, columns = unit
+            # of deployment). Shares the `families` dict with the gate and
+            # the selector so kept members are what later rounds expand.
+            if fam_cfg.max_members is not None:
+                self._log(
+                    f"within-family pick: up to {fam_cfg.max_members} "
+                    f"member(s) per accepted family, own max-null at "
+                    f"alpha={fam_cfg.alpha}"
+                )
+                refine_fn = make_family_refiner(
+                    fast_sel, self.config.discovery.metric, families, fam_cfg,
+                    direction=direction, workers=cand_workers,
+                    n_jobs=cand_n_jobs,
+                )
 
         selector = FeatureSelector(
             scorer=scorer,
@@ -858,6 +905,7 @@ class FeatureDiscovery:
             first_cut_round=pruning.first_cut_round,
             families=families,
             acceptance_fn=acceptance_fn,
+            refine_fn=refine_fn,
         )
 
         # For BLAS-threaded models (the fit ignores n_jobs), cap each concurrent

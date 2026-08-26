@@ -163,6 +163,65 @@ class TestFamilyForwardSelection:
         assert lines[0]["fold_metrics"] == {}
 
 
+class TestWithinFamilyPick:
+    """refine_fn hook: kept members replace the block for later rounds, the
+    result, the history, and — via the checkpoint — a resume."""
+
+    @staticmethod
+    def _first_member(family, selected):
+        return [FAMILIES[family][0]], {"resolved": "members"}
+
+    def _run(self, refine_fn, tmp_path, fams):
+        selector = FeatureSelector(
+            scorer=make_scorer(), all_features=ALL_COLS, method="forward",
+            direction="minimize", families=fams, refine_fn=refine_fn,
+        )
+        return selector.forward_selection(
+            checkpoint_path=tmp_path / "discovery_checkpoint_unit.json",
+        )
+
+    def test_kept_members_replace_the_block(self, tmp_path):
+        calls = []
+
+        def refine(family, selected):
+            calls.append((family, list(selected)))
+            return self._first_member(family, selected)
+
+        fams = {k: list(v) for k, v in FAMILIES.items()}
+        result = self._run(refine, tmp_path, fams)
+
+        # fam_a (a1+a2 = 0.70) accepted, reduced to a1 (0.85); fam_b then
+        # adds b1 (0.75); fam_noise cannot improve on that -> stop.
+        assert calls[0] == ("fam_a", ["fam_a"])
+        assert calls[1] == ("fam_b", ["fam_a", "fam_b"])
+        assert result.selected_families == ["fam_a", "fam_b"]
+        assert result.selected_features == ["a1", "b1"]
+        assert fams["fam_a"] == ["a1"]  # shared dict, not a copy
+        lines = [
+            json.loads(ln)
+            for ln in (tmp_path / "fs_history_unit.jsonl").read_text().splitlines()
+            if ln.strip()
+        ]
+        first = lines[0]
+        assert first["kept"] == ["a1"]
+        assert first["block_metric"] == pytest.approx(0.70)
+        assert first["metric"] == pytest.approx(0.85)  # re-scored on a1 alone
+        assert first["refinement"] == {"resolved": "members"}
+
+    def test_resume_restores_kept_members(self, tmp_path):
+        fams = {k: list(v) for k, v in FAMILIES.items()}
+        self._run(self._first_member, tmp_path, fams)
+        cp = json.loads((tmp_path / "discovery_checkpoint_unit.json").read_text())
+        assert cp["refined_families"] == {"fam_a": ["a1"], "fam_b": ["b1"]}
+
+        # a fresh selector (fresh full-member dict) resuming from that
+        # checkpoint must expand the accepted families to the kept members
+        fresh = {k: list(v) for k, v in FAMILIES.items()}
+        result = self._run(self._first_member, tmp_path, fresh)
+        assert fresh["fam_a"] == ["a1"]
+        assert result.selected_features == ["a1", "b1"]
+
+
 class TestAcceptanceGate:
     """Two-bar gate mechanics at the loop level (stub acceptance_fn)."""
 
@@ -237,3 +296,4 @@ class TestFamilyAcceptanceConfig:
         parsed = DiscoveryConfig.model_validate(cfg)
         assert parsed.discovery.family_acceptance.k == 5
         assert parsed.discovery.family_acceptance.alpha == 0.10
+        assert parsed.discovery.family_acceptance.max_members == 3
