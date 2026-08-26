@@ -3543,6 +3543,10 @@ def cmd_live(args: argparse.Namespace) -> int:
     try:
         predictor = ProductionPredictor(target_section="winner")
         predictions = predictor.predict(tournament_keys=pairs, include_features=True)
+        # A residual stage that fails to score degrades to the lead's numbers
+        # (ProductionPredictor._apply_stages); carry it into the run report so
+        # the alert names the stage, instead of leaving it as a log line.
+        errors.extend(getattr(predictor, "_stage_errors", []))
         # Per-(match_uid, player_id) feature frame for the sheet's diff columns.
         lead_feature_frame = getattr(predictor, "_feature_frame", None)
 

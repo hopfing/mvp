@@ -6,7 +6,12 @@ import polars as pl
 
 
 def get_active_model() -> str | None:
-    """Read the active model name from production.yaml."""
+    """The model version live bets are stamped with, from production.yaml.
+
+    That is the LAST residual stage when `winner.stages` is configured (the
+    predictor sets `model_version` to the stage that produced the shipped
+    probability), else the active lead.
+    """
     from pathlib import Path
 
     import yaml
@@ -17,8 +22,11 @@ def get_active_model() -> str | None:
     try:
         with open(prod_path) as f:
             config = yaml.safe_load(f)
+        winner = config.get("winner", {})
+        stages = winner.get("stages") or []
         config_path = (
-            config.get("winner", {}).get("active", {}).get("config", "")
+            stages[-1].get("config", "") if stages
+            else winner.get("active", {}).get("config", "")
         )
         return Path(config_path).stem if config_path else None
     except Exception:

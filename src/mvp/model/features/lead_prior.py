@@ -19,7 +19,7 @@ deliberately: `impute=None` (register_transform fixes this) so a match outside
 the OOF span stays null instead of being handed the median. Trees take nulls
 natively; the offset's logistic does not, so a config offsetting on this must
 restrict its rows with `filters: {player_lead_logit: not_null}`. At serve time
-pending matches have no row here either -- the predictor injects the lead's
+pending matches have no row here either -- the predictor fills in the lead's
 live logit before a stage scores them.
 
 The parquet is a snapshot of ONE lead. `scripts/build_lead_prior.py` records

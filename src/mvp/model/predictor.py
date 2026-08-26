@@ -40,6 +40,7 @@ from mvp.model.features._score_helpers import (
     total_games_lost as _total_games_lost,
     total_games_won as _total_games_won,
 )
+from mvp.model.features import lead_prior as _lead_prior
 from mvp.model.features.elo import surface_elo_expr
 from mvp.model.imputation import apply_imputation, build_imputation, fit_imputation
 from mvp.model.models import EnsembleModel, XGBoostMTLModel, get_model
@@ -80,6 +81,118 @@ _PREDICTOR_EXTRA_COLS = [
 PREDICTION_TOLERANCE = 1e-4
 # Threshold for drift alerts (5% probability swing)
 DRIFT_THRESHOLD = 0.05
+
+# Columns produced by the `lead_prior` transform (features/lead_prior.py). A
+# training frame carrying them is a residual stage: it may only ever see the
+# lead's OUT-OF-SAMPLE output (residual-stage plan, rule 1), and at serve time
+# pending matches have no prior row, so the lead's live prediction is filled in.
+_LEAD_LOGIT_COL = "player_lead_logit"
+_LEAD_PROB_COL = "player_lead_prob"
+_LOGIT_EPS = 1e-6
+
+
+def _logit(p: np.ndarray) -> np.ndarray:
+    p = np.clip(np.asarray(p, dtype=np.float64), _LOGIT_EPS, 1 - _LOGIT_EPS)
+    return np.log(p / (1 - p))
+
+
+def _assert_prior_is_oof(df: pl.DataFrame, what: str) -> None:
+    """Refuse to train a stage on any row the lead saw in-sample.
+
+    Joins the training rows to the prior parquet and requires, for every row
+    carrying a lead logit, a prior row whose `prior_train_end` is strictly
+    before the match. Rows with a null logit are not checked here: the
+    entry's `player_lead_logit: not_null` filter has already dropped them,
+    and the offset's finite-input guard catches any that slip through.
+    No-op for configs that do not carry the prior (the lead, voters).
+    """
+    if _LEAD_LOGIT_COL not in df.columns:
+        return
+    prior = pl.read_parquet(_lead_prior.prior_path()).select(
+        "match_uid", "player_id", pl.col("prior_train_end").cast(pl.Date),
+    )
+    rows = df.filter(pl.col(_LEAD_LOGIT_COL).is_not_null()).select(
+        "match_uid", "player_id",
+        pl.col("effective_match_date").cast(pl.Date).alias("_day"),
+    )
+    joined = rows.join(prior, on=["match_uid", "player_id"], how="left")
+    missing = joined.filter(pl.col("prior_train_end").is_null()).height
+    leaked = joined.filter(pl.col("_day") <= pl.col("prior_train_end")).height
+    if missing or leaked:
+        raise ValueError(
+            f"{what}: residual-stage training rows violate the OOF rule -- "
+            f"{leaked} row(s) dated on/before the prior's train end, "
+            f"{missing} row(s) with a lead logit but no prior row. A stage "
+            "trains only on the lead's out-of-sample output; rebuild the prior "
+            "(scripts/build_lead_prior.py) or fix the entry's train_date_range."
+        )
+    logger.info(
+        "%s: OOF prior check passed on %d rows (prior train end < match date)",
+        what, joined.height,
+    )
+
+
+def _check_prior_lead(df: pl.DataFrame, active_config: str | Path) -> None:
+    """Warn when the prior on disk was built from a different lead than
+    `active`. The OOF date check cannot tell a stale prior from a fresh one:
+    after a lead REPLACEMENT the dates still line up, only the numbers are
+    another model's. Rebuilding is a deliberate step (plan, "Decided"), and
+    config stems are not guaranteed to match across an evaluation snapshot
+    and its production copy, so this warns rather than refuses.
+    """
+    if _LEAD_LOGIT_COL not in df.columns:
+        return
+    meta_path = _lead_prior.prior_path().with_suffix(".json")
+    if not meta_path.exists():
+        logger.warning(
+            "lead prior has no %s sidecar; cannot verify which lead built it",
+            meta_path.name,
+        )
+        return
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    built_from = meta.get("config_stem")
+    active_stem = Path(active_config).stem
+    if built_from != active_stem:
+        logger.warning(
+            "lead prior was built from %s (fp %s) but the active lead is %s; if "
+            "the lead was replaced, rebuild the prior "
+            "(scripts/build_lead_prior.py) before training stages",
+            built_from, meta.get("lead_fp"), active_stem,
+        )
+
+
+def _fill_lead_logit(
+    df: pl.DataFrame, values: dict[tuple[str, str], float]
+) -> pl.DataFrame:
+    """Fill the lead-prior columns for rows the prior parquet cannot cover.
+
+    Pending matches have no out-of-sample row in `lead_prior.parquet`, so the
+    transform leaves `player_lead_logit` null there and a stage could not
+    score them. The lead's live prediction is the right value: it is exactly
+    what the stage conditions on when the bet is placed. Supplied values win
+    for the keyed rows; every other row keeps what the transform produced.
+    """
+    inj = pl.DataFrame({
+        "match_uid": [k[0] for k in values],
+        "player_id": [k[1] for k in values],
+        "_inj_logit": [float(v) for v in values.values()],
+    })
+    out = df.join(inj, on=["match_uid", "player_id"], how="left")
+    logit_expr = (
+        pl.coalesce(pl.col("_inj_logit"), pl.col(_LEAD_LOGIT_COL))
+        if _LEAD_LOGIT_COL in out.columns else pl.col("_inj_logit")
+    )
+    prob_fallback = (
+        pl.col(_LEAD_PROB_COL) if _LEAD_PROB_COL in out.columns
+        else pl.lit(None, dtype=pl.Float64)
+    )
+    return out.with_columns(
+        logit_expr.alias(_LEAD_LOGIT_COL),
+        pl.when(pl.col("_inj_logit").is_not_null())
+        .then(1.0 / (1.0 + (-pl.col("_inj_logit")).exp()))
+        .otherwise(prob_fallback)
+        .alias(_LEAD_PROB_COL),
+    ).drop("_inj_logit")
 
 
 def _odd_project_serving(
@@ -249,6 +362,9 @@ class ProductionPredictor:
         self._experiment_config = ExperimentConfig.from_file(
             self.config["active"]["config"]
         )
+        # Residual-stage failures from the last predict() (see _apply_stages);
+        # the pipeline appends these to its run report.
+        self._stage_errors: list[str] = []
 
     @property
     def target(self) -> str:
@@ -565,6 +681,17 @@ class ProductionPredictor:
 
         if entry.get("filters"):
             df = apply_filters(df, entry["filters"])
+
+        # Residual stage (a config carrying the lead prior): rule 1 of the
+        # residual-stage plan, enforced before anything is fit; then a check
+        # that the prior belongs to the lead this production config serves.
+        # The identity check is skipped when the entry IS `active`: that is a
+        # stage being backtested as the lead (backtest.py builds `active` from
+        # the config under test), where `active`'s stem is the stage's own
+        # and the comparison would cry wolf on every fold.
+        _assert_prior_is_oof(df, Path(entry["config"]).stem)
+        if entry is not self.config["active"]:
+            _check_prior_lead(df, self.config["active"]["config"])
 
         # Resolve target column(s). Primary at index 0; aux targets appended
         # when config.mtl is set. Single-task path: target_cols has length 1
@@ -1354,8 +1481,15 @@ class ProductionPredictor:
         logger.info("Model saved to %s", artifact_path)
 
     def train(self) -> None:
-        """Train production model on all matching data and save artifact."""
+        """Train the production lead, then each residual stage; save artifacts.
+
+        Stages follow the lead only for logging order: a stage trains on the
+        lead's OUT-OF-SAMPLE prior parquet, never on the artifact fit here.
+        """
         self._train_single(self.config["active"])
+        for stage in self.config.get("stages") or []:
+            logger.info("Training stage %s", Path(stage["config"]).stem)
+            self._train_single(stage)
 
     def load(self) -> dict[str, Any]:
         """Load the trained production model.
@@ -1392,6 +1526,7 @@ class ProductionPredictor:
         scoped: bool = False,
         *,
         include_settled: bool = False,
+        fill_lead_logit: dict[tuple[str, str], float] | None = None,
     ) -> dict[str, float]:
         """Generate raw uid->prob predictions for a single model entry.
 
@@ -1400,7 +1535,13 @@ class ProductionPredictor:
         matches that don't pass the entry's config filters (the voter only
         votes on matches within its training domain).
 
-        Returns {match_uid: p1_win_prob}.
+        `fill_lead_logit` maps (match_uid, player_id) -> lead log-odds and
+        is how a residual stage scores pending matches, which have no
+        out-of-sample prior row (see `_fill_lead_logit`).
+
+        Returns {match_uid: p1_win_prob}, p1 being the canonical player
+        (draw_p1_id, else the lexically smaller id) -- the same rule
+        `predict()` uses for its `p1_id`.
         """
         artifact = self._load_single(entry)
         model = artifact["model"]
@@ -1422,6 +1563,8 @@ class ProductionPredictor:
         extra = compute_only + filter_specs
         all_specs = feature_specs + [s for s in extra if s not in feature_specs]
         df = engine.compute(all_specs, extra_columns=_PREDICTOR_EXTRA_COLS)
+        if fill_lead_logit:
+            df = _fill_lead_logit(df, fill_lead_logit)
 
         # Determine in-scope match UIDs for scoped voters
         in_scope_uids: set[str] | None = None
@@ -1672,6 +1815,7 @@ class ProductionPredictor:
         feature_cols = artifact["feature_cols"]
         calibrator = artifact.get("calibrator")
         config = self._experiment_config
+        self._stage_errors = []
         engine = FeatureEngine(
             matches_path=self.matches_path, cache_dir=self.cache_dir
         )
@@ -1990,8 +2134,89 @@ class ProductionPredictor:
                     select_exprs.append(pl.col(col))
         result = canonical.select(select_exprs)
 
+        stages = self.config.get("stages") or []
+        if stages and not is_deciding_set and len(result) > 0:
+            result = self._apply_stages(
+                result, stages, tournament_keys, include_settled=include_settled,
+            )
+
         logger.info("Generated %d %s predictions", len(result), self.target)
         return result
+
+    def _apply_stages(
+        self,
+        predictions: pl.DataFrame,
+        stages: list[dict],
+        tournament_keys: list[tuple[str, int]] | None,
+        *,
+        include_settled: bool = False,
+    ) -> pl.DataFrame:
+        """Run each residual stage on top of the lead's live predictions.
+
+        A stage is an ordinary model entry whose config offsets on
+        `player_lead_logit`. Pending matches have no out-of-sample prior row,
+        so each stage is scored through `_predict_raw` with the CURRENT
+        probability supplied as that column: +logit for `p1_id`, -logit for
+        `p2_id` (the lead odd-projects, so the opponent's logit is exactly the
+        negation). Stages chain: stage k conditions on stage k-1's output.
+
+        `p1_win_prob` becomes the last stage's probability and `model_version`
+        its config stem, so downstream attribution follows the number that was
+        actually bet; the lead's own probability is kept as
+        `lead_p1_win_prob`. A match a stage cannot score keeps the previous
+        probability and version.
+        """
+        uids = predictions["match_uid"].to_list()
+        p1_ids = predictions["p1_id"].to_list()
+        p2_ids = predictions["p2_id"].to_list()
+        lead_probs = predictions["p1_win_prob"].to_list()
+        lead_version = Path(self.config["active"]["config"]).stem
+
+        current = dict(zip(uids, lead_probs))
+        version = dict.fromkeys(uids, lead_version)
+        self._stage_errors = []
+        for stage in stages:
+            stem = Path(stage["config"]).stem
+            logits = _logit(np.array([current[u] for u in uids]))
+            fill: dict[tuple[str, str], float] = {}
+            for uid, p1, p2, lg in zip(uids, p1_ids, p2_ids, logits):
+                fill[(uid, p1)] = float(lg)
+                fill[(uid, p2)] = float(-lg)
+            # Failure isolation: this runs inside the live 15-minute loop, and
+            # the lead's predictions are already computed. A stage that cannot
+            # score (prior parquet or artifact missing on the serving box, a
+            # feature the engine cannot compute) must cost the stage, not the
+            # tick -- degrade to the previous number and say so loudly; the
+            # pipeline surfaces `_stage_errors` in its run report.
+            try:
+                scored = self._predict_raw(
+                    stage, tournament_keys, set(uids),
+                    # Stages honour their own config filters by default, so a
+                    # narrower-domain stage never scores out of domain (those
+                    # matches keep the previous probability and version).
+                    scoped=bool(stage.get("scoped", True)),
+                    include_settled=include_settled, fill_lead_logit=fill,
+                )
+            except Exception as e:  # noqa: BLE001 -- degrade, never sink the lead
+                logger.exception(
+                    "Stage %s failed to score; keeping previous probabilities", stem,
+                )
+                self._stage_errors.append(f"stage {stem}: {e}")
+                continue
+            for uid, p in scored.items():
+                current[uid] = p
+                version[uid] = stem
+            logger.info(
+                "Stage %s scored %d/%d matches", stem, len(scored), len(uids),
+            )
+
+        p1_new = [current[u] for u in uids]
+        return predictions.with_columns(
+            pl.Series("lead_p1_win_prob", lead_probs),
+            pl.Series("p1_win_prob", p1_new),
+            pl.Series("p2_win_prob", [1.0 - p for p in p1_new]),
+            pl.Series("model_version", [version[u] for u in uids]),
+        )
 
     def save_predictions(self, predictions: pl.DataFrame) -> pl.DataFrame:
         """Save predictions to parquet, appending new and validating existing.
