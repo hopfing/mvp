@@ -592,9 +592,12 @@ class TestMergePredictions:
         assert m["cal_tier"][0] == "Risky"  # -0.0073 is in [-0.01, -0.005)
         assert abs(float(m["cell_cal"][0]) - (-0.0073)) < 1e-6
 
-    def test_cal_tier_not_overwritten_once_set(self, tmp_path, monkeypatch):
-        # Sidecar would suggest "Optimal" for this (circuit, round), but the
-        # row already has "Risky" — frozen-once-set must preserve "Risky".
+    def test_cal_tier_preserved_when_match_not_scored_this_sync(
+        self, tmp_path, monkeypatch
+    ):
+        # Sidecar would suggest "Optimal" for this (circuit, round), but M1 is
+        # not in this sync's predictions (a settled row, or one outside the
+        # scoring window), so it must keep "Risky".
         sidecar = tmp_path / "lead_cal_tiers.json"
         sidecar.write_text(json.dumps({
             "segments": {
@@ -669,6 +672,88 @@ class TestMergePredictions:
             f"pre-existing blank row was backfilled to {old['cal_tier'][0]!r}"
         )
         assert old["cell_cal"][0] == ""
+
+    def test_cal_tier_refreshes_on_open_row(self, tmp_path, monkeypatch):
+        # The row carries a tier from an earlier fit (Risky / -0.0080) and has
+        # no stake, so it is still open. The match IS scored this sync, so the
+        # tier must re-derive from the live sidecar instead of sticking.
+        sidecar = tmp_path / "shipped_cal_tiers.json"
+        sidecar.write_text(json.dumps({
+            "segments": {
+                "by_circuit": {
+                    "tour": {"round": {"R32": {"signed_calibration": 0.005}}},
+                },
+            },
+        }))
+        monkeypatch.setattr(
+            "mvp.gsheets.base._resolve_shipped_sidecar_path", lambda: sidecar
+        )
+
+        row = _make_sheet_row(
+            match_uid="M1", circuit="ATP", round="R32",
+            cal_tier="Risky", cell_cal="-0.0080", stake="",
+        )
+        existing = _sheet_df([row])
+        new = prepare_predictions(_make_predictions(match_uid="M1"))
+        matches = _matches_df({
+            "match_uid": ["M1"], "won": [None],
+            "player_id": ["A"], "opp_id": ["B"],
+        })
+        result = merge_predictions(existing, new, matches)
+        m1 = result.filter(pl.col("match_uid") == "M1")
+        assert m1["cal_tier"][0] == "Optimal"
+        assert abs(float(m1["cell_cal"][0]) - 0.005) < 1e-6
+
+    def test_cal_tier_frozen_once_stake_entered(self, tmp_path, monkeypatch):
+        # Same open-row setup, but a stake is on the row: the tier freezes so
+        # the settled bet records what was on screen when it was placed.
+        sidecar = tmp_path / "shipped_cal_tiers.json"
+        sidecar.write_text(json.dumps({
+            "segments": {
+                "by_circuit": {
+                    "tour": {"round": {"R32": {"signed_calibration": 0.005}}},
+                },
+            },
+        }))
+        monkeypatch.setattr(
+            "mvp.gsheets.base._resolve_shipped_sidecar_path", lambda: sidecar
+        )
+
+        row = _make_sheet_row(
+            match_uid="M1", circuit="ATP", round="R32",
+            cal_tier="Risky", cell_cal="-0.0080", stake="10",
+        )
+        existing = _sheet_df([row])
+        new = prepare_predictions(_make_predictions(match_uid="M1"))
+        matches = _matches_df({
+            "match_uid": ["M1"], "won": [None],
+            "player_id": ["A"], "opp_id": ["B"],
+        })
+        result = merge_predictions(existing, new, matches)
+        m1 = result.filter(pl.col("match_uid") == "M1")
+        assert m1["cal_tier"][0] == "Risky"
+        assert m1["cell_cal"][0] == "-0.0080"
+
+    def test_cal_tier_untouched_when_sidecar_missing(self, monkeypatch):
+        # A missing artifact on the serving box must leave the sheet alone
+        # rather than wiping tiers off open rows.
+        monkeypatch.setattr(
+            "mvp.gsheets.base._resolve_shipped_sidecar_path", lambda: None
+        )
+        row = _make_sheet_row(
+            match_uid="M1", circuit="ATP", round="R32",
+            cal_tier="Risky", cell_cal="-0.0080", stake="",
+        )
+        existing = _sheet_df([row])
+        new = prepare_predictions(_make_predictions(match_uid="M1"))
+        matches = _matches_df({
+            "match_uid": ["M1"], "won": [None],
+            "player_id": ["A"], "opp_id": ["B"],
+        })
+        result = merge_predictions(existing, new, matches)
+        m1 = result.filter(pl.col("match_uid") == "M1")
+        assert m1["cal_tier"][0] == "Risky"
+        assert m1["cell_cal"][0] == "-0.0080"
 
     def test_cal_tier_blank_when_no_sidecar(self, monkeypatch):
         monkeypatch.setattr(

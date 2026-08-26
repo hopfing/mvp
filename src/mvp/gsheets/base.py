@@ -702,25 +702,33 @@ def merge_predictions(
 
         merged = merged.with_columns(pl.Series("fav_edge_open", new_fav_open))
 
-    # 3c3. Populate cell_cal + cal_tier from the production lead's sidecar —
-    # but ONLY for matches that are first appearing this sync (`truly_new`).
-    # For pre-existing rows, whatever value is already on the row is preserved
-    # (frozen-once-set). Crucially we must NOT fill blanks on pre-existing
-    # rows: those bets were placed under earlier model state, and stamping
-    # them with today's sidecar values poisons the historical analysis.
+    # 3c3. Populate cell_cal + cal_tier from the sidecar of the fit that ships
+    # the probability. These follow the prediction columns in 2a rather than
+    # being stamped once: they refresh every tick while the row is open and
+    # freeze the moment a stake is entered. An open row then carries the live
+    # model's calibration for its own cell (a lead swap, a retrain of the same
+    # version, or a round relabel all re-tier it), and a settled bet records
+    # the tier that was on screen when it was placed.
+    #
+    # Refresh is confined to matches in THIS sync's predictions — the pending
+    # set — so a settled row is never re-stamped and historical rows keep the
+    # model state they were placed under. Pre-existing blanks predate the
+    # feature and stay blank. With no sidecar the whole block is skipped, so a
+    # missing artifact on the serving box leaves the sheet alone instead of
+    # wiping it.
     sidecar_path = _resolve_shipped_sidecar_path()
     cal_lookup = load_cal_tiers_from_path(sidecar_path) if sidecar_path else {}
-    if len(merged) > 0:
+    if len(merged) > 0 and cal_lookup:
         new_cell_cal: list[str] = []
         new_cal_tier: list[str] = []
         for row in merged.iter_rows(named=True):
-            current_tier = (row.get("cal_tier") or "").strip()
             uid = row.get("match_uid") or ""
-            if current_tier or uid not in truly_new:
-                # Preserve whatever's there. Pre-existing rows without a tier
-                # stay null — they predate the feature and have no honest tier.
+            has_stake = bool((row.get("stake") or "").strip())
+            if uid not in new_uids or has_stake:
+                # Not being scored this sync (settled/absent), or frozen by a
+                # stake — preserve whatever is on the row.
                 new_cell_cal.append(row.get("cell_cal") or "")
-                new_cal_tier.append(current_tier)
+                new_cal_tier.append((row.get("cal_tier") or "").strip())
                 continue
             sheet_circuit = (row.get("circuit") or "").strip()
             # Sheet stores display labels (ATP / CH); sidecar keys on raw
