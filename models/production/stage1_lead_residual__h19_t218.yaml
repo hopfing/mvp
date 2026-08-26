@@ -1,0 +1,64 @@
+calibration: null
+data:
+  date_range:
+    end: 2025-12-31
+    start: 2023-01-01
+  eval_filters: {}
+  filters:
+    circuit:
+    - tour
+    - chal
+    draw_type: singles
+    player_lead_logit: not_null
+  train_filters: {}
+features:
+  compute_only: []
+  include:
+  - opp_deciding_set_win_pct(days=30)
+  - opp_tourn_holds
+  - player_high_tier_match_pct(days=30)
+  - player_lead_logit
+  - player_matches_vs_net_rusher(days=730)
+  - player_ret_pts_won_pct_matchup
+  - player_style_winner_rate_matchup(days=30)
+  - player_surface_df_pct
+  - player_svc_elo_surface_indoor_matchup
+model:
+  params:
+    colsample_bylevel: 0.9854491383999707
+    colsample_bynode: 0.7458561823500489
+    colsample_bytree: 0.9051558893778467
+    gamma: 1.496026139418448
+    grow_policy: lossguide
+    learning_rate: 0.017468530942137128
+    max_bin: 512
+    max_delta_step: 0
+    max_depth: 7
+    max_leaves: 176
+    min_child_weight: 5
+    n_estimators: 350
+    random_state: 42
+    reg_alpha: 0.45758472202491174
+    reg_lambda: 5.133363627581843
+    scale_pos_weight: 0.9975866437218874
+    subsample: 0.7872744793672161
+    tree_method: hist
+  type: xgboost
+offset:
+  feature: player_lead_logit
+  params: {}
+  type: logistic
+sample_weight: null
+target: won
+validation:
+  initial_train_months: 12
+  initial_train_size: null
+  min_train_size: 50000
+  n_splits: 5
+  step_size: null
+  test_months: 6
+  test_size: 10000
+  test_start: null
+  train_months: null
+  train_size: null
+  type: date_expanding

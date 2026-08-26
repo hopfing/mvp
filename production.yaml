@@ -30,6 +30,22 @@ winner:
     train_date_range:
       end: '2025-12-31'
       start: '2021-01-01'
+  # Residual stages: each trains on the lead's out-of-sample prior
+  # (stage/model/lead_prior.parquet, must exist on the serving box) and at
+  # serve time scores on top of the lead's live number. The last stage's
+  # probability ships as p1_win_prob; the lead's is kept as lead_p1_win_prob.
+  stages:
+  - artifact: data/models/stage1_lead_residual__h19_t218.joblib
+    config: models/production/stage1_lead_residual__h19_t218.yaml
+    filters:
+      circuit:
+      - tour
+      - chal
+      draw_type: singles
+      player_lead_logit: not_null
+    train_date_range:
+      end: '2026-06-30'
+      start: '2023-01-01'
   voters:
   - artifact: data/models/lr_fs_15f_260331.joblib
     config: models/voters/lr_fs_15f_260331.yaml
