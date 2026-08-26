@@ -288,6 +288,24 @@ class TestOffsetMargins:
 
         assert np.isfinite(score)
 
+    def test_scorer_exposes_per_fold_metrics(
+        self, discovery_config_offset: Path, sample_matches: Path, tmp_path: Path
+    ):
+        """The closure stamps scorer.last_fold_metrics after every call, so
+        family-level selection can apply fold-agreement acceptance without a
+        return-contract change."""
+        fast = self._fast(discovery_config_offset, sample_matches, tmp_path / "cache")
+        scorer = fast.create_scorer("log_loss")
+
+        score = scorer(["player_ranking_points_diff"])
+
+        folds = scorer.last_fold_metrics
+        assert len(folds) == len(fast.folds)
+        assert score == pytest.approx(float(np.mean(folds)))
+
+        scorer([])
+        assert scorer.last_fold_metrics == []
+
     def test_scorer_rejects_caller_supplied_folds(
         self, discovery_config_offset: Path, sample_matches: Path, tmp_path: Path
     ):

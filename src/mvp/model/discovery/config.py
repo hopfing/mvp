@@ -156,11 +156,41 @@ class PoolPruningConfig(BaseModel):
     first_cut_round: int = 3
 
 
+class FamilyAcceptanceConfig(BaseModel):
+    """Two-bar acceptance for family-unit forward selection (FS-protocol
+    redesign items 2-3). Presence of this block REPLACES the min_delta stop
+    rule: each round accepts the best family clearing both bars and stops
+    when none does.
+
+    Bar (a): shifted-candidate null -> per-family p-value -> Benjamini-
+    Hochberg at ``q``. Bar (b): observed gain >= the 95th percentile of the
+    round's bottom-half families' observed gains; below ``min_control_pool``
+    controls the floor is unstable, so bar (a) alone applies (logged).
+    """
+
+    k: int = 20  # null replicates per family per round
+    q: float = 0.10  # BH false-discovery level
+    # Fold-agreement gate inside the composite statistic; None = n_folds - 1
+    # (3-of-4 at the standard schedule).
+    min_agree: int | None = None
+    min_control_pool: int = 40
+    seed: int = 0
+    # Cap on families null-tested per round (top by observed gain). None =
+    # every scored family. Never silent: the cut is logged each round.
+    top_m: int | None = None
+
+
 class DiscoveryOptions(BaseModel):
     """Discovery-specific options."""
 
     importance_method: Literal["gain", "permutation", "shap"] = "permutation"
     selection_method: Literal["forward", "recursive", "threshold"] = "forward"
+    # Unit of forward selection. "feature" = classic per-column greedy.
+    # "family" = one base statistic across its side/window/combiner forms is
+    # scored and accepted as a block (discovery/families.py; FS-protocol
+    # redesign items 1-2). Forward-only; the candidate loop runs serial so
+    # per-fold metrics can be captured per candidate.
+    selection_unit: Literal["feature", "family"] = "feature"
     sweep_params: bool = False
     segment_analysis: bool = False
     metric: str = "calibration_error"
@@ -195,6 +225,7 @@ class DiscoveryOptions(BaseModel):
     null_importance: NullImportanceConfig | None = None
     features: DiscoveryFeaturesConfig = DiscoveryFeaturesConfig()
     pool_pruning: PoolPruningConfig = PoolPruningConfig()
+    family_acceptance: FamilyAcceptanceConfig | None = None
 
     @model_validator(mode="after")
     def _warn_direction_mismatch(self) -> "DiscoveryOptions":
@@ -206,6 +237,15 @@ class DiscoveryOptions(BaseModel):
                     "of metric %r (%s) — honoring the explicit override.",
                     self.direction, self.metric, derived,
                 )
+        return self
+
+    @model_validator(mode="after")
+    def _check_family_acceptance(self) -> "DiscoveryOptions":
+        if self.family_acceptance is not None and self.selection_unit != "family":
+            raise ValueError(
+                "discovery.family_acceptance requires selection_unit='family' "
+                "(the two-bar gate is defined on family-unit rounds)"
+            )
         return self
 
     def resolved_direction(self) -> str:

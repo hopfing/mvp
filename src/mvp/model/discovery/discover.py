@@ -15,6 +15,7 @@ import yaml
 
 from mvp.common.base_job import get_local_data_root
 from mvp.model.discovery.config import DiscoveryConfig
+from mvp.model.discovery.families import group_candidates
 from mvp.model.discovery.fast_selection import FastForwardSelector
 from mvp.model.discovery.importance import compute_importance
 from mvp.model.discovery.segments import (
@@ -25,6 +26,7 @@ from mvp.model.discovery.null_importance import (
     run_null_importance,
 )
 from mvp.model.discovery.selection import FeatureSelector, SelectionResult
+from mvp.model.discovery.shifted_null import make_family_acceptance
 from mvp.model.metrics import fs_display_precision
 from mvp.model.discovery.stability import StabilityResult, run_stability_selection
 from mvp.model.discovery.sweeps import (
@@ -404,6 +406,9 @@ class FeatureDiscovery:
             matches_path=self.matches_path,
             cache_dir=self.cache_dir,
         )
+        # Retained for the family-acceptance gate: the shifted-candidate null
+        # operates on this instance's precomputed matrix, folds and margins.
+        self._fast_selector = fast
 
         if self.config.discovery.meta_discovery is not None:
             meta_config = self.config.discovery.meta_discovery
@@ -788,6 +793,47 @@ class FeatureDiscovery:
                 f"from forward round {pruning.first_cut_round} on"
             )
 
+        # Family-unit selection (redesign item 2): group the candidate pool
+        # into families and iterate those. Base/seed columns stay pinned as
+        # raw columns and are excluded from grouping. A non-empty unassigned
+        # residue is a hard error — the overlay in families.py must be
+        # extended, not guessed around.
+        families: dict[str, list[str]] | None = None
+        if method == "forward" and self.config.discovery.selection_unit == "family":
+            pool = [f for f in all_features if f not in set(base)]
+            families, unassigned = group_candidates(pool)
+            if unassigned:
+                raise ValueError(
+                    f"selection_unit=family: {len(unassigned)} candidates have "
+                    f"no family (extend families.py): {unassigned[:10]}"
+                )
+            sizes = sorted((len(v) for v in families.values()), reverse=True)
+            self._log(
+                f"family mode: {len(pool)} candidates -> {len(families)} "
+                f"families (largest {sizes[0] if sizes else 0} members)"
+            )
+
+        # Two-bar acceptance gate: only with a family_acceptance block and
+        # family mode (config validation ties the two together).
+        acceptance_fn = None
+        fam_cfg = self.config.discovery.family_acceptance
+        if families is not None and fam_cfg is not None:
+            fast_sel = getattr(self, "_fast_selector", None)
+            if fast_sel is None:
+                raise RuntimeError(
+                    "family_acceptance requires the fast-selection scorer "
+                    "path (forward selection)"
+                )
+            self._log(
+                f"two-bar family acceptance: k={fam_cfg.k}, q={fam_cfg.q}, "
+                f"control pool >= {fam_cfg.min_control_pool}"
+                + (f", top_m={fam_cfg.top_m}" if fam_cfg.top_m else "")
+            )
+            acceptance_fn = make_family_acceptance(
+                fast_sel, self.config.discovery.metric, families, fam_cfg,
+                direction=direction,
+            )
+
         selector = FeatureSelector(
             scorer=scorer,
             all_features=all_features,
@@ -804,6 +850,8 @@ class FeatureDiscovery:
             round1_exclude=round1_exclude,
             bottom_cut_n=pruning.bottom_cut_n,
             first_cut_round=pruning.first_cut_round,
+            families=families,
+            acceptance_fn=acceptance_fn,
         )
 
         # For BLAS-threaded models (the fit ignores n_jobs), cap each concurrent

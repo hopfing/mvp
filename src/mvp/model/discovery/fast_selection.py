@@ -246,6 +246,8 @@ class FastForwardSelector:
         # precompute(); empty/None under non-date splitters.
         self.row_dates: np.ndarray | None = None
         self.row_uids: np.ndarray | None = None
+        self.row_player_ids: np.ndarray | None = None
+        self.row_opp_ids: np.ndarray | None = None
         # Folds already warned about low pairing. On the selector, not in the
         # scorer closure, so a new scorer per round does not re-warn.
         self._pair_warned: set[int] = set()
@@ -609,6 +611,15 @@ class FastForwardSelector:
         self.row_uids = (
             df["match_uid"].to_numpy() if "match_uid" in df.columns else None
         )
+        # Per-row side identities for the shifted-candidate null (FS-protocol
+        # redesign item 3): within-player circular shifts need each row's
+        # player and opponent. Same lifecycle as row_uids.
+        self.row_player_ids = (
+            df["player_id"].to_numpy() if "player_id" in df.columns else None
+        )
+        self.row_opp_ids = (
+            df["opp_id"].to_numpy() if "opp_id" in df.columns else None
+        )
         if "tournament_id" in df.columns and "year" in df.columns:
             self.tournament_key = (
                 df.select(
@@ -638,6 +649,10 @@ class FastForwardSelector:
             self.row_dates = self.row_dates[row_mask]
             if self.row_uids is not None:
                 self.row_uids = self.row_uids[row_mask]
+            if self.row_player_ids is not None:
+                self.row_player_ids = self.row_player_ids[row_mask]
+            if self.row_opp_ids is not None:
+                self.row_opp_ids = self.row_opp_ids[row_mask]
             if self.tournament_key is not None:
                 self.tournament_key = self.tournament_key[row_mask]
             if self.y_aux is not None:
@@ -917,6 +932,11 @@ class FastForwardSelector:
             )
 
         def scorer(features: list[str]) -> float:
+            # Per-fold metrics side channel: after every call the closure
+            # stamps `scorer.last_fold_metrics` (a list, possibly empty) so
+            # family-level selection can apply fold-agreement acceptance
+            # without changing this function's return contract.
+            scorer.last_fold_metrics = []
             if not features:
                 return float("inf")
 
@@ -1163,6 +1183,7 @@ class FastForwardSelector:
                         "Round %d ES best_iteration/fold: [%s]", round_num, per_fold
                     )
 
+            scorer.last_fold_metrics = [float(m) for m in fold_metrics]
             if not fold_metrics:
                 # Every fold's test slice was empty under eval_filters.
                 return float("inf")

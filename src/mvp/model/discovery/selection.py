@@ -125,6 +125,10 @@ class SelectionResult:
     # Features permanently dropped by bottom-cut pruning (empty when pruning is
     # off). Flat set; per-round attribution lives in fs_pruned_<stem>.json.
     pruned_features: list[str] = field(default_factory=list)
+    # Family-unit runs only: accepted family ids in acceptance order.
+    # selected_features carries the expanded member columns (downstream fit
+    # consumes columns); this preserves the family-level view.
+    selected_families: list[str] = field(default_factory=list)
 
 
 class FeatureSelector:
@@ -151,6 +155,8 @@ class FeatureSelector:
         round1_exclude: set[str] | None = None,
         bottom_cut_n: int | None = None,
         first_cut_round: int = 3,
+        families: dict[str, list[str]] | None = None,
+        acceptance_fn: Callable[..., tuple[set[str], dict[str, Any]]] | None = None,
     ) -> None:
         """Initialize selector.
 
@@ -200,6 +206,21 @@ class FeatureSelector:
         self.bottom_cut_n = bottom_cut_n
         self.first_cut_round = first_cut_round
         self._pruned_features: set[str] = set()
+        # Family-unit selection (forward only): candidate ids are family keys
+        # mapping to member columns; the scorer always receives columns via
+        # _expand()/_cols(). Empty dict = classic per-column selection, where
+        # every id is its own column and both helpers are identity.
+        self._families: dict[str, list[str]] = dict(families) if families else {}
+        self._candidate_ids: list[str] = (
+            list(self._families) if self._families else list(self.all_features)
+        )
+        # Two-bar acceptance gate (family mode only). Called once per round
+        # with (selected, best_metric, scores, fold_scores); returns the set
+        # of families eligible to win plus a JSON-serializable info dict for
+        # the run log. When set it REPLACES min_delta — the bars are the
+        # evidence standard, a fixed delta would re-impose the "beats zero"
+        # test the redesign removes.
+        self.acceptance_fn = acceptance_fn
 
     def _fmt_metric(self, value: float) -> str:
         """Format a metric value at the min_delta-scaled display precision."""
@@ -216,6 +237,14 @@ class FeatureSelector:
         if self.direction == "minimize":
             return float("inf")
         return float("-inf")
+
+    def _cols(self, candidate: str) -> list[str]:
+        """Columns a candidate id expands to (identity outside family mode)."""
+        return self._families.get(candidate, [candidate])
+
+    def _expand(self, ids: list[str]) -> list[str]:
+        """Expand candidate ids to the flat column list the scorer consumes."""
+        return [c for i in ids for c in self._cols(i)]
 
     def forward_selection(
         self,
@@ -254,7 +283,7 @@ class FeatureSelector:
             ]
             self._pruned_features = set(getattr(cp, "pruned_features", None) or [])
             remaining = (
-                set(self.all_features) - set(selected) - self._pruned_features
+                set(self._candidate_ids) - set(selected) - self._pruned_features
             )
             best_metric = cp.best_metric
             history: list[dict[str, Any]] = []
@@ -284,11 +313,11 @@ class FeatureSelector:
         else:
             selected = list(self.base_features)
             remaining = (
-                set(self.all_features) - set(selected) - self._pruned_features
+                set(self._candidate_ids) - set(selected) - self._pruned_features
             )
             history = []
             if selected:
-                best_metric = self.scorer(selected)
+                best_metric = self.scorer(self._expand(selected))
                 # Base features are scored as a set; record the set metric for
                 # each so the checkpoint carries a real number, not a 0 stub.
                 selected_metrics = [best_metric] * len(selected)
@@ -317,6 +346,11 @@ class FeatureSelector:
             round_num = len(selected) + 1
             round_results: list[tuple[str, float]] = []
             scores_this_round: dict[str, float] = {}
+            # Per-candidate per-fold metrics (serial loop only — the scorer
+            # side channel is a closure attribute, unsafe across threads).
+            # Persisted with the round ranking; the two-bar acceptance
+            # (redesign items 2-3) reads fold agreement from here.
+            fold_scores_this_round: dict[str, list[float]] = {}
 
             # Candidate pool for THIS round. The round-1 mirror filter fires ONLY
             # on a genuine round 1 (round_num == 1, i.e. nothing selected — an
@@ -352,6 +386,15 @@ class FeatureSelector:
 
             to_eval = sorted(unevaluated)
             workers = max(1, self.forward_max_workers or 1)
+            if self._families and workers > 1:
+                # Per-candidate fold metrics are read off the scorer closure
+                # right after each call; that side channel is not thread-safe,
+                # and family acceptance (two-bar protocol) consumes it.
+                logger.info(
+                    "  family mode: forcing serial candidate loop (was x%d)",
+                    workers,
+                )
+                workers = 1
             eval_count = 0
             round_t0 = time.perf_counter()
 
@@ -360,23 +403,33 @@ class FeatureSelector:
             # reads only shared read-only state via self.scorer, whose per-fold
             # np.ix_ gather returns a private copy before any in-place impute, so
             # concurrent calls never mutate the shared matrix and are safe.
-            def _eval(feat: str) -> tuple[str, float | None]:
+            def _eval(feat: str) -> tuple[str, float | None, list[float]]:
                 try:
-                    return feat, self.scorer(selected + [feat])
+                    metric = self.scorer(self._expand(selected) + self._cols(feat))
                 except Exception as e:  # noqa: BLE001 — match serial skip-on-error
                     logger.warning("Scorer failed for %s: %s", feat, e)
-                    return feat, None
+                    return feat, None, []
+                folds = (
+                    [float(m) for m in getattr(self.scorer, "last_fold_metrics", [])]
+                    if workers == 1
+                    else []
+                )
+                return feat, metric, folds
 
             # All bookkeeping stays on the main thread (no locks needed): record
             # the score and write the periodic checkpoint while the dict is
             # quiescent between results. Cadence is "every N completions" — same
             # crash-loss bound as the old "every N submissions".
-            def _record(feat: str, metric: float | None) -> None:
+            def _record(
+                feat: str, metric: float | None, folds: list[float]
+            ) -> None:
                 nonlocal eval_count
                 if metric is None:
                     return
                 round_results.append((feat, metric))
                 scores_this_round[feat] = metric
+                if folds:
+                    fold_scores_this_round[feat] = folds
                 eval_count += 1
                 if (
                     checkpoint_path is not None
@@ -413,8 +466,8 @@ class FeatureSelector:
             if workers == 1:
                 bar = tqdm(to_eval, desc=desc, leave=False, ncols=120)
                 for feature in bar:
-                    feat, metric = _eval(feature)
-                    _record(feat, metric)
+                    feat, metric, folds = _eval(feature)
+                    _record(feat, metric, folds)
                     _show(bar, feat, metric)
             else:
                 with ThreadPoolExecutor(max_workers=workers) as ex:
@@ -424,8 +477,8 @@ class FeatureSelector:
                         desc=f"{desc} (x{workers})", leave=False, ncols=120,
                     )
                     for fut in bar:
-                        feat, metric = fut.result()
-                        _record(feat, metric)
+                        feat, metric, folds = fut.result()
+                        _record(feat, metric, folds)
                         _show(bar, feat, metric)
 
             # Deterministic round winner: strict-improvement reduction over the
@@ -434,9 +487,18 @@ class FeatureSelector:
             # identical feature; ties resolve to the earliest-sorted candidate,
             # and a candidate that merely equals best_metric is not accepted
             # (preserving the stop-on-no-improvement behavior below).
+            gate_info: dict[str, Any] | None = None
+            eligible: set[str] | None = None
+            if self.acceptance_fn is not None and self._families:
+                eligible, gate_info = self.acceptance_fn(
+                    list(selected), best_metric, dict(scores_this_round),
+                    dict(fold_scores_this_round),
+                )
             best_feature = None
             best_feature_metric = best_metric
             for feat in sorted(scores_this_round):
+                if eligible is not None and feat not in eligible:
+                    continue
                 if self._is_better(scores_this_round[feat], best_feature_metric):
                     best_feature = feat
                     best_feature_metric = scores_this_round[feat]
@@ -458,14 +520,22 @@ class FeatureSelector:
                 delta = best_metric - best_feature_metric
             else:
                 delta = best_feature_metric - best_metric
-            if best_feature is None or delta < self.min_delta:
-                reason = (
-                    "no improvement" if self.min_delta == 0.0
-                    else (
-                        f"improvement {self._fmt_metric(delta)} "
-                        f"< min_delta {self._fmt_metric(self.min_delta)}"
+            # The gate replaces min_delta: with an eligible set in play, any
+            # strict improvement by an eligible family is accepted.
+            min_delta = 0.0 if eligible is not None else self.min_delta
+            if best_feature is None or delta < min_delta:
+                if eligible is not None:
+                    reason = (
+                        "no family cleared two-bar acceptance "
+                        "(or none eligible improved)"
                     )
-                )
+                elif min_delta == 0.0:
+                    reason = "no improvement"
+                else:
+                    reason = (
+                        f"improvement {self._fmt_metric(delta)} "
+                        f"< min_delta {self._fmt_metric(min_delta)}"
+                    )
                 logger.info("FS halting: %s", reason)
                 if best_feature is not None:
                     logger.info(
@@ -495,6 +565,8 @@ class FeatureSelector:
                         round_results, key=lambda x: x[1],
                         reverse=self.direction == "maximize",
                     ),
+                    "fold_metrics": fold_scores_this_round,
+                    "acceptance": gate_info,
                 })
                 break
 
@@ -526,6 +598,8 @@ class FeatureSelector:
                 "feature": best_feature,
                 "metric": best_metric,
                 "ranking": sorted_results,
+                "fold_metrics": fold_scores_this_round,
+                "acceptance": gate_info,
             })
 
             # Bottom-cut: from the warmup round on, permanently drop the N
@@ -609,11 +683,16 @@ class FeatureSelector:
         # the resume cheap — it does not re-run completed rounds).
 
         return SelectionResult(
-            selected_features=selected,
+            selected_features=self._expand(selected),
             excluded_features=list(remaining),
             history=history,
             final_metric=best_metric if best_metric != self._worst_value() else 0.0,
             pruned_features=sorted(self._pruned_features),
+            selected_families=(
+                [f for f in selected if f in self._families]
+                if self._families
+                else []
+            ),
         )
 
     def _write_checkpoint(
