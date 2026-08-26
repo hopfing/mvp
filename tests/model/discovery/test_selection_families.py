@@ -108,6 +108,40 @@ class TestFamilyForwardSelection:
             assert folds == [ranking[fam], ranking[fam]]
         assert set(first["fold_metrics"]) == set(FAMILIES)
 
+    def test_parallel_candidates_keep_fold_metrics(self, tmp_path, caplog):
+        """With a scorer that returns fold metrics alongside the score, the
+        family-mode candidate loop runs on threads and every candidate's
+        fold metrics still land in the history record."""
+        scorer = make_scorer()
+
+        def score_with_folds(cols: list[str]) -> tuple[float, list[float]]:
+            s = scorer(cols)
+            return s, [s, s]
+
+        scorer.score_with_folds = score_with_folds
+        selector = self._selector(scorer, forward_max_workers=2)
+        with caplog.at_level("INFO"):
+            selector.forward_selection(
+                checkpoint_path=tmp_path / "discovery_checkpoint_unit.json",
+            )
+
+        assert "forcing serial" not in caplog.text
+        hist = tmp_path / "fs_history_unit.jsonl"
+        lines = [json.loads(ln) for ln in hist.read_text().splitlines() if ln.strip()]
+        first = lines[0]
+        ranking = dict(tuple(r) for r in first["ranking"])
+        assert set(first["fold_metrics"]) == set(FAMILIES)
+        for fam, folds in first["fold_metrics"].items():
+            assert folds == [ranking[fam], ranking[fam]]
+
+    def test_side_channel_only_scorer_forces_serial(self, tmp_path, caplog):
+        selector = self._selector(make_scorer(), forward_max_workers=2)
+        with caplog.at_level("INFO"):
+            selector.forward_selection(
+                checkpoint_path=tmp_path / "discovery_checkpoint_unit.json",
+            )
+        assert "forcing serial candidate loop (was x2)" in caplog.text
+
     def test_feature_mode_unchanged(self, tmp_path):
         def plain_scorer(cols: list[str]) -> float:  # no side channel at all
             return 1.0 - 0.1 * ("a1" in cols)
@@ -202,4 +236,4 @@ class TestFamilyAcceptanceConfig:
         cfg["discovery"]["selection_unit"] = "family"
         parsed = DiscoveryConfig.model_validate(cfg)
         assert parsed.discovery.family_acceptance.k == 5
-        assert parsed.discovery.family_acceptance.q == 0.10
+        assert parsed.discovery.family_acceptance.alpha == 0.10

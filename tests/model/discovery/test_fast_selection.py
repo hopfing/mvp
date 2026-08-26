@@ -303,8 +303,14 @@ class TestOffsetMargins:
         assert len(folds) == len(fast.folds)
         assert score == pytest.approx(float(np.mean(folds)))
 
+        # thread-safe form: same numbers returned with the score, no stamp
+        metric2, folds2 = scorer.score_with_folds(["player_ranking_points_diff"])
+        assert metric2 == pytest.approx(score)
+        assert folds2 == folds
+
         scorer([])
         assert scorer.last_fold_metrics == []
+        assert scorer.score_with_folds([]) == (float("inf"), [])
 
     def test_scorer_rejects_caller_supplied_folds(
         self, discovery_config_offset: Path, sample_matches: Path, tmp_path: Path

@@ -825,13 +825,19 @@ class FeatureDiscovery:
                     "path (forward selection)"
                 )
             self._log(
-                f"two-bar family acceptance: k={fam_cfg.k}, q={fam_cfg.q}, "
+                f"two-bar family acceptance: k={fam_cfg.k}, "
+                f"alpha={fam_cfg.alpha}, "
                 f"control pool >= {fam_cfg.min_control_pool}"
                 + (f", top_m={fam_cfg.top_m}" if fam_cfg.top_m else "")
+                + f"; null runner {cand_workers} workers x {cand_n_jobs} "
+                f"threads/fit"
             )
+            # The candidate loop runs serial in family mode (per-fold side
+            # channel), so its worker budget is free for the null runner.
             acceptance_fn = make_family_acceptance(
                 fast_sel, self.config.discovery.metric, families, fam_cfg,
-                direction=direction,
+                direction=direction, workers=cand_workers, n_jobs=cand_n_jobs,
+                checkpoint_path=checkpoint_path,
             )
 
         selector = FeatureSelector(

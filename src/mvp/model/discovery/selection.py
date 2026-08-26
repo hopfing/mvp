@@ -386,12 +386,15 @@ class FeatureSelector:
 
             to_eval = sorted(unevaluated)
             workers = max(1, self.forward_max_workers or 1)
-            if self._families and workers > 1:
-                # Per-candidate fold metrics are read off the scorer closure
-                # right after each call; that side channel is not thread-safe,
-                # and family acceptance (two-bar protocol) consumes it.
+            # Family mode records per-candidate fold metrics. A scorer that
+            # returns them with the score (`score_with_folds`) is thread-safe;
+            # one that only stamps `last_fold_metrics` after each call is not,
+            # so it runs serial.
+            score_with_folds = getattr(self.scorer, "score_with_folds", None)
+            if self._families and workers > 1 and score_with_folds is None:
                 logger.info(
-                    "  family mode: forcing serial candidate loop (was x%d)",
+                    "  family mode: scorer has no score_with_folds, forcing "
+                    "serial candidate loop (was x%d)",
                     workers,
                 )
                 workers = 1
@@ -404,16 +407,22 @@ class FeatureSelector:
             # np.ix_ gather returns a private copy before any in-place impute, so
             # concurrent calls never mutate the shared matrix and are safe.
             def _eval(feat: str) -> tuple[str, float | None, list[float]]:
+                cols = self._expand(selected) + self._cols(feat)
                 try:
-                    metric = self.scorer(self._expand(selected) + self._cols(feat))
+                    if score_with_folds is not None:
+                        metric, folds = score_with_folds(cols)
+                        folds = [float(m) for m in folds]
+                    else:
+                        metric = self.scorer(cols)
+                        folds = (
+                            [float(m) for m in
+                             getattr(self.scorer, "last_fold_metrics", [])]
+                            if workers == 1
+                            else []
+                        )
                 except Exception as e:  # noqa: BLE001 — match serial skip-on-error
                     logger.warning("Scorer failed for %s: %s", feat, e)
                     return feat, None, []
-                folds = (
-                    [float(m) for m in getattr(self.scorer, "last_fold_metrics", [])]
-                    if workers == 1
-                    else []
-                )
                 return feat, metric, folds
 
             # All bookkeeping stays on the main thread (no locks needed): record

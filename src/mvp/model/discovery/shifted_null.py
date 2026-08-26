@@ -39,16 +39,28 @@ shifts each side by ``offset % m`` independently.
 The composite statistic is (mean fold gain, positive in >= ``min_agree``
 folds) and the null replicates are pushed through the same rule, so
 expanding-fold dependence is priced into the calibration. The acceptance
-bars (Benjamini-Hochberg over per-family p-values, and the negative-control
+bars (the max-null — "beats the best of the fakes" — and the negative-control
 floor read off gains the round already computed) are small pure functions at
 the bottom of the module.
+
+Why the max-null and not per-family p-values under FDR: with K replicates a
+family's own-null p-value is at best 1/(K+1), and Benjamini-Hochberg over n
+families needs p <= q*r/n — at K=20, n=532, q=0.10 nothing can be accepted
+until ~254 families all sit at the floor. Taking, per replicate, the best
+null composite across every tested family puts the multiplicity in the
+statistic instead of in the p-value resolution: K=20 calibrates the round's
+test however many families were scored. Own-null p-values are still
+recorded per family as a diagnostic.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import time
-from dataclasses import dataclass, field
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
 
 import numpy as np
 
@@ -244,7 +256,9 @@ class _FoldScorer:
     configs this serves are plain XGBoost + offset) and raise.
     """
 
-    def __init__(self, fast: FastForwardSelector, metric: str):
+    def __init__(
+        self, fast: FastForwardSelector, metric: str, n_jobs: int | None = None
+    ):
         if fast.config.mtl is not None:
             raise NotImplementedError("shifted null: MTL configs unsupported")
         es = fast.config.early_stopping
@@ -267,11 +281,25 @@ class _FoldScorer:
                 "ordering and orientation projection"
             )
         self.fast = fast
+        params = dict(fast.config.model.params or {})
         self.metric_fn = _make_metric_fn(
-            metric,
-            lambda_over=(fast.config.model.params or {}).get("lambda_over"),
+            metric, lambda_over=params.get("lambda_over"),
         )
-        self._pair_cache: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+        # Per-fit thread share (OpenMP via XGB n_jobs), injected the same way
+        # the fast-selection scorer does it for the candidate loop.
+        if n_jobs is not None:
+            params["n_jobs"] = int(n_jobs)
+        self._model_params = params
+        # Orientation-projection pair maps per fold, built up front so
+        # score_fold has no shared mutable state and can run on threads.
+        self._pairs: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+        if fast.config.target == "won":
+            for f, (_, test_idx) in enumerate(fast.folds):
+                if fast.eval_mask is not None:
+                    test_idx = test_idx[fast.eval_mask[test_idx]]
+                if test_idx.size:
+                    i_p, j_p, _ = pair_index(fast.row_uids[test_idx])
+                    self._pairs[f] = (i_p, j_p)
 
     def score_fold(
         self,
@@ -316,8 +344,7 @@ class _FoldScorer:
             col_train[np.isnan(col_train)] = val
             col_test[np.isnan(col_test)] = val
 
-        model_params = fast.config.model.params or {}
-        model = get_model(fast.config.model.type, model_params)
+        model = get_model(fast.config.model.type, self._model_params)
         fit_kwargs: dict = {}
         predict_kwargs: dict = {}
         if fast.sample_weights is not None:
@@ -329,12 +356,8 @@ class _FoldScorer:
         model.fit(X_train, y_train, **fit_kwargs)
         y_prob = model.predict_proba(X_test, **predict_kwargs)
 
-        if fast.config.target == "won":
-            pair = self._pair_cache.get(fold_idx)
-            if pair is None:
-                i_p, j_p, _ = pair_index(fast.row_uids[test_idx])
-                pair = (i_p, j_p)
-                self._pair_cache[fold_idx] = pair
+        pair = self._pairs.get(fold_idx)
+        if pair is not None:
             y_prob = symmetrize_indexed(y_prob, *pair)
         return float(self.metric_fn(y_test, y_prob))
 
@@ -352,6 +375,50 @@ class FamilyNullVerdict:
     observed_fold_gains: list[float] = field(default_factory=list)
     null_composites: list[float] = field(default_factory=list)
     reason: str | None = None  # set when untestable (p_value None)
+
+
+def null_verdicts_path(checkpoint_path: Path | None, round_num: int) -> Path | None:
+    """Per-round verdict log beside the FS checkpoint
+    (``null_verdicts_<stem>_r<round>.jsonl``). The candidate-score checkpoint
+    covers scoring; this covers the null runner, which is the longer part
+    of a family-mode round and otherwise restarts from family 1 on resume."""
+    if checkpoint_path is None:
+        return None
+    name = checkpoint_path.name
+    prefix = "discovery_checkpoint_"
+    stem = name[len(prefix):] if name.startswith(prefix) else name
+    stem = stem.rsplit(".", 1)[0]
+    return checkpoint_path.with_name(f"null_verdicts_{stem}_r{round_num}.jsonl")
+
+
+def _verdict_key(accepted_specs: list[str], k: int, seed: int, min_agree: int) -> dict:
+    """What a stored verdict is conditional on. A line whose key differs is
+    from another accepted set / null draw and must not be reused."""
+    return {
+        "accepted": sorted(accepted_specs), "k": k, "seed": seed,
+        "min_agree": min_agree,
+    }
+
+
+def load_verdicts(path: Path | None, key: dict) -> dict[str, FamilyNullVerdict]:
+    """Verdicts stored under exactly ``key``; anything else is ignored."""
+    if path is None or not path.exists():
+        return {}
+    out: dict[str, FamilyNullVerdict] = {}
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            if not line.strip():
+                continue
+            rec = json.loads(line)
+            if rec.get("key") != key:
+                continue
+            out[rec["verdict"]["family"]] = FamilyNullVerdict(**rec["verdict"])
+    return out
+
+
+def _append_verdict(fh, verdict: FamilyNullVerdict, key: dict) -> None:
+    fh.write(json.dumps({"key": key, "verdict": asdict(verdict)}) + "\n")
+    fh.flush()
 
 
 def composite_gain(fold_gains: list[float], min_agree: int) -> float:
@@ -375,6 +442,9 @@ def run_family_nulls(
     seed: int = 0,
     min_agree: int | None = None,
     direction: str = "minimize",
+    workers: int = 1,
+    n_jobs: int | None = None,
+    checkpoint_path: Path | None = None,
 ) -> list[FamilyNullVerdict]:
     """Observed and null composite gains, and a p-value, per family.
 
@@ -382,10 +452,19 @@ def run_family_nulls(
     families' member columns). ``families`` maps family id -> member specs to
     test this round. K replicates per family; every quantity (baseline,
     observed, nulls) runs through the same fold-fit path.
+
+    ``workers`` families are processed concurrently (threads; XGB releases
+    the GIL), each fit on ``n_jobs`` threads — the candidate loop's budget,
+    which family mode leaves idle. Offsets are drawn up front per (fold,
+    replicate), so verdicts do not depend on scheduling order — which is
+    also what makes ``checkpoint_path`` sound: each verdict is appended as
+    it completes, keyed on (accepted set, k, seed, min_agree), and a rerun
+    with the same key skips the families already on disk and computes the
+    rest identically.
     """
     from mvp.model.engine import get_feature_columns
 
-    scorer = _FoldScorer(fast, metric)
+    scorer = _FoldScorer(fast, metric, n_jobs=n_jobs)
     n_folds = len(fast.folds)
     if min_agree is None:
         min_agree = max(1, n_folds - 1)  # 3-of-4 at the standard schedule
@@ -404,10 +483,14 @@ def run_family_nulls(
     if not baseline:
         raise ValueError("no scorable folds for the accepted set")
 
-    # Fold-level shift infrastructure shared across families and replicates:
-    # offsets are sampled per (fold, replicate) and the two side maps are
-    # derived from them, so every family in a replicate sees the same
-    # player-level scramble (irrelevant across families, cheap to share).
+    # Fold-level shift infrastructure shared across families: offsets are
+    # sampled once per (fold, replicate) and every family in that replicate
+    # sees the same player-level scramble. This is load-bearing, not an
+    # optimization: the acceptance bar takes the max null composite across
+    # families per replicate, and a max over one joint null world per
+    # replicate (Westfall-Young) is the honest "best of the fakes"; a max
+    # over independently scrambled families would be inflated. Do not
+    # un-share the draw.
     rng = np.random.default_rng(seed)
     uids = fast.row_uids.astype(str)
     fold_maps: list[list[tuple[np.ndarray, np.ndarray]]] = []
@@ -428,16 +511,13 @@ def run_family_nulls(
             ))
         fold_maps.append(maps_k)
 
-    verdicts: list[FamilyNullVerdict] = []
-    t0 = time.perf_counter()
-    for fam_i, (family, member_specs) in enumerate(sorted(families.items())):
+    def _one(family: str, member_specs: list[str]) -> FamilyNullVerdict:
         plan = resolve_rebuild(family, member_specs, fast.col_to_idx)
         if plan.missing:
-            verdicts.append(FamilyNullVerdict(
+            return FamilyNullVerdict(
                 family=family, p_value=None,
                 reason=f"unresolvable parents/members: {plan.missing[:6]}",
-            ))
-            continue
+            )
 
         member_idx = np.array(
             [fast.col_to_idx[m.col] for m in plan.members], dtype=int
@@ -489,19 +569,50 @@ def run_family_nulls(
             )
 
         exceed = sum(1 for c in null_composites if c >= observed)
-        verdicts.append(FamilyNullVerdict(
+        return FamilyNullVerdict(
             family=family,
             p_value=(1 + exceed) / (k + 1),
             observed_composite=observed,
             observed_fold_gains=observed_gains,
             null_composites=null_composites,
-        ))
-        if (fam_i + 1) % 10 == 0:
-            logger.info(
-                "shifted null: %d/%d families in %.0fs",
-                fam_i + 1, len(families), time.perf_counter() - t0,
-            )
+        )
 
+    key = _verdict_key(accepted_specs, k, seed, min_agree)
+    restored = load_verdicts(checkpoint_path, key)
+    items = [it for it in sorted(families.items()) if it[0] not in restored]
+    if restored:
+        logger.info(
+            "shifted null: restored %d/%d family verdicts from %s",
+            len(restored), len(families), checkpoint_path.name,
+        )
+    t0 = time.perf_counter()
+    verdicts: list[FamilyNullVerdict] = list(restored.values())
+    fh = (
+        open(checkpoint_path, "a", encoding="utf-8")
+        if checkpoint_path is not None else None
+    )
+
+    def _collect(results) -> None:
+        for fam_i, verdict in enumerate(results):
+            verdicts.append(verdict)
+            if fh is not None:
+                _append_verdict(fh, verdict, key)
+            if (fam_i + 1) % 10 == 0:
+                logger.info(
+                    "shifted null: %d/%d families in %.0fs",
+                    fam_i + 1, len(items), time.perf_counter() - t0,
+                )
+
+    try:
+        if workers > 1:
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                _collect(ex.map(lambda it: _one(*it), items))
+        else:
+            _collect(_one(*it) for it in items)
+    finally:
+        if fh is not None:
+            fh.close()
+    verdicts.sort(key=lambda v: v.family)
     return verdicts
 
 
@@ -510,17 +621,20 @@ def run_family_nulls(
 # ---------------------------------------------------------------------------
 
 
-def bh_accept(p_values: dict[str, float], q: float = 0.10) -> set[str]:
-    """Benjamini-Hochberg: largest r with p_(r) <= q*r/n; accept those r."""
-    if not p_values:
-        return set()
-    items = sorted(p_values.items(), key=lambda kv: kv[1])
-    n = len(items)
-    r_max = 0
-    for r, (_, p) in enumerate(items, 1):
-        if p <= q * r / n:
-            r_max = r
-    return {fam for fam, _ in items[:r_max]}
+def max_null(verdicts: list[FamilyNullVerdict]) -> list[float]:
+    """Per replicate, the best null composite across every testable family —
+    the round's "best of the fakes". Multiplicity lives in the max, so K
+    replicates calibrate the test however many families were scored."""
+    reps = [v.null_composites for v in verdicts if v.p_value is not None]
+    if not reps:
+        return []
+    return [max(col) for col in zip(*reps)]
+
+
+def max_null_p(observed: float, maxes: list[float]) -> float:
+    """(1 + #replicates whose best fake >= observed) / (K + 1)."""
+    exceed = sum(1 for m in maxes if m >= observed)
+    return (1 + exceed) / (len(maxes) + 1)
 
 
 def negative_control_floor(
@@ -545,11 +659,16 @@ def make_family_acceptance(
     cfg,
     direction: str = "minimize",
     _null_fn=run_family_nulls,
+    workers: int = 1,
+    n_jobs: int | None = None,
+    checkpoint_path: Path | None = None,
 ):
-    """Round-gate closure for ``FeatureSelector.acceptance_fn``: BH over
-    shifted-null p-values (bar a) intersected with the negative-control
+    """Round-gate closure for ``FeatureSelector.acceptance_fn``: max-null
+    test at ``cfg.alpha`` (bar a) intersected with the negative-control
     floor (bar b). ``cfg`` is a FamilyAcceptanceConfig; ``_null_fn`` is
-    injectable so the gate logic tests engine-free."""
+    injectable so the gate logic tests engine-free. ``workers`` /
+    ``n_jobs`` are the null runner's thread budget; ``checkpoint_path`` is
+    the FS checkpoint, from which the per-round verdict log is derived."""
 
     def acceptance(
         selected_ids: list[str],
@@ -572,8 +691,10 @@ def make_family_acceptance(
             logger.info(
                 "family acceptance: null-testing top %d of %d families by "
                 "observed gain (top_m cap) — the rest are ineligible this "
-                "round",
-                cfg.top_m, len(to_test),
+                "round, and the max-null is taken over the tested %d only, "
+                "so alpha is family-wise over that subset, not the round "
+                "(a weaker bar than the uncapped protocol)",
+                cfg.top_m, len(to_test), cfg.top_m,
             )
             to_test = to_test[: cfg.top_m]
         accepted_specs = [
@@ -586,18 +707,42 @@ def make_family_acceptance(
             seed=cfg.seed + len(selected_ids),  # fresh nulls each round
             min_agree=cfg.min_agree,
             direction=direction,
+            workers=workers,
+            n_jobs=n_jobs,
+            # same round numbering as the selector: seeds count as selected
+            checkpoint_path=null_verdicts_path(
+                checkpoint_path, len(selected_ids) + 1
+            ),
         )
-        p_values = {
-            v.family: v.p_value for v in verdicts if v.p_value is not None
-        }
+        testable = [v for v in verdicts if v.p_value is not None]
         untestable = sorted(v.family for v in verdicts if v.p_value is None)
-        bar_a = bh_accept(p_values, cfg.q)
+        maxes = max_null(testable)
+        # A -inf max means every tested family's fake failed the
+        # fold-agreement gate in that replicate: any family clearing the
+        # gate beats it regardless of magnitude. Negligible at full pool
+        # size, live under top_m or a thinned pool — so it is counted.
+        neg_inf = sum(1 for m in maxes if m == float("-inf"))
+        if neg_inf:
+            logger.warning(
+                "family acceptance: best fake failed the fold-agreement "
+                "gate in %d/%d replicates — bar (a) does not rank magnitude "
+                "there",
+                neg_inf, len(maxes),
+            )
+        p_max = {
+            v.family: max_null_p(v.observed_composite, maxes) for v in testable
+        }
+        bar_a = {f for f, p in p_max.items() if p <= cfg.alpha}
         eligible = (
             bar_a if floor is None
             else {f for f in bar_a if gains[f] >= floor}
         )
         info = {
-            "p_values": p_values,
+            "max_null": maxes,
+            "max_null_neg_inf": neg_inf,
+            "p_max": p_max,
+            # own-null p-values: diagnostic only (see module docstring)
+            "p_own": {v.family: v.p_value for v in testable},
             "untestable": untestable,
             "control_floor": floor,
             "bar_a": sorted(bar_a),

@@ -162,14 +162,18 @@ class FamilyAcceptanceConfig(BaseModel):
     rule: each round accepts the best family clearing both bars and stops
     when none does.
 
-    Bar (a): shifted-candidate null -> per-family p-value -> Benjamini-
-    Hochberg at ``q``. Bar (b): observed gain >= the 95th percentile of the
-    round's bottom-half families' observed gains; below ``min_control_pool``
-    controls the floor is unstable, so bar (a) alone applies (logged).
+    Bar (a): shifted-candidate null -> per replicate, the best null composite
+    across every tested family (the "best of the fakes") -> a family passes
+    when its observed composite beats that max-null with p <= ``alpha``
+    (p = (1 + #replicates the best fake >= observed) / (k + 1); at k=20,
+    alpha=0.10 means losing to at most one of the 20 best fakes). Bar (b):
+    observed gain >= the 95th percentile of the round's bottom-half families'
+    observed gains; below ``min_control_pool`` controls the floor is
+    unstable, so bar (a) alone applies (logged).
     """
 
     k: int = 20  # null replicates per family per round
-    q: float = 0.10  # BH false-discovery level
+    alpha: float = 0.10  # max-null p threshold (family-wise, per round)
     # Fold-agreement gate inside the composite statistic; None = n_folds - 1
     # (3-of-4 at the standard schedule).
     min_agree: int | None = None

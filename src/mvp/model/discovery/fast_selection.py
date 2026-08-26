@@ -931,21 +931,19 @@ class FastForwardSelector:
                 "runner-scored metrics"
             )
 
-        def scorer(features: list[str]) -> float:
-            # Per-fold metrics side channel: after every call the closure
-            # stamps `scorer.last_fold_metrics` (a list, possibly empty) so
-            # family-level selection can apply fold-agreement acceptance
-            # without changing this function's return contract.
-            scorer.last_fold_metrics = []
+        def score_with_folds(features: list[str]) -> tuple[float, list[float]]:
+            # (mean metric, per-fold metrics). Pure function of its inputs —
+            # no state on the closure — so the candidate loop can call it
+            # from several threads and keep each candidate's fold metrics.
             if not features:
-                return float("inf")
+                return float("inf"), []
 
             try:
                 col_names = get_feature_columns(features)
                 col_indices = np.array([col_to_idx[c] for c in col_names])
             except KeyError as e:
                 logger.warning("Column lookup failed for %s: %s", features, e)
-                return float("inf")
+                return float("inf"), []
 
             # Partition selected columns by FS-time fill strategy so the inner
             # loop honors each feature's declared impute contract. A column
@@ -1183,12 +1181,22 @@ class FastForwardSelector:
                         "Round %d ES best_iteration/fold: [%s]", round_num, per_fold
                     )
 
-            scorer.last_fold_metrics = [float(m) for m in fold_metrics]
+            per_fold = [float(m) for m in fold_metrics]
             if not fold_metrics:
                 # Every fold's test slice was empty under eval_filters.
-                return float("inf")
-            return float(np.mean(fold_metrics))
+                return float("inf"), per_fold
+            return float(np.mean(fold_metrics)), per_fold
 
+        def scorer(features: list[str]) -> float:
+            # Float return contract for every existing caller. Also stamps
+            # `scorer.last_fold_metrics` after each call (serial use only —
+            # under threads read `scorer.score_with_folds` instead).
+            metric, folds = score_with_folds(features)
+            scorer.last_fold_metrics = folds
+            return metric
+
+        scorer.last_fold_metrics = []
+        scorer.score_with_folds = score_with_folds
         return scorer
 
     def resample_folds(

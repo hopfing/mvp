@@ -13,11 +13,15 @@ from mvp.model.discovery.fast_selection import FastForwardSelector
 from mvp.model.discovery.shifted_null import (
     FamilyNullVerdict,
     _FoldScorer,
+    _append_verdict,
     _side_gather_map,
-    bh_accept,
     composite_gain,
+    load_verdicts,
     make_family_acceptance,
+    max_null,
+    max_null_p,
     negative_control_floor,
+    null_verdicts_path,
     resolve_rebuild,
     run_family_nulls,
 )
@@ -178,11 +182,68 @@ class TestAcceptanceBars:
         assert composite_gain(gains, 3) == float("-inf")
         assert composite_gain([], 1) == float("-inf")
 
-    def test_bh_accept(self):
-        assert bh_accept({}) == set()
-        # n=3, q=0.10: thresholds 0.033/0.067/0.10
-        accepted = bh_accept({"a": 0.001, "b": 0.02, "c": 0.9}, q=0.10)
-        assert accepted == {"a", "b"}
+    def test_max_null_is_best_fake_per_replicate(self):
+        neg = float("-inf")
+        verdicts = [
+            FamilyNullVerdict("a", 0.5, 0.01, null_composites=[0.001, neg, 0.003]),
+            FamilyNullVerdict("b", 0.5, 0.02, null_composites=[0.004, 0.002, neg]),
+            FamilyNullVerdict("u", None, reason="untestable"),
+        ]
+        assert max_null(verdicts) == [0.004, 0.002, 0.003]
+        assert max_null([]) == []
+
+    def test_max_null_p_puts_multiplicity_in_the_statistic(self):
+        # A family at its own-null floor (beats all 20 of its own fakes) is
+        # still rejected when other families' fakes beat it: the per-family
+        # p-value cannot get under q/n for any feasible K, the max-null can.
+        maxes = [0.002] * 20
+        assert max_null_p(0.001, maxes) == pytest.approx(21 / 21)
+        assert max_null_p(0.003, maxes) == pytest.approx(1 / 21)
+        assert max_null_p(0.003, [0.005] + [0.002] * 19) == pytest.approx(2 / 21)
+        assert max_null_p(float("-inf"), maxes) == pytest.approx(1.0)
+        assert max_null_p(0.5, []) == pytest.approx(1.0)
+
+    def test_max_null_all_neg_inf_loses_magnitude_discrimination(self):
+        # Every fake failed the fold-agreement gate: the bar is "cleared the
+        # gate at all", the size of the gain no longer matters. Documented
+        # degenerate case; the gate counts these replicates (see the
+        # gate test below).
+        neg = float("-inf")
+        maxes = [neg] * 20
+        assert max_null_p(1e-9, maxes) == pytest.approx(1 / 21)
+        assert max_null_p(0.5, maxes) == pytest.approx(1 / 21)
+        assert max_null_p(neg, maxes) == pytest.approx(1.0)
+
+    def test_null_verdicts_path_derives_from_checkpoint(self, tmp_path):
+        ck = tmp_path / "discovery_checkpoint_residual_families.json"
+        assert null_verdicts_path(ck, 3) == (
+            tmp_path / "null_verdicts_residual_families_r3.jsonl"
+        )
+        assert null_verdicts_path(None, 3) is None
+
+    def test_verdict_log_round_trips_and_filters_on_key(self, tmp_path):
+        neg = float("-inf")
+        path = tmp_path / "null_verdicts_x_r2.jsonl"
+        key = {"accepted": ["base"], "k": 3, "seed": 1, "min_agree": 2}
+        other = {**key, "seed": 2}
+        v1 = FamilyNullVerdict(
+            "a", 0.25, 0.01, observed_fold_gains=[0.02, neg],
+            null_composites=[0.001, neg, 0.002],
+        )
+        v2 = FamilyNullVerdict("u", None, reason="unresolvable: x")
+        v3 = FamilyNullVerdict("b", 0.5, 0.0, null_composites=[0.0] * 3)
+        with open(path, "w", encoding="utf-8") as fh:
+            _append_verdict(fh, v1, key)
+            _append_verdict(fh, v2, key)
+            _append_verdict(fh, v3, other)  # another draw: must be ignored
+
+        got = load_verdicts(path, key)
+        assert set(got) == {"a", "u"}
+        assert got["a"] == v1  # -inf survives the JSON round trip
+        assert got["u"] == v2
+        assert load_verdicts(path, other) == {"b": v3}
+        assert load_verdicts(tmp_path / "missing.jsonl", key) == {}
+        assert load_verdicts(None, key) == {}
 
     def test_negative_control_floor_needs_a_pool(self):
         few = {f"f{i}": 0.001 * i for i in range(20)}
@@ -262,10 +323,69 @@ class TestRunFamilyNulls:
         assert verdict.p_value is None
         assert "unresolvable" in verdict.reason
 
+    def test_parallel_matches_serial(
+        self, offset_config: Path, sample_matches: Path, tmp_path: Path
+    ):
+        """Threaded family processing reproduces the serial verdicts
+        exactly: offsets are drawn up front per (fold, replicate), and the
+        fold scorer carries no per-call shared state."""
+        fast = _fast(offset_config, sample_matches, tmp_path / "cache")
+        families = {
+            "win_pct_side": [FAMILY_SPECS[0], FAMILY_SPECS[1]],
+            "win_pct_diff": [FAMILY_SPECS[2]],
+        }
+        kwargs = dict(
+            accepted_specs=[BASE_SPEC], families=families, k=3, seed=11,
+            n_jobs=1,
+        )
+        serial = run_family_nulls(fast, "log_loss", workers=1, **kwargs)
+        threaded = run_family_nulls(fast, "log_loss", workers=2, **kwargs)
+
+        assert [v.family for v in threaded] == [v.family for v in serial]
+        for s, t in zip(serial, threaded):
+            assert t.p_value == s.p_value
+            assert t.observed_fold_gains == s.observed_fold_gains
+            assert t.null_composites == s.null_composites
+
+    def test_verdict_checkpoint_resumes_identically(
+        self, offset_config: Path, sample_matches: Path, tmp_path: Path
+    ):
+        """A run cut after the first family, resumed from its verdict log,
+        returns exactly what an uninterrupted run returns; a log written
+        under another key is ignored rather than reused."""
+        fast = _fast(offset_config, sample_matches, tmp_path / "cache")
+        families = {
+            "win_pct_diff": [FAMILY_SPECS[2]],
+            "win_pct_side": [FAMILY_SPECS[0], FAMILY_SPECS[1]],
+        }
+        kwargs = dict(
+            accepted_specs=[BASE_SPEC], families=families, k=3, seed=5,
+            n_jobs=1,
+        )
+        clean = run_family_nulls(fast, "log_loss", **kwargs)
+
+        log = tmp_path / "null_verdicts_unit_r2.jsonl"
+        run_family_nulls(fast, "log_loss", checkpoint_path=log, **kwargs)
+        lines = log.read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 2
+        # "interrupted after the first family"
+        log.write_text(lines[0] + "\n", encoding="utf-8")
+
+        resumed = run_family_nulls(fast, "log_loss", checkpoint_path=log, **kwargs)
+        assert resumed == clean
+        assert len(log.read_text(encoding="utf-8").splitlines()) == 2
+
+        # a different seed is a different draw: nothing restored, all recomputed
+        other = run_family_nulls(
+            fast, "log_loss", checkpoint_path=log, **{**kwargs, "seed": 6}
+        )
+        assert [v.family for v in other] == [v.family for v in clean]
+        assert len(log.read_text(encoding="utf-8").splitlines()) == 4
+
 
 class _GateCfg:
-    k = 5
-    q = 0.10
+    k = 20
+    alpha = 0.10
     min_agree = None
     min_control_pool = 4
     seed = 3
@@ -275,12 +395,28 @@ class _GateCfg:
 class TestMakeFamilyAcceptance:
     """Gate logic with an injected null runner — engine-free."""
 
-    # 10 families; f1 has a strong p-value but a sub-floor gain.
+    # 10 families; f1 clears the max-null but has a sub-floor gain.
     GAINS = {
         "f0": 0.10, "f1": 0.001, "f2": 0.06, "f3": 0.05, "f4": 0.04,
         "f5": 0.03, "f6": 0.003, "f7": 0.002, "f8": 0.0, "f9": -0.001,
     }
-    P_VALUES = {"f0": 0.01, "f1": 0.02}  # everything else 0.9
+    # Observed composites: f0 and f1 pass the fold-agreement gate, the rest
+    # collapse to -inf. Nulls: 20 per family; f5's replicate 0 is the round's
+    # best fake at 0.0015, which beats f1 once (p = 2/21) and f0 never.
+    COMPOSITES = {"f0": 0.10, "f1": 0.001}
+
+    # Replicates in which EVERY family's fake fails the fold-agreement gate
+    # (max-null -inf); empty by default, set by the degenerate-case test.
+    DEAD_REPLICATES: tuple[int, ...] = ()
+
+    def _nulls(self, fam: str) -> list[float]:
+        base = 0.0005 if fam == "f0" else 0.0002
+        nulls = [base] * _GateCfg.k
+        if fam == "f5":
+            nulls[0] = 0.0015
+        for j in self.DEAD_REPLICATES:
+            nulls[j] = float("-inf")
+        return nulls
 
     def _call(self, cfg=None):
         best_metric = 0.7
@@ -293,25 +429,54 @@ class TestMakeFamilyAcceptance:
             calls["tested"] = sorted(fams)
             calls["kwargs"] = kwargs
             return [
-                FamilyNullVerdict(family=f, p_value=self.P_VALUES.get(f, 0.9))
+                FamilyNullVerdict(
+                    family=f, p_value=1 / 21,
+                    observed_composite=self.COMPOSITES.get(f, float("-inf")),
+                    null_composites=self._nulls(f),
+                )
                 for f in sorted(fams)
             ]
 
         gate = make_family_acceptance(
             fast=None, metric="log_loss", families=families,
-            cfg=cfg or _GateCfg(), _null_fn=fake_nulls,
+            cfg=cfg or _GateCfg(), _null_fn=fake_nulls, workers=3, n_jobs=4,
         )
         eligible, info = gate(["base_col", "f0"], best_metric, scores, {})
         return eligible, info, calls
 
     def test_two_bars_intersect(self):
         eligible, info, _ = self._call()
-        # BH at q=0.10 over 10 p-values accepts f0 (0.01) and f1 (0.02); the
-        # negative-control floor (95th pct of the bottom-half gains, ~0.0028)
-        # then removes f1, whose gain is 0.001.
+        # max-null: replicate 0 is f5's 0.0015, the other 19 are 0.0005.
+        assert info["max_null"][0] == pytest.approx(0.0015)
+        assert info["max_null"][1] == pytest.approx(0.0005)
+        assert info["p_max"]["f0"] == pytest.approx(1 / 21)
+        assert info["p_max"]["f1"] == pytest.approx(2 / 21)
+        assert info["p_max"]["f2"] == pytest.approx(1.0)  # -inf composite
+        # own-null p is recorded but does not decide: every family is at its
+        # own floor here, only two clear the best fake.
+        assert set(info["p_own"]) == set(self.GAINS)
         assert info["bar_a"] == ["f0", "f1"]
+        # the negative-control floor (95th pct of the bottom-half gains,
+        # ~0.0028) then removes f1, whose gain is 0.001.
         assert 0.002 < info["control_floor"] < 0.004
         assert eligible == {"f0"}
+        assert info["max_null_neg_inf"] == 0
+
+    def test_dead_replicates_are_counted(self, caplog):
+        # Replicates 0 and 3: every fake fails the gate, max-null is -inf.
+        # f5's best fake sat in replicate 0, so f1 now beats every max
+        # (p = 1/21) on gate survival alone — the loss of magnitude
+        # discrimination the counter and warning exist for.
+        self.DEAD_REPLICATES = (0, 3)
+        try:
+            with caplog.at_level("WARNING"):
+                _, info, _ = self._call()
+        finally:
+            self.DEAD_REPLICATES = ()
+        assert info["max_null_neg_inf"] == 2
+        assert info["max_null"][0] == float("-inf")
+        assert info["p_max"]["f1"] == pytest.approx(1 / 21)
+        assert "2/20 replicates" in caplog.text
 
     def test_floor_fallback_below_control_pool(self):
         class Cfg(_GateCfg):
@@ -333,3 +498,26 @@ class TestMakeFamilyAcceptance:
         assert calls["accepted"] == ["base_col", "f0_col"]
         # fresh nulls each round: seed varies with the selected count
         assert calls["kwargs"]["seed"] == _GateCfg.seed + 2
+        # the null runner's thread budget passes through the gate
+        assert calls["kwargs"]["workers"] == 3
+        assert calls["kwargs"]["n_jobs"] == 4
+        # no FS checkpoint -> no verdict log
+        assert calls["kwargs"]["checkpoint_path"] is None
+
+    def test_verdict_log_path_follows_the_round(self, tmp_path):
+        calls: dict = {}
+
+        def fake_nulls(fast, metric, accepted, fams, **kwargs):
+            calls["kwargs"] = kwargs
+            return []
+
+        gate = make_family_acceptance(
+            fast=None, metric="log_loss", families={"f0": ["f0_col"]},
+            cfg=_GateCfg(), _null_fn=fake_nulls,
+            checkpoint_path=tmp_path / "discovery_checkpoint_unit.json",
+        )
+        gate(["base_col", "f0"], 0.7, {"f0": 0.6}, {})
+        # two selected (seed + one family) -> this is round 3
+        assert calls["kwargs"]["checkpoint_path"] == (
+            tmp_path / "null_verdicts_unit_r3.jsonl"
+        )
