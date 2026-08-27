@@ -10,6 +10,7 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import log_loss as _sk_log_loss
 
 from mvp.model.config import apply_filters
 from mvp.model.symmetry import pair_index, symmetrize_indexed
@@ -127,6 +128,13 @@ def _compute_mtl_loss(
     return primary_ll + aux_loss
 
 
+def _masked_log_loss(y_true: np.ndarray, y_prob: np.ndarray) -> float:
+    """Plain log loss on an already-selected row set (the fixed-population
+    form of restricted_logloss: the mask is decided outside, by the incumbent,
+    so no coverage term is needed — a candidate cannot move the population)."""
+    return float(_sk_log_loss(y_true, np.clip(y_prob, 1e-15, 1 - 1e-15), labels=[0, 1]))
+
+
 def _make_metric_fn(
     metric: str,
     lambda_over: float | None = None,
@@ -238,6 +246,13 @@ class FastForwardSelector:
         self.folds: list[tuple[np.ndarray, np.ndarray]] = []
         self.circuit: np.ndarray | None = None
         self.fold_medians: list[np.ndarray] = []
+        # Fixed scoring population for restricted_logloss: one boolean array
+        # per fold over GLOBAL rows, True = a test row the incumbent is
+        # confident on. None = the metric's own candidate-dependent cut. Set
+        # per round by set_incumbent_masks(); read by the scorer at call time
+        # and by the shifted-null scorer.
+        self.score_masks: list[np.ndarray] | None = None
+        self._scorer: Callable | None = None
         # Frozen geometry for stability selection. row_dates is the per-row
         # effective_match_date (aligned to X_wide); tournament_key is the
         # per-row resample unit (tournament_id + year). fold_windows holds the
@@ -908,6 +923,13 @@ class FastForwardSelector:
         # when we only need one. Pass lambda_over from model params so
         # asymmetric_logloss mirrors the training-side objective.
         metric_fn = _make_metric_fn(metric, lambda_over=model_params.get("lambda_over"))
+        # restricted_logloss under a FIXED population: when self.score_masks is
+        # set (per-round incumbent mask, see set_incumbent_masks), a fold's
+        # scored rows come from the mask and the metric is plain log loss on
+        # them. Read at call time, not captured, so the mask can change each
+        # round without rebuilding the scorer. Unset masks fall back to the
+        # metric's own candidate-dependent cut.
+        masked_metric = metric == "restricted_logloss"
 
         # Orientation projection. FS runs its OWN fit/predict loop rather than
         # going through ExperimentRunner, so it does not inherit the runner's
@@ -931,10 +953,15 @@ class FastForwardSelector:
                 "runner-scored metrics"
             )
 
-        def score_with_folds(features: list[str]) -> tuple[float, list[float]]:
+        def score_with_folds(
+            features: list[str], _collect: list | None = None,
+        ) -> tuple[float, list[float]]:
             # (mean metric, per-fold metrics). Pure function of its inputs —
             # no state on the closure — so the candidate loop can call it
             # from several threads and keep each candidate's fold metrics.
+            # `_collect`, when given, receives (fold_idx, test_idx, y_prob)
+            # per scored fold — the out-of-fold probabilities after
+            # orientation projection — for set_incumbent_masks.
             if not features:
                 return float("inf"), []
 
@@ -1165,7 +1192,22 @@ class FastForwardSelector:
                                     test_idx.size,
                                 )
                         y_prob = symmetrize_indexed(y_prob, *pair)
-                    fold_metrics.append(metric_fn(y_test, y_prob))
+                    if _collect is not None:
+                        _collect.append((fold_idx, test_idx, y_prob))
+                    fold_mask = (
+                        self.score_masks[fold_idx]
+                        if masked_metric and self.score_masks is not None
+                        else None
+                    )
+                    if fold_mask is not None:
+                        keep = fold_mask[test_idx]
+                        if not keep.any():
+                            continue
+                        fold_metrics.append(
+                            _masked_log_loss(y_test[keep], y_prob[keep])
+                        )
+                    else:
+                        fold_metrics.append(metric_fn(y_test, y_prob))
 
             # One compact ES line per round (see _logged_es_rounds above). "fb"
             # marks a fold that fell back to fixed rounds (its own WARNING also
@@ -1197,7 +1239,75 @@ class FastForwardSelector:
 
         scorer.last_fold_metrics = []
         scorer.score_with_folds = score_with_folds
+        self._scorer = scorer
         return scorer
+
+    def set_incumbent_masks(
+        self, features: list[str], tau: float | None = None,
+    ) -> dict[str, list[float]]:
+        """Fix the restricted_logloss scoring population from the incumbent.
+
+        Fits the accepted set on every fold through the same path candidates
+        use and marks the test rows where its out-of-fold probability is
+        confident (|p - 0.5| > tau). Every candidate in the round is then
+        scored on exactly those rows, so a candidate can only win by being
+        more right on them — never by pulling borderline rows under the
+        threshold, the shrink that produced most of the 2026-08-27 rll run's
+        metric drop (findings 2026-08-26 §7d). Call at every round start,
+        resume included, and re-score the incumbent on the new mask: the mask
+        is a deterministic function of the accepted set, so restored
+        candidate scores stay comparable.
+
+        With no accepted features the incumbent is the offset alone
+        (sigmoid of the fold margin) when the run has one, else every test
+        row is scored.
+
+        Returns per-fold coverage and the incumbent's masked log loss for the
+        round log — the fold spread is the data for setting min_delta.
+        """
+        from mvp.model.metrics import RESTRICTED_LOGLOSS_TAU
+
+        tau = RESTRICTED_LOGLOSS_TAU if tau is None else tau
+        if self.X_wide is None:
+            raise RuntimeError("precompute() must run before set_incumbent_masks()")
+        n_rows = self.X_wide.shape[0]
+        folds: list[tuple[int, np.ndarray, np.ndarray | None]] = []
+        if features:
+            if self._scorer is None:
+                raise RuntimeError(
+                    "create_scorer() must run before set_incumbent_masks()"
+                )
+            collected: list[tuple[int, np.ndarray, np.ndarray]] = []
+            self._scorer.score_with_folds(list(features), _collect=collected)
+            folds = [(f, t, np.asarray(p, dtype=float)) for f, t, p in collected]
+        else:
+            for fold_idx, (_, test_idx) in enumerate(self.folds):
+                if self.eval_mask is not None:
+                    test_idx = test_idx[self.eval_mask[test_idx]]
+                if test_idx.size == 0:
+                    continue
+                p = (
+                    1.0 / (1.0 + np.exp(-self.fold_margins[fold_idx][test_idx]))
+                    if self.fold_margins is not None else None
+                )
+                folds.append((fold_idx, test_idx, p))
+
+        masks = [np.zeros(n_rows, dtype=bool) for _ in self.folds]
+        coverage: list[float] = []
+        incumbent_ll: list[float] = []
+        for fold_idx, test_idx, p in folds:
+            conf = (
+                np.abs(p - 0.5) > tau if p is not None
+                else np.ones(test_idx.size, dtype=bool)
+            )
+            masks[fold_idx][test_idx[conf]] = True
+            coverage.append(float(conf.mean()))
+            incumbent_ll.append(
+                _masked_log_loss(self.y[test_idx][conf], p[conf])
+                if p is not None and conf.any() else float("nan")
+            )
+        self.score_masks = masks
+        return {"coverage": coverage, "incumbent_masked_logloss": incumbent_ll}
 
     def resample_folds(
         self, row_mask: np.ndarray, min_fold_rows: int,

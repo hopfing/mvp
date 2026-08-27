@@ -68,6 +68,7 @@ from mvp.model.discovery.families import family_of
 from mvp.model.discovery.fast_selection import (
     FastForwardSelector,
     _make_metric_fn,
+    _masked_log_loss,
     pair_index,
     symmetrize_indexed,
 )
@@ -329,6 +330,10 @@ class _FoldScorer:
         self.metric_fn = _make_metric_fn(
             metric, lambda_over=params.get("lambda_over"),
         )
+        # Same fixed population as the candidate scorer: when the selector
+        # carries a per-round incumbent mask, null replicates are scored on
+        # it too (read at call time — the mask changes each round).
+        self._masked = metric == "restricted_logloss"
         # Per-fit thread share (OpenMP via XGB n_jobs), injected the same way
         # the fast-selection scorer does it for the candidate loop.
         if n_jobs is not None:
@@ -403,6 +408,11 @@ class _FoldScorer:
         pair = self._pairs.get(fold_idx)
         if pair is not None:
             y_prob = symmetrize_indexed(y_prob, *pair)
+        if self._masked and fast.score_masks is not None:
+            keep = fast.score_masks[fold_idx][test_idx]
+            if not keep.any():
+                return None
+            return _masked_log_loss(y_test[keep], y_prob[keep])
         return float(self.metric_fn(y_test, y_prob))
 
 

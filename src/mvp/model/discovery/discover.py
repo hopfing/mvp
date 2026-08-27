@@ -918,6 +918,27 @@ class FeatureDiscovery:
                     n_jobs=cand_n_jobs,
                 )
 
+        # restricted_logloss: fix the scoring population per round from the
+        # incumbent (findings 2026-08-26 §7d — the metric's own cut lets a
+        # candidate shrink its scored set). Needs the fast scorer path.
+        mask_fn = None
+        if (
+            self.config.discovery.metric == "restricted_logloss"
+            and method == "forward"
+        ):
+            fast_sel = getattr(self, "_fast_selector", None)
+            if fast_sel is not None:
+                mask_fn = fast_sel.set_incumbent_masks
+                self._log(
+                    "restricted_logloss: per-round incumbent score mask "
+                    "(fixed population; coverage term unused)"
+                )
+            else:
+                logger.warning(
+                    "restricted_logloss without the fast scorer path: "
+                    "candidate-dependent mask (coverage can be gamed)"
+                )
+
         selector = FeatureSelector(
             scorer=scorer,
             all_features=all_features,
@@ -937,6 +958,7 @@ class FeatureDiscovery:
             families=families,
             acceptance_fn=acceptance_fn,
             refine_fn=refine_fn,
+            mask_fn=mask_fn,
         )
 
         # For BLAS-threaded models (the fit ignores n_jobs), cap each concurrent

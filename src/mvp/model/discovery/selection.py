@@ -158,11 +158,17 @@ class FeatureSelector:
         families: dict[str, list[str]] | None = None,
         acceptance_fn: Callable[..., tuple[set[str], dict[str, Any]]] | None = None,
         refine_fn: Callable[[str, list[str]], tuple[list[str], dict[str, Any]]] | None = None,
+        mask_fn: Callable[[list[str]], dict[str, list[float]]] | None = None,
     ) -> None:
         """Initialize selector.
 
         Args:
             scorer: Function that takes feature list and returns metric value.
+            mask_fn: Forward selection only. Called with the accepted columns
+                at every round start (resume included) to fix the scoring
+                population for the round; the incumbent is then re-scored so
+                candidates and the accept/stop comparison use identical rows.
+                Returns per-fold diagnostics for the round log.
             all_features: All available features to consider.
             method: Selection method (forward, recursive, threshold).
             direction: Whether to minimize or maximize the metric.
@@ -232,6 +238,7 @@ class FeatureSelector:
         # evidence standard, a fixed delta would re-impose the "beats zero"
         # test the redesign removes.
         self.acceptance_fn = acceptance_fn
+        self.mask_fn = mask_fn
 
     def _fmt_metric(self, value: float) -> str:
         """Format a metric value at the min_delta-scaled display precision."""
@@ -358,6 +365,27 @@ class FeatureSelector:
 
         while remaining and len(selected) < self.max_features:
             round_num = len(selected) + 1
+            # Fixed scoring population for this round: rebuild the mask from
+            # the incumbent and re-score it under that mask, so every
+            # candidate and the accept/stop comparison use identical rows.
+            # Runs on resume too — the mask is a deterministic function of the
+            # accepted set, so restored candidate scores stay comparable and a
+            # checkpointed best_metric from another mask is never trusted.
+            if self.mask_fn is not None:
+                mask_info = self.mask_fn(self._expand(selected))
+                if selected:
+                    best_metric = self.scorer(self._expand(selected))
+                logger.info(
+                    "  Round %d score mask from incumbent (%d feature%s): "
+                    "coverage/fold [%s]; incumbent %s (per fold [%s])",
+                    round_num, len(selected), "" if len(selected) == 1 else "s",
+                    ", ".join(f"{c:.3f}" for c in mask_info.get("coverage", [])),
+                    self._fmt_metric(best_metric),
+                    ", ".join(
+                        f"{m:.4f}"
+                        for m in mask_info.get("incumbent_masked_logloss", [])
+                    ),
+                )
             round_results: list[tuple[str, float]] = []
             scores_this_round: dict[str, float] = {}
             # Per-candidate per-fold metrics (serial loop only — the scorer

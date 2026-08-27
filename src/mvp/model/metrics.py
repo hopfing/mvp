@@ -13,6 +13,11 @@ from sklearn.metrics import (
     roc_curve,
 )
 
+# restricted_logloss scores rows with |p - 0.5| > tau. Shared with the FS
+# per-round incumbent mask (fast_selection.set_incumbent_masks) so the fixed
+# population uses the same confidence cut as the metric.
+RESTRICTED_LOGLOSS_TAU = 0.15
+
 # Tail-emphasizing threshold grid for threshold_weighted_brier. Excludes the
 # central [0.40, 0.60] band so near-coinflip calibration carries no weight,
 # leaving a proper (cost-weighted) scoring rule focused on confident calls.
@@ -305,7 +310,7 @@ def compute_threshold_weighted_brier(
 def compute_restricted_logloss(
     y_true: np.ndarray,
     y_prob: np.ndarray,
-    tau: float = 0.15,
+    tau: float = RESTRICTED_LOGLOSS_TAU,
     target_coverage: float = 0.35,
     lambda_cov: float = 3.0,
 ) -> float:
