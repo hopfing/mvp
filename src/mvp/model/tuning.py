@@ -246,6 +246,88 @@ def tuning_study_key(config_stem: str, serve_block: str | None = None) -> str:
     return f"{config_stem}__{serve_block}"
 
 
+def apply_search_space_overrides(
+    space: dict[str, dict[str, Any]],
+    overrides: dict[str, dict[str, Any] | None] | None,
+) -> dict[str, dict[str, Any]]:
+    """Merge a config's ``tuning.search_space`` over a default space.
+
+    Per parameter: a partial spec is merged over the default entry (type
+    kept, bounds/choices replaced); ``None`` removes the parameter from the
+    search; a parameter not in the default space must be a full spec.
+    Bounds are sanity-checked so a typo fails here, not inside Optuna.
+    """
+    if not overrides:
+        return dict(space)
+    out = dict(space)
+    for name, override in overrides.items():
+        if override is None:
+            out.pop(name, None)
+            continue
+        base = out.get(name)
+        if base is None and "type" not in override:
+            raise ValueError(
+                f"tuning.search_space.{name}: not in the default space for this "
+                f"model type; give a full spec with `type`"
+            )
+        merged = {**(base or {}), **override}
+        if merged.get("type") in ("int", "float") and not (
+            "low" in merged and "high" in merged and merged["low"] <= merged["high"]
+        ):
+            raise ValueError(
+                f"tuning.search_space.{name}: need low <= high, got {merged}"
+            )
+        if merged.get("type") == "categorical" and not merged.get("choices"):
+            raise ValueError(f"tuning.search_space.{name}: categorical needs choices")
+        out[name] = merged
+    return out
+
+
+def clip_baseline_to_space(
+    baseline: dict[str, Any], space: dict[str, dict[str, Any]]
+) -> tuple[dict[str, Any], list[str]]:
+    """Fit a config's own parameter values into the search space so they can
+    be enqueued as trial 0: numbers are clipped into [low, high], categorical
+    values outside the choices are dropped (sampled instead). Returns the
+    adjusted baseline and a note per change."""
+    out = dict(baseline)
+    notes: list[str] = []
+    for k in list(out):
+        spec = space.get(k)
+        if spec is None:
+            continue
+        v = out[k]
+        if spec.get("type") in ("int", "float") and "low" in spec and "high" in spec:
+            clipped = min(max(v, spec["low"]), spec["high"])
+            if clipped != v:
+                out[k] = clipped
+                notes.append(f"{k}: {v} -> {clipped}")
+        elif spec.get("type") == "categorical" and v not in spec.get("choices", []):
+            del out[k]
+            notes.append(f"{k}: {v!r} dropped (not in {spec.get('choices')})")
+    return out, notes
+
+
+def drop_out_of_space(
+    baseline: dict[str, Any], space: dict[str, dict[str, Any]]
+) -> tuple[dict[str, Any], list[str]]:
+    """Remove baseline params whose value the search space does not allow
+    (number outside [low, high], categorical not in choices)."""
+    out, dropped = {}, []
+    for k, v in baseline.items():
+        spec = space.get(k, {})
+        t = spec.get("type")
+        bad = (
+            (t in ("int", "float") and not (spec.get("low", v) <= v <= spec.get("high", v)))
+            or (t == "categorical" and v not in spec.get("choices", []))
+        )
+        if bad:
+            dropped.append(k)
+        else:
+            out[k] = v
+    return out, dropped
+
+
 DEFAULT_SEARCH_SPACES: dict[str, dict[str, dict[str, Any]]] = {
     "xgb_regressor": {
         "max_depth": {"type": "int", "low": 3, "high": 5},
@@ -735,6 +817,19 @@ class HyperparamTuner:
                 f"No default search space for model type '{self.model_type}'"
                 " — pass search_space explicitly"
             )
+        # Config-level adjustments (`tuning.search_space`): narrow, fix or
+        # drop parameters without editing the defaults. Applied to whatever
+        # space was chosen above, explicit or default.
+        overrides = (self.base_config.get("tuning") or {}).get("search_space")
+        if overrides:
+            self.search_space = apply_search_space_overrides(self.search_space, overrides)
+            logger.info(
+                "tuning.search_space overrides: %s",
+                ", ".join(
+                    f"{k}=dropped" if v is None else f"{k}={self.search_space[k]}"
+                    for k, v in overrides.items()
+                ),
+            )
 
         # DART: rate_drop / skip_drop are only meaningful when booster="dart",
         # and DART trials are O(n_estimators²) which can hang at the default
@@ -1060,6 +1155,14 @@ class HyperparamTuner:
         # search-space key meant configs that set only the handful of params they
         # care about — the normal case for a promoted FS config — silently never
         # evaluated their own hyperparameters.
+        # Config values the search space doesn't allow (a narrowed
+        # tuning.search_space) are dropped from the baseline and sampled
+        # instead: Optuna raises on an enqueued categorical outside the choices.
+        baseline, dropped = drop_out_of_space(baseline, self.search_space)
+        if dropped:
+            logger.info("Baseline trial: dropped %s (outside the search space)", ", ".join(dropped))
+        if not baseline:
+            return
         if len(baseline) < len(self.search_space):
             missing = sorted(set(self.search_space) - set(baseline))
             logger.info(

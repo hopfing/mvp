@@ -472,6 +472,22 @@ class EarlyStoppingConfig(_StrictModel):
     tail_fraction: float = 0.2
 
 
+class TuningConfig(_StrictModel):
+    """Per-config adjustments to the hyperparameter tune's search space.
+
+    ``search_space`` maps a parameter name to a PARTIAL spec merged over the
+    default space for the model type (``tuning.DEFAULT_SEARCH_SPACES``):
+    ``max_depth: {low: 2, high: 4}`` narrows the range and keeps the type;
+    ``grow_policy: {choices: [depthwise]}`` fixes a categorical; ``null``
+    removes the parameter from the search (its config value is used). A
+    parameter absent from the default space must give a full spec
+    (``type`` plus its bounds/choices). Not part of the model fingerprint:
+    it describes the search, not the fitted model.
+    """
+
+    search_space: dict[str, dict[str, Any] | None] = {}
+
+
 class ExperimentConfig(_StrictModel):
     """Complete experiment configuration."""
 
@@ -487,6 +503,8 @@ class ExperimentConfig(_StrictModel):
     mtl: MTLConfig | None = None
     early_stopping: EarlyStoppingConfig | None = None
     offset: OffsetConfig | None = None
+    # Search-space adjustments for `tune`; ignored by training and evaluation.
+    tuning: TuningConfig | None = None
 
     @model_validator(mode="after")
     def validate_offset(self) -> "ExperimentConfig":
