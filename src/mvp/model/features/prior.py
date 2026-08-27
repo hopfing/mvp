@@ -228,16 +228,29 @@ def _logit(p: np.ndarray) -> np.ndarray:
     return np.log(p / (1 - p))
 
 
-def _backtest_cutoffs(stem: str, backtests_root: Path | None = None) -> list[date]:
-    """Fold test-start dates from the backtest's per-fold lead artifacts."""
+def _backtest_cutoffs(stems: list[str], backtests_root: Path | None = None) -> list[date]:
+    """Fold test-start dates from the backtest's per-fold lead artifacts,
+    under the first of ``stems`` that has any. The backtest keys its
+    artifact dir by the config stem it ran under; a renamed config still
+    finds them through the tags its evaluation's source.txt recorded."""
     root = backtests_root or BACKTESTS_ROOT or (get_data_root() / "backtests")
-    d = root / "lead" / stem
-    tags = sorted(
-        date.fromisoformat(p.stem.removeprefix("lead_"))
-        for p in d.glob("lead_*.joblib")
-        if "_cal_tiers" not in p.stem
-    )
-    return tags
+    for stem in stems:
+        d = root / "lead" / stem
+        tags = sorted(
+            date.fromisoformat(p.stem.removeprefix("lead_"))
+            for p in d.glob("lead_*.joblib")
+            if "_cal_tiers" not in p.stem
+        )
+        if tags:
+            return tags
+    return []
+
+
+def _source_tags(eval_dir: Path) -> list[str]:
+    src = eval_dir / "source.txt"
+    if not src.exists():
+        return []
+    return [ln.split("	")[0].strip() for ln in src.read_text(encoding="utf-8").splitlines() if ln.strip()]
 
 
 def _fold_rows(path: Path) -> pl.DataFrame:
@@ -294,13 +307,14 @@ def build_prior_frame(
     duplicates and any row dated on/before its own train end."""
     parts = [_fold_rows(source.fold_predictions)]
     if source.backtest_csv.exists():
-        cutoffs = _backtest_cutoffs(source.stem, backtests_root)
+        stems = [source.stem] + [t for t in _source_tags(source.eval_dir) if t != source.stem]
+        cutoffs = _backtest_cutoffs(stems, backtests_root)
         if cutoffs:
             parts.append(_backtest_rows(source.backtest_csv, cutoffs))
         else:
             logger.warning(
                 "prior %s: backtest.csv present but no fold artifacts under "
-                "backtests/lead/%s; using fold OOF only", source.model, source.stem,
+                "backtests/lead/{%s}; using fold OOF only", source.model, ", ".join(stems),
             )
     if len(parts) == 2:
         overlap = parts[0].join(parts[1], on=["match_uid", "player_id"], how="inner").height

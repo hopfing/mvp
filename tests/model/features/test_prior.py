@@ -174,6 +174,23 @@ class TestSplice:
         assert ends["B1"] == date(2024, 12, 31)
         assert ends["B2"] == date(2025, 1, 31)
 
+    def test_backtest_artifacts_found_by_source_tag_after_rename(self, tmp_path):
+        """The backtest dir is keyed by the stem the backtest ran under; a
+        renamed config finds it through its evaluation's source tag."""
+        src = _source(tmp_path)  # stem "base"
+        src.eval_dir.mkdir(parents=True)
+        (src.eval_dir / "source.txt").write_text("old_stem\tdeadbeef\t2026-01-01\n")
+        _fold_predictions([date(2024, 3, 1)], [0]).write_parquet(src.fold_predictions)
+        pl.DataFrame({
+            "match_uid": ["B1"], "player_id": ["A"],
+            "effective_match_date": ["2025-01-10 00:00"], "model_prob": [0.6],
+        }).write_csv(src.backtest_csv)
+        bt = tmp_path / "backtests" / "lead" / "old_stem"
+        bt.mkdir(parents=True)
+        (bt / "lead_2025-01-01.joblib").write_bytes(b"")
+        frame = prior.build_prior_frame(src, backtests_root=tmp_path / "backtests")
+        assert "B1" in frame["match_uid"].to_list()
+
     def test_refuses_uncalibrated_and_leaky_sources(self, tmp_path):
         src = _source(tmp_path)
         src.eval_dir.mkdir(parents=True)
