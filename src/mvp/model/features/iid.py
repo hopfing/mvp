@@ -14,7 +14,6 @@ import polars as pl
 from mvp.common.tennis_scoring import hold_probability
 from mvp.model.registry import feature, register_diff, register_sum
 
-
 # =============================================================================
 # iid hold probability formula
 # =============================================================================
@@ -113,13 +112,27 @@ for _i in range(_GRID_SIZE):
 
 
 def _lookup_from_table(table: np.ndarray, s: pl.Series) -> pl.Series:
-    """Vectorized lookup in a precomputed 2D table from a struct series."""
-    h1 = s.struct.field("h1").to_numpy()
-    h2 = s.struct.field("h2").to_numpy()
-    # Clamp and convert to grid indices
-    i = np.clip(np.round(h1 * (_GRID_SIZE - 1)).astype(int), 0, _GRID_SIZE - 1)
-    j = np.clip(np.round(h2 * (_GRID_SIZE - 1)).astype(int), 0, _GRID_SIZE - 1)
-    return pl.Series(table[i, j])
+    """Vectorized lookup in a precomputed 2D table from a struct series.
+
+    A null/NaN input on either side propagates to NaN output (issue #104: the
+    old behaviour rounded nulls to grid index 0, silently scoring a missing
+    hold probability as 0.0)."""
+    h1 = s.struct.field("h1").to_numpy().astype(np.float64)
+    h2 = s.struct.field("h2").to_numpy().astype(np.float64)
+    missing = np.isnan(h1) | np.isnan(h2)
+    # Clamp and convert to grid indices (NaN -> 0 only as a safe index; the
+    # result for those rows is overwritten with NaN below)
+    i = np.clip(
+        np.round(np.nan_to_num(h1) * (_GRID_SIZE - 1)).astype(int),
+        0, _GRID_SIZE - 1,
+    )
+    j = np.clip(
+        np.round(np.nan_to_num(h2) * (_GRID_SIZE - 1)).astype(int),
+        0, _GRID_SIZE - 1,
+    )
+    out = table[i, j].astype(np.float64)
+    out[missing] = np.nan
+    return pl.Series(out)
 
 
 # =============================================================================
@@ -160,6 +173,8 @@ register_sum("iid_hold_prob")
     impute="median",
 )
 def iid_expected_games_per_set(days: int | None = None) -> pl.Expr:
+    # null-lookup fix v2 (#104): marker rolls the registry hash — the fix
+    # lives in _lookup_from_table, whose source the hash does not cover.
     if days is None:
         h1 = pl.col("player_iid_hold_prob")
         h2 = pl.col("opp_iid_hold_prob")
@@ -182,6 +197,8 @@ def iid_expected_games_per_set(days: int | None = None) -> pl.Expr:
     impute="median",
 )
 def iid_tiebreak_prob(days: int | None = None) -> pl.Expr:
+    # null-lookup fix v2 (#104): marker rolls the registry hash — the fix
+    # lives in _lookup_from_table, whose source the hash does not cover.
     if days is None:
         h1 = pl.col("player_iid_hold_prob")
         h2 = pl.col("opp_iid_hold_prob")
@@ -192,3 +209,4 @@ def iid_tiebreak_prob(days: int | None = None) -> pl.Expr:
         lambda s: _lookup_from_table(_TIEBREAK_PROB, s),
         return_dtype=pl.Float64,
     )
+
