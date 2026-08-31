@@ -102,6 +102,17 @@ def _canonicalize_ensemble_base_models(
     """
     out = []
     for ref in base_models:
+        if "base_canonical" in ref:
+            # Snapshot round-trip: `write_config_snapshot` persists THIS
+            # canonical form (base configs inlined, no path kept), and the
+            # equivalence check in features/prior.py re-canonicalizes stored
+            # snapshots. Already-canonical entries pass through; no existing
+            # fingerprint changes (this input previously raised KeyError).
+            out.append({
+                "base_canonical": _deep_sort(ref["base_canonical"]),
+                "weight": ref.get("weight", 1.0),
+            })
+            continue
         ref_path = Path(ref["config"])
         if not ref_path.is_absolute():
             ref_path = ref_path.resolve()

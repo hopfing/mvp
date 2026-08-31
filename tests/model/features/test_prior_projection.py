@@ -335,6 +335,23 @@ class TestSweepTagFallback:
         # is even equivalent: its RUN tag is what disqualifies it)
         assert src.eval_dir == plain
 
+    def test_unreadable_snapshot_is_skipped(self, tmp_path, monkeypatch):
+        proj_dir = tmp_path / "projections"
+        _write_proj_cfg(proj_dir, "proj_base")
+        root = tmp_path / "pe"
+        monkeypatch.setattr(prior, "PROJECTION_EVALUATIONS_ROOT", root)
+        bad = root / "aaaaaaaaaaaa"
+        bad.mkdir(parents=True)
+        (bad / "source.txt").write_text("proj_base\tproj_base\t2026-01-01\n")
+        (bad / "config.yaml").write_text("serve_model: 5\n")
+        src = prior.resolve_prior(
+            "proj_base",
+            config_dirs=(tmp_path / "models",),
+            projection_config_dirs=(proj_dir,),
+        )
+        assert src.eval_dir == root / src.fp
+        assert src.fp != "aaaaaaaaaaaa"
+
     def test_config_edit_never_resolves_to_the_stale_run(self, tmp_path, monkeypatch):
         """The 2026-08-31 regression: editing the config produced a new
         fingerprint and the fallback silently served the pre-edit run by

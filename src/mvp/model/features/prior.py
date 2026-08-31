@@ -156,6 +156,10 @@ def _load_config(path: Path):
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
     data.pop("name", None)
     data.pop("selection_history", None)
+    if not data.get("features"):
+        # an ensemble config (the only type allowed to omit features) is
+        # snapshotted with `features: {}`, which does not re-validate
+        data.pop("features", None)
     objective = data.pop("metrics_objective", None)
     if objective is not None:
         metrics = data.setdefault("metrics", {}) or {}
@@ -250,22 +254,26 @@ def _tagged_fallback(
         tagged.sort(key=lambda d: d.stat().st_mtime, reverse=True)
         for d in tagged:
             snapshot = d / "config.yaml"
+            if not snapshot.exists():
+                logger.warning(
+                    "offset.prior %s: tagged eval %s has no config snapshot; "
+                    "ignoring it", model, d.name,
+                )
+                continue
             try:
                 snap_fp = snapshot_fp(snapshot)
             except Exception as e:  # noqa: BLE001 — never accept on faith
                 logger.warning(
-                    "offset.prior %s: candidate %s has no readable config "
-                    "snapshot (%s); ignoring", model, d.name, e,
+                    "offset.prior %s: could not fingerprint the config "
+                    "snapshot of tagged eval %s (%s); ignoring it",
+                    model, d.name, e,
                 )
                 continue
             if snap_fp != fp:
                 logger.warning(
-                    "offset.prior %s: %s fingerprints to %s, but the "
-                    "evaluation tagged with that stem (%s) is of DIFFERENT "
-                    "content (its snapshot fingerprints to %s); ignoring it. "
-                    "If the config was edited, regenerate; if a field was "
-                    "lost in a copy, restore it.",
-                    model, path, fp, d.name, snap_fp,
+                    "offset.prior %s: tagged eval %s is a different config "
+                    "than the current file (%s); ignoring it",
+                    model, d.name, fp,
                 )
                 continue
             logger.info(
@@ -362,10 +370,8 @@ def ensure_prior_artifacts(source: PriorSource, regenerate: bool) -> None:
         from mvp.projection.iid.runner import IIDProjectionRunner
 
         logger.warning(
-            "offset.prior %s: no projection artifacts at %s -- regenerating "
-            "from %s (a full iid-project run, written where that command "
-            "would write it)",
-            source.model, source.eval_dir, source.config_path,
+            "offset.prior %s: regenerating at %s (iid-project on %s)",
+            source.model, source.eval_dir.name, source.config_path,
         )
         IIDProjectionRunner(config_path=source.config_path).run()
         _cached_frame.cache_clear()

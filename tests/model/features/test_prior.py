@@ -113,6 +113,69 @@ class TestResolve:
         assert src.fp == "bbbbbbbbbbbb"
         assert src.eval_dir == evals / "bbbbbbbbbbbb"
 
+    def test_newest_equivalent_candidate_wins(self, tmp_path, monkeypatch):
+        import os
+
+        models = tmp_path / "models"
+        _write_cfg(models, "base")
+        evals = tmp_path / "evals"
+        monkeypatch.setattr(prior, "EVALUATIONS_ROOT", evals)
+        fp = prior.resolve_prior("base", (models,)).fp
+        # two equivalent tagged dirs under OTHER fingerprints (an algorithm
+        # change moved the fingerprint); the newer one must win
+        for name, mtime in (("111111111111", 1_600_000_000),
+                            ("222222222222", 1_700_000_000)):
+            d = evals / name
+            d.mkdir(parents=True)
+            (d / "source.txt").write_text("base\tdeadbeef\t2026-01-01\n")
+            (d / "config.yaml").write_text(yaml.dump(_CFG))
+            os.utime(d, (mtime, mtime))
+        src = prior.resolve_prior("base", (models,))
+        assert src.fp == "222222222222"
+        assert src.fp != fp
+
+    def test_unreadable_snapshot_is_skipped(self, tmp_path, monkeypatch):
+        """A tagged dir with no snapshot, or one that cannot be fingerprinted,
+        is never accepted -- resolution lands on the true-fingerprint dir."""
+        models = tmp_path / "models"
+        _write_cfg(models, "base")
+        evals = tmp_path / "evals"
+        monkeypatch.setattr(prior, "EVALUATIONS_ROOT", evals)
+        (evals / "111111111111").mkdir(parents=True)
+        (evals / "111111111111" / "source.txt").write_text("base\tx\t2026-01-01\n")
+        # no config.yaml at all
+        (evals / "222222222222").mkdir()
+        (evals / "222222222222" / "source.txt").write_text("base\tx\t2026-01-01\n")
+        (evals / "222222222222" / "config.yaml").write_text("model: 5\n")
+        src = prior.resolve_prior("base", (models,))
+        assert src.eval_dir == evals / src.fp
+        assert src.fp not in ("111111111111", "222222222222")
+
+    def test_ensemble_snapshot_round_trips(self, tmp_path):
+        """The canonical form of an ensemble (features dropped, base configs
+        inlined as `base_canonical`) must re-fingerprint to the same value,
+        or the fallback misreads an equivalent candidate as unreadable."""
+        from mvp.common.config_hash import canonicalize_config, compute_fingerprint
+        from mvp.model.config import ExperimentConfig
+
+        models = tmp_path / "models"
+        base_path = _write_cfg(models, "base")
+        ens = {
+            "data": _CFG["data"],
+            "model": {"type": "ensemble", "params": {
+                "strategy": "average",
+                "base_models": [{"config": str(base_path), "weight": 1.0}],
+            }},
+            "target": "won",
+        }
+        cfg = ExperimentConfig.model_validate(ens)
+        fp = compute_fingerprint(cfg, config_path=models / "ens.yaml")
+        snap = tmp_path / "config.yaml"
+        snap.write_text(
+            yaml.dump(canonicalize_config(cfg, config_path=models / "ens.yaml"))
+        )
+        assert prior._snapshot_fingerprint_model(snap) == fp
+
     def test_missing_artifacts_refuse_unless_regenerating(self, tmp_path, monkeypatch):
         _write_cfg(tmp_path / "models", "base")
         monkeypatch.setattr(prior, "EVALUATIONS_ROOT", tmp_path / "evals")
