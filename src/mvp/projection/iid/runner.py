@@ -75,6 +75,33 @@ def preload_match_specs(serve_model_config) -> list[str]:
     return [s for s in specs if not (s in seen or seen.add(s))]
 
 
+def build_fold_match_frame(
+    test_df: pl.DataFrame, out: Any, fold_idx: int, y_won: np.ndarray
+) -> pl.DataFrame:
+    """One fold's rows for the fold_match_win artifact.
+
+    Same alignment guard `build_pmf_frame` carries: the distribution indexes
+    by row order, and a silent reorder here would hand every match another
+    match's probability in the OOF store models train against. `won_a` (the
+    A row's outcome, the same array the fold metrics score against) rides
+    along so a consumer can calibrate the raw chain probability without
+    re-deriving outcomes.
+    """
+    if not (test_df["match_uid"].to_numpy() == out.match_uid).all():
+        raise ValueError(
+            "fold_match_win: test_df and ProjectionOutput are not row-aligned"
+        )
+    return pl.DataFrame({
+        "match_uid": test_df["match_uid"],
+        "player_id": test_df["player_id"],
+        "opp_id": test_df["opp_id"],
+        "effective_match_date": test_df["effective_match_date"],
+        "fold_idx": pl.Series([fold_idx] * len(test_df), dtype=pl.Int32),
+        "p_match_win_a": out.distribution.p_match_win_a,
+        "won_a": pl.Series(np.asarray(y_won).astype(np.int8)),
+    })
+
+
 class IIDProjectionRunner:
     """Runner for executing IID projection experiments."""
 
@@ -251,6 +278,10 @@ class IIDProjectionRunner:
         check_memory("before iid projection fold loop")
         all_metrics: list[dict[str, float]] = []
         all_predictions: list[dict[str, Any]] = []
+        # Per-fold match-win rows for the fold_match_win artifact: six skinny
+        # columns per test row, accumulated here and written once after the
+        # loop (the winner-side prior's OOF store).
+        fold_match_rows: list[pl.DataFrame] = []
 
         # Materialize points and match-level features once and reuse across
         # folds. This avoids re-reading match_beats_points.parquet on every fold
@@ -399,6 +430,9 @@ class IIDProjectionRunner:
                     "y_games_a": y_games_a,
                     "y_games_b": y_games_b,
                 })
+                fold_match_rows.append(
+                    build_fold_match_frame(test_df, out, fold_idx + 1, y_won)
+                )
 
                 run_logger.info(
                     "Fold %d: log_loss=%.4f mae=%.3f crps_total=%.3f (%.1fs)",
@@ -469,6 +503,10 @@ class IIDProjectionRunner:
                 source=self.source, run_id=self.run_name,
             )
             write_projection_json(fp_dir, result)
+            if fold_match_rows:
+                from mvp.projection.iid.artifacts import write_fold_match_win
+
+                write_fold_match_win(fp_dir, pl.concat(fold_match_rows))
             run_logger.info("Wrote projection metrics -> %s", fp_dir)
 
         return result

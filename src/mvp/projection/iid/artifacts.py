@@ -42,6 +42,7 @@ logger = logging.getLogger(__name__)
 PROJECTION_JSON = "projection.json"
 PMF_PARQUET = "total_games_pmf.parquet"
 SPREAD_PMF_PARQUET = "game_spread_pmf.parquet"
+FOLD_MATCH_WIN_PARQUET = "fold_match_win.parquet"
 BACKTEST_PARQUET = "backtest.parquet"
 SPREAD_BACKTEST_PARQUET = "backtest_game_spread.parquet"
 
@@ -204,6 +205,31 @@ def write_pmf_parquet(
     fp_dir.mkdir(parents=True, exist_ok=True)
     path = fp_dir / name
     pmf.write_parquet(path)
+    return path
+
+
+_FOLD_MATCH_WIN_COLUMNS = [
+    "match_uid", "player_id", "opp_id", "effective_match_date",
+    "fold_idx", "p_match_win_a", "won_a",
+]
+
+
+def write_fold_match_win(fp_dir: Path, frame: pl.DataFrame) -> Path:
+    """Persist the walk-forward per-match win probabilities.
+
+    One row per (fold, match): the chain's `p_match_win_a` for the match's
+    "A" player (the lower-sorting `player_id`, per `_collapse_to_match_rows`),
+    with both players' ids so a consumer can emit the mirrored orientation.
+    This is the per-row OOF store the winner-side prior consumes — before it
+    existed, the walk-forward's predictions lived only in memory and
+    `projection.json` kept aggregates.
+    """
+    missing = [c for c in _FOLD_MATCH_WIN_COLUMNS if c not in frame.columns]
+    if missing:
+        raise ValueError(f"fold_match_win frame missing columns: {missing}")
+    fp_dir.mkdir(parents=True, exist_ok=True)
+    path = fp_dir / FOLD_MATCH_WIN_PARQUET
+    frame.select(_FOLD_MATCH_WIN_COLUMNS).write_parquet(path)
     return path
 
 

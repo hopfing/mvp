@@ -62,10 +62,19 @@ _LOGIT_EPS = 1e-6
 # name stays a plain identifier and the reference is the same file the
 # `model` command would run.
 CONFIG_DIRS = (Path("models"), Path("models") / "production")
+# A stem may instead name an IID PROJECTION config: the prior column is then
+# the projector's OOF match-win probability (chain on the fitted serve
+# model), resolved to B:/projection_evaluations via the iid fingerprint.
+# Projection configs live where iid-project runs them (projections/); a
+# specific sweep trial is pinned by placing its snapshot config there under
+# its own stem. A stem present in BOTH namespaces is refused, never guessed.
+PROJECTION_CONFIG_DIRS = (Path("projections"),)
 # Test seams, consulted at call time: where evaluations / backtests live
-# (None = the data root's model_evaluations / backtests).
+# (None = the data root's model_evaluations / backtests /
+# projection_evaluations).
 EVALUATIONS_ROOT: Path | None = None
 BACKTESTS_ROOT: Path | None = None
+PROJECTION_EVALUATIONS_ROOT: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -74,6 +83,12 @@ class PriorSource:
     config_path: Path  # the base model's config file
     fp: str  # its evaluation fingerprint (a pure function of the config)
     eval_dir: Path
+    # "model" (an ExperimentConfig evaluation) or "projection" (an IID
+    # projection evaluation; the probability is the chain's p_match_win_a).
+    kind: str = "model"
+    # Projection only: the single-fit cutoff behind the forward (pmf) rows —
+    # the config's date_range.end. One fit, one honest train end.
+    forward_train_end: date | None = None
 
     @property
     def stem(self) -> str:
@@ -87,15 +102,30 @@ class PriorSource:
     def backtest_csv(self) -> Path:
         return self.eval_dir / "backtest.csv"
 
+    @property
+    def fold_match_win(self) -> Path:
+        return self.eval_dir / "fold_match_win.parquet"
+
+    @property
+    def pmf_parquet(self) -> Path:
+        return self.eval_dir / "total_games_pmf.parquet"
+
+    def _artifact_paths(self) -> tuple[Path, ...]:
+        if self.kind == "projection":
+            return (self.fold_match_win, self.pmf_parquet)
+        return (self.fold_predictions, self.backtest_csv)
+
     def salt(self) -> str:
         """Identity of the artifacts behind the column, for the cache."""
         parts = [self.fp]
-        for p in (self.fold_predictions, self.backtest_csv):
+        for p in self._artifact_paths():
             parts.append(str(int(p.stat().st_mtime)) if p.exists() else "-")
         return ":".join(parts)
 
     @property
     def regenerate_command(self) -> str:
+        if self.kind == "projection":
+            return f"poetry run py -m mvp iid-project {self.config_path.stem}"
         return f"poetry run py -m mvp model {self.config_path.as_posix()}"
 
 
@@ -138,6 +168,24 @@ def _evaluations_root() -> Path:
     return EVALUATIONS_ROOT or (get_data_root() / "model_evaluations")
 
 
+def _projection_evaluations_root() -> Path:
+    return PROJECTION_EVALUATIONS_ROOT or (
+        get_data_root() / "projection_evaluations"
+    )
+
+
+def _find_projection_config(model: str, projection_config_dirs=None) -> Path | None:
+    dirs = (
+        tuple(projection_config_dirs)
+        if projection_config_dirs else PROJECTION_CONFIG_DIRS
+    )
+    for d in dirs:
+        p = Path(d) / f"{model}.yaml"
+        if p.exists():
+            return p
+    return None
+
+
 def _source_tag(eval_dir: Path) -> str | None:
     """First field of the evaluation's source.txt: the config stem/tag the
     `model` command ran."""
@@ -148,25 +196,29 @@ def _source_tag(eval_dir: Path) -> str | None:
     return lines[0].split("\t")[0].strip() if lines else None
 
 
-def resolve_prior(model: str, config_dirs=None) -> PriorSource:
-    """Config stem -> its config file -> evaluation fingerprint -> eval dir.
+def _projection_run_tag(eval_dir: Path) -> str | None:
+    """The RUN tag of a projection evaluation: field 2 of source.txt. Field 1
+    is the grouping source — the PARENT stem for every sweep trial — so
+    matching on it would hand a parent stem some arbitrary trial's dir."""
+    src = eval_dir / "source.txt"
+    if not src.exists():
+        return None
+    lines = src.read_text(encoding="utf-8").splitlines()
+    if not lines:
+        return None
+    fields = lines[0].split("	")
+    return fields[1].strip() if len(fields) > 1 else None
 
-    The fingerprint is computed from the config, so the lookup is exact when
-    the file is the one the `model` command ran. A production copy can
-    differ from that file in fields the fingerprint sees (e.g. a stripped
-    `metrics_objective`); then the evaluation tagged with this stem in its
-    source.txt is used instead, logged, and only if neither exists does the
-    caller regenerate.
-    """
-    from mvp.common.config_hash import compute_fingerprint
 
-    path = find_prior_config(model, config_dirs)
-    fp = compute_fingerprint(_load_config(path), config_path=path)
-    root = _evaluations_root()
+def _tagged_fallback(
+    root: Path, model: str, fp: str, path: Path, tag_of=_source_tag,
+) -> tuple[str, Path]:
+    """The eval dir for `fp`, or the newest one tagged with this stem when
+    the fingerprint has no dir (a copy differing in fingerprinted fields)."""
     eval_dir = root / fp
     if not eval_dir.is_dir() and root.is_dir():
         tagged = [
-            d for d in root.iterdir() if d.is_dir() and _source_tag(d) == model
+            d for d in root.iterdir() if d.is_dir() and tag_of(d) == model
         ]
         if tagged:
             tagged.sort(key=lambda d: d.stat().st_mtime, reverse=True)
@@ -175,12 +227,69 @@ def resolve_prior(model: str, config_dirs=None) -> PriorSource:
                 "using the evaluation tagged with that stem, %s",
                 model, path, fp, tagged[0].name,
             )
-            fp, eval_dir = tagged[0].name, tagged[0]
-    return PriorSource(model=model, config_path=path, fp=fp, eval_dir=eval_dir)
+            return tagged[0].name, tagged[0]
+    return fp, eval_dir
+
+
+def resolve_prior(
+    model: str, config_dirs=None, projection_config_dirs=None,
+) -> PriorSource:
+    """Config stem -> its config file -> evaluation fingerprint -> eval dir.
+
+    The stem is looked up in the model namespace (models/, models/production/)
+    and the projection namespace (projections/); found in both, it is
+    refused. Model stems fingerprint via `compute_fingerprint` into
+    model_evaluations; projection stems via `compute_iid_fingerprint` into
+    projection_evaluations. Either way, a config copy that differs in
+    fingerprinted fields falls back to the evaluation tagged with the stem
+    in its source.txt, logged.
+    """
+    proj_path = _find_projection_config(model, projection_config_dirs)
+    try:
+        model_path = find_prior_config(model, config_dirs)
+    except FileNotFoundError:
+        if proj_path is None:
+            raise
+        model_path = None
+    if model_path is not None and proj_path is not None:
+        raise ValueError(
+            f"offset.prior {model!r} exists in both the model namespace "
+            f"({model_path}) and the projection namespace ({proj_path}); "
+            "rename one — the stem must be unambiguous."
+        )
+
+    if proj_path is None:
+        from mvp.common.config_hash import compute_fingerprint
+
+        fp = compute_fingerprint(_load_config(model_path), config_path=model_path)
+        fp, eval_dir = _tagged_fallback(_evaluations_root(), model, fp, model_path)
+        return PriorSource(
+            model=model, config_path=model_path, fp=fp, eval_dir=eval_dir
+        )
+
+    from mvp.common.config_hash import compute_iid_fingerprint
+    from mvp.projection.iid.config import IIDProjectionConfig
+
+    cfg = IIDProjectionConfig.from_file(proj_path)
+    fp = compute_iid_fingerprint(cfg, config_path=proj_path)
+    fp, eval_dir = _tagged_fallback(
+        _projection_evaluations_root(), model, fp, proj_path,
+        tag_of=_projection_run_tag,
+    )
+    return PriorSource(
+        model=model, config_path=proj_path, fp=fp, eval_dir=eval_dir,
+        kind="projection", forward_train_end=cfg.data.date_range.end,
+    )
 
 
 def prior_artifacts_ready(source: PriorSource) -> bool:
-    """Fold OOF present with the calibrated column."""
+    """Fold OOF present with the probability column the kind requires."""
+    if source.kind == "projection":
+        p = source.fold_match_win
+        if not p.exists():
+            return False
+        cols = pl.scan_parquet(p).collect_schema().names()
+        return {"p_match_win_a", "player_id", "opp_id", "won_a"} <= set(cols)
     p = source.fold_predictions
     if not p.exists():
         return False
@@ -192,6 +301,33 @@ def ensure_prior_artifacts(source: PriorSource, regenerate: bool) -> None:
     config when allowed (the discovery driver does; train/serve refuse with
     the command instead — a live box must never start an evaluation)."""
     if prior_artifacts_ready(source):
+        return
+    if source.kind == "projection":
+        if not regenerate:
+            raise FileNotFoundError(
+                f"offset.prior {source.model}: no fold_match_win.parquet at "
+                f"{source.fold_match_win} (or it predates the current "
+                f"columns). Run the projection first: "
+                f"{source.regenerate_command}"
+            )
+        # Same convention as model priors: the discovery driver regenerates,
+        # train/serve refuse. The projection's own runner, never
+        # ExperimentRunner.
+        from mvp.projection.iid.runner import IIDProjectionRunner
+
+        logger.warning(
+            "offset.prior %s: no projection artifacts at %s -- regenerating "
+            "from %s (a full iid-project run, written where that command "
+            "would write it)",
+            source.model, source.eval_dir, source.config_path,
+        )
+        IIDProjectionRunner(config_path=source.config_path).run()
+        _cached_frame.cache_clear()
+        if not prior_artifacts_ready(source):
+            raise RuntimeError(
+                f"offset.prior {source.model}: projection ran but "
+                f"{source.fold_match_win} is still missing or incomplete"
+            )
         return
     if not regenerate:
         raise FileNotFoundError(
@@ -298,13 +434,152 @@ def _backtest_rows(path: Path, cutoffs: list[date]) -> pl.DataFrame:
     )
 
 
+def _both_orientations(df: pl.DataFrame) -> pl.DataFrame:
+    """Two rows per match from an A-oriented frame carrying
+    (match_uid, player_id, opp_id, day, prior_prob, prior_train_end,
+    prior_kind): the A row as-is, the mirror with 1 - p."""
+    a = df.select(
+        "match_uid", "player_id", "day", "prior_prob",
+        "prior_train_end", "prior_kind",
+    )
+    b = df.select(
+        "match_uid",
+        pl.col("opp_id").alias("player_id"),
+        "day",
+        (1.0 - pl.col("prior_prob")).alias("prior_prob"),
+        "prior_train_end", "prior_kind",
+    )
+    return pl.concat([a, b])
+
+
+def _read_fold_match_win(path: Path) -> pl.DataFrame:
+    df = pl.read_parquet(path)
+    required = {"match_uid", "player_id", "opp_id", "effective_match_date",
+                "fold_idx", "p_match_win_a", "won_a"}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(
+            f"{path} is missing columns {sorted(missing)}; re-run the "
+            "projection to produce the current artifact."
+        )
+    return df
+
+
+def _projection_fold_rows(path: Path) -> pl.DataFrame:
+    """Walk-forward OOF rows from the projection's fold_match_win artifact,
+    NESTED-CALIBRATED and in both orientations.
+
+    The chain output is raw; model priors are nested-Platt-calibrated
+    (`y_prob_cal`), and two calibration states are never spliced into one
+    column. Same discipline here: fold i's probabilities are transformed by
+    a Platt fit on the OTHER folds' rows, so every prior value comes from a
+    calibrator that never saw it. Per-fold ``prior_train_end`` by the same
+    day.min()-1 rule as the model path."""
+    from mvp.model.calibration import PlattCalibrator
+
+    df = _read_fold_match_win(path)
+    folds = sorted(df["fold_idx"].unique().to_list())
+    if len(folds) < 2:
+        raise ValueError(
+            f"{path}: nested calibration needs >= 2 folds, found {folds}"
+        )
+    cal_parts = []
+    for f in folds:
+        others = df.filter(pl.col("fold_idx") != f)
+        mine = df.filter(pl.col("fold_idx") == f)
+        cal = PlattCalibrator()
+        try:
+            cal.fit(
+                others["p_match_win_a"].to_numpy(),
+                others["won_a"].to_numpy().astype(np.int64),
+            )
+        except ValueError as e:
+            # A raw-probability fallback would splice calibration states into
+            # one column, so a degenerate complement is refused, not papered
+            # over.
+            raise ValueError(
+                f"{path}: cannot nested-calibrate fold {f} — the other "
+                f"folds' outcomes are single-class ({e}). The projection's "
+                "folds are too thin for a calibrated prior."
+            ) from e
+        cal_parts.append(mine.with_columns(
+            pl.Series("prior_prob", cal.transform(mine["p_match_win_a"].to_numpy()))
+        ))
+    out = pl.concat(cal_parts).with_columns(
+        pl.col("effective_match_date").cast(pl.Date).alias("day"),
+        pl.lit("proj_fold_oof_nested_cal").alias("prior_kind"),
+    )
+    train_end = out.group_by("fold_idx").agg(
+        (pl.col("day").min() - timedelta(days=1)).alias("prior_train_end")
+    )
+    return _both_orientations(out.join(train_end, on="fold_idx"))
+
+
+def _projection_forward_rows(
+    pmf_path: Path, fold_path: Path, train_end: date, model: str
+) -> pl.DataFrame | None:
+    """Forward rows from the projection's live pmf artifact (one fit through
+    ``train_end``), calibrated by a global Platt fit on ALL walk-forward OOF
+    rows — the fit ends at ``train_end`` and these rows are dated after it,
+    mirroring the model path's post-Platt backtest rows. Both orientations.
+    None (with a log) when the pmf predates the id columns."""
+    from mvp.model.calibration import PlattCalibrator
+
+    cols = pl.scan_parquet(pmf_path).collect_schema().names()
+    if not {"player_id", "opp_id", "p_match_win_a"} <= set(cols):
+        logger.warning(
+            "prior %s: %s lacks player_id/opp_id (predates the id columns); "
+            "using fold OOF only — re-run iid-backtest for forward rows",
+            model, pmf_path,
+        )
+        return None
+    oof = _read_fold_match_win(fold_path)
+    cal = PlattCalibrator()
+    try:
+        cal.fit(
+            oof["p_match_win_a"].to_numpy(),
+            oof["won_a"].to_numpy().astype(np.int64),
+        )
+    except ValueError as e:
+        raise ValueError(
+            f"{fold_path}: cannot calibrate forward rows — the walk-forward "
+            f"outcomes are single-class ({e})."
+        ) from e
+    df = pl.read_parquet(pmf_path).select(
+        "match_uid", "player_id", "opp_id",
+        pl.col("effective_match_date").cast(pl.Date).alias("day")
+        if "effective_match_date" in cols else pl.lit(None, dtype=pl.Date).alias("day"),
+        pl.col("p_match_win_a"),
+    )
+    if df["day"].null_count():
+        raise ValueError(
+            f"prior {model}: {pmf_path} rows lack effective_match_date; cannot "
+            "date the forward splice"
+        )
+    return _both_orientations(df.with_columns(
+        pl.Series("prior_prob", cal.transform(df["p_match_win_a"].to_numpy())),
+        pl.lit(train_end).alias("prior_train_end"),
+        pl.lit("proj_forward_cal").alias("prior_kind"),
+    ))
+
+
 def build_prior_frame(
     source: PriorSource, backtests_root: Path | None = None
 ) -> pl.DataFrame:
     """One row per (match_uid, player_id) the base model scored out of sample:
     ``prior_prob``, ``prior_logit``, ``prior_train_end``, ``prior_kind``.
-    Fold OOF spliced with the backtest's walk-forward rows; refuses overlaps,
+    Fold OOF spliced with the walk-forward/forward rows; refuses overlaps,
     duplicates and any row dated on/before its own train end."""
+    if source.kind == "projection":
+        parts = [_projection_fold_rows(source.fold_match_win)]
+        if source.pmf_parquet.exists():
+            fwd = _projection_forward_rows(
+                source.pmf_parquet, source.fold_match_win,
+                source.forward_train_end, source.model,
+            )
+            if fwd is not None:
+                parts.append(fwd)
+        return _splice_and_finalize(parts, source)
     parts = [_fold_rows(source.fold_predictions)]
     if source.backtest_csv.exists():
         stems = [source.stem] + [t for t in _source_tags(source.eval_dir) if t != source.stem]
@@ -316,12 +591,18 @@ def build_prior_frame(
                 "prior %s: backtest.csv present but no fold artifacts under "
                 "backtests/lead/{%s}; using fold OOF only", source.model, ", ".join(stems),
             )
+    return _splice_and_finalize(parts, source)
+
+
+def _splice_and_finalize(
+    parts: list[pl.DataFrame], source: PriorSource
+) -> pl.DataFrame:
     if len(parts) == 2:
         overlap = parts[0].join(parts[1], on=["match_uid", "player_id"], how="inner").height
         if overlap:
             raise ValueError(
                 f"prior {source.model}: {overlap} (match, player) rows in both "
-                "the fold OOF and the backtest; refusing to splice"
+                "the fold OOF and the backtest/forward rows; refusing to splice"
             )
     df = pl.concat(parts).sort(["day", "match_uid", "player_id"])
     if df.select(["match_uid", "player_id"]).is_duplicated().any():

@@ -11,6 +11,8 @@ alignment assert is the one guard standing between a reordered frame and every
 downstream bet being priced against another match's distribution.
 """
 
+from datetime import date
+
 import joblib
 import numpy as np
 import polars as pl
@@ -56,6 +58,9 @@ def _test_df(match_uids: list[str]) -> pl.DataFrame:
     return pl.DataFrame(
         {
             "match_uid": match_uids,
+            "player_id": [f"AA{i:02d}" for i in range(n)],
+            "opp_id": [f"ZZ{i:02d}" for i in range(n)],
+            "effective_match_date": [date(2026, 1, 2 + i) for i in range(n)],
             "circuit": ["tour"] * n,
             "surface": ["Hard"] * n,
             "round": ["R32"] * n,
@@ -232,6 +237,8 @@ def _spread_test_df(pairs: list[tuple[str, str]]) -> pl.DataFrame:
         {
             "match_uid": uids,
             "player_id": [a for a, _ in pairs],
+            "opp_id": [b for _, b in pairs],
+            "effective_match_date": [date(2026, 1, 2 + i) for i in range(n)],
             "circuit": ["tour"] * n,
             "surface": ["Hard"] * n,
             "round": ["R32"] * n,
@@ -293,3 +300,50 @@ class TestBuildSpreadPmfFrame:
         assert tot["match_uid"].to_list() == spr["match_uid"].to_list()
         assert "actual_total" in tot.columns and "actual_total" not in spr.columns
         assert "actual_spread" in spr.columns and "actual_spread" not in tot.columns
+
+
+class TestBuildFoldMatchFrame:
+    """The runner-side fold frame for fold_match_win.parquet."""
+
+    def test_columns_alignment_and_probability(self):
+        from mvp.projection.iid.runner import build_fold_match_frame
+
+        uids = ["m0", "m1"]
+        df, out = _test_df(uids), _output_for(uids)
+        frame = build_fold_match_frame(
+            df, out, fold_idx=3, y_won=np.array([1, 0])
+        )
+        assert frame.columns == [
+            "match_uid", "player_id", "opp_id", "effective_match_date",
+            "fold_idx", "p_match_win_a", "won_a",
+        ]
+        assert frame["won_a"].to_list() == [1, 0]
+        assert frame["fold_idx"].to_list() == [3, 3]
+        assert frame["player_id"].to_list() == df["player_id"].to_list()
+        assert frame["opp_id"].to_list() == df["opp_id"].to_list()
+        np.testing.assert_allclose(
+            frame["p_match_win_a"].to_numpy(), out.distribution.p_match_win_a
+        )
+
+    def test_misaligned_output_raises(self):
+        from mvp.projection.iid.runner import build_fold_match_frame
+
+        df = _test_df(["m0", "m1"])
+        out = _output_for(["m1", "m0"])
+        with pytest.raises(ValueError, match="not row-aligned"):
+            build_fold_match_frame(df, out, fold_idx=1, y_won=np.array([1, 0]))
+
+    def test_feeds_the_artifact_writer(self, tmp_path):
+        from mvp.projection.iid.artifacts import write_fold_match_win
+        from mvp.projection.iid.runner import build_fold_match_frame
+
+        parts = [
+            build_fold_match_frame(
+                _test_df(["m0"]), _output_for(["m0"]), 1, np.array([1])
+            ),
+            build_fold_match_frame(
+                _test_df(["m1"]), _output_for(["m1"]), 2, np.array([0])
+            ),
+        ]
+        path = write_fold_match_win(tmp_path, pl.concat(parts))
+        assert pl.read_parquet(path).height == 2

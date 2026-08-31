@@ -288,3 +288,41 @@ class TestCutoverPurge:
         artifacts.purge_stale_artifacts(dry_run=False)
         assert (d / "backtest.parquet").exists()
         assert not (d / "backtest.csv").exists()
+
+
+class TestFoldMatchWin:
+    def test_write_selects_and_orders_the_contract_columns(self, tmp_path):
+        from datetime import date
+
+        import polars as pl
+
+        from mvp.projection.iid.artifacts import (
+            FOLD_MATCH_WIN_PARQUET,
+            write_fold_match_win,
+        )
+
+        frame = pl.DataFrame({
+            "extra": [1],
+            "match_uid": ["m0"],
+            "player_id": ["A"],
+            "opp_id": ["B"],
+            "effective_match_date": [date(2025, 1, 1)],
+            "fold_idx": [1],
+            "p_match_win_a": [0.6],
+            "won_a": [1],
+        })
+        path = write_fold_match_win(tmp_path, frame)
+        assert path.name == FOLD_MATCH_WIN_PARQUET
+        out = pl.read_parquet(path)
+        assert out.columns == [
+            "match_uid", "player_id", "opp_id", "effective_match_date",
+            "fold_idx", "p_match_win_a", "won_a",
+        ]
+
+    def test_missing_column_raises(self, tmp_path):
+        import polars as pl
+
+        from mvp.projection.iid.artifacts import write_fold_match_win
+
+        with pytest.raises(ValueError, match="missing columns"):
+            write_fold_match_win(tmp_path, pl.DataFrame({"match_uid": ["m0"]}))

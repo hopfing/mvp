@@ -291,6 +291,12 @@ def build_pmf_frame(test_df: pl.DataFrame, out: ProjectionOutput) -> pl.DataFram
         )
     return pl.DataFrame({
         "match_uid": test_df["match_uid"],
+        # Both players' ids so the winner-side prior can emit the mirrored
+        # orientation for these forward rows (A = the row's player_id, per
+        # _collapse_to_match_rows' lower-sorting rule).
+        "player_id": test_df["player_id"],
+        "opp_id": test_df["opp_id"],
+        "effective_match_date": test_df["effective_match_date"],
         "circuit": test_df["circuit"],
         "surface": test_df["surface"],
         "round": test_df["round"],
