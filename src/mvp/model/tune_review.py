@@ -143,6 +143,15 @@ def _study_frame(
     return is_iid, is_projection, use_cal, cal_mixed, n_cal
 
 
+# Metrics that always have a column in the classification leaderboard row.
+# A ranked metric outside this set is printed first on the row.
+_HEADLINE_METRICS = frozenset({
+    "log_loss", "brier_score", "roc_auc", "accuracy", "calibration_error",
+    "calibration_error_max", "overconfidence_max", "signed_calibration",
+    "error_rate_80plus",
+})
+
+
 def _objective_sort_metrics(
     study: optuna.Study, trials: list[optuna.trial.FrozenTrial], fallback: str
 ) -> list[str]:
@@ -514,15 +523,22 @@ def format_leaderboard(
             oc_max = ua.get("holdout_cal_overconfidence_max", float("nan"))
             scal = ua.get("holdout_cal_signed_calibration", float("nan"))
             err80 = ua.get("holdout_cal_error_rate_80plus", float("nan"))
+            raw_key = f"holdout_{ref_metric}"
+            cal_key = _to_ranked(ref_metric, use_cal)
+            # The ranked metric leads the row when it isn't one of the fixed
+            # columns (e.g. restricted_logloss): otherwise the sort key only
+            # appears as a raw value plus delta on the second line.
+            lead = (
+                f"{ref_label}={ua[cal_key]:.5f}  "
+                if ref_metric not in _HEADLINE_METRICS and cal_key in ua else ""
+            )
             lines.append(
-                f"  {i + 1:>2}. {seq_tag:<9}  LL={ll:.5f}  brier={brier:.5f}  "
+                f"  {i + 1:>2}. {seq_tag:<9}  {lead}LL={ll:.5f}  brier={brier:.5f}  "
                 f"AUC={auc:.5f}  acc={acc:.5f}  cal={cal * 100:.2f}%  "
                 f"cal_max={cal_max * 100:.2f}%  oc_max={oc_max * 100:.2f}%  "
                 f"scal={scal * 100:+.2f}%  err80={err80 * 100:.1f}%  "
                 f"({duration:.0f}s · {trial_id})"
             )
-            raw_key = f"holdout_{ref_metric}"
-            cal_key = _to_ranked(ref_metric, use_cal)
             ref_parts: list[str] = []
             if not ref_invariant and raw_key in ua and cal_key in ua:
                 raw_val, cal_val = ua[raw_key], ua[cal_key]
@@ -556,8 +572,13 @@ def format_leaderboard(
             oc_max = ua.get("holdout_overconfidence_max", float("nan"))
             scal = ua.get("holdout_signed_calibration", float("nan"))
             err80 = ua.get("holdout_error_rate_80plus", float("nan"))
+            raw_ranked = f"holdout_{ref_metric}"
+            lead = (
+                f"{ref_label}={ua[raw_ranked]:.5f}  "
+                if ref_metric not in _HEADLINE_METRICS and raw_ranked in ua else ""
+            )
             lines.append(
-                f"  {i + 1:>2}. {seq_tag:<9}  LL={ll:.5f}  brier={brier:.5f}  "
+                f"  {i + 1:>2}. {seq_tag:<9}  {lead}LL={ll:.5f}  brier={brier:.5f}  "
                 f"AUC={auc:.5f}  acc={acc:.5f}  cal={cal * 100:.2f}%  "
                 f"cal_max={cal_max * 100:.2f}%  oc_max={oc_max * 100:.2f}%  "
                 f"scal={scal * 100:+.2f}%  err80={err80 * 100:.1f}%  "

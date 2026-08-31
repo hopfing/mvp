@@ -98,13 +98,16 @@ def populated_cal_study(tmp_path):
         study_name="cal_review", storage=storage, direction="minimize"
     )
     # (C, raw holdout LL, cal holdout LL, cal per-fold LLs)
+    # rll: a third ordering (C=10 best) so a restricted_logloss sort is
+    # distinguishable from both log-loss orderings.
     trial_data = [
-        {"C": 0.1, "h_ll": 0.62, "hc_ll": 0.64, "folds": [0.63, 0.65]},
-        {"C": 1.0, "h_ll": 0.66, "hc_ll": 0.60, "folds": [0.58, 0.62]},
-        {"C": 10.0, "h_ll": 0.65, "hc_ll": 0.63, "folds": [0.61, 0.65]},
+        {"C": 0.1, "h_ll": 0.62, "hc_ll": 0.64, "folds": [0.63, 0.65], "rll": 0.52},
+        {"C": 1.0, "h_ll": 0.66, "hc_ll": 0.60, "folds": [0.58, 0.62], "rll": 0.54},
+        {"C": 10.0, "h_ll": 0.65, "hc_ll": 0.63, "folds": [0.61, 0.65], "rll": 0.50},
     ]
     for td in trial_data:
         raw = {
+            "holdout_restricted_logloss": td["rll"] + 0.01,
             "holdout_log_loss": td["h_ll"], "holdout_brier_score": 0.22,
             "holdout_roc_auc": 0.73, "holdout_accuracy": 0.67,
             "holdout_calibration_error": 0.03,
@@ -114,6 +117,7 @@ def populated_cal_study(tmp_path):
             "holdout_error_rate_80plus": 0.12,
         }
         cal = {
+            "holdout_cal_restricted_logloss": td["rll"],
             "holdout_cal_log_loss": td["hc_ll"], "holdout_cal_brier_score": 0.21,
             "holdout_cal_roc_auc": 0.73, "holdout_cal_accuracy": 0.68,
             "holdout_cal_calibration_error": 0.012,
@@ -306,6 +310,23 @@ class TestFormatLeaderboard:
         first_row = _first_row(format_leaderboard(populated_cal_study, top_n=3))
         assert "LL=0.6000" in first_row  # calibrated LL, not raw 0.6200
         assert "trial 1)" in first_row   # C=1.0 was the 2nd-created trial
+
+    def test_ranked_metric_outside_the_columns_leads_the_row(
+        self, populated_cal_study
+    ):
+        """Sorting by a metric that has no fixed column (restricted_logloss)
+        prints it first on the row, so the sort key is visible where the eye
+        lands rather than only as a raw value + delta on the second line."""
+        lines = format_leaderboard(
+            populated_cal_study, top_n=3, sort_by=["restricted_logloss"]
+        )
+        first_row = _first_row(lines)
+        assert "restricted_logloss=0.50000  LL=" in first_row
+        assert "C: 10.0" in "\n".join(lines[lines.index(first_row):])
+        # a headline metric as the sort key adds no lead
+        assert "log_loss=" not in _first_row(
+            format_leaderboard(populated_cal_study, top_n=3, sort_by=["log_loss"])
+        )
 
     def test_raw_reference_on_each_row(self, populated_cal_study):
         """Each trial shows its uncalibrated LL next to the ranked one. The frame
