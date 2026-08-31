@@ -74,6 +74,17 @@ def _score_iid_spread_cal_max(dist, y_a, y_b, *, spread_lines=None, **_):
     return float(max(spread_cal_errs(dist, y_a, y_b, spread_lines)))
 
 
+def _score_iid_match_win_log_loss(dist, y_a, y_b, *, y_won=None, **_):
+    if y_won is None:
+        raise ValueError(
+            "iid_match_win_log_loss requires y_won -- the match winner cannot "
+            "be derived from game counts (winners can lose the games count)"
+        )
+    p = np.clip(dist.p_match_win_a, 1e-15, 1 - 1e-15)
+    y = np.asarray(y_won, dtype=np.float64)
+    return float(-np.mean(y * np.log(p) + (1 - y) * np.log(1 - p)))
+
+
 def _score_mae(dist, y_a, y_b, **_):
     return float(np.mean(np.abs(y_a - dist.expected_games_a)))
 
@@ -94,6 +105,13 @@ METRICS: dict[str, MetricSpec] = {
         MetricSpec("iid_total_cal_max",    "chain", "minimize", _score_iid_total_cal_max),
         MetricSpec("iid_spread_cal",       "chain", "minimize", _score_iid_spread_cal),
         MetricSpec("iid_spread_cal_max",   "chain", "minimize", _score_iid_spread_cal_max),
+        # Match-win through the chain. Distinct from point-grain "log_loss"
+        # (the serve model's point-level loss): this scores dist.p_match_win_a
+        # against the actual winner, so serve FS can select FOR match-win.
+        MetricSpec(
+            "iid_match_win_log_loss", "chain", "minimize",
+            _score_iid_match_win_log_loss,
+        ),
         MetricSpec("mae",  "chain", "minimize", _score_mae),
         MetricSpec("rmse", "chain", "minimize", _score_rmse),
     ]
@@ -137,14 +155,17 @@ def score_chain(
     *,
     total_lines: list[float] | None = None,
     spread_lines: list[float] | None = None,
+    y_won: np.ndarray | None = None,
 ) -> float:
-    """Score a MatchDistribution against observed games for a chain-grain metric."""
+    """Score a MatchDistribution against observed outcomes for a chain-grain
+    metric. `y_won` is required by the match-win metric only; the games/lines
+    scorers absorb it via their kwargs catch-all."""
     spec = METRICS.get(name)
     if spec is None or spec.chain_scorer is None:
         raise ValueError(f"Unknown chain metric: {name}")
     return spec.chain_scorer(
         dist, y_games_a, y_games_b,
-        total_lines=total_lines, spread_lines=spread_lines,
+        total_lines=total_lines, spread_lines=spread_lines, y_won=y_won,
     )
 
 

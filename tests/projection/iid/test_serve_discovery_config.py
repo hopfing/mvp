@@ -35,6 +35,27 @@ class TestServeDiscoveryConfig:
         assert cfg.model_forms == ["logistic", "xgboost"]  # default
         assert cfg.metric == "log_loss"
 
+    def test_match_win_chain_metric_accepted(self):
+        """A serve FS can select on chain match-win log loss (distinct from
+        the point-grain "log_loss" default)."""
+        from mvp.projection.iid.metric_registry import is_chain_metric
+
+        yaml_str = dedent("""
+            data:
+              date_range:
+                start: 2022-01-01
+                end: 2025-12-31
+              filters:
+                circuit: [tour]
+            features:
+              candidate_point_level_features:
+                - is_break_point
+            metric: iid_match_win_log_loss
+        """)
+        cfg = ServeDiscoveryConfig.from_yaml(yaml_str)
+        assert cfg.metric == "iid_match_win_log_loss"
+        assert is_chain_metric(cfg.metric)
+
     def test_full_from_yaml(self):
         yaml_str = dedent("""
             data:

@@ -930,8 +930,8 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
     )
     tune_parser.add_argument(
         "--metric", type=str, nargs="+", default=None,
-        help="[IID/projection only] Metric(s) to optimize. Classification tuning "
-             "reads metrics.objective from the config and rejects --metric.",
+        help="[regression projection only] Metric(s) to optimize. Classification "
+             "AND IID tuning read metrics.objective from the config instead.",
     )
     tune_parser.add_argument(
         "--param", action="append", metavar="KEY=VALUE",

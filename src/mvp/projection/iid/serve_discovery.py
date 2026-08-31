@@ -1182,6 +1182,7 @@ class ServeDiscoverySelector:
                     self.config.metric, dist, y_games_a, y_games_b,
                     total_lines=list(self.config.metrics.total_lines),
                     spread_lines=list(self.config.metrics.spread_lines),
+                    y_won=test_df["won"].to_numpy().astype(np.int64),
                 )
             )
             # Drop refs promptly, and bound memory with the same check_memory()
