@@ -85,17 +85,33 @@ class TestResolve:
         monkeypatch.setattr(prior, "EVALUATIONS_ROOT", tmp_path / "evals")
         assert prior.resolve_prior("snap", (models,)).fp == fp_orig
 
-        # stripped copy: different fingerprint, no dir there -> source tag
+        # stripped copy: different fingerprint, no dir there -> the tagged
+        # fallback accepts ONLY a dir whose own snapshot is equivalent to
+        # the current file. A dir holding the ORIGINAL's snapshot is of
+        # different content and is ignored (the lossy-copy rescue is gone:
+        # serving artifacts of a different config is never right).
         (models / "prod").mkdir()
         (models / "prod" / "stripped.yaml").write_text(yaml.dump(_CFG))
+        fp_stripped = compute_fingerprint(
+            ExperimentConfig.model_validate(_CFG),
+            config_path=models / "prod" / "stripped.yaml",
+        )
         evals = tmp_path / "evals"
         (evals / "aaaaaaaaaaaa").mkdir(parents=True)
         (evals / "aaaaaaaaaaaa" / "source.txt").write_text("stripped\tdeadbeef\t2026-01-01\n")
-        (evals / "bbbbbbbbbbbb").mkdir()
-        (evals / "bbbbbbbbbbbb" / "source.txt").write_text("other\tdeadbeef\t2026-01-01\n")
+        (evals / "aaaaaaaaaaaa" / "config.yaml").write_text(yaml.dump(original))
         src = prior.resolve_prior("stripped", (models / "prod",))
-        assert src.fp == "aaaaaaaaaaaa"
-        assert src.eval_dir == evals / "aaaaaaaaaaaa"
+        assert src.fp == fp_stripped  # the inequivalent dir was ignored
+        assert src.eval_dir == evals / fp_stripped
+
+        # a tagged dir whose snapshot IS equivalent to the current file is
+        # accepted
+        (evals / "bbbbbbbbbbbb").mkdir()
+        (evals / "bbbbbbbbbbbb" / "source.txt").write_text("stripped\tdeadbeef\t2026-01-01\n")
+        (evals / "bbbbbbbbbbbb" / "config.yaml").write_text(yaml.dump(_CFG))
+        src = prior.resolve_prior("stripped", (models / "prod",))
+        assert src.fp == "bbbbbbbbbbbb"
+        assert src.eval_dir == evals / "bbbbbbbbbbbb"
 
     def test_missing_artifacts_refuse_unless_regenerating(self, tmp_path, monkeypatch):
         _write_cfg(tmp_path / "models", "base")

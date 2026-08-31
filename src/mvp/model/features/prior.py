@@ -210,24 +210,70 @@ def _projection_run_tag(eval_dir: Path) -> str | None:
     return fields[1].strip() if len(fields) > 1 else None
 
 
+def _snapshot_fingerprint_model(snapshot: Path) -> str:
+    from mvp.common.config_hash import compute_fingerprint
+
+    return compute_fingerprint(_load_config(snapshot), config_path=snapshot)
+
+
+def _snapshot_fingerprint_projection(snapshot: Path) -> str:
+    from mvp.common.config_hash import compute_iid_fingerprint
+    from mvp.projection.iid.config import IIDProjectionConfig
+
+    return compute_iid_fingerprint(
+        IIDProjectionConfig.from_file(snapshot), config_path=snapshot
+    )
+
+
 def _tagged_fallback(
-    root: Path, model: str, fp: str, path: Path, tag_of=_source_tag,
+    root: Path, model: str, fp: str, path: Path,
+    tag_of=_source_tag, snapshot_fp=_snapshot_fingerprint_model,
 ) -> tuple[str, Path]:
-    """The eval dir for `fp`, or the newest one tagged with this stem when
-    the fingerprint has no dir (a copy differing in fingerprinted fields)."""
+    """The eval dir for `fp`, or the newest EQUIVALENT one tagged with this
+    stem when the fingerprint has no dir.
+
+    A tag says an evaluation once ran under this name; only the dir's own
+    stored config snapshot says what it evaluated. A candidate is accepted
+    solely when its snapshot, through the same normalization as the current
+    file, fingerprints identically — i.e. the mismatch was recoverable
+    cosmetics. Anything else (a semantic edit, a copy that truly lost a
+    fingerprinted field, an unreadable snapshot) is logged and IGNORED, so
+    resolution lands on the true-fingerprint dir and the existing
+    missing-artifact behaviour takes over: discovery regenerates,
+    train/serve refuse with the command. Serving a stale evaluation after
+    a config edit (2026-08-31) is what this test exists to prevent."""
     eval_dir = root / fp
     if not eval_dir.is_dir() and root.is_dir():
         tagged = [
             d for d in root.iterdir() if d.is_dir() and tag_of(d) == model
         ]
-        if tagged:
-            tagged.sort(key=lambda d: d.stat().st_mtime, reverse=True)
+        tagged.sort(key=lambda d: d.stat().st_mtime, reverse=True)
+        for d in tagged:
+            snapshot = d / "config.yaml"
+            try:
+                snap_fp = snapshot_fp(snapshot)
+            except Exception as e:  # noqa: BLE001 — never accept on faith
+                logger.warning(
+                    "offset.prior %s: candidate %s has no readable config "
+                    "snapshot (%s); ignoring", model, d.name, e,
+                )
+                continue
+            if snap_fp != fp:
+                logger.warning(
+                    "offset.prior %s: %s fingerprints to %s, but the "
+                    "evaluation tagged with that stem (%s) is of DIFFERENT "
+                    "content (its snapshot fingerprints to %s); ignoring it. "
+                    "If the config was edited, regenerate; if a field was "
+                    "lost in a copy, restore it.",
+                    model, path, fp, d.name, snap_fp,
+                )
+                continue
             logger.info(
-                "offset.prior %s: %s fingerprints to %s (no evaluation there); "
-                "using the evaluation tagged with that stem, %s",
-                model, path, fp, tagged[0].name,
+                "offset.prior %s: %s fingerprints to %s (no evaluation "
+                "there); using the equivalent evaluation %s",
+                model, path, fp, d.name,
             )
-            return tagged[0].name, tagged[0]
+            return d.name, d
     return fp, eval_dir
 
 
@@ -274,7 +320,7 @@ def resolve_prior(
     fp = compute_iid_fingerprint(cfg, config_path=proj_path)
     fp, eval_dir = _tagged_fallback(
         _projection_evaluations_root(), model, fp, proj_path,
-        tag_of=_projection_run_tag,
+        tag_of=_projection_run_tag, snapshot_fp=_snapshot_fingerprint_projection,
     )
     return PriorSource(
         model=model, config_path=proj_path, fp=fp, eval_dir=eval_dir,

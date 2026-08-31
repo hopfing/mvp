@@ -319,9 +319,11 @@ class TestSweepTagFallback:
         trial = root / "aaaaaaaaaaaa"
         trial.mkdir(parents=True)
         (trial / "source.txt").write_text("proj_base\tproj_base__h03_t17\t2026-01-01\n")
+        (trial / "config.yaml").write_text(_PROJ_YAML)
         plain = root / "bbbbbbbbbbbb"
         plain.mkdir()
         (plain / "source.txt").write_text("proj_base\tproj_base\t2026-01-02\n")
+        (plain / "config.yaml").write_text(_PROJ_YAML)
 
         src = prior.resolve_prior(
             "proj_base",
@@ -329,5 +331,37 @@ class TestSweepTagFallback:
             projection_config_dirs=(proj_dir,),
         )
         # the computed fingerprint has no dir, so the fallback fires — and it
-        # must pick the plain run, never the sweep trial
+        # must pick the plain run, never the sweep trial (whose snapshot here
+        # is even equivalent: its RUN tag is what disqualifies it)
         assert src.eval_dir == plain
+
+    def test_config_edit_never_resolves_to_the_stale_run(self, tmp_path, monkeypatch):
+        """The 2026-08-31 regression: editing the config produced a new
+        fingerprint and the fallback silently served the pre-edit run by
+        tag. Now the stale dir's snapshot fingerprints differently and is
+        ignored: resolution lands on the (empty) true-fingerprint dir and
+        the regenerate path engages."""
+        proj_dir = tmp_path / "projections"
+        cfg_path = _write_proj_cfg(proj_dir, "proj_base")
+        root = tmp_path / "pe"
+        monkeypatch.setattr(prior, "PROJECTION_EVALUATIONS_ROOT", root)
+
+        stale = root / "cccccccccccc"
+        stale.mkdir(parents=True)
+        (stale / "source.txt").write_text("proj_base\tproj_base\t2026-01-01\n")
+        (stale / "config.yaml").write_text(_PROJ_YAML)
+        _fold_match_win(_DAYS_2X2, _FOLDS_2X2, _WINS_2X2).write_parquet(
+            stale / "fold_match_win.parquet"
+        )
+
+        cfg_path.write_text(
+            _PROJ_YAML.replace('start: "2024-01-01"', 'start: "2022-01-01"'),
+            encoding="utf-8",
+        )
+        src = prior.resolve_prior(
+            "proj_base",
+            config_dirs=(tmp_path / "models",),
+            projection_config_dirs=(proj_dir,),
+        )
+        assert src.eval_dir != stale
+        assert not prior.prior_artifacts_ready(src)
