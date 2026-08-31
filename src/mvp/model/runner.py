@@ -11,7 +11,7 @@ from typing import Any
 
 import numpy as np
 import polars as pl
-from sklearn.metrics import r2_score
+from sklearn.metrics import log_loss as _sk_log_loss, r2_score
 
 run_logger = logging.getLogger(__name__)
 
@@ -43,7 +43,11 @@ from mvp.model.features._score_helpers import (
     total_games_won as _total_games_won,
 )
 from mvp.model.imputation import apply_imputation, build_imputation, fit_imputation
-from mvp.model.metrics import compute_metrics, metric_direction
+from mvp.model.metrics import (
+    RESTRICTED_LOGLOSS_TAU,
+    compute_metrics,
+    metric_direction,
+)
 from mvp.model.mlflow_logger import ExperimentLogger
 from mvp.model.models import EnsembleModel, XGBoostMTLModel, get_model
 from mvp.model.offset import fit_offset, offset_margin, resolve_offset_col
@@ -51,6 +55,72 @@ from mvp.model.registry import get_registry
 from mvp.model.splitters import BaseSplitter, make_splitter
 from mvp.model.symmetry import symmetrize, validate_pairing
 from mvp.model.weighting import sample_weights_from_frame
+
+
+def _fixed_score_mask(
+    margin: np.ndarray, tau: float = RESTRICTED_LOGLOSS_TAU
+) -> np.ndarray:
+    """Rows the offset alone is confident on: |sigmoid(margin) - 0.5| > tau.
+
+    The fixed population for `restricted_logloss` as a tune objective. The
+    metric's own cut is taken on each trial's predictions, so a trial can
+    improve it by pulling borderline rows under the threshold (findings
+    2026-08-26 §7d); HPs move that far more than one feature does. The
+    offset margin is shared by every trial of a config and never moves, so
+    scoring all of them on its confident rows makes the objective a proper
+    score on one population."""
+    p = 1.0 / (1.0 + np.exp(-np.asarray(margin, dtype=float)))
+    return np.abs(p - 0.5) > tau
+
+
+def _masked_log_loss(y_true: np.ndarray, y_prob: np.ndarray) -> float:
+    return float(
+        _sk_log_loss(y_true, np.clip(y_prob, 1e-15, 1 - 1e-15), labels=[0, 1])
+    )
+
+
+def _with_fixed_rll(
+    metrics: dict[str, float] | None,
+    y_true: np.ndarray,
+    y_prob: np.ndarray,
+    mask: np.ndarray | None,
+) -> dict[str, float] | None:
+    """Replace `restricted_logloss` with plain log loss on the fixed-mask rows.
+
+    No-op when there is no mask (non-offset run, or the objective is not
+    restricted_logloss) or the metric is absent. The metric's own-cut value
+    is kept as `restricted_logloss_own_mask` for diagnostics. Returns a new
+    dict; never mutates its input."""
+    if metrics is None or mask is None or "restricted_logloss" not in metrics:
+        return metrics
+    mask = np.asarray(mask, dtype=bool)
+    if mask.shape != np.shape(y_true):
+        raise ValueError(
+            f"fixed score mask misaligned: {mask.shape} vs {np.shape(y_true)}"
+        )
+    if not mask.any():
+        # The metric's own coverage penalty kept every value finite; a fixed
+        # population with no rows has no value at all, and a NaN objective
+        # would reach Optuna unguarded. Fail loudly: it means the offset is
+        # never confident on this slice, which is a config problem.
+        raise ValueError(
+            "fixed restricted_logloss population is empty: the offset is not "
+            f"confident on any of the {mask.size} scored rows"
+        )
+    out = dict(metrics)
+    out["restricted_logloss_own_mask"] = metrics["restricted_logloss"]
+    out["restricted_logloss"] = _masked_log_loss(
+        np.asarray(y_true)[mask], np.asarray(y_prob)[mask]
+    )
+    return out
+
+
+def _pooled_score_mask(predictions: list[dict]) -> np.ndarray | None:
+    """Concatenate per-fold score masks in prediction order; None unless
+    every fold carries one."""
+    if not predictions or any(p.get("score_mask") is None for p in predictions):
+        return None
+    return np.concatenate([p["score_mask"] for p in predictions])
 
 
 def _reporting_calibrated_holdout(
@@ -84,15 +154,18 @@ def _reporting_calibrated_holdout(
         return None, None
     holdout_y_true = np.concatenate([p["y_true"] for p in holdout_predictions])
     holdout_y_prob = np.concatenate([p["y_prob"] for p in holdout_predictions])
-    overall = compute_metrics(
-        holdout_y_true, reporting_cal.transform(holdout_y_prob), lambda_over=lambda_over
+    holdout_cal = reporting_cal.transform(holdout_y_prob)
+    overall = _with_fixed_rll(
+        compute_metrics(holdout_y_true, holdout_cal, lambda_over=lambda_over),
+        holdout_y_true, holdout_cal, _pooled_score_mask(holdout_predictions),
     )
-    per_fold = [
-        compute_metrics(
-            p["y_true"], reporting_cal.transform(p["y_prob"]), lambda_over=lambda_over
-        )
-        for p in holdout_predictions
-    ]
+    per_fold = []
+    for p in holdout_predictions:
+        p_cal = reporting_cal.transform(p["y_prob"])
+        per_fold.append(_with_fixed_rll(
+            compute_metrics(p["y_true"], p_cal, lambda_over=lambda_over),
+            p["y_true"], p_cal, p.get("score_mask"),
+        ))
     return overall, per_fold
 
 
@@ -134,7 +207,10 @@ def _calibrated_objective_metrics(
             return None
         cal_probs.append(cal.transform(tuning_predictions[i]["y_prob"]))
     pooled = np.concatenate(cal_probs)
-    return compute_metrics(y_true_oof, pooled, lambda_over=lambda_over)
+    return _with_fixed_rll(
+        compute_metrics(y_true_oof, pooled, lambda_over=lambda_over),
+        y_true_oof, pooled, _pooled_score_mask(tuning_predictions),
+    )
 
 
 class ExperimentRunner:
@@ -599,6 +675,27 @@ class ExperimentRunner:
         # and early stopping, so only the plain xgboost branch below needs to
         # handle it.
         offset_cfg = self.config.offset
+        # restricted_logloss as an objective is scored on a FIXED population
+        # (the offset's confident rows, see _fixed_score_mask) so trials can't
+        # move their own scored set. Without an offset there is no shared
+        # reference, and the candidate-dependent cut is the thing to avoid.
+        fixed_rll = "restricted_logloss" in (self.config.metrics.objective or [])
+        if fixed_rll and offset_cfg is None:
+            raise ValueError(
+                "metrics.objective includes restricted_logloss, which needs a "
+                "fixed scoring population: set `offset` (its margin defines the "
+                "confident rows every trial is scored on), or tune on log_loss."
+            )
+        if fixed_rll and self.inner_cv_folds > 0:
+            # The inner-CV regroup rebuilds prediction dicts without the mask
+            # (see `regrouped_predictions`), which would silently revert the
+            # objective to the candidate-dependent cut. Refuse rather than
+            # report the wrong number under the right name.
+            raise ValueError(
+                "restricted_logloss as an objective is not supported with "
+                "inner_cv_folds > 0: the regrouped predictions drop the fixed "
+                "score mask. Use inner_cv_folds=0 (the tune default)."
+            )
 
         # When the model is trained with asymmetric_logloss, mirror its
         # lambda_over into compute_metrics so the tune metric evaluates the
@@ -1241,6 +1338,9 @@ class ExperimentRunner:
                     )
                     model.set_history_features(history_df)
 
+                # Fixed restricted_logloss population for this fold (offset
+                # runs tuning on it); stays None on every other path.
+                fold_score_mask: np.ndarray | None = None
                 if is_ensemble and base_model_specs is not None:
                     assert isinstance(model, EnsembleModel)
                     model.configure(base_model_specs)
@@ -1298,6 +1398,8 @@ class ExperimentRunner:
                         fold_margin_test = offset_margin(
                             offset_model, X_test, offset_col
                         )
+                        if fixed_rll:
+                            fold_score_mask = _fixed_score_mask(fold_margin_test)
                         model.fit(
                             X_train, y_train_for_fit,
                             sample_weight=train_weights,
@@ -1335,7 +1437,10 @@ class ExperimentRunner:
                 y_prob_raw = y_prob
                 y_prob = self._odd_project(y_prob, test_df)
                 y_prob_train = self._odd_project(y_prob_train, train_df)
-                metrics = compute_metrics(y_test, y_prob, lambda_over=lambda_over_eval)
+                metrics = _with_fixed_rll(
+                    compute_metrics(y_test, y_prob, lambda_over=lambda_over_eval),
+                    y_test, y_prob, fold_score_mask,
+                )
                 all_metrics.append(metrics)
 
                 # Predict and evaluate on train (for overfitting detection)
@@ -1383,6 +1488,9 @@ class ExperimentRunner:
                     "df": test_df,
                     "y_true": y_test,
                     "y_prob": y_prob,
+                    # Fixed population for restricted_logloss (offset runs
+                    # tuning on it); None otherwise. Row-aligned with y_test.
+                    "score_mask": fold_score_mask,
                     # The unprojected twin of y_prob at this stage, so
                     # y_prob == _odd_project(y_prob_raw) holds on append. That
                     # invariant does NOT survive the calibrate=True mutation
@@ -1795,8 +1903,13 @@ class ExperimentRunner:
                 # tuning and holdout preds so every fold gets a calibrated
                 # probability (the holdout's just hasn't seen its own labels).
                 # raw_metrics are computed pre-calibration for diagnostic visibility.
-                raw_metrics = compute_metrics(
-                    combined_y_true_oof, combined_y_prob_oof, lambda_over=lambda_over_eval
+                raw_metrics = _with_fixed_rll(
+                    compute_metrics(
+                        combined_y_true_oof, combined_y_prob_oof,
+                        lambda_over=lambda_over_eval,
+                    ),
+                    combined_y_true_oof, combined_y_prob_oof,
+                    _pooled_score_mask(tuning_predictions),
                 )
 
                 cal_cfg = self.config.calibration
@@ -1924,13 +2037,25 @@ class ExperimentRunner:
                 # so the per-fold report matches the headline (both reflect the
                 # single calibrator that gets deployed).
                 all_metrics = [
-                    compute_metrics(p["y_true"], p["y_prob"], lambda_over=lambda_over_eval)
+                    _with_fixed_rll(
+                        compute_metrics(
+                            p["y_true"], p["y_prob"], lambda_over=lambda_over_eval
+                        ),
+                        p["y_true"], p["y_prob"], p.get("score_mask"),
+                    )
                     for p in tuning_predictions
                 ]
                 calibrated_y_prob = np.concatenate(
                     [p["y_prob"] for p in tuning_predictions]
                 )
-                avg_metrics = compute_metrics(combined_y_true_oof, calibrated_y_prob, lambda_over=lambda_over_eval)
+                avg_metrics = _with_fixed_rll(
+                    compute_metrics(
+                        combined_y_true_oof, calibrated_y_prob,
+                        lambda_over=lambda_over_eval,
+                    ),
+                    combined_y_true_oof, calibrated_y_prob,
+                    _pooled_score_mask(tuning_predictions),
+                )
                 # NB `raw_` now means projected-but-uncalibrated, not
                 # unprojected. Comparing raw_* against a pre-symmetrization run
                 # crosses the frame boundary like every other metric here.
@@ -1942,8 +2067,13 @@ class ExperimentRunner:
                 # block in config is ignored here; it's a deployment concern
                 # honored by `mvp model` (ProductionPredictor) not by tuning.
                 run_logger.info("Calibration disabled (calibrate=False)")
-                avg_metrics = compute_metrics(
-                    combined_y_true_oof, combined_y_prob_oof, lambda_over=lambda_over_eval
+                avg_metrics = _with_fixed_rll(
+                    compute_metrics(
+                        combined_y_true_oof, combined_y_prob_oof,
+                        lambda_over=lambda_over_eval,
+                    ),
+                    combined_y_true_oof, combined_y_prob_oof,
+                    _pooled_score_mask(tuning_predictions),
                 )
                 # all_metrics already contains per-fold raw metrics from earlier
                 # in run(); no recomputation needed since y_prob was never mutated.
@@ -1966,9 +2096,20 @@ class ExperimentRunner:
                 holdout_y_prob = np.concatenate(
                     [p["y_prob"] for p in holdout_predictions]
                 )
-                holdout_metrics = compute_metrics(holdout_y_true, holdout_y_prob, lambda_over=lambda_over_eval)
+                holdout_metrics = _with_fixed_rll(
+                    compute_metrics(
+                        holdout_y_true, holdout_y_prob, lambda_over=lambda_over_eval
+                    ),
+                    holdout_y_true, holdout_y_prob,
+                    _pooled_score_mask(holdout_predictions),
+                )
                 holdout_fold_metrics = [
-                    compute_metrics(p["y_true"], p["y_prob"], lambda_over=lambda_over_eval)
+                    _with_fixed_rll(
+                        compute_metrics(
+                            p["y_true"], p["y_prob"], lambda_over=lambda_over_eval
+                        ),
+                        p["y_true"], p["y_prob"], p.get("score_mask"),
+                    )
                     for p in holdout_predictions
                 ]
 
