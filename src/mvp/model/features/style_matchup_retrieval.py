@@ -304,6 +304,11 @@ register_transform(
         + [f"style_conf_{k}" for k in _AXES]
         + ["elo_surface_diff"]
     ),
-    raw_columns=["opp_elo"],
+    # `won` is read by _residual(). It happens to be in the engine's
+    # always-loaded structural set, so declaring it changes no resolved column
+    # set today — but raw_columns is now the ONLY channel by which a transform
+    # states its raw needs (a df->df func can't be introspected), so it is
+    # declared rather than relied upon.
+    raw_columns=["opp_elo", "won"],
     description="Form A joint-kNN style-matchup retrieval (whole-matrix self-join)",
 )

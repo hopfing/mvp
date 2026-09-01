@@ -7,7 +7,7 @@ import polars as pl
 import pytest
 
 from mvp.model.engine import FeatureEngine, parse_feature_spec
-from mvp.model.registry import feature, get_registry
+from mvp.model.registry import feature, get_registry, register_transform
 
 
 class TestFeatureEngineInit:
@@ -515,6 +515,85 @@ class TestFeatureEngineColumnPruning:
         result = engine.compute(["player_base_rate", "player_hybrid_ratio"])
 
         assert "player_hybrid_ratio" in result.columns
+
+    def _register_joined_transform(self):
+        """A df->df transform with NO depends_on, like prior/lead_prior/
+        market_prior: it joins an external frame keyed on (match_uid,
+        player_id) and declares the one raw column it reads."""
+        def _joined(df: pl.DataFrame) -> pl.DataFrame:
+            return df.select(
+                "match_uid", "player_id",
+                (pl.col("raw_num") * 0.0).alias("player_joined_logit"),
+            )
+
+        register_transform(
+            name="joined_prior",
+            func=_joined,
+            outputs=["player_joined_logit"],
+            raw_columns=["raw_num"],
+        )
+
+    def test_dependencyless_transform_does_not_disable_pruning(
+        self, tmp_path: Path, isolated_registry
+    ):
+        """A transform's func can't be introspected as an expr — calling it
+        without a df raises, and that TypeError used to reach the expr branch
+        and drop the whole prune list. Every config carrying a prior column
+        then loaded all ~400 parquet columns (3.4 GB) instead of its ~35."""
+        self._register_joined_transform()
+        engine = FeatureEngine(
+            matches_path=self._hybrid_matches(tmp_path),
+            cache_dir=tmp_path / "cache",
+        )
+
+        specs = engine._expand_transform_requests(["player_joined_logit"])
+        cols = engine._resolve_source_columns(specs)
+
+        # Pruning stays ON (an empty list is the load-everything sentinel)...
+        assert cols
+        # ...the transform's declared raw column survives...
+        assert "raw_num" in cols
+        # ...and a column nothing asked for is still pruned away.
+        assert "raw_den" not in cols
+
+    def test_parameterized_transform_prunes_and_computes(
+        self, tmp_path: Path, isolated_registry
+    ):
+        """The exact shape that broke: parameterized, df->df, no depends_on —
+        `prior(model=<stem>)`. Pruning holds through the param round-trip, and
+        Phase 7 runs the transform against the pruned frame."""
+        def _keyed(df: pl.DataFrame, model: str) -> pl.DataFrame:
+            return df.select(
+                "match_uid", "player_id",
+                (pl.col("raw_den") * 0.0).alias("player_keyed_logit"),
+            )
+
+        register_transform(
+            name="keyed_prior",
+            func=_keyed,
+            outputs=["player_keyed_logit"],
+            params=["model"],
+            raw_columns=["raw_den"],
+        )
+        engine = FeatureEngine(
+            matches_path=self._hybrid_matches(tmp_path),
+            cache_dir=tmp_path / "cache",
+        )
+        spec = "player_keyed_logit(model=two_level_flat)"
+
+        cols = engine._resolve_source_columns(
+            engine._expand_transform_requests([spec])
+        )
+
+        assert cols
+        assert "raw_den" in cols
+        assert "raw_num" not in cols
+
+        # End-to-end: the transform's func gets a frame that still carries the
+        # raw column it declared, and the output lands under its param suffix.
+        result = engine.compute([spec])
+
+        assert "player_keyed_logit_two_level_flat" in result.columns
 
 
 class TestFeatureEngineCaching:

@@ -741,6 +741,12 @@ class FeatureEngine:
         Introspects base (non-derived) feature expressions via
         ``expr.meta.root_names()`` to find referenced source columns.
         Derived features reference computed columns, so they are skipped.
+        Transforms are ``df -> df`` and cannot be introspected at all: their
+        raw needs come from the ``raw_columns`` they declare, plus the
+        structural set below, and nothing else.
+
+        An empty return is the sentinel for "pruning off, load every column" —
+        reached only when a base feature's expression cannot be built.
 
         Args:
             feature_specs: Resolved (dependency-expanded) feature specs.
@@ -787,9 +793,20 @@ class FeatureEngine:
             seen_bases.add(base_name)
 
             # A transform's func reads these raw columns directly (can't be
-            # introspected from a df->df func); load them.
+            # introspected from a df->df func); load them, and STOP HERE.
+            # Falling through to the expr branch below calls the func without a
+            # `df` (a parameterized one gets its params and nothing else) — a
+            # TypeError, which that branch answers by returning [] and
+            # disabling pruning for the whole compute. A transform with
+            # depends_on (style_matchup) escaped that only by hitting the
+            # `continue` below it; the dependency-less ones (prior, lead_prior,
+            # market_prior) did not, so every config carrying a prior column
+            # loaded all ~400 parquet columns (3.3 GB) instead of the few dozen
+            # its features name — 35 for the tune config that surfaced this, 53
+            # for the production stage.
             if feature_def.transform:
                 needed.update(feature_def.transform_columns)
+                continue
 
             if feature_def.depends_on:
                 # Most derived features reference only computed columns (filtered
@@ -797,17 +814,14 @@ class FeatureEngine:
                 # features (e.g. the surf_spec ratios) ALSO read raw parquet
                 # columns directly in their expression — introspect best-effort
                 # so those load too. A failure here is non-fatal (skip this one,
-                # don't disable pruning globally). Transforms are df->df and can't
-                # be introspected as an expr; their raw needs already came from
-                # transform_columns above.
-                if not feature_def.transform:
-                    try:
-                        needed.update(feature_def.func(**params).meta.root_names())
-                    except Exception:
-                        logger.debug(
-                            "Could not introspect derived feature %s for raw "
-                            "columns", base_name,
-                        )
+                # don't disable pruning globally).
+                try:
+                    needed.update(feature_def.func(**params).meta.root_names())
+                except Exception:
+                    logger.debug(
+                        "Could not introspect derived feature %s for raw "
+                        "columns", base_name,
+                    )
                 continue
 
             try:
