@@ -62,7 +62,7 @@ from mvp.projection.iid.score_state_features import (
 from mvp.projection.iid.score_state_model import build_score_state_model
 from mvp.projection.iid.serve_model import (
     ScoreStateChainServeModel,
-    swap_side_opp_specs,
+    swap_side_partner_specs,
 )
 from mvp.projection.iid.stateful_chain import match_distribution_from_state_fn
 
@@ -985,19 +985,25 @@ class ServeDiscoverySelector:
         # Materialize every candidate match-level feature ON THE TWO-SIDED frame,
         # then join onto the match-grain (one-row-per-match) df.
         #
-        # ScoreStateChainServeModel.predict_state_fn reads `player_X` for the
-        # server-side value and, for mirror features, `opp_X` for the swap side
-        # (mirror=False diffs negate `player_X` instead) — so the opp_ specs from
-        # swap_side_opp_specs have to be requested here, not just the configured
-        # pool. Two-sided is load-bearing for them: load_features_numpy derives an
-        # opp_ column by self-joining the partner row on (match_uid, opp_id), so on
-        # an already-deduplicated frame every opp_ column comes back all-null.
+        # ScoreStateChainServeModel.predict_state_fn reads BOTH sides of every
+        # mirror feature — `opp_X` for a player_ spec at the swap side, and
+        # `player_X` for an opp_ spec (mirror=False diffs negate `player_X`
+        # instead) — so the partner specs from swap_side_partner_specs have to
+        # be requested here, not just the configured pool. The narrower
+        # swap_side_opp_specs only covered player_ specs, which crashed the
+        # first pool carrying opp_-only TRANSFORM candidates
+        # (opp_vs_opp_style_pool_elo: registered mirror features leave their
+        # player_ column behind as a load byproduct, transform outputs do
+        # not). Two-sided is load-bearing: load_features_numpy derives an
+        # opp_ column by self-joining the partner row on (match_uid, opp_id),
+        # so on an already-deduplicated frame every opp_ column comes back
+        # all-null.
         #
         # The two-sided frame is retained: the FS loop hands it to model.fit() per
         # candidate × fold, which is what keeps fit off engine.compute() (a full
         # 1.67M-row matches.parquet read each time).
         load_specs = list(match_pool)
-        for spec in swap_side_opp_specs(match_pool):
+        for spec in swap_side_partner_specs(match_pool):
             if spec not in load_specs:
                 load_specs.append(spec)
         self._match_features_both_sides = engine.load_features_numpy(
