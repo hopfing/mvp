@@ -58,6 +58,19 @@ def _fold_match_win(
     })
 
 
+def _write_pmf(src) -> None:
+    """A minimal valid forward pmf: the columns `_forward_artifact_ready` and
+    `_projection_forward_rows` require, dated after the OOF window."""
+    src.eval_dir.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame({
+        "match_uid": ["F0"],
+        "player_id": ["A0"],
+        "opp_id": ["B0"],
+        "effective_match_date": [date(2026, 2, 1)],
+        "p_match_win_a": [0.6],
+    }).write_parquet(src.pmf_parquet)
+
+
 # Two folds, two rows each, both classes in each fold — the smallest artifact
 # the nested calibration can run on.
 _DAYS_2X2 = [date(2025, 1, 5), date(2025, 1, 9), date(2025, 7, 2), date(2025, 7, 8)]
@@ -123,7 +136,9 @@ class TestResolve:
 
     def test_regenerate_runs_the_projection_runner(self, tmp_path, monkeypatch):
         """The discovery driver's regenerate=True auto-runs the PROJECTION
-        runner (never ExperimentRunner), which writes the artifact."""
+        runner (never ExperimentRunner) for the fold OOF, then the projection
+        backtest for the forward pmf — a complete source, nothing left to
+        produce by hand."""
         proj_dir = tmp_path / "projections"
         _write_proj_cfg(proj_dir, "proj_base")
         monkeypatch.setattr(prior, "PROJECTION_EVALUATIONS_ROOT", tmp_path / "pe")
@@ -137,7 +152,7 @@ class TestResolve:
 
         class _FakeRunner:
             def __init__(self, config_path):
-                calls.append(str(config_path))
+                calls.append(f"project:{config_path}")
 
             def run(self):
                 src.eval_dir.mkdir(parents=True, exist_ok=True)
@@ -146,12 +161,79 @@ class TestResolve:
                 )
                 return {}
 
+        def _fake_run_projection(config_path):
+            calls.append(f"backtest:{config_path}")
+            _write_pmf(src)
+
+        import mvp.projection.iid.projection_run as proj_run
         import mvp.projection.iid.runner as proj_runner
 
         monkeypatch.setattr(proj_runner, "IIDProjectionRunner", _FakeRunner)
+        monkeypatch.setattr(proj_run, "run_projection", _fake_run_projection)
+        prior.ensure_prior_artifacts(src, regenerate=True)
+        assert calls == [
+            f"project:{src.config_path}", f"backtest:{src.config_path}",
+        ]
+        assert prior.prior_artifacts_ready(src)
+        assert prior._forward_artifact_ready(src)
+
+    def test_regenerate_produces_only_the_missing_forward_artifact(
+        self, tmp_path, monkeypatch
+    ):
+        """OOF present, pmf missing (the 2026-08-31 backtest failure): the
+        fold runner is NOT re-run; the forward pmf is produced."""
+        proj_dir = tmp_path / "projections"
+        _write_proj_cfg(proj_dir, "proj_base")
+        monkeypatch.setattr(prior, "PROJECTION_EVALUATIONS_ROOT", tmp_path / "pe")
+        src = prior.resolve_prior(
+            "proj_base",
+            config_dirs=(tmp_path / "models",),
+            projection_config_dirs=(proj_dir,),
+        )
+        src.eval_dir.mkdir(parents=True)
+        _fold_match_win(_DAYS_2X2, _FOLDS_2X2, _WINS_2X2).write_parquet(
+            src.fold_match_win
+        )
+
+        calls: list[str] = []
+
+        def _fake_run_projection(config_path):
+            calls.append(str(config_path))
+            _write_pmf(src)
+
+        import mvp.projection.iid.projection_run as proj_run
+        import mvp.projection.iid.runner as proj_runner
+
+        monkeypatch.setattr(
+            proj_runner, "IIDProjectionRunner",
+            lambda **_: (_ for _ in ()).throw(AssertionError("fold rerun")),
+        )
+        monkeypatch.setattr(proj_run, "run_projection", _fake_run_projection)
         prior.ensure_prior_artifacts(src, regenerate=True)
         assert calls == [str(src.config_path)]
-        assert prior.prior_artifacts_ready(src)
+        assert prior._forward_artifact_ready(src)
+
+    def test_missing_forward_artifact_warns_without_regenerate(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """Train/serve (regenerate=False) with a complete OOF but no pmf:
+        warn with the producing command, never refuse -- training inside the
+        evaluation window is legitimate without forward rows."""
+        proj_dir = tmp_path / "projections"
+        _write_proj_cfg(proj_dir, "proj_base")
+        monkeypatch.setattr(prior, "PROJECTION_EVALUATIONS_ROOT", tmp_path / "pe")
+        src = prior.resolve_prior(
+            "proj_base",
+            config_dirs=(tmp_path / "models",),
+            projection_config_dirs=(proj_dir,),
+        )
+        src.eval_dir.mkdir(parents=True)
+        _fold_match_win(_DAYS_2X2, _FOLDS_2X2, _WINS_2X2).write_parquet(
+            src.fold_match_win
+        )
+        with caplog.at_level("WARNING"):
+            prior.ensure_prior_artifacts(src, regenerate=False)
+        assert "iid-backtest" in caplog.text
 
 
 def _source(tmp_path: Path, end: date = date(2025, 12, 31)) -> prior.PriorSource:

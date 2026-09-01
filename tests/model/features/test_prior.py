@@ -184,6 +184,138 @@ class TestResolve:
         with pytest.raises(FileNotFoundError, match="Evaluate the base model first"):
             prior.ensure_prior_artifacts(src, regenerate=False)
 
+    def test_regenerate_produces_the_missing_backtest_ledger(
+        self, tmp_path, monkeypatch
+    ):
+        """Fold OOF present but no backtest.csv: regenerate=True runs the
+        model backtest so post-eval rows have a prior; the evaluation itself
+        is not re-run."""
+        from datetime import date as _date
+
+        _write_cfg(tmp_path / "models", "base")
+        monkeypatch.setattr(prior, "EVALUATIONS_ROOT", tmp_path / "evals")
+        src = prior.resolve_prior("base", (tmp_path / "models",))
+        src.eval_dir.mkdir(parents=True)
+        _fold_predictions([_date(2024, 3, 1)], [0]).write_parquet(
+            src.fold_predictions
+        )
+
+        calls: list[str] = []
+
+        def _fake_run_backtest(config_path):
+            calls.append(str(config_path))
+            src.backtest_csv.write_text(
+                "match_uid,player_id,effective_match_date,model_prob\n"
+            )
+
+        import mvp.model.backtest as backtest_mod
+
+        monkeypatch.setattr(backtest_mod, "run_backtest", _fake_run_backtest)
+        prior.ensure_prior_artifacts(src, regenerate=True)
+        assert calls == [str(src.config_path)]
+
+    def test_forward_regeneration_primes_a_chained_base_first(
+        self, tmp_path, monkeypatch
+    ):
+        """Producing stage A's ledger runs A's predictor, which consumes A's
+        own prior — base B must be completed FIRST, forward artifact
+        included. Covers the expanded `feature:` spelling FS-emitted configs
+        carry (prior: None)."""
+        from datetime import date as _date
+
+        import yaml as _yaml
+
+        models = tmp_path / "models"
+        _write_cfg(models, "baseb")
+        spec = "player_prior_logit(model=baseb)"
+        cfg_a = {
+            **_CFG,
+            "features": {"include": ["player_elo_surface_indoor_diff", spec]},
+            "offset": {"feature": spec},
+        }
+        (models / "stagea.yaml").write_text(_yaml.dump(cfg_a))
+        monkeypatch.setattr(prior, "EVALUATIONS_ROOT", tmp_path / "evals")
+        src_a = prior.resolve_prior("stagea", (models,))
+        src_b = prior.resolve_prior("baseb", (models,))
+        for s in (src_a, src_b):
+            s.eval_dir.mkdir(parents=True)
+            _fold_predictions([_date(2024, 3, 1)], [0]).write_parquet(
+                s.fold_predictions
+            )
+
+        by_path = {str(src_a.config_path): src_a, str(src_b.config_path): src_b}
+        calls: list[str] = []
+
+        def _fake_run_backtest(config_path):
+            calls.append(Path(config_path).stem)
+            by_path[str(config_path)].backtest_csv.write_text(
+                "match_uid,player_id,effective_match_date,model_prob\n"
+            )
+
+        import mvp.model.backtest as backtest_mod
+
+        monkeypatch.setattr(backtest_mod, "run_backtest", _fake_run_backtest)
+        monkeypatch.setattr(
+            prior, "resolve_prior",
+            lambda model, *a, **k: by_path[str(models / f"{model}.yaml")],
+        )
+        prior.ensure_prior_artifacts(src_a, regenerate=True)
+        assert calls == ["baseb", "stagea"]
+
+    def test_regenerated_artifacts_accepted_at_the_true_fingerprint_dir(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """A source resolved via the tagged fallback points at the OLD dir;
+        producers write under the CURRENT fingerprint. The post-check must
+        accept the artifacts there instead of failing after real compute."""
+        from datetime import date as _date
+
+        models = tmp_path / "models"
+        _write_cfg(models, "base")
+        evals = tmp_path / "evals"
+        monkeypatch.setattr(prior, "EVALUATIONS_ROOT", evals)
+        true_fp = prior.resolve_prior("base", (models,)).fp
+        # equivalent tagged dir under an OLD fingerprint, with a complete OOF
+        old = evals / "111111111111"
+        old.mkdir(parents=True)
+        (old / "source.txt").write_text("base\tx\t2026-01-01\n")
+        (old / "config.yaml").write_text(yaml.dump(_CFG))
+        _fold_predictions([_date(2024, 3, 1)], [0]).write_parquet(
+            old / "fold_predictions.parquet"
+        )
+        src = prior.resolve_prior("base", (models,))
+        assert src.eval_dir == old  # the fallback fired
+
+        def _fake_run_backtest(config_path):
+            d = evals / true_fp
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "backtest.csv").write_text(
+                "match_uid,player_id,effective_match_date,model_prob\n"
+            )
+
+        import mvp.model.backtest as backtest_mod
+
+        monkeypatch.setattr(backtest_mod, "run_backtest", _fake_run_backtest)
+        with caplog.at_level("WARNING"):
+            prior.ensure_prior_artifacts(src, regenerate=True)  # must not raise
+        assert "current fingerprint" in caplog.text
+
+    def test_missing_backtest_ledger_warns_without_regenerate(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        from datetime import date as _date
+
+        _write_cfg(tmp_path / "models", "base")
+        monkeypatch.setattr(prior, "EVALUATIONS_ROOT", tmp_path / "evals")
+        src = prior.resolve_prior("base", (tmp_path / "models",))
+        src.eval_dir.mkdir(parents=True)
+        _fold_predictions([_date(2024, 3, 1)], [0]).write_parquet(
+            src.fold_predictions
+        )
+        with caplog.at_level("WARNING"):
+            prior.ensure_prior_artifacts(src, regenerate=False)
+        assert "mvp backtest" in caplog.text
+
 
 def _fold_predictions(days: list[date], fold_idx: list[int]) -> pl.DataFrame:
     n = len(days)

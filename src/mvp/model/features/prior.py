@@ -37,7 +37,7 @@ a config offsetting on this filters its rows (the sugar does it).
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, timedelta
 from functools import lru_cache
 from pathlib import Path
@@ -127,6 +127,14 @@ class PriorSource:
         if self.kind == "projection":
             return f"poetry run py -m mvp iid-project {self.config_path.stem}"
         return f"poetry run py -m mvp model {self.config_path.as_posix()}"
+
+    @property
+    def forward_regenerate_command(self) -> str:
+        """The command that produces the FORWARD artifact (rows after the
+        evaluation window): the pmf for projections, the ledger for models."""
+        if self.kind == "projection":
+            return f"poetry run py -m mvp iid-backtest {self.config_path.stem}"
+        return f"poetry run py -m mvp backtest {self.config_path.stem}"
 
 
 def find_prior_config(model: str, config_dirs=None) -> Path:
@@ -350,64 +358,189 @@ def prior_artifacts_ready(source: PriorSource) -> bool:
     return "y_prob_cal" in pl.scan_parquet(p).collect_schema().names()
 
 
-def ensure_prior_artifacts(source: PriorSource, regenerate: bool) -> None:
-    """Make sure the base model's fold OOF exists; regenerate it from its
-    config when allowed (the discovery driver does; train/serve refuse with
-    the command instead — a live box must never start an evaluation)."""
-    if prior_artifacts_ready(source):
-        return
+def _forward_artifact_ready(source: PriorSource) -> bool:
+    """The FORWARD artifact — what the post-eval splice reads — exists and is
+    usable: the pmf with the columns `_projection_forward_rows` needs, or the
+    ledger with the columns `_backtest_rows` needs. Without it every row after
+    the evaluation window has a null prior, which an offset's not_null filter
+    turns into an empty predict set (the 2026-08-31 backtest failure)."""
     if source.kind == "projection":
-        if not regenerate:
-            raise FileNotFoundError(
-                f"offset.prior {source.model}: no fold_match_win.parquet at "
-                f"{source.fold_match_win} (or it predates the current "
-                f"columns). Run the projection first: "
-                f"{source.regenerate_command}"
-            )
-        # Same convention as model priors: the discovery driver regenerates,
-        # train/serve refuse. The projection's own runner, never
-        # ExperimentRunner.
-        from mvp.projection.iid.runner import IIDProjectionRunner
+        p = source.pmf_parquet
+        if not p.exists():
+            return False
+        cols = pl.scan_parquet(p).collect_schema().names()
+        return {
+            "player_id", "opp_id", "p_match_win_a", "effective_match_date",
+        } <= set(cols)
+    p = source.backtest_csv
+    if not p.exists():
+        return False
+    cols = pl.scan_csv(p).collect_schema().names()
+    return {
+        "match_uid", "player_id", "effective_match_date", "model_prob",
+    } <= set(cols)
 
-        logger.warning(
-            "offset.prior %s: regenerating at %s (iid-project on %s)",
-            source.model, source.eval_dir.name, source.config_path,
-        )
-        IIDProjectionRunner(config_path=source.config_path).run()
-        _cached_frame.cache_clear()
-        if not prior_artifacts_ready(source):
-            raise RuntimeError(
-                f"offset.prior {source.model}: projection ran but "
-                f"{source.fold_match_win} is still missing or incomplete"
+
+def _base_prior_stem(cfg) -> str | None:
+    """The stem of a config's OWN offset prior, whichever spelling it uses:
+    the `prior:` shorthand, or the expanded `feature:
+    player_prior_logit(model=<stem>)` form that FS-emitted configs carry."""
+    if cfg.offset is None:
+        return None
+    if cfg.offset.prior is not None:
+        return cfg.offset.prior
+    if cfg.offset.feature is not None:
+        return prior_model_of(cfg.offset.feature)
+    return None
+
+
+def _ready_possibly_relocated(source: PriorSource, check) -> bool:
+    """Post-regeneration readiness. The producers write under the CURRENT
+    config's fingerprint; when this source resolved via the tagged fallback
+    (a renamed-but-equivalent evaluation), that is a DIFFERENT dir than
+    `source.eval_dir` — the artifacts are real, just not where this stale
+    resolution points. Accept them there (the next resolution lands on the
+    fingerprint dir directly) instead of failing after the compute is spent."""
+    if check(source):
+        return True
+    try:
+        if source.kind == "projection":
+            fp = _snapshot_fingerprint_projection(source.config_path)
+            true_dir = _projection_evaluations_root() / fp
+        else:
+            fp = _snapshot_fingerprint_model(source.config_path)
+            true_dir = _evaluations_root() / fp
+    except Exception:  # noqa: BLE001 — unreadable config: nothing to offer
+        return False
+    if true_dir == source.eval_dir:
+        return False
+    if not check(replace(source, fp=true_dir.name, eval_dir=true_dir)):
+        return False
+    logger.warning(
+        "offset.prior %s: artifacts regenerated under the current fingerprint "
+        "%s, not the tagged dir %s this resolution used; the next resolution "
+        "finds them directly",
+        source.model, true_dir.name, source.eval_dir.name,
+    )
+    return True
+
+
+def ensure_prior_artifacts(source: PriorSource, regenerate: bool) -> None:
+    """Make sure the base model's artifacts exist AND are complete: the fold
+    OOF (missing = refuse or regenerate) and the forward artifact behind
+    post-eval rows (missing = warn or regenerate). regenerate=True is the
+    discovery driver's mode and leaves nothing to produce by hand; train and
+    serve refuse/warn with the exact command instead — a live box must never
+    start an evaluation."""
+    if not prior_artifacts_ready(source):
+        if source.kind == "projection":
+            if not regenerate:
+                raise FileNotFoundError(
+                    f"offset.prior {source.model}: no fold_match_win.parquet at "
+                    f"{source.fold_match_win} (or it predates the current "
+                    f"columns). Run the projection first: "
+                    f"{source.regenerate_command}"
+                )
+            # Same convention as model priors: the discovery driver
+            # regenerates, train/serve refuse. The projection's own runner,
+            # never ExperimentRunner.
+            from mvp.projection.iid.runner import IIDProjectionRunner
+
+            logger.warning(
+                "offset.prior %s: regenerating at %s (iid-project on %s)",
+                source.model, source.eval_dir.name, source.config_path,
             )
+            IIDProjectionRunner(config_path=source.config_path).run()
+            _cached_frame.cache_clear()
+            if not _ready_possibly_relocated(source, prior_artifacts_ready):
+                raise RuntimeError(
+                    f"offset.prior {source.model}: projection ran but "
+                    f"{source.fold_match_win} is still missing or incomplete"
+                )
+        else:
+            if not regenerate:
+                raise FileNotFoundError(
+                    f"offset.prior {source.model}: no calibrated fold OOF at "
+                    f"{source.fold_predictions}. Evaluate the base model first: "
+                    f"{source.regenerate_command}"
+                )
+            from mvp.model.runner import ExperimentRunner
+
+            # A chain regenerates in order: the base model's own prior (if
+            # it has one, in either spelling) must exist before its
+            # evaluation can run.
+            base_stem = _base_prior_stem(_load_config(source.config_path))
+            if base_stem is not None:
+                ensure_prior_artifacts(resolve_prior(base_stem), regenerate=True)
+                _cached_frame.cache_clear()
+
+            logger.warning(
+                "offset.prior %s: no evaluation at %s -- regenerating from %s "
+                "(a full `model` run; this is the base model's own evaluation, "
+                "written where the `model` command would write it)",
+                source.model, source.eval_dir, source.config_path,
+            )
+            ExperimentRunner(config_path=source.config_path).run()
+            _cached_frame.cache_clear()
+            if not _ready_possibly_relocated(source, prior_artifacts_ready):
+                raise RuntimeError(
+                    f"offset.prior {source.model}: evaluation ran but "
+                    f"{source.fold_predictions} still lacks y_prob_cal"
+                )
+
+    # The OOF alone is not a complete source: rows after the evaluation window
+    # splice from the forward artifact, and a missing one used to be a SILENT
+    # null-prior gap. Regeneration produces it; the non-regenerating path warns
+    # with the command rather than refusing, because training strictly inside
+    # the evaluation window is still legitimate without it.
+    if _forward_artifact_ready(source):
         return
     if not regenerate:
-        raise FileNotFoundError(
-            f"offset.prior {source.model}: no calibrated fold OOF at "
-            f"{source.fold_predictions}. Evaluate the base model first: "
-            f"{source.regenerate_command}"
+        logger.warning(
+            "offset.prior %s: no forward artifact at %s -- rows after the "
+            "evaluation window will have NO prior (an offset's not_null "
+            "filter drops them). Produce it with: %s",
+            source.model,
+            source.pmf_parquet if source.kind == "projection" else source.backtest_csv,
+            source.forward_regenerate_command,
         )
-    from mvp.model.runner import ExperimentRunner
+        return
+    if source.kind == "projection":
+        from mvp.projection.iid.projection_run import run_projection
 
-    # A chain regenerates in order: the base model's own prior (if it has
-    # one) must exist before its evaluation can run.
-    base_cfg = _load_config(source.config_path)
-    if base_cfg.offset is not None and base_cfg.offset.prior is not None:
-        ensure_prior_artifacts(resolve_prior(base_cfg.offset.prior), regenerate=True)
-        _cached_frame.cache_clear()
+        logger.warning(
+            "offset.prior %s: producing the forward pmf at %s (iid-backtest "
+            "on %s)",
+            source.model, source.eval_dir.name, source.config_path,
+        )
+        run_projection(source.config_path)
+    else:
+        from mvp.model.backtest import run_backtest
 
-    logger.warning(
-        "offset.prior %s: no evaluation at %s -- regenerating from %s "
-        "(a full `model` run; this is the base model's own evaluation, "
-        "written where the `model` command would write it)",
-        source.model, source.eval_dir, source.config_path,
-    )
-    ExperimentRunner(config_path=source.config_path).run()
+        # Same chain-priming as the OOF branch: producing this ledger runs
+        # this model's own predictor, which consumes ITS prior — the base
+        # must be complete first or the backtest empties on null forward
+        # rows one level down (review finding on the 2026-08-31 fix).
+        base_stem = _base_prior_stem(_load_config(source.config_path))
+        if base_stem is not None:
+            ensure_prior_artifacts(resolve_prior(base_stem), regenerate=True)
+            _cached_frame.cache_clear()
+
+        logger.warning(
+            "offset.prior %s: producing the backtest ledger at %s "
+            "(`mvp backtest` on %s)",
+            source.model, source.eval_dir.name, source.config_path,
+        )
+        run_backtest(source.config_path)
     _cached_frame.cache_clear()
-    if not prior_artifacts_ready(source):
+    if not _ready_possibly_relocated(source, _forward_artifact_ready):
+        fwd = (
+            source.pmf_parquet if source.kind == "projection"
+            else source.backtest_csv
+        )
         raise RuntimeError(
-            f"offset.prior {source.model}: evaluation ran but "
-            f"{source.fold_predictions} still lacks y_prob_cal"
+            f"offset.prior {source.model}: the forward run completed but "
+            f"{fwd} is still missing or incomplete"
         )
 
 
@@ -631,8 +764,22 @@ def build_prior_frame(
             )
             if fwd is not None:
                 parts.append(fwd)
+        else:
+            logger.warning(
+                "prior %s: no %s -- rows after the evaluation window have no "
+                "prior. Produce it with: %s",
+                source.model, source.pmf_parquet.name,
+                source.forward_regenerate_command,
+            )
         return _splice_and_finalize(parts, source)
     parts = [_fold_rows(source.fold_predictions)]
+    if not source.backtest_csv.exists():
+        logger.warning(
+            "prior %s: no %s -- rows after the evaluation window have no "
+            "prior. Produce it with: %s",
+            source.model, source.backtest_csv.name,
+            source.forward_regenerate_command,
+        )
     if source.backtest_csv.exists():
         stems = [source.stem] + [t for t in _source_tags(source.eval_dir) if t != source.stem]
         cutoffs = _backtest_cutoffs(stems, backtests_root)
