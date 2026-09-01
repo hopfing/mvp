@@ -7,6 +7,7 @@ from pathlib import Path
 
 import polars as pl
 
+from mvp.atptour.elo.mov import MovTracker
 from mvp.atptour.ratings import compute_all_ratings
 from mvp.common.base_job import BaseJob
 
@@ -822,13 +823,28 @@ class MatchesAggregator(BaseJob):
             "opp_ret_bp_converted", "opp_ret_bp_opportunities",
         ] + [f"player_set{i}_tiebreak" for i in range(1, 6)] + [
             f"opp_set{i}_tiebreak" for i in range(1, 6)
+        ] + [
+            # MOV-Elo inputs (plan 2026-09-01-mov-elo-ratings): per-set games
+            # for the margin, reason/result_type for the incomplete guard —
+            # compute_all_ratings REFUSES a tracker without them rather than
+            # letting the guard silently degrade.
+            f"player_set{i}_games" for i in range(1, 6)
+        ] + [f"opp_set{i}_games" for i in range(1, 6)] + [
+            "reason", "result_type",
         ]
         _ratings_cols = [c for c in _RATINGS_INPUT_COLS if c in combined.columns]
         singles_slim = combined.filter(
             pl.col("draw_type") == "singles"
         ).select(_ratings_cols)
         if not singles_slim.is_empty():
-            ratings_result = compute_all_ratings(singles_slim)
+            # Fresh tracker per run, like the driver's own rating dicts —
+            # MovTracker state does not reset itself, and this runs q15m.
+            # melo only: the gate passed its candidacy read (floor
+            # complementarity -0.0054, 4/4 folds); kmov/kflat stay
+            # research-only.
+            ratings_result = compute_all_ratings(
+                singles_slim, mov_tracker=MovTracker(variants=("melo",))
+            )
             # Extract only the new rating columns and join back
             join_keys = ["match_uid", "player_id"]
             rating_cols = [c for c in ratings_result.columns if c not in _ratings_cols]

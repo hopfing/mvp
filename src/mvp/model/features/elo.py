@@ -93,6 +93,16 @@ def elo_surface_indoor() -> pl.Expr:
 
 
 @feature(
+    name="melo",
+    description="Margin-of-victory Elo (games-share outcome, K-rescaled; "
+                "bare rating, no surface/indoor layers)",
+    mirror=True,
+)
+def melo() -> pl.Expr:
+    return pl.col("player_melo")
+
+
+@feature(
     name="serve_elo",
     description="Serve Elo rating",
     mirror=True,
@@ -361,6 +371,19 @@ def elo_diff_x_rd_sum() -> pl.Expr:
 def elo_diff() -> pl.Expr:
     """Overall Elo rating difference."""
     return pl.col("player_elo") - pl.col("opp_elo")
+
+
+@feature(
+    name="melo_diff",
+    params=[],
+    description="Margin-of-victory Elo difference (player - opponent). "
+                "Complementary to elo_diff, not a replacement: the gate read "
+                "was joint -0.0054 vs the composite, standalone weaker.",
+    mirror=False,
+    impute=None,
+)
+def melo_diff() -> pl.Expr:
+    return pl.col("player_melo") - pl.col("opp_melo")
 
 
 @feature(

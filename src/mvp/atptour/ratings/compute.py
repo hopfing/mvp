@@ -16,6 +16,7 @@ from mvp.atptour.elo.constants import (
     SURFACE_K_MULT,
     ServeEloConfig,
 )
+from mvp.atptour.elo.mov import MovTracker, margin_is_valid
 from mvp.atptour.elo.ratings import (
     PlayerRating,
     apply_inactivity_rd,
@@ -234,6 +235,7 @@ def compute_all_ratings(
     df: pl.DataFrame,
     serve_config: ServeEloConfig | None = None,
     stamp: bool = False,
+    mov_tracker: "MovTracker | None" = None,
 ) -> pl.DataFrame:
     """Add all rating columns to matches DataFrame.
 
@@ -251,6 +253,14 @@ def compute_all_ratings(
             cell's output carries proof of what it actually ran under and
             cannot be mislabelled. Off by default to keep matches.parquet as
             it is.
+        mov_tracker: optional margin-of-victory variant state (elo/mov.py).
+            None (the default) leaves every existing code path and output
+            column untouched — the pipeline-safety invariant, tested by
+            asserting identical existing-column output with and without a
+            tracker. When passed, the df must carry per-set games columns
+            (plus `reason`/`result_type` for the incomplete guard) or this
+            raises: silently falling back to binary on EVERY row would make
+            the variants degenerate copies of standard elo.
 
     Returns:
         DataFrame with additional rating columns.
@@ -320,9 +330,35 @@ def compute_all_ratings(
     col_player_set_tb = [_col(f"player_set{s}_tiebreak") for s in range(1, 6)]
     col_opp_set_tb = [_col(f"opp_set{s}_tiebreak") for s in range(1, 6)]
 
+    # MOV variant inputs — materialized only when a tracker is running.
+    if mov_tracker is not None:
+        games_cols = [f"player_set{s}_games" for s in range(1, 6)]
+        if not any(c in df_cols for c in games_cols):
+            raise ValueError(
+                "mov_tracker passed but the frame carries no per-set games "
+                "columns — every update would silently fall back to binary "
+                "and the variants would be degenerate copies of standard elo"
+            )
+        missing_guard = [
+            c for c in ("reason", "result_type") if c not in df_cols
+        ]
+        if missing_guard:
+            raise ValueError(
+                f"mov_tracker passed but {missing_guard} absent — the "
+                "incomplete guard would silently degrade to zero-games-only, "
+                "and a retirement's nonzero partial margin would feed the "
+                "update instead of falling back to binary"
+            )
+        col_player_set_games = [_col(f"player_set{s}_games") for s in range(1, 6)]
+        col_opp_set_games = [_col(f"opp_set{s}_games") for s in range(1, 6)]
+        col_reason = _col("reason")
+        col_result_type = _col("result_type")
+
     elo_ratings: dict[str, PlayerRating] = {}
     glicko_ratings: dict[str, GlickoRating] = {}
     cols = ALL_RATING_COLUMNS + (SERVE_COUNT_COLUMNS if stamp else [])
+    if mov_tracker is not None:
+        cols = cols + mov_tracker.output_columns()
     output: dict[str, list[float | None]] = {col: [] for col in cols}
     processed_matches: set[str] = set()
     # Cache pre-match ratings for each match_uid to handle both rows consistently
@@ -362,6 +398,11 @@ def compute_all_ratings(
             opp_ranking = col_opp_rank[i]
             elo_ratings[opp_id] = initialize_player(opp_ranking, svc_cfg)
             glicko_ratings[opp_id] = GlickoRating(mu=elo_ratings[opp_id].elo)
+        if mov_tracker is not None:
+            # Same rank-based seed as the base rating, so a variant's early
+            # divergence from elo is pure mechanism, never seeding.
+            mov_tracker.ensure_player(player_id, elo_ratings[player_id].elo)
+            mov_tracker.ensure_player(opp_id, elo_ratings[opp_id].elo)
 
         player_rating = elo_ratings[player_id]
         opp_rating = elo_ratings[opp_id]
@@ -376,6 +417,10 @@ def compute_all_ratings(
                 p_cached["elo"], o_cached["elo"],
                 p_cached["glicko"], o_cached["glicko"],
             )
+            if mov_tracker is not None:
+                mov_tracker.append_output(
+                    output, p_cached["mov"], o_cached["mov"]
+                )
             continue
 
         # First row for this match - apply inactivity and cache pre-match values
@@ -406,6 +451,9 @@ def compute_all_ratings(
                 opp_rating.return_rd,
                 opp_rating.last_return_update_date, match_date,
             )
+            if mov_tracker is not None:
+                mov_tracker.apply_inactivity(player_id, match_date)
+                mov_tracker.apply_inactivity(opp_id, match_date)
             # Each surface/venue adjustment grows from its OWN clock too. A
             # player who has not been on grass for two years should show low
             # confidence in their grass adjustment however much they have played
@@ -449,11 +497,18 @@ def compute_all_ratings(
             player_id: {"elo": elo_player, "glicko": glicko_p_vals},
             opp_id: {"elo": elo_opp, "glicko": glicko_o_vals},
         }
+        if mov_tracker is not None:
+            mov_p_vals = mov_tracker.capture(player_id)
+            mov_o_vals = mov_tracker.capture(opp_id)
+            match_ratings_cache[match_uid][player_id]["mov"] = mov_p_vals
+            match_ratings_cache[match_uid][opp_id]["mov"] = mov_o_vals
 
         # Record PRE-MATCH values
         _append_ratings_to_output(
             output, elo_player, elo_opp, glicko_p_vals, glicko_o_vals,
         )
+        if mov_tracker is not None:
+            mov_tracker.append_output(output, mov_p_vals, mov_o_vals)
 
         # Mark as processed and update ratings
         processed_matches.add(match_uid)
@@ -473,6 +528,25 @@ def compute_all_ratings(
         opp_rating.elo = update_elo(
             opp_rating.elo, opp_effective, player_effective, not won, k_opp
         )
+
+        # MOV variants: own bare state, own K schedule inputs, own reversion —
+        # all inside the tracker. Games from THIS row's orientation; the
+        # incomplete guard falls back to the binary update.
+        if mov_tracker is not None:
+            p_games = sum(
+                g[i] for g in col_player_set_games if g[i] is not None
+            )
+            o_games = sum(
+                g[i] for g in col_opp_set_games if g[i] is not None
+            )
+            mov_tracker.update_match(
+                player_id, opp_id, bool(won), round_name, tournament_level,
+                p_games, o_games,
+                margin_is_valid(
+                    p_games + o_games, col_reason[i], col_result_type[i]
+                ),
+                match_date if isinstance(match_date, date) else None,
+            )
 
         # Update surface adjustments using pre-match effective Elos (same snapshot)
         if surface in ("Hard", "Clay", "Grass"):
