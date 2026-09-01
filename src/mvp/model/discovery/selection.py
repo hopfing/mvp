@@ -1012,6 +1012,10 @@ def create_scorer(
                 config_path=temp_path,
                 matches_path=matches_path,
                 cache_dir=cache_dir,
+                # Family tag + display name: the base config's stem, not the
+                # temp file's.
+                source=Path(base_config_path).stem,
+                run_name=f"fs_{Path(base_config_path).stem}",
             )
             result = runner.run()
             return result["metrics"].get(metric, float("inf"))

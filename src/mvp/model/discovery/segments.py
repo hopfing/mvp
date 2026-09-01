@@ -169,6 +169,10 @@ def compare_single_vs_split(
                 config_path=temp_path,
                 matches_path=matches_path,
                 cache_dir=cache_dir,
+                # Family tag + display name: the base config's stem, not the
+                # temp file's.
+                source=Path(config_path).stem,
+                run_name=f"segment_{Path(config_path).stem}",
             )
             seg_result = seg_runner.run()
             seg_metrics = seg_result["metrics"]

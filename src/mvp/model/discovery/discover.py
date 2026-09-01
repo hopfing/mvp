@@ -328,6 +328,10 @@ class FeatureDiscovery:
                 workflow="discovery",
                 run_name=run_name or self.config_path.stem,
                 log_to_mlflow=log_to_mlflow,
+                # The temp config's stem is a random tmpXXXXXXXX; tag the
+                # evaluation with the discovery run's identity so it is
+                # findable by family (model-rank, `mvp compare`).
+                source=run_name or self.config_path.stem,
             )
             result = runner.run()
             self._experiment_count += 1

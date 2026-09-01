@@ -257,6 +257,10 @@ class ParameterSweep:
                     config_path=temp_path,
                     matches_path=self.matches_path,
                     cache_dir=self.cache_dir,
+                    # Family tag + display name: the sweep's base config
+                    # stem, not the temp trial file's random stem.
+                    source=self.base_config_path.stem,
+                    run_name=f"sweep_{self.base_config_path.stem}",
                 )
                 result = runner.run()
                 metric_value = result["metrics"].get(self.metric, float("inf"))

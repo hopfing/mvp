@@ -250,6 +250,7 @@ class ExperimentRunner:
         calibrate: bool = True,
         report_calibrated_holdout: bool = False,
         report_calibrated_objective: bool = False,
+        source: str | None = None,
     ) -> None:
         """Initialize runner.
 
@@ -261,6 +262,13 @@ class ExperimentRunner:
             workflow: MLflow experiment name ("training" or "discovery").
             run_name: Override for MLflow run name. Defaults to filename.
             log_to_mlflow: Whether to log to MLflow. Set False for intermediate runs.
+            source: Grouping tag written to the evaluation's source.txt
+                (field 1). Defaults to the config file's stem — which for a
+                sweep/discovery trial run from a NamedTemporaryFile is a
+                random `tmpXXXXXXXX`, making the trial unfindable by family
+                tag (model-rank, `mvp compare`). Drivers that run trials from
+                temp configs pass their parent stem here, mirroring the IID
+                path's `record_run(source=...)`.
             holdout_folds: Number of trailing CV folds to hold out from the
                 calibrator fit, diagnostics, and headline `metrics`. The held-out
                 folds still get calibrated probabilities (using the
@@ -306,6 +314,7 @@ class ExperimentRunner:
             )
         self.config_path = Path(config_path)
         self.config = ExperimentConfig.from_file(str(config_path))
+        self.source = source
         from mvp.common.base_job import get_data_root, get_local_data_root
 
         self.matches_path = Path(matches_path) if matches_path else (
@@ -2367,7 +2376,9 @@ class ExperimentRunner:
                     write_config_snapshot(
                         self.config, fp, config_path=self.config_path
                     )
-                    append_source(fp, self.config_path.stem, run_id)
+                    append_source(
+                        fp, self.source or self.config_path.stem, run_id
+                    )
                     if fold_predictions_df is not None:
                         fold_predictions_df.write_parquet(
                             fp_dir / "fold_predictions.parquet"
