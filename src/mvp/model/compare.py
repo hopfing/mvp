@@ -25,6 +25,7 @@ Plan: mvp-docs/plans/2026-09-01-paired-family-comparison.md (rev 3).
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -64,14 +65,47 @@ def _source_tags(eval_dir: Path) -> set[str]:
     }
 
 
-def resolve_side(spec: str) -> list[Path]:
-    """A side is a comma-separated fingerprint list (primary input) or a
-    source tag (best-effort: sweep trials are tag-patched only where
+def _side_form(spec: str) -> str:
+    parts = [p.strip() for p in spec.split(",") if p.strip()]
+    if all(
+        len(p) == 12 and all(c in "0123456789abcdef" for c in p) for p in parts
+    ):
+        return "fps"
+    return "tag"
+
+
+def resolve_sides(
+    spec_a: str, spec_b: str, top: int | None = None,
+) -> tuple[list[Path], list[Path]]:
+    """Resolve both sides with ONE input form: both tags or both fingerprint
+    lists — a mixed run compares a curated subset against an enumeration,
+    which is never a like-for-like question. --top therefore requires tag
+    form on both sides."""
+    form_a, form_b = _side_form(spec_a), _side_form(spec_b)
+    if form_a != form_b:
+        raise ValueError(
+            f"mixed side forms (a={form_a}, b={form_b}): pass both sides as "
+            "tags or both as fingerprint lists"
+        )
+    return resolve_side(spec_a, top=top), resolve_side(spec_b, top=top)
+
+
+def resolve_side(spec: str, top: int | None = None) -> list[Path]:
+    """A side is a comma-separated fingerprint list or a source tag
+    (best-effort: sweep trials are tag-patched only where
     frozen_backtest_sweep --report ran, so the match count is logged and an
-    empty match is refused rather than silently compared as nothing)."""
+    empty match is refused rather than silently compared as nothing).
+
+    ``top``: tag sides only — keep the tag's top-N trials by the tune
+    study's own ranking (see `top_trial_dirs`), so a family subset never
+    means hand-pasting fingerprints."""
     root = _evaluations_root()
     parts = [p.strip() for p in spec.split(",") if p.strip()]
-    if all(len(p) == 12 and all(c in "0123456789abcdef" for c in p) for p in parts):
+    if _side_form(spec) == "fps":
+        if top is not None:
+            raise ValueError(
+                "top applies to tag sides; a fingerprint list IS the subset"
+            )
         dirs = [root / p for p in parts]
         missing = [d.name for d in dirs if not d.is_dir()]
         if missing:
@@ -96,7 +130,72 @@ def resolve_side(spec: str) -> list[Path]:
             "Classification sweep trials carry temp-stem tags unless "
             "frozen_backtest_sweep --report patched them; pass fingerprints."
         )
+    if top is not None:
+        dirs = top_trial_dirs(tag, dirs, top)
+        logger.info(
+            "tag %r: top %d by tune ranking -> %s",
+            tag, len(dirs), [d.name for d in dirs],
+        )
     return dirs
+
+
+def _trial_number_of(eval_dir: Path, tag: str) -> int | None:
+    src = eval_dir / "source.txt"
+    if not src.exists():
+        return None
+    m = re.search(
+        rf"{re.escape(tag)}__h\d+_t(\d+)", src.read_text(encoding="utf-8")
+    )
+    return int(m.group(1)) if m else None
+
+
+def top_trial_dirs(tag: str, dirs: list[Path], n: int) -> list[Path]:
+    """The tag's top-n evaluation dirs by the tune study's own ranking key —
+    the SAME ordering tune-review and frozen_backtest_sweep --select topn
+    use (resolve_sort_keys/sort_trials), so "top" cannot drift between
+    tools. Dirs map to trials via the __hNN_tNN tag the sweep writes."""
+    import optuna
+
+    from mvp.model.tune_review import resolve_sort_keys, sort_trials
+
+    db = get_data_root() / "tuning" / f"{tag}.db"
+    if not db.exists():
+        raise FileNotFoundError(
+            f"--top for side {tag!r} needs its tune study at {db}; pass "
+            "fingerprints instead for an untuned family"
+        )
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+    storage = f"sqlite:///{db}"
+    names = [s.study_name for s in optuna.study.get_all_study_summaries(storage)]
+    study_name = tag if tag in names else names[0] if len(names) == 1 else None
+    if study_name is None:
+        raise ValueError(f"{db} holds studies {names}; none matches {tag!r}")
+    study = optuna.load_study(study_name=study_name, storage=storage)
+    done = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
+    ranked = sort_trials(done, resolve_sort_keys(study, done, None))
+    by_trial: dict[int, Path] = {}
+    for d in dirs:
+        num = _trial_number_of(d, tag)
+        if num is not None and num not in by_trial:
+            by_trial[num] = d
+    out: list[Path] = []
+    for t in ranked:
+        d = by_trial.get(t.number)
+        if d is not None:
+            out.append(d)
+            if len(out) == n:
+                break
+    if not out:
+        raise ValueError(
+            f"tag {tag!r}: no evaluation dir maps to a tuned trial (dirs "
+            "carry __hNN_tNN tags only when the frozen sweep reported them)"
+        )
+    if len(out) < n:
+        logger.warning(
+            "tag %r: only %d of the requested top %d have evaluation dirs",
+            tag, len(out), n,
+        )
+    return out
 
 
 def load_eval_predictions(fp_dir: Path, column: str) -> tuple[pl.DataFrame, str]:
@@ -251,17 +350,20 @@ def compare_pair(
 
 def compare_families(
     dirs_a: list[Path], dirs_b: list[Path],
-    *, column: str = "y_prob_cal", pick_a: str | None = None,
-    pick_b: str | None = None, min_overlap: float = 0.5,
+    *, column: str = "y_prob_cal", min_overlap: float = 0.5,
     reps: int = 2000, seed: int = 0,
 ) -> dict:
-    """Family verdict (delta matrix + envelope + family-mean CI) and
-    deployable verdict (one picked pair, default: newest trial per side).
+    """Side-vs-side verdict: trial-pair delta matrix, envelope, and
+    family-mean CIs — pooled AND per segment cut (half-year, circuit).
 
-    The deployable interval is NOT corrected for post-hoc selection from the
-    matrix; picking the standout cell and reading its CI as pre-specified is
-    the fallacy this tool replaces, relocated -- the report flags when the
-    picked pair IS the grid extreme."""
+    One interface, three usages: family vs family (both sides multi-trial),
+    a head-to-head (one fingerprint per side — the 1x1 matrix's family
+    verdict IS the pair verdict, cuts included), and within-family (both
+    sides drawn from the same family's trials). There is no "picked
+    deployable" concept: nominating one cell of a matrix you have already
+    seen and reading its interval as pre-specified is the fallacy this tool
+    replaces — run the 1v1 form for a head-to-head, knowing its interval is
+    not corrected for how you chose the two."""
     loaded_a = {d.name: load_eval_predictions(d, column) for d in dirs_a}
     loaded_b = {d.name: load_eval_predictions(d, column) for d in dirs_b}
     frames_a = {k: df for k, (df, _) in loaded_a.items()}
@@ -291,72 +393,79 @@ def compare_families(
     deltas = {k: r.delta_ll for k, r in matrix.items()}
     env = (min(deltas.values()), max(deltas.values()))
 
-    # Family-mean CI: one week-resampling per rep applied to EVERY pair, so
-    # the interval reflects sampling noise of the mean-over-pairs, while
-    # trial-choice variance stays visible in the matrix/envelope.
-    # Pairs missing a drawn week contribute nothing to that rep, and a pair
-    # matching zero drawn weeks drops out of that rep entirely — sparse-week
-    # pairs therefore fluctuate in how much they weigh the family mean. The
-    # min per-pair block count is reported so that thinness is visible.
+    # Family-mean CIs, pooled and per cut: one week-resampling per rep
+    # applied to EVERY pair, so intervals reflect sampling noise of the
+    # mean-over-pairs while trial-choice variance stays visible in the
+    # matrix/envelope. Vectorized as (pairs x weeks) sum/count matrices per
+    # cut label — a pair with no data in a drawn week contributes nothing
+    # that rep, and drops out of that rep entirely at zero coverage; the
+    # min per-pair block count per cut keeps that thinness visible.
     all_weeks: set[int] = set()
-    pair_tables = {}
-    for k, res in matrix.items():
+    per_pair_rows = []  # (weeks array, delta array, {label: mask})
+    for k in matrix:
         fa, fb = frames_a[k[0]], frames_b[k[1]]
         j = fa.join(fb, on=["match_uid", "player_id"], how="inner", suffix="_b")
         w = _iso_week(j["day"])
         d = (j["loss"] - j["loss_b"]).to_numpy()
-        uniq = np.unique(w)
-        sums = np.zeros(len(uniq))
-        counts = np.zeros(len(uniq))
-        idx = np.searchsorted(uniq, w)
-        np.add.at(sums, idx, d)
-        np.add.at(counts, idx, 1)
-        pair_tables[k] = dict(zip(uniq.tolist(), zip(sums, counts)))
-        all_weeks.update(uniq.tolist())
-    weeks_u = sorted(all_weeks)
+        labels: dict[str, np.ndarray] = {}
+        hy = _half_year(j["day"])
+        for lab in np.unique(hy):
+            labels[str(lab)] = hy == lab
+        if "circuit" in j.columns:
+            circ = j["circuit"].to_numpy()
+            for lab in np.unique(circ):
+                labels[str(lab)] = circ == lab
+        per_pair_rows.append((w, d, labels))
+        all_weeks.update(np.unique(w).tolist())
+    weeks_u = np.array(sorted(all_weeks))
+    n_w, n_p = len(weeks_u), len(per_pair_rows)
+    all_labels = sorted({lab for _, _, ls in per_pair_rows for lab in ls})
+
+    def _matrices(label: str | None) -> tuple[np.ndarray, np.ndarray]:
+        S = np.zeros((n_p, n_w))
+        C = np.zeros((n_p, n_w))
+        for pi, (w, d, ls) in enumerate(per_pair_rows):
+            if label is None:
+                m = np.ones(len(d), dtype=bool)
+            else:
+                m = ls.get(label, np.zeros(len(d), dtype=bool))
+            idx = np.searchsorted(weeks_u, w[m])
+            np.add.at(S[pi], idx, d[m])
+            np.add.at(C[pi], idx, 1)
+        return S, C
+
     rng = np.random.default_rng(seed)
-    fam_means = []
-    for _ in range(reps):
-        chosen = rng.integers(0, len(weeks_u), size=len(weeks_u))
-        pair_means = []
-        for tab in pair_tables.values():
-            s = c = 0.0
-            for i in chosen:
-                ent = tab.get(weeks_u[i])
-                if ent:
-                    s += ent[0]
-                    c += ent[1]
-            if c:
-                pair_means.append(s / c)
-        if pair_means:
-            fam_means.append(float(np.mean(pair_means)))
-    fam_lo, fam_hi = np.percentile(fam_means, [2.5, 97.5])
+    draws = rng.integers(0, n_w, size=(reps, n_w))
 
-    def _newest(dirs: list[Path]) -> str:
-        return max(dirs, key=lambda d: d.stat().st_mtime).name
+    def _fam_stats(S: np.ndarray, C: np.ndarray) -> tuple[float, float, float, int]:
+        with np.errstate(invalid="ignore"):
+            point = float(np.nanmean(
+                np.where(C.sum(axis=1) > 0, S.sum(axis=1) / C.sum(axis=1), np.nan)
+            ))
+        means = []
+        for r in range(reps):
+            s = S[:, draws[r]].sum(axis=1)
+            c = C[:, draws[r]].sum(axis=1)
+            ok_p = c > 0
+            if ok_p.any():
+                means.append(float(np.mean(s[ok_p] / c[ok_p])))
+        lo, hi = np.percentile(means, [2.5, 97.5])
+        n_blocks = int(min((C[pi] > 0).sum() for pi in range(n_p)))
+        return point, float(lo), float(hi), n_blocks
 
-    pa = pick_a or _newest(dirs_a)
-    pb = pick_b or _newest(dirs_b)
-    if pa not in frames_a or pb not in frames_b:
-        raise ValueError(
-            f"pick ({pa}, {pb}) is not among the loaded trials "
-            f"(a: {sorted(frames_a)}, b: {sorted(frames_b)})"
-        )
-    if (pa, pb) not in matrix:
-        raise ValueError(
-            f"picked pair {pa} vs {pb} was refused: {refused[(pa, pb)]}"
-        )
-    deploy = matrix[(pa, pb)]
-    extreme = (deploy.delta_ll in env) and len(matrix) > 1
+    fam_mean, fam_lo, fam_hi, fam_blocks = _fam_stats(*_matrices(None))
+    family_cuts: dict[str, tuple[float, float, float, int]] = {}
+    for lab in all_labels:
+        family_cuts[lab] = _fam_stats(*_matrices(lab))
+
     return {
         "column": column,
         "n_trials": (len(dirs_a), len(dirs_b)),
         "matrix": matrix,
         "refused": refused,
         "envelope": env,
-        "family_mean": float(np.mean(list(deltas.values()))),
-        "family_ci": (float(fam_lo), float(fam_hi)),
-        "family_n_blocks": min(len(t) for t in pair_tables.values()),
-        "deployable": deploy,
-        "picked_is_extreme": extreme,
+        "family_mean": fam_mean,
+        "family_ci": (fam_lo, fam_hi),
+        "family_n_blocks": fam_blocks,
+        "family_cuts": family_cuts,
     }

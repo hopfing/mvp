@@ -148,20 +148,33 @@ class TestPair:
 
 
 class TestFamilies:
-    def test_matrix_envelope_and_extreme_flag(self, root):
+    def test_matrix_envelope_and_family_cuts(self, root):
         base = list(np.linspace(0.3, 0.8, 30))
         dirs_a = [
             _write_eval(root, "a" * 11 + str(i), [p + 0.01 * i for p in base])
             for i in range(2)
         ]
         dirs_b = [_write_eval(root, "b" * 12, base)]
-        rep = compare.compare_families(
-            dirs_a, dirs_b, pick_a="a" * 11 + "1", reps=100,
-        )
+        rep = compare.compare_families(dirs_a, dirs_b, reps=100)
         assert rep["n_trials"] == (2, 1)
         assert len(rep["matrix"]) == 2
         lo, hi = rep["envelope"]
         assert lo <= rep["family_mean"] <= hi
+        # segment cuts exist at FAMILY level, each with an interval
+        assert rep["family_cuts"]
+        for _lab, (dv, clo, chi, _nb) in rep["family_cuts"].items():
+            assert clo <= dv <= chi
+
+    def test_one_v_one_is_the_head_to_head_form(self, root):
+        """A 1x1 matrix's family verdict IS the pair verdict — the
+        head-to-head usage needs no separate machinery."""
+        probs = list(np.linspace(0.3, 0.8, 30))
+        da = _write_eval(root, "a" * 12, probs)
+        db = _write_eval(root, "b" * 12, [p + 0.02 for p in probs])
+        rep = compare.compare_families([da], [db], reps=100)
+        pair = rep["matrix"][("a" * 12, "b" * 12)]
+        assert rep["family_mean"] == pytest.approx(pair.delta_ll)
+        assert rep["family_cuts"]  # cuts present in the 1v1 form too
 
     def test_mixed_grain_is_refused(self, root):
         da = _write_eval(root, "a" * 12, [0.6, 0.7])
@@ -179,30 +192,50 @@ class TestFamilies:
             root, "e" * 12, base, uids=[f"X{i}" for i in range(20)]
         )
         db = _write_eval(root, "b" * 12, base)
-        rep = compare.compare_families(
-            [good, other_pop], [db], pick_a="a" * 12, reps=100,
-        )
+        rep = compare.compare_families([good, other_pop], [db], reps=100)
         assert len(rep["matrix"]) == 1
         assert len(rep["refused"]) == 1
         assert ("e" * 12, "b" * 12) in rep["refused"]
 
-    def test_picked_refused_pair_is_a_clear_error(self, root):
-        base = list(np.linspace(0.3, 0.8, 20))
-        good = _write_eval(root, "a" * 12, base)
-        other_pop = _write_eval(
-            root, "e" * 12, base, uids=[f"X{i}" for i in range(20)]
-        )
-        db = _write_eval(root, "b" * 12, base)
-        with pytest.raises(ValueError, match="refused"):
-            compare.compare_families(
-                [good, other_pop], [db], pick_a="e" * 12, reps=100,
-            )
+    def test_tag_top_subset_by_tune_ranking(self, root, tmp_path, monkeypatch):
+        """--top on a tag side: subset by the tune study's own ordering
+        (holdout key), mapped via the sweep's __hNN_tNN tags — no
+        fingerprint pasting."""
+        import optuna
 
-    def test_bad_pick_names_valid_choices(self, root):
-        da = _write_eval(root, "a" * 12, [0.6] * 6)
-        db = _write_eval(root, "b" * 12, [0.6] * 6)
-        with pytest.raises(ValueError, match="not among the loaded"):
-            compare.compare_families([da], [db], pick_a="f" * 12, reps=50)
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
+        monkeypatch.setattr(compare, "get_data_root", lambda: tmp_path)
+        (tmp_path / "tuning").mkdir()
+        study = optuna.create_study(
+            study_name="fam",
+            storage=f"sqlite:///{tmp_path / 'tuning' / 'fam.db'}",
+            direction="minimize",
+        )
+        # trial numbers 0..2; holdout ranking: t1 best, t2, t0
+        for hold in (0.62, 0.60, 0.61):
+            study.add_trial(optuna.trial.create_trial(
+                params={}, distributions={}, value=hold,
+                user_attrs={
+                    "holdout_cal_log_loss": hold, "_tuning_mode": "calibrated",
+                },
+            ))
+        for i, fp in enumerate(("1" * 12, "2" * 12, "3" * 12)):
+            d = _write_eval(root, fp, [0.6])
+            (d / "source.txt").write_text(
+                f"fam__h0{i + 1}_t{i}\trun{i}\t2026-01-01\n"
+                f"fam\tfam__h0{i + 1}_t{i}\t2026-01-01\n"
+            )
+        assert [p.name for p in compare.resolve_side("fam", top=2)] == [
+            "2" * 12, "3" * 12,  # t1 then t2 by holdout
+        ]
+        with pytest.raises(ValueError, match="fingerprint list IS the subset"):
+            compare.resolve_side("1" * 12, top=2)
+        with pytest.raises(ValueError, match="mixed side forms"):
+            compare.resolve_sides("fam", "1" * 12)
+        d = _write_eval(root, "4" * 12, [0.6])
+        (d / "source.txt").write_text("famx_no_db\tx\t2026-01-01\n")
+        with pytest.raises(FileNotFoundError, match="tune study"):
+            compare.resolve_side("famx_no_db", top=2)
 
     def test_resolve_side_fingerprints_and_tag(self, root):
         d1 = _write_eval(root, "c" * 12, [0.6])
@@ -225,25 +258,26 @@ class TestCLI:
         _write_eval(root, "a" * 12, [0.6] * len(days_a), days=days_a)
         _write_eval(root, "b" * 12, [0.7] * len(days_b), days=days_b)
         args = argparse.Namespace(
-            a="a" * 12, b="b" * 12, a_pick=None, b_pick=None,
+            a="a" * 12, b="b" * 12, top=None,
             column="y_prob_cal", min_overlap=0.5, reps=100, seed=0, **kw,
         )
         assert cmd_compare(args) == 0
         return capsys.readouterr().out
 
-    def test_low_blocks_reaches_the_headline_lines(self, root, capsys):
-        """A thin-window comparison must flag the DEPLOYABLE and FAMILY
-        intervals, not only the segment cuts (review finding: the silent
-        narrow CI is the exact failure this tool exists to prevent)."""
+    def test_low_blocks_reaches_the_headline_line(self, root, capsys):
+        """A thin-window comparison must flag the pooled interval, not only
+        the segment cuts (the silent narrow CI is the exact failure this
+        tool exists to prevent)."""
         days = [date(2024, 1, 2)] * 8
         out = self._run(root, capsys, days, days)
-        deploy_line = next(ln for ln in out.splitlines() if "deployable" in ln)
-        family_line = next(ln for ln in out.splitlines() if ln.startswith("family"))
-        assert "LOW-BLOCKS" in deploy_line
-        assert "LOW-BLOCKS" in family_line
-        assert "matches" in deploy_line
+        pooled_line = next(ln for ln in out.splitlines() if ln.startswith("pooled"))
+        assert "LOW-BLOCKS" in pooled_line
+        assert "matches" in out
 
-    def test_selection_note_always_printed(self, root, capsys):
+    def test_family_cuts_printed_with_intervals(self, root, capsys):
         days = [date(2024, 1, 2) + timedelta(weeks=i) for i in range(40)]
         out = self._run(root, capsys, days, days)
-        assert "selection-corrected" in out
+        assert "selection" not in out or "not corrected" in out
+        # half-year cut lines carry brackets (an interval each)
+        cut_lines = [ln for ln in out.splitlines() if ln.strip().startswith("H")]
+        assert cut_lines and all("[" in ln for ln in cut_lines)

@@ -1315,10 +1315,11 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
     )
     cmp_parser.add_argument("--b", required=True, help="Side B, same forms")
     cmp_parser.add_argument(
-        "--a-pick", default=None,
-        help="Fingerprint of side A's deployable candidate (default: newest)",
+        "--top", type=int, default=None,
+        help="For each TAG side: keep its top-N trials by the tune study's "
+             "ranking (same ordering as tune-review / the frozen sweep). "
+             "Fingerprint-list sides are unaffected — the list is the subset.",
     )
-    cmp_parser.add_argument("--b-pick", default=None, help="Side B's candidate")
     cmp_parser.add_argument(
         "--column", default="y_prob_cal", choices=["y_prob_cal", "y_prob"],
         help="Probability column, SAME on both sides (default y_prob_cal; "
@@ -3192,49 +3193,45 @@ def cmd_model_rank(args: argparse.Namespace) -> int:
 
 
 def cmd_compare(args: argparse.Namespace) -> int:
-    """Paired family comparison with block-bootstrap intervals."""
-    from mvp.model.compare import LOW_BLOCKS, compare_families, resolve_side
+    """Paired side-vs-side comparison with block-bootstrap intervals."""
+    from mvp.model.compare import LOW_BLOCKS, compare_families, resolve_sides
 
+    dirs_a, dirs_b = resolve_sides(args.a, args.b, top=args.top)
     report = compare_families(
-        resolve_side(args.a), resolve_side(args.b),
-        column=args.column, pick_a=args.a_pick, pick_b=args.b_pick,
+        dirs_a, dirs_b,
+        column=args.column,
         min_overlap=args.min_overlap, reps=args.reps, seed=args.seed,
     )
     na, nb = report["n_trials"]
-    d = report["deployable"]
     print(f"a: {na} trial(s)   b: {nb} trial(s)   column={args.column}")
-    print("negative delta = A better (lower loss)\n")
+    print("negative delta = A better (lower loss); intervals are not "
+          "corrected for how the sides were chosen\n")
     lo, hi = report["family_ci"]
     fam_flag = "  LOW-BLOCKS" if report["family_n_blocks"] < LOW_BLOCKS else ""
     print(
-        f"family: mean dLL {report['family_mean']:+.4f}  CI[{lo:+.4f}, {hi:+.4f}]"
+        f"pooled: mean dLL {report['family_mean']:+.4f}  CI[{lo:+.4f}, {hi:+.4f}]"
         f"{fam_flag}   matrix {na}x{nb}, envelope "
         f"[{report['envelope'][0]:+.4f}, {report['envelope'][1]:+.4f}]"
     )
+    for lab, (dv, clo, chi, cnb) in report["family_cuts"].items():
+        flag = "  LOW-BLOCKS" if cnb < LOW_BLOCKS else ""
+        print(f"    {lab:<8} {dv:+.4f} [{clo:+.4f}, {chi:+.4f}]{flag}")
+    sample = next(iter(report["matrix"].values()))
+    unit = (
+        "matches" if sample.grain == "match"
+        else "ROWS (orientation invariant violated)"
+    )
+    print(
+        f"\nrows per pair (first cell): {sample.n_matches} {unit}; "
+        f"a keeps {sample.keep_a:.2f}, b keeps {sample.keep_b:.2f}; "
+        f"unmatched a={sample.unmatched_a} b={sample.unmatched_b}"
+    )
     if na > 1 or nb > 1:
+        print("\nper-pair pooled deltas:")
         for (fa, fb), r in report["matrix"].items():
             print(f"    {fa} vs {fb}: {r.delta_ll:+.4f}")
     for (fa, fb), why in report["refused"].items():
         print(f"    {fa} vs {fb}: REFUSED ({why.splitlines()[0]})")
-    unit = "matches" if d.grain == "match" else "ROWS (orientation invariant violated)"
-    dep_flag = "  LOW-BLOCKS" if d.n_blocks < LOW_BLOCKS else ""
-    print(
-        f"\ndeployable {d.fp_a} vs {d.fp_b}: dLL {d.delta_ll:+.4f} "
-        f"CI[{d.ci[0]:+.4f}, {d.ci[1]:+.4f}]{dep_flag}  "
-        f"dBrier {d.delta_brier:+.4f}"
-        f"  ({d.n_matches} {unit}; a keeps {d.keep_a:.2f}, b keeps "
-        f"{d.keep_b:.2f}; unmatched a={d.unmatched_a} b={d.unmatched_b})"
-    )
-    for lab, (dv, clo, chi, cnb) in d.cuts.items():
-        flag = "  LOW-BLOCKS" if cnb < LOW_BLOCKS else ""
-        print(f"    {lab:<8} {dv:+.4f} [{clo:+.4f}, {chi:+.4f}]{flag}")
-    if report["picked_is_extreme"]:
-        print(
-            "\nNOTE: the picked pair is the matrix's extreme cell; its "
-            "interval is NOT corrected for post-hoc selection from the grid."
-        )
-    else:
-        print("\n(deployable interval is not selection-corrected)")
     return 0
 
 
