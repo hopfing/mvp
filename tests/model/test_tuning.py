@@ -5,6 +5,7 @@ import logging
 import sys
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import optuna
@@ -785,6 +786,52 @@ validation:
         assert result["metrics"]["log_loss"] == 0.6
         # Deployment-frame outer-block metrics propagate through _run_one.
         assert result["holdout_metrics_calibrated"]["log_loss"] == 0.60
+
+    def test_run_one_cleans_up_when_the_trial_raises(
+        self, sample_config, sample_matches, tmp_path, monkeypatch
+    ):
+        """A pruned trial still unlinks its temp config, and the exception
+        reaches Optuna unchanged. The per-trial cleanup used to sit on the
+        success path, so a raising trial skipped it entirely."""
+        tuner = HyperparamTuner(
+            config_path=sample_config,
+            matches_path=sample_matches,
+            cache_dir=tmp_path / "cache",
+            state_dir=tmp_path / "tuning",
+            outer_folds=1,
+        )
+        built: list[Path] = []
+        real_build = tuner._build_trial_config
+
+        def _spy(params):
+            path = real_build(params)
+            built.append(path)
+            return path
+
+        monkeypatch.setattr(tuner, "_build_trial_config", _spy)
+        # The unlink was already in `finally`; the collection is what moved, so
+        # pin it — otherwise this test passes against the old code too.
+        collected: list[str] = []
+        monkeypatch.setattr(
+            "mvp.model.tuning.gc",
+            SimpleNamespace(collect=lambda: collected.append("collect")),
+        )
+
+        class _PrunedRunner:
+            def __init__(self, **kwargs):
+                pass
+
+            def run(self, trial=None):
+                raise optuna.TrialPruned("fold 1 below the pruner's threshold")
+
+        monkeypatch.setattr("mvp.model.runner.ExperimentRunner", _PrunedRunner)
+
+        with pytest.raises(optuna.TrialPruned):
+            tuner._run_one({"C": 1.0})
+
+        assert built, "the trial never built a temp config"
+        assert not built[0].exists()
+        assert collected, "the raising path skipped the per-trial collection"
 
     def test_prob_scale_objective_is_calibrated_frame(self, sample_config, tmp_path):
         """A probability-scale objective (log_loss) searches the calibrated frame."""

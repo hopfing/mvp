@@ -1437,13 +1437,6 @@ class HyperparamTuner:
             )
             duration = time.perf_counter() - t0
 
-            # Drop large per-trial state (fold predictions, diagnostics, mlflow
-            # buffers via runner) before returning so memory doesn't accumulate
-            # across Optuna trials.
-            del result
-            del runner
-            gc.collect()
-
             return {
                 "params": params,
                 "metrics": metrics,
@@ -1459,6 +1452,21 @@ class HyperparamTuner:
             }
         finally:
             temp_path.unlink(missing_ok=True)
+            # Collect on EVERY path, not just the success one: a pruned or
+            # failed trial skipped this entirely and left its cyclic garbage
+            # (model/closure cycles — see serve_discovery.py:1223) for whenever
+            # the collector next happened to run.
+            #
+            # This does NOT free the trial that just failed. While the exception
+            # propagates, its traceback still pins ExperimentRunner.run()'s
+            # frame and the feature matrix that is local to it; rebinding
+            # `runner` here clears only this frame's name. What it does buy is
+            # the PREVIOUS trial's garbage, reclaimed here rather than never —
+            # accumulation bounded at one stale trial instead of unbounded.
+            # Rebinding, not `del`: an exception before the assignments leaves
+            # these names unbound, and `del` would raise over the real error.
+            result = runner = None
+            gc.collect()
 
     def run(
         self, n_trials: int, verbose: bool = True, parallel_trials: int = 1,
