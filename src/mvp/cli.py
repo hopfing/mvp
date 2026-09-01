@@ -1300,6 +1300,38 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         help="Skip refresh entirely; read existing artifacts only",
     )
 
+    # compare subcommand - paired family comparison with bootstrap intervals
+    cmp_parser = subparsers.add_parser(
+        "compare",
+        parents=[common],
+        help="Paired loss deltas between two families/trials with "
+             "block-bootstrap intervals (shared matches only)",
+    )
+    cmp_parser.add_argument(
+        "--a", required=True,
+        help="Side A: comma-separated evaluation fingerprints (primary), "
+             "or a source tag (best-effort; sweep trials are tag-patched "
+             "only where frozen_backtest_sweep --report ran)",
+    )
+    cmp_parser.add_argument("--b", required=True, help="Side B, same forms")
+    cmp_parser.add_argument(
+        "--a-pick", default=None,
+        help="Fingerprint of side A's deployable candidate (default: newest)",
+    )
+    cmp_parser.add_argument("--b-pick", default=None, help="Side B's candidate")
+    cmp_parser.add_argument(
+        "--column", default="y_prob_cal", choices=["y_prob_cal", "y_prob"],
+        help="Probability column, SAME on both sides (default y_prob_cal; "
+             "a side missing it is an error, never a fallback)",
+    )
+    cmp_parser.add_argument(
+        "--min-overlap", type=float, default=0.5,
+        help="Refuse when either side keeps less than this share of its "
+             "matches in the intersection (default 0.5)",
+    )
+    cmp_parser.add_argument("--reps", type=int, default=2000)
+    cmp_parser.add_argument("--seed", type=int, default=0)
+
     return parser.parse_args(args)
 
 
@@ -3159,6 +3191,53 @@ def cmd_model_rank(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_compare(args: argparse.Namespace) -> int:
+    """Paired family comparison with block-bootstrap intervals."""
+    from mvp.model.compare import LOW_BLOCKS, compare_families, resolve_side
+
+    report = compare_families(
+        resolve_side(args.a), resolve_side(args.b),
+        column=args.column, pick_a=args.a_pick, pick_b=args.b_pick,
+        min_overlap=args.min_overlap, reps=args.reps, seed=args.seed,
+    )
+    na, nb = report["n_trials"]
+    d = report["deployable"]
+    print(f"a: {na} trial(s)   b: {nb} trial(s)   column={args.column}")
+    print("negative delta = A better (lower loss)\n")
+    lo, hi = report["family_ci"]
+    fam_flag = "  LOW-BLOCKS" if report["family_n_blocks"] < LOW_BLOCKS else ""
+    print(
+        f"family: mean dLL {report['family_mean']:+.4f}  CI[{lo:+.4f}, {hi:+.4f}]"
+        f"{fam_flag}   matrix {na}x{nb}, envelope "
+        f"[{report['envelope'][0]:+.4f}, {report['envelope'][1]:+.4f}]"
+    )
+    if na > 1 or nb > 1:
+        for (fa, fb), r in report["matrix"].items():
+            print(f"    {fa} vs {fb}: {r.delta_ll:+.4f}")
+    for (fa, fb), why in report["refused"].items():
+        print(f"    {fa} vs {fb}: REFUSED ({why.splitlines()[0]})")
+    unit = "matches" if d.grain == "match" else "ROWS (orientation invariant violated)"
+    dep_flag = "  LOW-BLOCKS" if d.n_blocks < LOW_BLOCKS else ""
+    print(
+        f"\ndeployable {d.fp_a} vs {d.fp_b}: dLL {d.delta_ll:+.4f} "
+        f"CI[{d.ci[0]:+.4f}, {d.ci[1]:+.4f}]{dep_flag}  "
+        f"dBrier {d.delta_brier:+.4f}"
+        f"  ({d.n_matches} {unit}; a keeps {d.keep_a:.2f}, b keeps "
+        f"{d.keep_b:.2f}; unmatched a={d.unmatched_a} b={d.unmatched_b})"
+    )
+    for lab, (dv, clo, chi, cnb) in d.cuts.items():
+        flag = "  LOW-BLOCKS" if cnb < LOW_BLOCKS else ""
+        print(f"    {lab:<8} {dv:+.4f} [{clo:+.4f}, {chi:+.4f}]{flag}")
+    if report["picked_is_extreme"]:
+        print(
+            "\nNOTE: the picked pair is the matrix's extreme cell; its "
+            "interval is NOT corrected for post-hoc selection from the grid."
+        )
+    else:
+        print("\n(deployable interval is not selection-corrected)")
+    return 0
+
+
 def cmd_model_errors(args: argparse.Namespace) -> int:
     """Run feature-error analysis on a model evaluation (by name or fingerprint)."""
     from mvp.model.error_analysis.runner import run_error_analysis
@@ -4017,6 +4096,8 @@ def main(args: list[str] | None = None) -> int:
         return cmd_model_report(parsed)
     elif parsed.command == "model-rank":
         return cmd_model_rank(parsed)
+    elif parsed.command == "compare":
+        return cmd_compare(parsed)
 
     return 1
 
