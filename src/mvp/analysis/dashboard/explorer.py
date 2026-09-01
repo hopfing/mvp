@@ -444,6 +444,176 @@ def _render_edge_bands(
     st.dataframe(styled, use_container_width=True, hide_index=True)
 
 
+# Edge movement -- predictions whose opening odds predate this point are
+# excluded: staged-odds capture wasn't comprehensive enough for "opening
+# odds" to be reliable, and open edge is the axis this whole section turns
+# on. Same floor Bet Performance uses for its provenance matrix. Compared
+# as a string prefix against predicted_at's ISO form, so the floor reads as
+# UTC; only ~56 resolved rows sit within 12h of it either way.
+_OPENING_RELIABLE_AFTER = "2026-03-21 09:15"
+
+# "flat" means the line did not move -- exact equality, not a dead band. A
+# band wide enough to absorb real drift also lets a row read "unmoved"
+# while its edge crossed zero, and at 0.25pp that already spawns cells of
+# one and two rows whose ROI is a single result.
+_MOVE_FLAT_TOL = 1e-9
+
+# The eight reachable (opened, moved, now) states, with the reading each
+# one carries. Four of the twelve combinations never occur: edge that moves
+# up from positive cannot land negative, edge that moves down from negative
+# cannot land positive, and a flat line cannot change sign at all. They are
+# absent by construction rather than filtered, so the row set is fixed and
+# the table keeps its shape when a state empties under an Edge cut.
+_MOVEMENT_ROWS: tuple[tuple[str, str, str, str], ...] = (
+    ("open +", "up",   "now +", "Edge grew"),
+    ("open +", "flat", "now +", "Edge unmoved"),
+    ("open +", "down", "now +", "Edge decayed"),
+    ("open +", "down", "now -", "Edge died"),
+    ("open -", "up",   "now +", "Gap closed"),
+    ("open -", "up",   "now -", "Gap narrowed"),
+    ("open -", "flat", "now -", "Gap unmoved"),
+    ("open -", "down", "now -", "Gap widened"),
+)
+
+
+def _movement_eligible(df: pl.DataFrame, edge_col: str) -> pl.DataFrame:
+    """Rows that can carry a movement state, past the reliability floor."""
+    if "model_edge_open" not in df.columns or edge_col not in df.columns:
+        return df.head(0)
+    out = df.filter(
+        pl.col("model_edge_open").is_not_null() & pl.col(edge_col).is_not_null()
+    )
+    if "predicted_at" in out.columns:
+        out = out.filter(
+            pl.col("predicted_at").cast(pl.Utf8) > _OPENING_RELIABLE_AFTER
+        )
+    return out
+
+
+def _classify_movement(df: pl.DataFrame, edge_col: str) -> pl.DataFrame:
+    """Tag each row with its (opened, moved, now) movement state.
+
+    ``moved`` compares edge on the selected basis against edge at open, so
+    the section reads "the model saw this much edge when the line opened,
+    the line moved this way, and here is where the edge stands now".
+    """
+    delta = pl.col(edge_col) - pl.col("model_edge_open")
+    return df.with_columns(
+        pl.when(pl.col("model_edge_open") > 0)
+        .then(pl.lit("open +"))
+        .otherwise(pl.lit("open -"))
+        .alias("opened"),
+        pl.when(delta.abs() <= _MOVE_FLAT_TOL)
+        .then(pl.lit("flat"))
+        .when(delta > 0)
+        .then(pl.lit("up"))
+        .otherwise(pl.lit("down"))
+        .alias("moved"),
+        pl.when(pl.col(edge_col) > 0)
+        .then(pl.lit("now +"))
+        .otherwise(pl.lit("now -"))
+        .alias("now"),
+    )
+
+
+def _movement_table(
+    df: pl.DataFrame, odds_col: str, edge_col: str
+) -> pl.DataFrame:
+    """One row per reachable movement state, plus a Total, scored at ``odds_col``.
+
+    Cells are priced on the selected basis because that is the price you
+    could actually have taken -- the open is gone by the time the movement
+    is known.
+    """
+    tagged = _classify_movement(df, edge_col)
+    delta_pp = (pl.col(edge_col) - pl.col("model_edge_open")) * 100
+    edge_pp = pl.col(edge_col) * 100
+
+    def _means(sub: pl.DataFrame) -> tuple[float | None, float | None]:
+        if len(sub) == 0:
+            return None, None
+        agg = sub.select(
+            delta_pp.mean().alias("d"), edge_pp.mean().alias("e")
+        ).row(0)
+        # + 0.0 folds the -0.0 that float noise leaves on the flat rows,
+        # where the mean is exactly zero by construction.
+        return round(agg[0], 2) + 0.0, round(agg[1], 2) + 0.0
+
+    rows: list[dict] = []
+    for opened, moved, now, label in _MOVEMENT_ROWS:
+        sub = tagged.filter(
+            (pl.col("opened") == opened)
+            & (pl.col("moved") == moved)
+            & (pl.col("now") == now)
+        )
+        stats = _flat_bet_stats(sub, odds_col)
+        d_mean, e_mean = _means(sub)
+        stats.update({
+            "Movement": label,
+            "Opened": opened,
+            "Moved": moved,
+            "Now": now,
+            "Δ Edge": d_mean,
+            "Edge": e_mean,
+        })
+        rows.append(stats)
+
+    total = _flat_bet_stats(tagged, odds_col)
+    d_mean, e_mean = _means(tagged)
+    total.update({
+        "Movement": "Total",
+        "Opened": "",
+        "Moved": "",
+        "Now": "",
+        "Δ Edge": d_mean,
+        "Edge": e_mean,
+    })
+    rows.append(total)
+
+    return pl.DataFrame(rows).select(
+        "Movement", "Opened", "Moved", "Now",
+        "N", "W", "L", "Acc %", "ROI %", "P&L", "Δ Edge", "Edge",
+    )
+
+
+def _render_movement_table(
+    df: pl.DataFrame, odds_col: str, edge_col: str, st
+) -> None:
+    """Render the open-edge to selected-basis movement table."""
+    table = _movement_table(df, odds_col, edge_col)
+    pdf = table.to_pandas()
+
+    def _color_negative(val):
+        if isinstance(val, (int, float)) and val < 0:
+            return "color: #e74c3c"
+        return ""
+
+    def _row_style(row):
+        if row["Movement"] == "Total":
+            return [
+                "font-weight: bold; background-color: rgba(255,255,255,0.08)"
+            ] * len(row)
+        if row["Now"] == "now +":
+            return ["background-color: rgba(46,204,113,0.10)"] * len(row)
+        return ["background-color: rgba(231,76,60,0.10)"] * len(row)
+
+    styled = (
+        pdf.style.apply(_row_style, axis=1)
+        .applymap(_color_negative, subset=["P&L", "ROI %", "Δ Edge", "Edge"])
+        .format(
+            {
+                "Acc %": "{:.1f}%",
+                "ROI %": "{:+.1f}%",
+                "P&L": "${:+,.2f}",
+                "Δ Edge": "{:+.2f}pp",
+                "Edge": "{:+.2f}pp",
+            },
+            na_rep="—",
+        )
+    )
+    st.dataframe(styled, use_container_width=True, hide_index=True)
+
+
 def _render_charts(
     df: pl.DataFrame, odds_col: str, granularity: str, st
 ) -> None:
@@ -781,6 +951,41 @@ def render(ds: pl.DataFrame, sims: pl.DataFrame) -> None:
             st.markdown(f"**{label}**")
             table = _aggregate_books(circuit_dfs[val], books, edge_range)
             _style_breakdown(table, "Book", st)
+
+    # --- By Edge Movement — where the edge on the selected basis came from,
+    # relative to the opening line. Degenerate at Open basis: movement is
+    # always flat against itself and Now restates Opened, collapsing the
+    # eight rows to the Edge / No Edge pair already in the headline cards. ---
+    st.subheader("By Edge Movement")
+    if edge_col == "model_edge_open":
+        st.caption(
+            "Movement needs a later stage to compare the open against — "
+            "select Formed or Close as the Odds Basis."
+        )
+    elif "model_edge_open" not in resolved.columns:
+        st.info("No opening-edge data available (model_edge_open missing).")
+    else:
+        move_df = _movement_eligible(resolved, edge_col)
+        n_dropped = len(resolved) - len(move_df)
+        if len(move_df) == 0:
+            st.info(
+                f"No predictions with both opening and {basis_label} edge "
+                "past the opening-odds reliability floor."
+            )
+        else:
+            if n_dropped > 0:
+                st.caption(
+                    f"Excludes {n_dropped:,} of {len(resolved):,} predictions "
+                    f"missing opening or {basis_label} edge, or predicted "
+                    f"before {_OPENING_RELIABLE_AFTER} where opening-odds "
+                    "capture is unreliable."
+                )
+            move_circuits = _circuit_slices(move_df)
+            for val, label in move_circuits:
+                st.markdown(f"**{label}**")
+                _render_movement_table(
+                    move_df.filter(pl.col("circuit") == val), odds_col, edge_col, st
+                )
 
     # By Timing — per-threshold cross-book best / median / worst. Reads the
     # pre-cut frame: each cell already filters on its own threshold's edge
