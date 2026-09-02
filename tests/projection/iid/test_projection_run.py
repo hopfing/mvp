@@ -310,13 +310,24 @@ class TestBuildFoldMatchFrame:
 
         uids = ["m0", "m1"]
         df, out = _test_df(uids), _output_for(uids)
+        from mvp.projection.iid.artifacts import SHAPE_COLUMNS
+
         frame = build_fold_match_frame(
             df, out, fold_idx=3, y_won=np.array([1, 0])
         )
         assert frame.columns == [
             "match_uid", "player_id", "opp_id", "effective_match_date",
             "fold_idx", "p_match_win_a", "won_a",
+            *SHAPE_COLUMNS,
         ]
+        # shape columns are reductions of the SAME output object
+        np.testing.assert_allclose(
+            frame["chain_hold_sum"].to_numpy(), out.h_a + out.h_b
+        )
+        np.testing.assert_allclose(
+            frame["chain_egames"].to_numpy(),
+            out.distribution.expected_total_games,
+        )
         assert frame["won_a"].to_list() == [1, 0]
         assert frame["fold_idx"].to_list() == [3, 3]
         assert frame["player_id"].to_list() == df["player_id"].to_list()

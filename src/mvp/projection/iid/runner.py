@@ -27,7 +27,11 @@ from mvp.model.engine import check_memory, make_fs_engine
 from mvp.model.features._score_helpers import total_games_lost, total_games_won
 from mvp.model.mlflow_logger import ExperimentLogger
 from mvp.model.splitters import BaseSplitter, make_splitter
-from mvp.projection.iid.artifacts import record_run, write_projection_json
+from mvp.projection.iid.artifacts import (
+    record_run,
+    shape_scalars,
+    write_projection_json,
+)
 from mvp.projection.iid.config import IIDProjectionConfig
 from mvp.projection.iid.diagnostics import IIDProjectionDiagnostics
 from mvp.projection.iid.metrics import (
@@ -99,6 +103,10 @@ def build_fold_match_frame(
         "fold_idx": pl.Series([fold_idx] * len(test_df), dtype=pl.Int32),
         "p_match_win_a": out.distribution.p_match_win_a,
         "won_a": pl.Series(np.asarray(y_won).astype(np.int8)),
+        # Shape scalars ride the same aligned `out` — the winner-side
+        # chain_shape transform consumes them the way the prior consumes
+        # p_match_win_a.
+        **shape_scalars(out),
     })
 
 

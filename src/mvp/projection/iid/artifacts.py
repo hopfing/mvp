@@ -28,6 +28,17 @@ from typing import Any
 
 import polars as pl
 
+# Shape schema + scalar reducer live in mvp.common.chain_shape (a leaf
+# module) because the winner-side chain_shape transform consumes the same
+# columns, and a features->projection import at module scope closes a cycle
+# through the engine. Re-exported here for the writers.
+from mvp.common.chain_shape import (
+    SHAPE_ANTISYMMETRIC,  # noqa: F401 — re-export
+    SHAPE_COLUMNS,
+    SHAPE_SYMMETRIC,  # noqa: F401 — re-export
+    shape_scalars,  # noqa: F401 — re-export
+)
+
 from mvp.common.config_hash import (
     PROJECTION_EVAL_ROOT,
     append_source,
@@ -211,6 +222,7 @@ def write_pmf_parquet(
 _FOLD_MATCH_WIN_COLUMNS = [
     "match_uid", "player_id", "opp_id", "effective_match_date",
     "fold_idx", "p_match_win_a", "won_a",
+    *SHAPE_COLUMNS,
 ]
 
 

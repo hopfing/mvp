@@ -38,6 +38,7 @@ from mvp.projection.iid.artifacts import (
     SERVE_MODEL_JOBLIB,
     fp_dir_for,
     record_run,
+    shape_scalars,
     write_pmf_parquet,
 )
 from mvp.projection.iid.config import IIDProjectionConfig
@@ -309,6 +310,10 @@ def build_pmf_frame(test_df: pl.DataFrame, out: ProjectionOutput) -> pl.DataFram
         "total_games_pmf": [
             row.tolist() for row in out.distribution.total_games_pmf
         ],
+        # Shape scalars for the winner-side chain_shape transform's forward
+        # rows — the same reduction the fold artifact carries, so the two
+        # splice halves agree by construction.
+        **shape_scalars(out),
     })
 
 

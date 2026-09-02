@@ -298,6 +298,7 @@ class TestFoldMatchWin:
 
         from mvp.projection.iid.artifacts import (
             FOLD_MATCH_WIN_PARQUET,
+            SHAPE_COLUMNS,
             write_fold_match_win,
         )
 
@@ -310,6 +311,7 @@ class TestFoldMatchWin:
             "fold_idx": [1],
             "p_match_win_a": [0.6],
             "won_a": [1],
+            **{c: [0.5] for c in SHAPE_COLUMNS},
         })
         path = write_fold_match_win(tmp_path, frame)
         assert path.name == FOLD_MATCH_WIN_PARQUET
@@ -317,6 +319,7 @@ class TestFoldMatchWin:
         assert out.columns == [
             "match_uid", "player_id", "opp_id", "effective_match_date",
             "fold_idx", "p_match_win_a", "won_a",
+            *SHAPE_COLUMNS,
         ]
 
     def test_missing_column_raises(self, tmp_path):

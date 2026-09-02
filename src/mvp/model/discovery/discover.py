@@ -491,6 +491,44 @@ class FeatureDiscovery:
 
         return importance_fn
 
+    def _ensure_prior_sources(self) -> None:
+        """Regenerate every prior/chain-shape evaluation this run references.
+
+        This is the one place regeneration is allowed (a `model`/`iid-project`
+        run on the source config) -- the discovery driver runs on the dev box
+        by definition; the engine and production train refuse with the command
+        instead. Covers offset.prior AND every model=<stem> spec seeded in
+        features.base or added via features.extra: a base/extra-referenced
+        source whose artifacts are missing (or predate the current columns)
+        would otherwise crash at the transform's refusal mid-precompute.
+        """
+        prior_stems: list[str] = []
+        off = self.config.offset
+        if off is not None and off.prior is not None:
+            prior_stems.append(off.prior)
+        feat_cfg = self.config.discovery.features
+        # Assumes model= is the spec's ONLY parenthesized param — true for
+        # every model=-parameterized transform today (prior, chain_shape both
+        # register params=["model"]). A future transform combining model= with
+        # a second param in one spec would need this (and families.py's
+        # _MODEL_PARAM) generalized.
+        stem_re = re.compile(r"\(model=([^)]+)\)")
+        for spec in [*feat_cfg.base, *feat_cfg.extra]:
+            m = stem_re.search(spec)
+            if m:
+                prior_stems.append(m.group(1))
+        if not prior_stems:
+            return
+        from mvp.model.features.prior import ensure_prior_artifacts, resolve_prior
+
+        for stem in dict.fromkeys(prior_stems):
+            source = resolve_prior(stem)
+            self._log(
+                f"prior source {stem}: {source.config_path} -> evaluation "
+                f"{source.fp}"
+            )
+            ensure_prior_artifacts(source, regenerate=True)
+
     def _build_candidate_pool(
         self, all_features: list[str] | None = None
     ) -> list[str]:
@@ -517,6 +555,19 @@ class FeatureDiscovery:
             included = set(feat_cfg.include)
             all_features = [f for f in all_features if f in included]
             self._log(f"Restricted to {len(all_features)} features via include")
+
+        # `extra` joins AFTER the enumeration filters (paramed_only/include —
+        # an explicitly typed spec must not be silently starved by a narrowing
+        # list) and BEFORE the removals below, which still apply: additions
+        # cannot override an exclusion safety rule.
+        if feat_cfg.extra:
+            missing_extra = [f for f in feat_cfg.extra if f not in all_features]
+            if missing_extra:
+                self._log(
+                    f"extra: added {len(missing_extra)} candidate spec(s): "
+                    f"{missing_extra}"
+                )
+                all_features = [*all_features, *missing_extra]
 
         if feat_cfg.compute_only:
             compute_only = set(feat_cfg.compute_only)
@@ -784,21 +835,7 @@ class FeatureDiscovery:
                 )
             matrix_specs = list(all_features) + extra
 
-        # Residual stage: make sure the base model's evaluation exists before
-        # the matrix is built. This is the one place regeneration is allowed
-        # (a `model` run on the base config) -- the discovery driver runs on
-        # the dev box by definition; the engine and production train refuse
-        # with the command instead.
-        off = self.config.offset
-        if off is not None and off.prior is not None:
-            from mvp.model.features.prior import ensure_prior_artifacts, resolve_prior
-
-            source = resolve_prior(off.prior)
-            self._log(
-                f"offset.prior {off.prior}: {source.config_path} -> evaluation "
-                f"{source.fp}"
-            )
-            ensure_prior_artifacts(source, regenerate=True)
+        self._ensure_prior_sources()
 
         cand_workers, cand_n_jobs = self._resolve_candidate_parallelism(method)
         if method == "forward":

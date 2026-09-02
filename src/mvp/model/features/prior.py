@@ -865,3 +865,147 @@ register_transform(
         "resolved from its evaluation by config stem (model=<stem>)"
     ),
 )
+
+
+# ---------------------------------------------------------------------------
+# chain_shape: the projection's DISTRIBUTION moments as winner-side features.
+#
+# The prior consumes one number from the chain (p_match_win_a); these are the
+# moments that collapse discards — how the match is structured (dispersion,
+# decisiveness, serve texture), not who wins. Projection-kind stems only: the
+# scalars are reductions of MatchDistribution/ProjectionOutput fields, which
+# model-kind priors never had.
+#
+# Same splice honesty as the prior (fold rows dated after their own fold's
+# train end; forward rows after the evaluation window) but NO calibration
+# step: these are descriptors consumed as features, not beliefs consumed as
+# probabilities, so the "never splice calibration states" rule is not in
+# scope. Mirror semantics per column: symmetric values read the same from
+# both orientations; antisymmetric values negate on the mirror.
+# ---------------------------------------------------------------------------
+
+from mvp.common.chain_shape import (  # noqa: E402
+    SHAPE_ANTISYMMETRIC,
+    SHAPE_COLUMNS,
+    SHAPE_SYMMETRIC,
+)
+
+_SHAPE_OUTPUTS = [f"player_{c}" for c in SHAPE_COLUMNS]
+
+
+def _shape_read(path: Path, source: PriorSource) -> pl.DataFrame:
+    df = pl.read_parquet(path)
+    missing = ({"match_uid", "player_id", "opp_id", "effective_match_date"}
+               | set(SHAPE_COLUMNS)) - set(df.columns)
+    if missing:
+        raise ValueError(
+            f"{path} is missing shape columns {sorted(missing)} (predates the "
+            f"chain_shape artifact schema). Regenerate: {source.regenerate_command}"
+        )
+    return df
+
+
+def _shape_both_orientations(df: pl.DataFrame) -> pl.DataFrame:
+    """Two rows per match from an A-oriented shape frame: symmetric columns
+    carried as-is, antisymmetric columns negated on the mirror."""
+    keep = ["match_uid", "day", "shape_train_end"]
+    a = df.select(keep + ["player_id"] + SHAPE_COLUMNS)
+    b = df.select(
+        keep
+        + [pl.col("opp_id").alias("player_id")]
+        + [pl.col(c) for c in SHAPE_SYMMETRIC]
+        + [(-pl.col(c)).alias(c) for c in SHAPE_ANTISYMMETRIC]
+    )
+    return pl.concat([a.select(b.columns), b])
+
+
+def _shape_fold_rows(source: PriorSource) -> pl.DataFrame:
+    df = _shape_read(source.fold_match_win, source)
+    df = df.with_columns(pl.col("effective_match_date").cast(pl.Date).alias("day"))
+    train_end = df.group_by("fold_idx").agg(
+        (pl.col("day").min() - timedelta(days=1)).alias("shape_train_end")
+    )
+    return _shape_both_orientations(df.join(train_end, on="fold_idx"))
+
+
+def _shape_forward_rows(source: PriorSource) -> pl.DataFrame | None:
+    if not source.pmf_parquet.exists():
+        logger.warning(
+            "chain_shape %s: no %s -- rows after the evaluation window carry "
+            "no shape. Produce it with: %s",
+            source.model, source.pmf_parquet.name,
+            source.forward_regenerate_command,
+        )
+        return None
+    df = _shape_read(source.pmf_parquet, source)
+    df = df.with_columns(
+        pl.col("effective_match_date").cast(pl.Date).alias("day"),
+        pl.lit(source.forward_train_end).alias("shape_train_end"),
+    )
+    return _shape_both_orientations(df)
+
+
+@lru_cache(maxsize=8)
+def _cached_shape_frame(model: str) -> pl.DataFrame:
+    source = resolve_prior(model)
+    if source.kind != "projection":
+        raise ValueError(
+            f"chain_shape(model={model}): resolves to a {source.kind} source; "
+            "shape scalars only exist for projection stems"
+        )
+    # Same contract as the prior transform: the engine never regenerates —
+    # the discovery driver decides that before precompute.
+    ensure_prior_artifacts(source, regenerate=False)
+    parts = [_shape_fold_rows(source)]
+    fwd = _shape_forward_rows(source)
+    if fwd is not None:
+        overlap = parts[0].join(
+            fwd, on=["match_uid", "player_id"], how="inner"
+        ).height
+        if overlap:
+            raise ValueError(
+                f"chain_shape {source.model}: {overlap} (match, player) rows in "
+                "both the fold OOF and the forward rows; refusing to splice"
+            )
+        parts.append(fwd)
+    df = pl.concat(parts).sort(["day", "match_uid", "player_id"])
+    if df.select(["match_uid", "player_id"]).is_duplicated().any():
+        raise ValueError(
+            f"chain_shape {source.model}: duplicate (match_uid, player_id) rows"
+        )
+    leaked = df.filter(pl.col("day") <= pl.col("shape_train_end")).height
+    if leaked:
+        raise ValueError(
+            f"chain_shape {source.model}: {leaked} rows dated on/before their "
+            "train end"
+        )
+    return df
+
+
+def _chain_shape_transform(df: pl.DataFrame, model: str) -> pl.DataFrame:
+    """Engine transform: the chain's shape scalars keyed to each row. Returns
+    just the keyed outputs (bare names; the engine suffixes ``_<model>``)."""
+    frame = _cached_shape_frame(str(model))
+    shape = frame.select(
+        "match_uid", "player_id",
+        *[pl.col(c).alias(f"player_{c}") for c in SHAPE_COLUMNS],
+    )
+    return (
+        df.select("match_uid", "player_id")
+        .join(shape, on=["match_uid", "player_id"], how="left")
+        .select("match_uid", "player_id", *_SHAPE_OUTPUTS)
+    )
+
+
+register_transform(
+    name="chain_shape",
+    func=_chain_shape_transform,
+    outputs=_SHAPE_OUTPUTS,
+    params=["model"],
+    cache_salt=_prior_salt,
+    description=(
+        "The chain projection's distribution moments (dispersion, "
+        "decisiveness, serve texture) as features, resolved by config stem "
+        "(model=<stem>); null where the projection has no OOF/forward row"
+    ),
+)

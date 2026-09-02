@@ -24,6 +24,13 @@ import re
 from collections import defaultdict
 
 _WINDOW = re.compile(r"\(days=\d+\)$")
+# model=<stem> parameterization (prior / chain_shape specs, reachable via
+# features.extra) strips like a window: the family is the transform output,
+# not one garbled singleton per stem. Assumes model= is the spec's ONLY
+# parenthesized param — true for every such transform today; a transform
+# combining model= with a second param would need this (and discover.py's
+# stem regex) generalized.
+_MODEL_PARAM = re.compile(r"\(model=[^)]+\)$")
 
 # Combiner-only stems -> the family their base stat actually lives under.
 STEM_REMAP: dict[str, str] = {
@@ -116,6 +123,7 @@ MANUAL_FAMILIES: dict[str, str] = {
 def family_of(name: str) -> str | None:
     """Family key for one candidate column name, or None if unassignable."""
     base = _WINDOW.sub("", name)
+    base = _MODEL_PARAM.sub("", base)
     side = None
     for p in ("player_", "opp_"):
         if base.startswith(p):

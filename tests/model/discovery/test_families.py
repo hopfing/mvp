@@ -35,6 +35,17 @@ class TestFamilyRule:
         assert family_of("some_new_symmetric_thing") is None
         assert family_of("player_elo_diff_x_new_interaction") is None
 
+    def test_model_param_strips_like_a_window(self):
+        # model=-parameterized specs (features.extra's door) group by the
+        # transform output, never one garbled singleton family per stem.
+        assert (
+            family_of("player_chain_egames(model=two_level_flat)")
+            == family_of("player_chain_egames(model=other_stem)")
+        )
+        assert family_of("player_prior_logit(model=a_stem)") == family_of(
+            "player_prior_logit(model=b_stem)"
+        )
+
     def test_group_candidates_returns_residue(self):
         fams, unassigned = group_candidates([
             "player_hold_pct", "opp_hold_pct(days=30)", "mystery_column",

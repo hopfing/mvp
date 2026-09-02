@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+from types import SimpleNamespace
+
 import pytest
 import yaml
 from pydantic import ValidationError
@@ -548,6 +550,117 @@ class TestBaseUnionedIntoPool:
             config_path=self._config(tmp_path, [spec], exclude=[spec])
         )
         assert spec in disc._build_candidate_pool()
+
+
+class TestExtraCandidates:
+    """features.extra: additional CANDIDATES for specs enumeration never
+    lists (model=-parameterized transforms). Bypasses the enumeration
+    filters — an explicitly typed spec must not be silently starved by a
+    narrowing include list — but never the exclusion safety rules."""
+
+    def _config(self, tmp_path, extra, **features):
+        config_dict = {
+            "data": {"date_range": {"start": "2020-01-01", "end": "2025-12-31"}},
+            "discovery": {"features": {"extra": extra, **features}},
+            "model": {"type": "xgboost"},
+        }
+        path = tmp_path / "cfg.yaml"
+        with open(path, "w") as f:
+            yaml.dump(config_dict, f)
+        return path
+
+    def test_extra_joins_the_pool(self, tmp_path):
+        spec = "player_chain_egames(model=two_level_flat)"
+        disc = FeatureDiscovery(config_path=self._config(tmp_path, [spec]))
+        assert spec in disc._build_candidate_pool()
+
+    def test_extra_survives_a_narrowing_include(self, tmp_path):
+        spec = "player_chain_egames(model=two_level_flat)"
+        disc = FeatureDiscovery(config_path=self._config(
+            tmp_path, [spec], include=["player_win_pct_diff"]
+        ))
+        pool = disc._build_candidate_pool()
+        assert spec in pool
+        assert pool.count(spec) == 1
+
+    def test_extra_never_overrides_exclude(self, tmp_path):
+        spec = "player_chain_egames(model=two_level_flat)"
+        disc = FeatureDiscovery(config_path=self._config(
+            tmp_path, [spec], exclude=[spec]
+        ))
+        assert spec not in disc._build_candidate_pool()
+
+    def test_extra_is_a_candidate_not_a_seed(self, tmp_path):
+        spec = "player_chain_egames(model=two_level_flat)"
+        disc = FeatureDiscovery(config_path=self._config(tmp_path, [spec]))
+        assert spec not in disc.config.discovery.features.base
+
+    def test_extra_never_overrides_compute_only(self, tmp_path):
+        spec = "player_chain_egames(model=two_level_flat)"
+        disc = FeatureDiscovery(config_path=self._config(
+            tmp_path, [spec], compute_only=[spec]
+        ))
+        assert spec not in disc._build_candidate_pool()
+
+
+class TestEnsurePriorSources:
+    """The completeness pass regenerates every model=<stem> source the run
+    references (offset.prior + base + extra) before precompute — without it,
+    a missing/stale source crashes at the transform's refusal mid-run."""
+
+    def _disc(self, tmp_path, base=(), extra=(), offset_prior=None):
+        config_dict = {
+            "data": {"date_range": {"start": "2020-01-01", "end": "2025-12-31"}},
+            "discovery": {"features": {"base": list(base), "extra": list(extra)}},
+            "model": {"type": "xgboost"},
+        }
+        if offset_prior:
+            config_dict["offset"] = {"prior": offset_prior}
+        path = tmp_path / "cfg.yaml"
+        with open(path, "w") as f:
+            yaml.dump(config_dict, f)
+        return FeatureDiscovery(config_path=path)
+
+    def test_collects_offset_base_and_extra_stems_deduped(
+        self, tmp_path, monkeypatch
+    ):
+        import mvp.model.features.prior as prior_mod
+
+        ensured: list[str] = []
+        monkeypatch.setattr(
+            prior_mod, "resolve_prior",
+            lambda stem: SimpleNamespace(
+                model=stem, config_path=f"{stem}.yaml", fp="feedfeedfeed"
+            ),
+        )
+        monkeypatch.setattr(
+            prior_mod, "ensure_prior_artifacts",
+            lambda source, regenerate: ensured.append(
+                (source.model, regenerate)
+            ),
+        )
+        disc = self._disc(
+            tmp_path,
+            base=["player_prior_logit(model=stem_a)"],
+            extra=[
+                "player_chain_egames(model=stem_b)",
+                # same stem twice across lists -> ensured once
+                "player_chain_gstd(model=stem_b)",
+            ],
+            offset_prior="stem_a",
+        )
+        disc._ensure_prior_sources()
+        assert ensured == [("stem_a", True), ("stem_b", True)]
+
+    def test_no_sources_is_a_noop(self, tmp_path, monkeypatch):
+        import mvp.model.features.prior as prior_mod
+
+        def _boom(*a, **k):
+            raise AssertionError("should not resolve anything")
+
+        monkeypatch.setattr(prior_mod, "resolve_prior", _boom)
+        disc = self._disc(tmp_path, base=["player_elo_diff"])
+        disc._ensure_prior_sources()
 
 
 class TestResolvedMinDelta:
