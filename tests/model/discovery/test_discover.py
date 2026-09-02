@@ -328,12 +328,12 @@ class TestDiscoveryResult:
 
 
 class TestOffsetPoolMembership:
-    """`base` is never unioned into the candidate pool, so a seeded offset feature
-    the pool filters dropped would vanish from the feature matrix while forward
-    selection carried on unaware. Config validators can't see this — it depends on
-    the registry-resolved pool, not on config fields."""
+    """A seeded offset feature must have a matrix column. Base seeds are
+    unioned into the pool (matrix columns, not candidates), so base-seeded
+    offset features survive any filter — and config validation guarantees
+    every offset feature IS base-seeded."""
 
-    def _config(self, tmp_path, **features):
+    def _config(self, tmp_path, base=("player_elo_diff",), **features):
         import mvp.model.features  # noqa: F401
 
         config_dict = {
@@ -343,7 +343,7 @@ class TestOffsetPoolMembership:
             "discovery": {
                 "sweep_params": False,
                 "segment_analysis": False,
-                "features": {"base": ["player_elo_diff"], **features},
+                "features": {"base": list(base), **features},
             },
             "offset": {"feature": "player_elo_diff"},
         }
@@ -359,21 +359,26 @@ class TestOffsetPoolMembership:
 
         assert "player_elo_diff" in pool
 
-    def test_offset_feature_excluded_from_pool_raises(self, tmp_path):
+    def test_base_seeded_offset_feature_survives_exclude(self, tmp_path):
+        # exclude keeps it out of the CANDIDATE pool, but the base union
+        # restores its matrix column, so the offset fit works.
         config_path = self._config(tmp_path, exclude=["player_elo_diff"])
         discovery = FeatureDiscovery(config_path=config_path, verbose=False)
 
-        with pytest.raises(ValueError, match="not in the resolved candidate pool"):
-            discovery._build_candidate_pool()
+        assert "player_elo_diff" in discovery._build_candidate_pool()
 
-    def test_include_list_omitting_offset_feature_raises(self, tmp_path):
-        """The realistic version: an `include` list copied from an older run that
-        predates the feature being promoted to a seed."""
+    def test_base_seeded_offset_feature_survives_include_omission(self, tmp_path):
+        """An `include` list copied from an older run that predates the
+        feature being promoted to a seed — the base union restores it."""
         config_path = self._config(tmp_path, include=["player_win_pct_diff"])
         discovery = FeatureDiscovery(config_path=config_path, verbose=False)
 
-        with pytest.raises(ValueError, match="not in the resolved candidate pool"):
-            discovery._build_candidate_pool()
+        assert "player_elo_diff" in discovery._build_candidate_pool()
+
+    # An offset feature missing from base is impossible past config load —
+    # validate_offset_compatibility raises (covered in test_fast_selection) —
+    # so with the base union there is no reachable "offset feature not in
+    # pool" state left to test.
 
 
 class TestFeatureDiscovery:
@@ -502,6 +507,47 @@ class TestExcludeBase:
         )
         with pytest.raises(ValueError, match="matches no registered feature"):
             disc._build_candidate_pool()
+
+
+class TestBaseUnionedIntoPool:
+    """Base seeds join the matrix pool: a base spec with no matrix column
+    would KeyError every base+candidate evaluation to -inf and FS would halt
+    having discovered nothing (the model=-parameterized prior seed bug)."""
+
+    def _config(self, tmp_path, base, exclude=None):
+        features: dict = {"base": base}
+        if exclude:
+            features["exclude"] = exclude
+        config_dict = {
+            "data": {"date_range": {"start": "2020-01-01", "end": "2025-12-31"}},
+            "discovery": {"features": features},
+            "model": {"type": "xgboost"},
+        }
+        path = tmp_path / "cfg.yaml"
+        with open(path, "w") as f:
+            yaml.dump(config_dict, f)
+        return path
+
+    def test_parameterized_base_spec_joins_pool(self, tmp_path):
+        # model=-parameterized specs are never enumerated; base must union them
+        spec = "player_prior_logit(model=two_level_flat)"
+        disc = FeatureDiscovery(config_path=self._config(tmp_path, [spec]))
+        assert spec in disc._build_candidate_pool()
+
+    def test_enumerable_base_spec_not_duplicated(self, tmp_path):
+        spec = "player_days_since_surface"
+        disc = FeatureDiscovery(config_path=self._config(tmp_path, [spec]))
+        assert disc._build_candidate_pool().count(spec) == 1
+
+    def test_base_wins_over_exclude_in_the_matrix(self, tmp_path):
+        # An excluded spec stays out of the CANDIDATE pool, but a base seed the
+        # model will contain must still get a matrix column or every
+        # evaluation breaks. The selector keeps it out of `remaining` anyway.
+        spec = "player_days_since_surface"
+        disc = FeatureDiscovery(
+            config_path=self._config(tmp_path, [spec], exclude=[spec])
+        )
+        assert spec in disc._build_candidate_pool()
 
 
 class TestResolvedMinDelta:

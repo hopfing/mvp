@@ -552,29 +552,30 @@ class FeatureDiscovery:
                 f"{len(exclude_feats)} features from {len(feat_cfg.exclude_base)} base(s)"
             )
 
-        # `base` is never unioned into the pool — FeatureSelector takes all_features
-        # as-is — so a seed the filters above dropped stays in base_features while
-        # vanishing from the feature matrix. Forward selection would not notice
-        # (`remaining` is unaffected), but the offset fit indexes col_to_idx
-        # directly and would raise mid-precompute. Config validators can't catch
-        # this: it depends on the resolved pool, not on config fields.
-        offset_cfg = self.config.offset
-        if (
-            offset_cfg is not None
-            and offset_cfg.prior is not None
-            and offset_cfg.feature not in all_features
-        ):
-            # The prior transform is parameterised by model, so enumeration
-            # never lists it; the stage's own prior spec joins the pool here
-            # (it is also seeded in `base`, so it is a column of the matrix,
-            # not a candidate).
-            all_features = [*all_features, offset_cfg.feature]
-        if offset_cfg is not None and offset_cfg.feature not in all_features:
-            raise ValueError(
-                f"offset.feature={offset_cfg.feature!r} is not in the resolved "
-                "candidate pool — discovery.features include/exclude/exclude_base/"
-                "paramed_only dropped it. Seeding it in `base` does not add it back."
-            )
+        # The fast-selection matrix is built from this pool, and every scoring
+        # call evaluates base + candidate — a base seed with no matrix column
+        # KeyErrors every candidate to -inf and FS halts having discovered
+        # nothing, without crashing. Enumerable base specs are in the pool
+        # already; parameterised ones (`model=<stem>`) never are, so union
+        # whatever is missing. Matrix columns only, not candidates: the
+        # selector subtracts `base` from `remaining` (selection.py). Base wins
+        # over include/exclude here by design — a pinned seed the model WILL
+        # contain cannot be filtered out of the matrix without breaking every
+        # evaluation.
+        if feat_cfg.base:
+            missing_base = [b for b in feat_cfg.base if b not in all_features]
+            if missing_base:
+                self._log(
+                    f"base: unioned {len(missing_base)} non-enumerated seed(s) "
+                    f"into the matrix pool: {missing_base}"
+                )
+                all_features = [*all_features, *missing_base]
+
+        # No offset-specific pool handling needed: the config validator
+        # guarantees offset.feature is seeded in `base` (feature mode raises
+        # at load, prior mode auto-pins — config.py validate_offset_
+        # compatibility), and the base union above guarantees every base seed
+        # has a matrix column.
 
         return all_features
 
