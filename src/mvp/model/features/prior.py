@@ -126,7 +126,10 @@ class PriorSource:
     def regenerate_command(self) -> str:
         if self.kind == "projection":
             return f"poetry run py -m mvp iid-project {self.config_path.stem}"
-        return f"poetry run py -m mvp model {self.config_path.as_posix()}"
+        return (
+            f"poetry run py -m mvp model-report {self.config_path.as_posix()} "
+            "--no-confidence"
+        )
 
     @property
     def forward_regenerate_command(self) -> str:
