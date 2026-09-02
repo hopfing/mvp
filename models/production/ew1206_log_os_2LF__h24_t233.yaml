@@ -1,0 +1,57 @@
+data:
+  date_range:
+    end: 2025-12-31
+    start: 2023-01-01
+  filters:
+    circuit:
+    - tour
+    - chal
+    draw_type: singles
+    player_prior_logit_ew1206_23_log_os_22__h19_t238: not_null
+features:
+  include:
+  - elo_diff_x_rd_sum
+  - opp_level_gap_pts(days=730)
+  - opp_quality_win_rate
+  - opp_style_net_approach_frequency_matchup(days=30)
+  - opp_vs_opp_style_resid_xs(days=30)
+  - player_itf_match_pct_diff(days=365)
+  - player_melo_diff
+  - player_prior_logit(model=ew1206_23_log_os_22__h19_t238)
+  - player_prior_logit(model=two_level_flat)
+  - player_retirement_rate_diff(days=730)
+  - player_return_elo
+  - player_surface_ace_pct(days=180)
+  - player_surface_ret_first_serve_win_pct_diff(days=180)
+metrics:
+  objective:
+  - log_loss
+model:
+  params:
+    colsample_bylevel: 0.8455127485470694
+    colsample_bynode: 0.8607732928323605
+    colsample_bytree: 0.9181038641901479
+    gamma: 0.04822354691507047
+    grow_policy: lossguide
+    learning_rate: 0.01773323250471751
+    max_bin: 128
+    max_delta_step: 1
+    max_depth: 6
+    max_leaves: 208
+    min_child_weight: 15
+    n_estimators: 500
+    random_state: 42
+    reg_alpha: 0.45401129546795377
+    reg_lambda: 4.424102371253171
+    scale_pos_weight: 1.0791916619614224
+    subsample: 0.565252323835935
+    tree_method: hist
+  type: xgboost
+offset:
+  feature: player_prior_logit(model=ew1206_23_log_os_22__h19_t238)
+  type: logistic
+target: won
+validation:
+  initial_train_months: 12
+  test_months: 6
+  type: date_expanding
