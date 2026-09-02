@@ -11,7 +11,8 @@ experiments/
 models/*
 !models/production/
 !models/voters/
-projections/
+projections/*
+!projections/production/
 
 # Environment
 .env

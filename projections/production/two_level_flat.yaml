@@ -1,0 +1,117 @@
+description: Serve FS, first_in component. Chain metric (CRPS game spread), match
+  and point candidates searched jointly over the Phase-A shortlist, nothing pinned.
+data:
+  date_range:
+    start: 2022-01-01
+    end: 2025-12-31
+  filters:
+    circuit:
+    - tour
+    - chal
+    draw_type: singles
+    best_of: 3
+  exclude_incomplete: false
+features:
+  include:
+  - player_tourn_svc_df_pct
+  - player_tourn_pts_service_lost
+  - opp_surface_ret_second_serve_win_pct_vs_surf_spec(days=180)
+  - player_tourn_pts_service_won_per_match
+  - player_tourn_pts_total_played_per_match
+  - player_surface_matches(days=30)
+  - opp_tourn_svc_df_pct
+  - opp_tourn_pts_service_lost
+  - player_surface_ret_second_serve_win_pct_vs_surf_spec(days=180)
+  - opp_tourn_pts_service_won_per_match
+  - opp_tourn_pts_total_played_per_match
+  - opp_surface_matches(days=30)
+  - opp_ret_elo_surface_indoor_matchup
+  - player_ret_elo_surface_indoor_matchup
+  - player_vs_opp_style_resid_flat_diff
+  - player_glicko_rd_diff
+  - opp_glicko_rd_diff
+  - player_tour_match_pct
+  - opp_tour_match_pct
+  - opp_surface_adj
+  - player_surface_adj
+  - player_elo_surface_indoor
+  - opp_elo_surface_indoor
+  - opp_opp_elo_faced_avg(days=730)
+  - player_opp_elo_faced_avg(days=730)
+  - player_iid_hold_prob(days=30)
+  - opp_iid_hold_prob(days=30)
+  - player_opp_elo_faced_avg_diff(days=730)
+  - opp_opp_elo_faced_avg_diff(days=730)
+  - player_tourn_max_match_minutes_diff
+  - opp_tourn_max_match_minutes_diff
+  - player_tourn_pts_service_lost_per_set
+  - opp_tourn_pts_service_lost_per_set
+  - player_days_since_surface_diff
+  - opp_days_since_surface_diff
+  - opp_age
+  - player_age
+  - player_tourn_pts_total_lost_per_match
+  - opp_tourn_pts_total_lost_per_match
+metrics:
+  objective: [iid_total_cal, iid_spread_cal]
+serve_model:
+  type: two_level
+  window: 90
+  clip_min: 0.3
+  clip_max: 0.9
+  gap_shrink: 1.0
+  surface_circuit_offset: {}
+  feature_columns: []
+  match_level_columns: []
+  regressor:
+    type: ridge
+    params: {}
+  model_type: xgboost
+  posterior_draws: 200
+  posterior_seed: 0
+  match_level_features: []
+  point_level_features: []
+  params:
+    n_estimators: 100
+    max_depth: 3
+    learning_rate: 0.05
+    subsample: 0.8
+    colsample_bytree: 0.8
+    min_child_weight: 5
+    gamma: 1.0
+    reg_lambda: 1.0
+    reg_alpha: 0.0
+    tree_method: hist
+    random_state: 42
+    n_jobs: 6
+  first_in_match_features: []
+  first_in_point_features: []
+  first_in_params: {}
+  win_first_match_features:
+  - opp_ret_elo_surface_indoor_matchup
+  - player_vs_opp_style_resid_flat_diff
+  - player_glicko_rd_diff
+  - player_tour_match_pct
+  - opp_surface_adj
+  - opp_surface_matches(days=30)
+  win_first_point_features:
+  - sets_won_asymmetry
+  win_second_match_features:
+  - player_elo_surface_indoor
+  - player_vs_opp_style_resid_flat_diff
+  - opp_opp_elo_faced_avg(days=730)
+  - player_glicko_rd_diff
+  - player_iid_hold_prob(days=30)
+  - player_opp_elo_faced_avg_diff(days=730)
+  - player_tourn_max_match_minutes_diff
+  - player_tourn_pts_service_lost_per_set
+  - player_days_since_surface_diff
+  - opp_age
+  - player_tourn_pts_total_lost_per_match
+  win_second_point_features:
+  - sets_won_asymmetry
+  - set_score_asymmetry
+validation:
+  type: date_expanding
+  initial_train_months: 12
+  test_months: 6

@@ -68,7 +68,10 @@ CONFIG_DIRS = (Path("models"), Path("models") / "production")
 # Projection configs live where iid-project runs them (projections/); a
 # specific sweep trial is pinned by placing its snapshot config there under
 # its own stem. A stem present in BOTH namespaces is refused, never guessed.
-PROJECTION_CONFIG_DIRS = (Path("projections"),)
+# projections/ is scratch (gitignored); projections/production/ is versioned —
+# any projection config a PRODUCTION model references lives there so it
+# reaches every checkout, mirroring models/ vs models/production/.
+PROJECTION_CONFIG_DIRS = (Path("projections"), Path("projections/production"))
 # Test seams, consulted at call time: where evaluations / backtests live
 # (None = the data root's model_evaluations / backtests /
 # projection_evaluations).
