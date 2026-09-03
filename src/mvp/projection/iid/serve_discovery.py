@@ -621,7 +621,18 @@ class ServeDiscoverySelector:
                 else -math.inf
             )
             if best_cand is None or best_delta < self.config.min_delta:
-                logger.info("FS halting: no candidate exceeds min_delta=%.6f (best=%.6f)", self.config.min_delta, best_delta)
+                reason = (
+                    "no candidate produced a finite score" if best_cand is None
+                    else f"improvement {best_delta:.6f} < min_delta {self.config.min_delta:.6f}"
+                )
+                logger.info("FS halting: %s", reason)
+                # The halt round's ranking is the only record of what nearly
+                # cleared the bar — same `stop` record shape as the
+                # classification path (selection.py) so one reader serves both.
+                _append_fs_history(history_path, self._stop_record(
+                    round_idx, reason, current_score, best_cand, best_new_score,
+                    this_round_scores, is_minimize(self.config.metric),
+                ))
                 break
 
             if best_grain == "match":
@@ -880,6 +891,34 @@ class ServeDiscoverySelector:
         else:  # pragma: no cover - Literal-constrained
             raise ValueError(f"unknown serve_component: {component!r}")
         return build_serve_model(cfg, engine=self._engine)
+
+    @staticmethod
+    def _stop_record(
+        round_idx: int,
+        reason: str,
+        current_score: float,
+        best_cand: str | None,
+        best_score: float,
+        this_round_scores: dict[str, float],
+        minimize: bool,
+    ) -> dict[str, Any]:
+        """History record for a halted round: the classification path's `stop`
+        shape (selection.py) plus the finite-ranked candidates of the round."""
+        ranked = sorted(
+            ((f, m) for f, m in this_round_scores.items() if math.isfinite(m)),
+            key=lambda x: x[1],
+            reverse=not minimize,
+        )
+        return {
+            "round": round_idx,
+            "action": "stop",
+            "reason": reason,
+            "metric": current_score,
+            "best_candidate": best_cand,
+            "best_candidate_metric": best_score if best_cand is not None else None,
+            "n_non_finite": len(this_round_scores) - len(ranked),
+            "ranking": ranked,
+        }
 
     def _score_cv(
         self,
