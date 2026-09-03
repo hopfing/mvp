@@ -351,13 +351,21 @@ def resolve_prior(
 
 
 def prior_artifacts_ready(source: PriorSource) -> bool:
-    """Fold OOF present with the probability column the kind requires."""
+    """Fold OOF present with the columns the kind's CURRENT schema requires.
+
+    For projection sources the schema includes the chain-shape columns: the
+    writers always emit them now, so an artifact without them predates the
+    schema and must read as stale — otherwise the discovery completeness pass
+    short-circuits and the chain_shape transform crashes downstream on the
+    old file (the 2026-09-03 probe failure)."""
     if source.kind == "projection":
         p = source.fold_match_win
         if not p.exists():
             return False
         cols = pl.scan_parquet(p).collect_schema().names()
-        return {"p_match_win_a", "player_id", "opp_id", "won_a"} <= set(cols)
+        required = {"p_match_win_a", "player_id", "opp_id", "won_a"}
+        required |= set(SHAPE_COLUMNS)
+        return required <= set(cols)
     p = source.fold_predictions
     if not p.exists():
         return False
@@ -369,15 +377,17 @@ def _forward_artifact_ready(source: PriorSource) -> bool:
     usable: the pmf with the columns `_projection_forward_rows` needs, or the
     ledger with the columns `_backtest_rows` needs. Without it every row after
     the evaluation window has a null prior, which an offset's not_null filter
-    turns into an empty predict set (the 2026-08-31 backtest failure)."""
+    turns into an empty predict set (the 2026-08-31 backtest failure).
+    Projection pmfs must also carry the chain-shape columns (same staleness
+    rule as the fold artifact)."""
     if source.kind == "projection":
         p = source.pmf_parquet
         if not p.exists():
             return False
         cols = pl.scan_parquet(p).collect_schema().names()
-        return {
+        return ({
             "player_id", "opp_id", "p_match_win_a", "effective_match_date",
-        } <= set(cols)
+        } | set(SHAPE_COLUMNS)) <= set(cols)
     p = source.backtest_csv
     if not p.exists():
         return False
@@ -901,9 +911,11 @@ def _shape_read(path: Path, source: PriorSource) -> pl.DataFrame:
     missing = ({"match_uid", "player_id", "opp_id", "effective_match_date"}
                | set(SHAPE_COLUMNS)) - set(df.columns)
     if missing:
+        cmd = (source.forward_regenerate_command
+               if path == source.pmf_parquet else source.regenerate_command)
         raise ValueError(
             f"{path} is missing shape columns {sorted(missing)} (predates the "
-            f"chain_shape artifact schema). Regenerate: {source.regenerate_command}"
+            f"chain_shape artifact schema). Regenerate: {cmd}"
         )
     return df
 

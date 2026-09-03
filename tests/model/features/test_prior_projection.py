@@ -47,6 +47,8 @@ def _fold_match_win(
         wins = [i % 2 for i in range(n)]
     if probs is None:
         probs = list(np.linspace(0.55, 0.75, n))
+    from mvp.common.chain_shape import SHAPE_COLUMNS
+
     return pl.DataFrame({
         "match_uid": [f"M{i}" for i in range(n)],
         "player_id": [f"A{i}" for i in range(n)],
@@ -55,12 +57,17 @@ def _fold_match_win(
         "fold_idx": pl.Series(folds, dtype=pl.Int32),
         "p_match_win_a": probs,
         "won_a": pl.Series(wins, dtype=pl.Int8),
+        # shape columns are part of the projection artifact schema now;
+        # readiness treats their absence as a stale artifact
+        **{c: [0.5] * n for c in SHAPE_COLUMNS},
     })
 
 
 def _write_pmf(src) -> None:
     """A minimal valid forward pmf: the columns `_forward_artifact_ready` and
     `_projection_forward_rows` require, dated after the OOF window."""
+    from mvp.common.chain_shape import SHAPE_COLUMNS
+
     src.eval_dir.mkdir(parents=True, exist_ok=True)
     pl.DataFrame({
         "match_uid": ["F0"],
@@ -68,6 +75,7 @@ def _write_pmf(src) -> None:
         "opp_id": ["B0"],
         "effective_match_date": [date(2026, 2, 1)],
         "p_match_win_a": [0.6],
+        **{c: [0.5] for c in SHAPE_COLUMNS},
     }).write_parquet(src.pmf_parquet)
 
 
