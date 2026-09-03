@@ -54,9 +54,19 @@ def _market_transform(df: pl.DataFrame) -> pl.DataFrame:
     )
 
 
+def _market_salt() -> str:
+    """Freshness of the external artifact this transform reads. Without a
+    salt the cache entry would outlive rebuilds of market_prior.parquet —
+    under per-spec invalidation there is no accidental global wipe left to
+    save it (granular-cache plan, round-3 finding)."""
+    p = paths.stage_root() / PRIOR_PATH_NAME
+    return str(int(p.stat().st_mtime)) if p.exists() else "-"
+
+
 register_transform(
     name="market_prior",
     func=_market_transform,
     outputs=_OUTPUTS,
+    cache_salt=_market_salt,
     description="Entry-book opening moneyline, de-vigged, as prob and log-odds",
 )

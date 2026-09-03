@@ -1,9 +1,11 @@
 """Feature Engine for computing features from matches data."""
 
 
+import ast
 import ctypes
 import ctypes.wintypes
 import hashlib
+import importlib.util
 import inspect
 import json
 import logging
@@ -343,6 +345,209 @@ def get_feature_columns(feature_specs: list[str]) -> list[str]:
     return cols
 
 
+# ---------------------------------------------------------------------------
+# Per-feature code signatures (plan: 2026-09-03-granular-feature-cache).
+#
+# A feature's cached value is stale when ANY code that produced it changed:
+# its defining module, every first-party module that module transitively
+# imports (from ALL scopes -- prior.py lazy-imports its calibrator inside
+# function bodies), and the features it depends_on (the diff/matchup
+# closures live in registry.py; only depends_on links them to their base's
+# module). No hand-enumerated helper list at any grain: three review rounds
+# showed every such list (functions, modules, namespace prefixes) leaves a
+# silent false-VALID hole.
+#
+# Known over-inclusion (accepted, plan rev 5): most closures are 3-5 modules,
+# but prior.py and style_matchup_retrieval.py lazy-import the runner/backtest,
+# which reach the mvp.model.features registration hub — their closures span
+# ~200+ modules. An edit almost anywhere first-party recomputes those specs.
+# That is the design working, not a bug: stale-serving risk is priced above
+# recompute cost, and those transforms genuinely execute that code.
+# ---------------------------------------------------------------------------
+
+_FIRST_PARTY = "mvp"
+_module_closure_cache: dict[str, str] = {}
+_feature_sig_cache: dict[str, str] = {}
+_root_dir_cache: dict[str, Path | None] = {}
+
+
+def _clear_signature_caches() -> None:
+    """Test seam: signatures are memoized for the process lifetime."""
+    _module_closure_cache.clear()
+    _feature_sig_cache.clear()
+    _root_dir_cache.clear()
+
+
+def _root_package_dir(root: str) -> Path | None:
+    """Directory of a TOP-LEVEL package, located without executing any code.
+
+    ``find_spec`` on a dotted name imports the parent packages to reach the
+    child — and mvp's ``__init__.py`` files are not empty, so that pulled
+    hundreds of unrelated modules into every signature computation (round-2
+    implementation-review HIGH: ~45MB/~2.3s per fresh ``mvp live`` process,
+    plus an uncaught-exception path through any broken import in that reach).
+    A top-level lookup has no parents, so nothing runs; everything below the
+    root resolves on the filesystem in ``_module_file``."""
+    if root not in _root_dir_cache:
+        try:
+            spec = importlib.util.find_spec(root)
+        except (ImportError, ValueError):
+            spec = None
+        locs = getattr(spec, "submodule_search_locations", None) if spec else None
+        _root_dir_cache[root] = Path(next(iter(locs))) if locs else None
+    return _root_dir_cache[root]
+
+
+def _module_file(modname: str) -> Path | None:
+    """The .py file for a dotted first-party name, resolved purely from the
+    filesystem — never sys.modules, never a parent-package import.
+
+    Signatures must be a pure function of the code on disk, not of which
+    modules a particular process happened to import first: gating on
+    sys.modules made the closure silently truncate for lazily-imported
+    modules (prior.py's function-body imports of backtest/calibration —
+    the round-1 implementation-review blocker)."""
+    parts = modname.split(".")
+    root = _root_package_dir(parts[0])
+    if root is None:
+        return None
+    if len(parts) == 1:
+        init = root / "__init__.py"
+        return init if init.is_file() else None
+    path = root
+    for seg in parts[1:-1]:
+        path = path / seg
+        if not (path / "__init__.py").is_file():
+            return None
+    pkg_init = path / parts[-1] / "__init__.py"
+    if pkg_init.is_file():
+        return pkg_init
+    mod = path / (parts[-1] + ".py")
+    return mod if mod.is_file() else None
+
+
+def _module_source(modname: str) -> str:
+    f = _module_file(modname)
+    if f is None:
+        return ""
+    try:
+        return f.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
+def _is_package(modname: str) -> bool:
+    f = _module_file(modname)
+    return f is not None and f.name == "__init__.py"
+
+
+def _is_module(modname: str) -> bool:
+    return _module_file(modname) is not None
+
+
+def _first_party_imports(modname: str) -> set[str]:
+    """First-party modules imported by ``modname``, from ALL scopes.
+
+    ``ast.walk`` deliberately (not just top-level statements): function-body
+    lazy imports are common in this codebase and carry code that changes
+    feature values. ``from pkg import name`` contributes ``pkg`` and, when
+    ``pkg.name`` is itself a module, that submodule too. Relative imports
+    resolve against the importer's package.
+    """
+    src = _module_source(modname)
+    if not src:
+        return set()
+    try:
+        tree = ast.parse(src)
+    except SyntaxError:
+        return set()
+    # Relative-import anchor: a PACKAGE's own __package__ is itself; a plain
+    # module's is its parent. (Several mvp __init__.py files re-export real
+    # imports — mvp.model, mvp.model.features — so the distinction matters.)
+    if _is_package(modname):
+        pkg = modname
+    else:
+        pkg = modname.rsplit(".", 1)[0] if "." in modname else modname
+    out: set[str] = set()
+
+    def _add(name: str) -> None:
+        if name == _FIRST_PARTY or name.startswith(_FIRST_PARTY + "."):
+            out.add(name)
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                _add(alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                base = pkg
+                for _ in range(node.level - 1):
+                    base = base.rsplit(".", 1)[0] if "." in base else base
+                target = f"{base}.{node.module}" if node.module else base
+            else:
+                target = node.module or ""
+            if not target:
+                continue
+            _add(target)
+            for alias in node.names:
+                # `from pkg import name`: include pkg.name when it IS a
+                # module — resolved from disk, never from sys.modules
+                # (import-timing independence, same rule as _module_source).
+                sub = f"{target}.{alias.name}"
+                if (sub == _FIRST_PARTY or sub.startswith(_FIRST_PARTY + ".")) \
+                        and _is_module(sub):
+                    _add(sub)
+    return out
+
+
+def _module_closure_hash(modname: str) -> str:
+    """Hash of the module's source plus its transitive first-party import
+    closure. Memoized for the process; cycle-guarded by the visited set."""
+    cached = _module_closure_cache.get(modname)
+    if cached is not None:
+        return cached
+    visited: set[str] = set()
+    stack = [modname]
+    while stack:
+        m = stack.pop()
+        if m in visited:
+            continue
+        visited.add(m)
+        stack.extend(_first_party_imports(m) - visited)
+    parts = [f"{m}\n{_module_source(m)}" for m in sorted(visited)]
+    digest = hashlib.md5("\n===\n".join(parts).encode()).hexdigest()
+    _module_closure_cache[modname] = digest
+    return digest
+
+
+def feature_code_signature(registry, name: str, _seen: frozenset = frozenset()) -> str:
+    """Code signature for one registered feature: defining-module closure
+    + output names (transforms; data the source cannot see) + the signatures
+    of everything in ``depends_on``, transitively (the feature-column graph
+    — distinct from the import graph, both required)."""
+    if not _seen:
+        cached = _feature_sig_cache.get(name)
+        if cached is not None:
+            return cached
+    feat = registry.get(name)
+    mod = inspect.getmodule(feat.func)
+    parts = [_module_closure_hash(mod.__name__ if mod else "<unknown>")]
+    if feat.transform:
+        parts.append("outputs=" + ",".join(feat.outputs))
+    if name not in _seen:
+        for dep in sorted(feat.depends_on):
+            try:
+                parts.append(
+                    feature_code_signature(registry, dep, _seen | {name})
+                )
+            except KeyError:
+                parts.append(f"missing-dep:{dep}")
+    digest = hashlib.md5(":".join(parts).encode()).hexdigest()
+    if not _seen:
+        _feature_sig_cache[name] = digest
+    return digest
+
+
 class FeatureEngine:
     """Engine for computing features from matches.parquet.
 
@@ -382,17 +587,40 @@ class FeatureEngine:
         self._manifest: dict[str, Any] = self._load_manifest()
         # Per-feature compute timings (phase, spec, seconds); reset per ensure_cached.
         self._feature_timings: list[tuple[str, str, float]] = []
+        # (spec, base_name) pairs whose entries failed the code check this
+        # run — feeds the granular-invalidation log line.
+        self._stale_code_specs: set[tuple[str, str]] = set()
+
+    _MANIFEST_SCHEMA = 2
+
+    def _fresh_manifest(self) -> dict[str, Any]:
+        return {"schema": self._MANIFEST_SCHEMA, "cache_key": None, "features": {}}
 
     def _load_manifest(self) -> dict[str, Any]:
         """Load the cache manifest from disk.
 
-        Validates that all referenced parquet files actually exist,
-        pruning stale entries (e.g., from partial syncs across machines).
+        Schema v2: `cache_key` holds the DATA identity only; each feature
+        entry carries its own `code` signature. A v1 manifest (no `schema`)
+        or an unparseable file (truncated by a killed run) is treated as
+        empty — one full rebuild, never a crash. Validates that referenced
+        parquet files exist, pruning stale entries (partial syncs).
         """
         if not self._manifest_path.exists():
-            return {"cache_key": None, "features": {}}
-        with open(self._manifest_path) as f:
-            manifest = json.load(f)
+            return self._fresh_manifest()
+        try:
+            with open(self._manifest_path) as f:
+                manifest = json.load(f)
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning(
+                "Cache manifest unreadable (%s); starting fresh (full rebuild)", e
+            )
+            return self._fresh_manifest()
+        if manifest.get("schema") != self._MANIFEST_SCHEMA:
+            logger.info(
+                "Cache manifest schema %s -> %s migration: full rebuild",
+                manifest.get("schema", 1), self._MANIFEST_SCHEMA,
+            )
+            return self._fresh_manifest()
         # Prune entries whose files are missing (partial sync, interrupted write)
         features = manifest.get("features", {})
         missing = [
@@ -407,14 +635,17 @@ class FeatureEngine:
                 len(missing),
             )
             manifest["features"] = features
-            with open(self._manifest_path, "w") as f:
-                json.dump(manifest, f, indent=2)
+            self._manifest = manifest
+            self._save_manifest()
         return manifest
 
     def _save_manifest(self) -> None:
-        """Save the cache manifest to disk."""
-        with open(self._manifest_path, "w") as f:
+        """Save the cache manifest atomically (temp + replace): a killed run
+        must never leave a truncated manifest behind."""
+        tmp = self._manifest_path.with_suffix(".json.tmp")
+        with open(tmp, "w") as f:
             json.dump(self._manifest, f, indent=2)
+        os.replace(tmp, self._manifest_path)
 
     def _compute_matches_hash(self) -> str:
         """Compute a hash of the matches data for cache invalidation.
@@ -484,43 +715,21 @@ class FeatureEngine:
             logger.info("Dropped %d walkover rows from feature stream", dropped)
         return df
 
-    def _compute_registry_hash(self) -> str:
-        """Compute a hash of all feature function source code.
+    def _feature_code(self, base_name: str) -> str:
+        """This feature's code signature (module-level machinery above)."""
+        return feature_code_signature(self._registry, base_name)
 
-        Detects when feature implementations change so cached values
-        from old code are not served.  Falls back to bytecode if source
-        files changed on disk after import (inspect.getsource fails).
-        """
-        sources = []
-        for name in sorted(self._registry.list_features()):
-            feat = self._registry.get(name)
-            try:
-                if feat.transform:
-                    # A transform's func calls module-level helpers (e.g.
-                    # combine_match_level / compute_form_a) and declares its
-                    # column names in `outputs` (data, not code) — neither is in
-                    # the func source, so a change there would leave the cache
-                    # stale under an unchanged key. Fingerprint the whole defining
-                    # module + the output names instead.
-                    mod = inspect.getmodule(feat.func)
-                    sig = inspect.getsource(mod) if mod else inspect.getsource(feat.func)
-                    sig += "\noutputs=" + ",".join(feat.outputs)
-                else:
-                    sig = inspect.getsource(feat.func)
-            except OSError:
-                sig = feat.func.__code__.co_code.hex()
-            sources.append(f"{name}:{sig}")
-        return hashlib.md5("\n".join(sources).encode()).hexdigest()
-
-    def _compute_cache_key(self) -> str:
-        """Combined key: matches data + feature code."""
-        return f"{self._compute_matches_hash()}:{self._compute_registry_hash()}"
+    def _compute_data_key(self) -> str:
+        """DATA identity only. Code identity lives per manifest entry
+        (`code`), so a feature-module edit invalidates its own specs
+        instead of wiping all ~4,800."""
+        return self._compute_matches_hash()
 
     def _invalidate_cache(self) -> None:
         """Delete all cached feature files and reset the manifest."""
         for f in self.cache_dir.glob("*.parquet"):
             f.unlink()
-        self._manifest = {"cache_key": None, "features": {}}
+        self._manifest = self._fresh_manifest()
         self._save_manifest()
 
     def _get_cache_path(self, spec: str) -> Path:
@@ -529,15 +738,20 @@ class FeatureEngine:
         return self.cache_dir / f"{safe_name}.parquet"
 
     def _is_cached(
-        self, spec: str, cache_key: str, salt: str | None = None
+        self, spec: str, data_key: str, base_name: str,
+        salt: str | None = None,
     ) -> bool:
-        """Check if a feature is cached and valid. ``salt`` (transforms with
-        a ``cache_salt``) must match what the manifest recorded at compute
-        time: it names external artifacts the standard key cannot see."""
-        if self._manifest.get("cache_key") != cache_key:
+        """Check if a feature is cached and valid: the DATA key (global),
+        this feature's own CODE signature (per entry — the granular half),
+        the transform ``salt`` when one exists (external artifacts no code
+        signature can see), and the file on disk."""
+        if self._manifest.get("cache_key") != data_key:
             return False
         entry = self._manifest.get("features", {}).get(spec)
         if entry is None:
+            return False
+        if entry.get("code") != self._feature_code(base_name):
+            self._stale_code_specs.add((spec, base_name))
             return False
         if salt is not None and entry.get("salt") != salt:
             return False
@@ -553,23 +767,80 @@ class FeatureEngine:
         cache_path = self._get_cache_path(spec)
         return pl.read_parquet(cache_path)
 
+    def _log_stale_code_specs(self) -> None:
+        """Granular counterpart of the old whole-cache 'Cache invalidated'
+        line: name what was recomputed for code changes, and where."""
+        if not self._stale_code_specs:
+            return
+        modules = set()
+        for _spec, base_name in self._stale_code_specs:
+            feat = self._registry.get(base_name)
+            mod = inspect.getmodule(feat.func)
+            modules.add(mod.__name__ if mod else "<unknown>")
+        logger.info(
+            "%d spec(s) recomputed: code changed (modules: %s)",
+            len(self._stale_code_specs), ", ".join(sorted(modules)),
+        )
+        self._stale_code_specs = set()
+
     def _cache_feature(
-        self, spec: str, df: pl.DataFrame, columns: list[str], cache_key: str,
-        salt: str | None = None,
+        self, spec: str, df: pl.DataFrame, columns: list[str], data_key: str,
+        base_name: str, salt: str | None = None,
     ) -> None:
         """Cache a computed feature to disk."""
         cache_path = self._get_cache_path(spec)
         key_cols = ["match_uid", "player_id"]
         df.select(key_cols + columns).write_parquet(cache_path)
 
-        self._manifest["cache_key"] = cache_key
+        self._manifest["cache_key"] = data_key
         if "features" not in self._manifest:
             self._manifest["features"] = {}
-        entry = {"columns": columns, "path": str(cache_path)}
+        entry = {
+            "columns": columns,
+            "path": str(cache_path),
+            "code": self._feature_code(base_name),
+        }
         if salt is not None:
             entry["salt"] = salt
         self._manifest["features"][spec] = entry
         self._save_manifest()
+
+    def _transform_cache_state(
+        self, spec: str, cache_key: str
+    ) -> tuple[str, dict, str, list[str], str | None, Any, bool]:
+        """Parse one transform spec and check its cache — the SINGLE
+        check-side sequence both ensure_cached and compute call (plan build
+        item 1: the two near-duplicate methods must not drift)."""
+        _prefix, base_name, _full, params = parse_feature_spec(spec)
+        feature_def = self._registry.get(base_name)
+        cache_spec = base_name
+        output_cols = list(feature_def.outputs)
+        if params:
+            param_str = ",".join(f"{k}={v}" for k, v in params.items())
+            cache_spec = f"{base_name}({param_str})"
+            output_cols = [
+                build_column_name(o, params) for o in feature_def.outputs
+            ]
+        salt = self._transform_salt(feature_def, params)
+        cached = self._is_cached(cache_spec, cache_key, base_name, salt)
+        return base_name, params, cache_spec, output_cols, salt, feature_def, cached
+
+    def _run_and_cache_transform(
+        self, df: pl.DataFrame, feature_def, params: dict, cache_spec: str,
+        output_cols: list[str], cache_key: str, base_name: str,
+        salt: str | None,
+    ) -> pl.DataFrame:
+        """Compute one transform variant and cache its keyed output frame —
+        the SINGLE compute-side sequence shared by both methods."""
+        out = feature_def.func(df, **params)
+        if params:
+            out = out.rename(
+                {o: build_column_name(o, params) for o in feature_def.outputs}
+            )
+        self._cache_feature(
+            cache_spec, out, output_cols, cache_key, base_name, salt=salt
+        )
+        return out
 
     def _compute_and_cache_feature(
         self,
@@ -590,7 +861,7 @@ class FeatureEngine:
         # Record timing for the end-of-run summary instead of one INFO line each.
         self._feature_timings.append((phase, cache_spec, elapsed))
         logger.debug("Computed %s in %.2fs", cache_spec, elapsed)
-        self._cache_feature(cache_spec, df, [col_name], cache_key)
+        self._cache_feature(cache_spec, df, [col_name], cache_key, base_name)
         return df
 
     def _log_timing_summary(self) -> None:
@@ -916,10 +1187,13 @@ class FeatureEngine:
         check_memory("ensure_cached: after parquet load")
 
         # Cache validity
-        cache_key = self._compute_cache_key()
+        cache_key = self._compute_data_key()  # DATA identity; code is per-entry
         if self._manifest.get("cache_key") != cache_key:
-            logger.info("Cache invalidated — recomputing all features")
+            logger.info(
+                "Cache invalidated — matches data changed; recomputing all features"
+            )
             self._invalidate_cache()
+        self._stale_code_specs = set()
 
         # Phase 0: match-level features (small, do all at once)
         for spec in tqdm(
@@ -932,7 +1206,7 @@ class FeatureEngine:
             if params:
                 param_str = ",".join(f"{k}={v}" for k, v in params.items())
                 cache_spec = f"{base_name}({param_str})"
-            if not self._is_cached(cache_spec, cache_key):
+            if not self._is_cached(cache_spec, cache_key, base_name):
                 df = self._compute_and_cache_feature(
                     df, base_name, cache_spec, col_name, params, cache_key,
                     phase="match-level",
@@ -957,7 +1231,7 @@ class FeatureEngine:
             if params:
                 param_str = ",".join(f"{k}={v}" for k, v in params.items())
                 cache_spec = f"player_{base_name}({param_str})"
-            if not self._is_cached(cache_spec, cache_key):
+            if not self._is_cached(cache_spec, cache_key, base_name):
                 uncached_base.append((base_name, cache_spec, player_col, params))
 
         # Process uncached base features in batches
@@ -1018,7 +1292,7 @@ class FeatureEngine:
             if params:
                 param_str = ",".join(f"{k}={v}" for k, v in params.items())
                 cache_spec = f"player_{base_name}({param_str})"
-            if self._is_cached(cache_spec, cache_key):
+            if self._is_cached(cache_spec, cache_key, base_name):
                 continue
 
             # Load dependencies from cache onto df
@@ -1076,7 +1350,7 @@ class FeatureEngine:
             if params:
                 param_str = ",".join(f"{k}={v}" for k, v in params.items())
                 cache_spec = f"{base_name}({param_str})"
-            if self._is_cached(cache_spec, cache_key):
+            if self._is_cached(cache_spec, cache_key, base_name):
                 continue
 
             feature_def = self._registry.get(base_name)
@@ -1124,14 +1398,9 @@ class FeatureEngine:
             transform_specs, desc="Phase 7: transforms",
             leave=False, ncols=120, disable=not transform_specs,
         ):
-            _prefix, base_name, _full, params = parse_feature_spec(spec)
-            feature_def = self._registry.get(base_name)
-            cache_spec = base_name
-            if params:
-                param_str = ",".join(f"{k}={v}" for k, v in params.items())
-                cache_spec = f"{base_name}({param_str})"
-            salt = self._transform_salt(feature_def, params)
-            if self._is_cached(cache_spec, cache_key, salt):
+            (base_name, params, cache_spec, output_cols, salt, feature_def,
+             cached) = self._transform_cache_state(spec, cache_key)
+            if cached:
                 continue
 
             dep_cols_before = set(df.columns)
@@ -1145,17 +1414,13 @@ class FeatureEngine:
                 df = self._mirror_features(df, player_dep_cols)
 
             t0_t = time.perf_counter()
-            out = feature_def.func(df, **params)  # keyed output frame (bare cols)
-            output_cols = feature_def.outputs
-            if params:
-                out = out.rename(
-                    {o: build_column_name(o, params) for o in output_cols}
-                )
-                output_cols = [build_column_name(o, params) for o in feature_def.outputs]
+            self._run_and_cache_transform(
+                df, feature_def, params, cache_spec, output_cols, cache_key,
+                base_name, salt,
+            )
             self._feature_timings.append(
                 ("transform", cache_spec, time.perf_counter() - t0_t)
             )
-            self._cache_feature(cache_spec, out, output_cols, cache_key, salt=salt)
 
             added_cols = [c for c in df.columns if c not in dep_cols_before]
             if added_cols:
@@ -1166,6 +1431,7 @@ class FeatureEngine:
             check_memory("ensure_cached: after transforms")
 
         self._log_timing_summary()
+        self._log_stale_code_specs()
         elapsed = time.perf_counter() - t0
         logger.info("ensure_cached complete in %.1fs", elapsed)
         return cache_key
@@ -1379,10 +1645,13 @@ class FeatureEngine:
         check_memory("after parquet load")
 
         # Check cache validity — wipe everything if data or code changed
-        cache_key = self._compute_cache_key()
+        cache_key = self._compute_data_key()  # DATA identity; code is per-entry
         if self._manifest.get("cache_key") != cache_key:
-            logger.info("Cache invalidated — recomputing all features")
+            logger.info(
+                "Cache invalidated — matches data changed; recomputing all features"
+            )
             self._invalidate_cache()
+        self._stale_code_specs = set()
 
         # Phase 0: compute match-level features (no prefix)
         computed_match_level: set[str] = set()
@@ -1398,7 +1667,7 @@ class FeatureEngine:
             if params:
                 param_str = ",".join(f"{k}={v}" for k, v in params.items())
                 cache_spec = f"{base_name}({param_str})"
-            if self._is_cached(cache_spec, cache_key):
+            if self._is_cached(cache_spec, cache_key, base_name):
                 cached_specs_p0.append(cache_spec)
             else:
                 uncached_p0.append((base_name, cache_spec, col_name, params))
@@ -1437,7 +1706,7 @@ class FeatureEngine:
                 if params:
                     param_str = ",".join(f"{k}={v}" for k, v in params.items())
                     cache_spec = f"player_{base_name}({param_str})"
-                if self._is_cached(cache_spec, cache_key):
+                if self._is_cached(cache_spec, cache_key, base_name):
                     cached_specs_p1.append(cache_spec)
                 else:
                     uncached_p1.append((base_name, cache_spec, player_col, params))
@@ -1500,7 +1769,7 @@ class FeatureEngine:
                 if params:
                     param_str = ",".join(f"{k}={v}" for k, v in params.items())
                     cache_spec = f"player_{base_name}({param_str})"
-                if self._is_cached(cache_spec, cache_key):
+                if self._is_cached(cache_spec, cache_key, base_name):
                     cached_specs_p3.append(cache_spec)
                     computed_player_cols.add(col_name)
                 else:
@@ -1550,7 +1819,7 @@ class FeatureEngine:
                 if params:
                     param_str = ",".join(f"{k}={v}" for k, v in params.items())
                     cache_spec = f"player_{base_name}({param_str})"
-                if self._is_cached(cache_spec, cache_key):
+                if self._is_cached(cache_spec, cache_key, base_name):
                     cached_specs_p5.append(cache_spec)
                     computed_player_cols.add(col_name)
                 else:
@@ -1576,7 +1845,7 @@ class FeatureEngine:
                 if params:
                     param_str = ",".join(f"{k}={v}" for k, v in params.items())
                     cache_spec = f"{base_name}({param_str})"
-                if self._is_cached(cache_spec, cache_key):
+                if self._is_cached(cache_spec, cache_key, base_name):
                     cached_specs_p6.append(cache_spec)
                 else:
                     uncached_p6.append((base_name, cache_spec, col_name, params))
@@ -1597,31 +1866,21 @@ class FeatureEngine:
         # callers (e.g. per-trial tuning runs) skip the expensive self-join.
         # Mirrors how Phases 0-6 cache per-row features in this same method.
         for spec in transform_specs:
-            _prefix, base_name, _full, params = parse_feature_spec(spec)
-            feature_def = self._registry.get(base_name)
-            cache_spec = base_name
-            output_cols = list(feature_def.outputs)
-            if params:
-                param_str = ",".join(f"{k}={v}" for k, v in params.items())
-                cache_spec = f"{base_name}({param_str})"
-                output_cols = [
-                    build_column_name(o, params) for o in feature_def.outputs
-                ]
-            salt = self._transform_salt(feature_def, params)
-            if self._is_cached(cache_spec, cache_key, salt):
+            (base_name, params, cache_spec, output_cols, salt, feature_def,
+             cached) = self._transform_cache_state(spec, cache_key)
+            if cached:
                 cached_out = self._load_cached_feature(cache_spec).select(
                     ["match_uid", "player_id"] + output_cols
                 )
                 df = df.join(cached_out, on=["match_uid", "player_id"], how="left")
                 continue
-            out = feature_def.func(df, **params)
-            if params:
-                out = out.rename(
-                    {o: build_column_name(o, params) for o in feature_def.outputs}
-                )
-            self._cache_feature(cache_spec, out, output_cols, cache_key, salt=salt)
+            out = self._run_and_cache_transform(
+                df, feature_def, params, cache_spec, output_cols, cache_key,
+                base_name, salt,
+            )
             df = df.join(out, on=["match_uid", "player_id"], how="left")
 
+        self._log_stale_code_specs()
         elapsed = time.perf_counter() - t0
         logger.info("Feature computation complete in %.1fs", elapsed)
 

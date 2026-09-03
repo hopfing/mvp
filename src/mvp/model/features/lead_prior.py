@@ -67,9 +67,20 @@ def _lead_prior_transform(df: pl.DataFrame) -> pl.DataFrame:
     )
 
 
+def _lead_prior_salt() -> str:
+    """Freshness of the external parquet. build_lead_prior.py already
+    deletes this transform's manifest entry after every rebuild, so the
+    salt is defense-in-depth (granular-cache plan, round-4 amendment):
+    the entry can never outlive the artifact even if that script-side
+    invalidation is bypassed."""
+    p = prior_path()
+    return str(int(p.stat().st_mtime)) if p.exists() else "-"
+
+
 register_transform(
     name="lead_prior",
     func=_lead_prior_transform,
     outputs=_OUTPUTS,
+    cache_salt=_lead_prior_salt,
     description="The lead's out-of-sample win probability, as prob and log-odds",
 )
