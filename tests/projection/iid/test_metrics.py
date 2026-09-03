@@ -163,6 +163,27 @@ class TestComputeIIDMetrics:
         assert "mae" in m
         assert "iid_crps_total_games" in m
 
+    def test_match_win_log_loss_emitted_under_registry_name(self):
+        """The serve FS promotes `metric: iid_match_win_log_loss` as the tune
+        objective, and the tune reads that key from these metrics: it must be
+        present under the registry's name, equal the FS chain scorer, and not
+        depend on the classification block being on."""
+        from mvp.projection.iid.metric_registry import score_chain
+
+        out = self._make_synthetic_projection(n=50)
+        rng = np.random.default_rng(5)
+        y_won = rng.integers(0, 2, 50)
+        y_a = rng.integers(0, 25, 50).astype(np.float64)
+        y_b = rng.integers(0, 25, 50).astype(np.float64)
+        m = compute_iid_metrics(out, y_won, y_a, y_b)
+        fs_score = score_chain(
+            "iid_match_win_log_loss", out.distribution, y_a, y_b, y_won=y_won,
+        )
+        assert m["iid_match_win_log_loss"] == pytest.approx(fs_score, abs=1e-12)
+        assert m["iid_match_win_log_loss"] == pytest.approx(m["log_loss"], abs=1e-9)
+        off = compute_iid_metrics(out, y_won, y_a, y_b, include_classification=False)
+        assert off["iid_match_win_log_loss"] == pytest.approx(fs_score, abs=1e-12)
+
 
 def _make_projection_output(n, serve_prob=0.62):
     """Build a ProjectionOutput with known serve probs for diagnostic tests."""

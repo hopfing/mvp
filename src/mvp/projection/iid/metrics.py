@@ -74,6 +74,19 @@ def crps_discrete_pmf(obs_idx: np.ndarray, pmf: np.ndarray) -> float:
     return float(per_match.mean())
 
 
+def match_win_log_loss(p_match_win_a: np.ndarray, y_won: np.ndarray) -> float:
+    """Log loss of the chain's match-win probability against the actual winner.
+
+    One primitive for both the FS chain scorer (metric_registry's
+    `iid_match_win_log_loss`) and the runner's per-fold emit, so the metric a
+    serve FS selects on and the objective `mvp tune` reads from projection
+    metrics are the same number under the same name.
+    """
+    p = np.clip(np.asarray(p_match_win_a, dtype=np.float64), 1e-15, 1 - 1e-15)
+    y = np.asarray(y_won, dtype=np.float64)
+    return float(-np.mean(y * np.log(p) + (1 - y) * np.log(1 - p)))
+
+
 def compute_iid_metrics(
     out: ProjectionOutput,
     y_won: np.ndarray,
@@ -102,6 +115,9 @@ def compute_iid_metrics(
 
     if include_classification:
         metrics.update(compute_metrics(y_won.astype(np.int64), dist.p_match_win_a))
+    # Always emitted, under the registry's name: the serve FS promotes its
+    # `metric` as `metrics.objective`, and the tune reads that key from here.
+    metrics["iid_match_win_log_loss"] = match_win_log_loss(dist.p_match_win_a, y_won)
 
     if include_regression:
         reg_metrics = compute_regression_metrics(

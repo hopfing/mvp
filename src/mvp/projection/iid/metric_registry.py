@@ -21,6 +21,7 @@ import numpy as np
 # consumers that want "all metric-stuff in one place" can import from here.
 from mvp.projection.iid.metrics import (
     crps_discrete_pmf,
+    match_win_log_loss,
     spread_cal_errs,
     total_cal_errs,
 )
@@ -80,9 +81,7 @@ def _score_iid_match_win_log_loss(dist, y_a, y_b, *, y_won=None, **_):
             "iid_match_win_log_loss requires y_won -- the match winner cannot "
             "be derived from game counts (winners can lose the games count)"
         )
-    p = np.clip(dist.p_match_win_a, 1e-15, 1 - 1e-15)
-    y = np.asarray(y_won, dtype=np.float64)
-    return float(-np.mean(y * np.log(p) + (1 - y) * np.log(1 - p)))
+    return match_win_log_loss(dist.p_match_win_a, y_won)
 
 
 def _score_mae(dist, y_a, y_b, **_):
