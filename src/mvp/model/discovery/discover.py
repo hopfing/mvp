@@ -498,7 +498,7 @@ class FeatureDiscovery:
         run on the source config) -- the discovery driver runs on the dev box
         by definition; the engine and production train refuse with the command
         instead. Covers offset.prior AND every model=<stem> spec seeded in
-        features.base or added via features.extra: a base/extra-referenced
+        features.base or added via features.add: a base/add-referenced
         source whose artifacts are missing (or predate the current columns)
         would otherwise crash at the transform's refusal mid-precompute.
         """
@@ -513,7 +513,7 @@ class FeatureDiscovery:
         # a second param in one spec would need this (and families.py's
         # _MODEL_PARAM) generalized.
         stem_re = re.compile(r"\(model=([^)]+)\)")
-        for spec in [*feat_cfg.base, *feat_cfg.extra]:
+        for spec in [*feat_cfg.base, *feat_cfg.add]:
             m = stem_re.search(spec)
             if m:
                 prior_stems.append(m.group(1))
@@ -556,18 +556,18 @@ class FeatureDiscovery:
             all_features = [f for f in all_features if f in included]
             self._log(f"Restricted to {len(all_features)} features via include")
 
-        # `extra` joins AFTER the enumeration filters (paramed_only/include —
+        # `add` joins AFTER the enumeration filters (paramed_only/include —
         # an explicitly typed spec must not be silently starved by a narrowing
         # list) and BEFORE the removals below, which still apply: additions
         # cannot override an exclusion safety rule.
-        if feat_cfg.extra:
-            missing_extra = [f for f in feat_cfg.extra if f not in all_features]
-            if missing_extra:
+        if feat_cfg.add:
+            missing_add = [f for f in feat_cfg.add if f not in all_features]
+            if missing_add:
                 self._log(
-                    f"extra: added {len(missing_extra)} candidate spec(s): "
-                    f"{missing_extra}"
+                    f"add: {len(missing_add)} candidate spec(s) joined the pool: "
+                    f"{missing_add}"
                 )
-                all_features = [*all_features, *missing_extra]
+                all_features = [*all_features, *missing_add]
 
         if feat_cfg.compute_only:
             compute_only = set(feat_cfg.compute_only)

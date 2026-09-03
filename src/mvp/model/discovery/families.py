@@ -25,7 +25,7 @@ from collections import defaultdict
 
 _WINDOW = re.compile(r"\(days=\d+\)$")
 # model=<stem> parameterization (prior / chain_shape specs, reachable via
-# features.extra) strips like a window: the family is the transform output,
+# features.add) strips like a window: the family is the transform output,
 # not one garbled singleton per stem. Assumes model= is the spec's ONLY
 # parenthesized param — true for every such transform today; a transform
 # combining model= with a second param would need this (and discover.py's

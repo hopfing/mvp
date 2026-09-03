@@ -36,7 +36,7 @@ class TestFamilyRule:
         assert family_of("player_elo_diff_x_new_interaction") is None
 
     def test_model_param_strips_like_a_window(self):
-        # model=-parameterized specs (features.extra's door) group by the
+        # model=-parameterized specs (features.add's door) group by the
         # transform output, never one garbled singleton family per stem.
         assert (
             family_of("player_chain_egames(model=two_level_flat)")

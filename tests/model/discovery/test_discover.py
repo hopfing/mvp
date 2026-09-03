@@ -552,16 +552,16 @@ class TestBaseUnionedIntoPool:
         assert spec in disc._build_candidate_pool()
 
 
-class TestExtraCandidates:
-    """features.extra: additional CANDIDATES for specs enumeration never
+class TestAddCandidates:
+    """features.add: additional CANDIDATES for specs enumeration never
     lists (model=-parameterized transforms). Bypasses the enumeration
     filters — an explicitly typed spec must not be silently starved by a
     narrowing include list — but never the exclusion safety rules."""
 
-    def _config(self, tmp_path, extra, **features):
+    def _config(self, tmp_path, add, **features):
         config_dict = {
             "data": {"date_range": {"start": "2020-01-01", "end": "2025-12-31"}},
-            "discovery": {"features": {"extra": extra, **features}},
+            "discovery": {"features": {"add": add, **features}},
             "model": {"type": "xgboost"},
         }
         path = tmp_path / "cfg.yaml"
@@ -569,12 +569,12 @@ class TestExtraCandidates:
             yaml.dump(config_dict, f)
         return path
 
-    def test_extra_joins_the_pool(self, tmp_path):
+    def test_add_joins_the_pool(self, tmp_path):
         spec = "player_chain_egames(model=two_level_flat)"
         disc = FeatureDiscovery(config_path=self._config(tmp_path, [spec]))
         assert spec in disc._build_candidate_pool()
 
-    def test_extra_survives_a_narrowing_include(self, tmp_path):
+    def test_add_survives_a_narrowing_include(self, tmp_path):
         spec = "player_chain_egames(model=two_level_flat)"
         disc = FeatureDiscovery(config_path=self._config(
             tmp_path, [spec], include=["player_win_pct_diff"]
@@ -583,19 +583,19 @@ class TestExtraCandidates:
         assert spec in pool
         assert pool.count(spec) == 1
 
-    def test_extra_never_overrides_exclude(self, tmp_path):
+    def test_add_never_overrides_exclude(self, tmp_path):
         spec = "player_chain_egames(model=two_level_flat)"
         disc = FeatureDiscovery(config_path=self._config(
             tmp_path, [spec], exclude=[spec]
         ))
         assert spec not in disc._build_candidate_pool()
 
-    def test_extra_is_a_candidate_not_a_seed(self, tmp_path):
+    def test_add_is_a_candidate_not_a_seed(self, tmp_path):
         spec = "player_chain_egames(model=two_level_flat)"
         disc = FeatureDiscovery(config_path=self._config(tmp_path, [spec]))
         assert spec not in disc.config.discovery.features.base
 
-    def test_extra_never_overrides_compute_only(self, tmp_path):
+    def test_add_never_overrides_compute_only(self, tmp_path):
         spec = "player_chain_egames(model=two_level_flat)"
         disc = FeatureDiscovery(config_path=self._config(
             tmp_path, [spec], compute_only=[spec]
@@ -605,13 +605,13 @@ class TestExtraCandidates:
 
 class TestEnsurePriorSources:
     """The completeness pass regenerates every model=<stem> source the run
-    references (offset.prior + base + extra) before precompute — without it,
+    references (offset.prior + base + add) before precompute — without it,
     a missing/stale source crashes at the transform's refusal mid-run."""
 
-    def _disc(self, tmp_path, base=(), extra=(), offset_prior=None):
+    def _disc(self, tmp_path, base=(), add=(), offset_prior=None):
         config_dict = {
             "data": {"date_range": {"start": "2020-01-01", "end": "2025-12-31"}},
-            "discovery": {"features": {"base": list(base), "extra": list(extra)}},
+            "discovery": {"features": {"base": list(base), "add": list(add)}},
             "model": {"type": "xgboost"},
         }
         if offset_prior:
@@ -642,7 +642,7 @@ class TestEnsurePriorSources:
         disc = self._disc(
             tmp_path,
             base=["player_prior_logit(model=stem_a)"],
-            extra=[
+            add=[
                 "player_chain_egames(model=stem_b)",
                 # same stem twice across lists -> ensured once
                 "player_chain_gstd(model=stem_b)",

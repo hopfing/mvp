@@ -127,12 +127,12 @@ class DiscoveryFeaturesConfig(BaseModel):
     base: list[str] = []
     # Additional CANDIDATES (selectable, not pinned). For specs registry
     # enumeration never lists — ``model=<stem>``-parameterized transforms like
-    # the prior and chain_shape. Semantics: extra bypasses the enumeration
+    # the prior and chain_shape. Semantics: add bypasses the enumeration
     # filters (paramed_only/include — that is its purpose: an explicitly typed
     # spec must not be silently starved by a narrowing list) but NEVER the
     # exclusion safety rules; pool = ((enumeration through filters) UNION
-    # extra) MINUS compute_only/exclude/exclude_base.
-    extra: list[str] = []
+    # add) MINUS compute_only/exclude/exclude_base.
+    add: list[str] = []
     min: int = 5
     max: int | None = None
     window_sizes: list[int] | None = None  # None = all defaults, 0 = alltime variant
