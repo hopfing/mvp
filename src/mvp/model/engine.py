@@ -1070,7 +1070,7 @@ class FeatureEngine:
             # TypeError, which that branch answers by returning [] and
             # disabling pruning for the whole compute. A transform with
             # depends_on (style_matchup) escaped that only by hitting the
-            # `continue` below it; the dependency-less ones (prior, lead_prior,
+            # `continue` below it; the dependency-less ones (prior,
             # market_prior) did not, so every config carrying a prior column
             # loaded all ~400 parquet columns (3.3 GB) instead of the few dozen
             # its features name — 35 for the tune config that surfaced this, 53

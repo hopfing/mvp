@@ -517,9 +517,9 @@ class TestFeatureEngineColumnPruning:
         assert "player_hybrid_ratio" in result.columns
 
     def _register_joined_transform(self):
-        """A df->df transform with NO depends_on, like prior/lead_prior/
-        market_prior: it joins an external frame keyed on (match_uid,
-        player_id) and declares the one raw column it reads."""
+        """A df->df transform with NO depends_on, like prior/market_prior:
+        it joins an external frame keyed on (match_uid, player_id) and
+        declares the one raw column it reads."""
         def _joined(df: pl.DataFrame) -> pl.DataFrame:
             return df.select(
                 "match_uid", "player_id",

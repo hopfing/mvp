@@ -216,7 +216,7 @@ class TestManifest:
     def test_salt_mismatch_recomputes_independent_of_code(self, tmp_path):
         # plan test workflow: an external-artifact rebuild (mtime salt moves)
         # must miss even when the code signature is identical — the mechanism
-        # market.py/lead_prior.py's build-item-5 salts depend on
+        # market.py's build-item-5 salt depends on
         import polars as pl
 
         e = self._engine(tmp_path)

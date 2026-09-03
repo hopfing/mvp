@@ -41,7 +41,6 @@ from mvp.model.features._score_helpers import (
     total_games_lost as _total_games_lost,
     total_games_won as _total_games_won,
 )
-from mvp.model.features import lead_prior as _lead_prior
 from mvp.model.features import prior as _prior
 from mvp.model.prior_naming import prior_column, prior_model_of
 from mvp.model.features.elo import surface_elo_expr
@@ -85,12 +84,6 @@ PREDICTION_TOLERANCE = 1e-4
 # Threshold for drift alerts (5% probability swing)
 DRIFT_THRESHOLD = 0.05
 
-# Columns produced by the `lead_prior` transform (features/lead_prior.py). A
-# training frame carrying them is a residual stage: it may only ever see the
-# lead's OUT-OF-SAMPLE output (residual-stage plan, rule 1), and at serve time
-# pending matches have no prior row, so the lead's live prediction is filled in.
-_LEAD_LOGIT_COL = "player_lead_logit"
-_LEAD_PROB_COL = "player_lead_prob"
 _LOGIT_EPS = 1e-6
 
 
@@ -102,44 +95,27 @@ def _logit(p: np.ndarray) -> np.ndarray:
 @dataclass(frozen=True)
 class _PriorBinding:
     """How a residual stage's config is tied to the model it corrects: the
-    offset column pair and, for `offset.prior` configs, the base model's
-    config stem. `model is None` is the legacy lead-prior transform
-    (`player_lead_logit`, read from the fixed prior parquet)."""
+    offset column pair and the base model's config stem (`offset.prior`)."""
 
     logit_col: str
     prob_col: str
-    model: str | None
+    model: str
 
 
 def _prior_binding(offset_feature: str | None) -> _PriorBinding | None:
     if not offset_feature:
         return None
-    if offset_feature == _LEAD_LOGIT_COL:
-        return _PriorBinding(_LEAD_LOGIT_COL, _LEAD_PROB_COL, None)
     model = prior_model_of(offset_feature)
     if model is None:
         return None
     return _PriorBinding(prior_column(model), f"player_prior_prob_{model}", model)
 
 
-def _prior_rows(binding: _PriorBinding) -> tuple[pl.DataFrame, str | None]:
-    """(match_uid, player_id, prior_train_end) for the bound prior, and the
-    stem of the model that produced it (None when unknown)."""
-    if binding.model is None:
-        prior = pl.read_parquet(_lead_prior.prior_path())
-        meta_path = _lead_prior.prior_path().with_suffix(".json")
-        built_from = (
-            json.loads(meta_path.read_text(encoding="utf-8")).get("config_stem")
-            if meta_path.exists() else None
-        )
-    else:
-        _source, prior = _prior.prior_frame(binding.model)
-        built_from = binding.model
-    return (
-        prior.select(
-            "match_uid", "player_id", pl.col("prior_train_end").cast(pl.Date),
-        ),
-        built_from,
+def _prior_rows(binding: _PriorBinding) -> pl.DataFrame:
+    """(match_uid, player_id, prior_train_end) for the bound prior."""
+    _source, prior = _prior.prior_frame(binding.model)
+    return prior.select(
+        "match_uid", "player_id", pl.col("prior_train_end").cast(pl.Date),
     )
 
 
@@ -158,7 +134,7 @@ def _assert_prior_is_oof(
     binding = _prior_binding(offset_feature)
     if binding is None or binding.logit_col not in df.columns:
         return
-    prior, _ = _prior_rows(binding)
+    prior = _prior_rows(binding)
     rows = df.filter(pl.col(binding.logit_col).is_not_null()).select(
         "match_uid", "player_id",
         pl.col("effective_match_date").cast(pl.Date).alias("_day"),
@@ -194,17 +170,7 @@ def _check_prior_chain(
     binding = _prior_binding(offset_feature)
     if binding is None:
         return
-    if binding.model is None:
-        meta_path = _lead_prior.prior_path().with_suffix(".json")
-        if not meta_path.exists():
-            logger.warning(
-                "lead prior has no %s sidecar; cannot verify which lead built it",
-                meta_path.name,
-            )
-            return
-        built_from = json.loads(meta_path.read_text(encoding="utf-8")).get("config_stem")
-    else:
-        built_from = binding.model
+    built_from = binding.model
     if built_from != expected_stem:
         logger.warning(
             "%s offsets on the prior of %s but the model before it in the chain "
@@ -1595,7 +1561,7 @@ class ProductionPredictor:
         scoped: bool = False,
         *,
         include_settled: bool = False,
-        fill_lead_logit: dict[tuple[str, str], float] | None = None,
+        fill_prior_logit: dict[tuple[str, str], float] | None = None,
     ) -> dict[str, float]:
         """Generate raw uid->prob predictions for a single model entry.
 
@@ -1604,7 +1570,7 @@ class ProductionPredictor:
         matches that don't pass the entry's config filters (the voter only
         votes on matches within its training domain).
 
-        `fill_lead_logit` maps (match_uid, player_id) -> the base model's log-odds and
+        `fill_prior_logit` maps (match_uid, player_id) -> the base model's log-odds and
         is how a residual stage scores pending matches, which have no
         out-of-sample prior row (see `_fill_prior_logit`).
 
@@ -1632,10 +1598,10 @@ class ProductionPredictor:
         extra = compute_only + filter_specs
         all_specs = feature_specs + [s for s in extra if s not in feature_specs]
         df = engine.compute(all_specs, extra_columns=_PREDICTOR_EXTRA_COLS)
-        if fill_lead_logit:
+        if fill_prior_logit:
             binding = _prior_binding(config.offset.feature if config.offset else None)
             if binding is not None:
-                df = _fill_prior_logit(df, fill_lead_logit, binding)
+                df = _fill_prior_logit(df, fill_prior_logit, binding)
 
         # Determine in-scope match UIDs for scoped voters
         in_scope_uids: set[str] | None = None
@@ -2224,12 +2190,13 @@ class ProductionPredictor:
     ) -> pl.DataFrame:
         """Run each residual stage on top of the lead's live predictions.
 
-        A stage is an ordinary model entry whose config offsets on
-        `player_lead_logit`. Pending matches have no out-of-sample prior row,
-        so each stage is scored through `_predict_raw` with the CURRENT
-        probability supplied as that column: +logit for `p1_id`, -logit for
-        `p2_id` (the lead odd-projects, so the opponent's logit is exactly the
-        negation). Stages chain: stage k conditions on stage k-1's output.
+        A stage is an ordinary model entry whose config offsets on its base
+        model's prior logit (`offset.prior` -> `player_prior_logit_<stem>`).
+        Pending matches have no out-of-sample prior row, so each stage is
+        scored through `_predict_raw` with the CURRENT probability supplied
+        as that column: +logit for `p1_id`, -logit for `p2_id` (the base
+        odd-projects, so the opponent's logit is exactly the negation).
+        Stages chain: stage k conditions on stage k-1's output.
 
         `p1_win_prob` becomes the last stage's probability and `model_version`
         its config stem, so downstream attribution follows the number that was
@@ -2266,7 +2233,7 @@ class ProductionPredictor:
                     # narrower-domain stage never scores out of domain (those
                     # matches keep the previous probability and version).
                     scoped=bool(stage.get("scoped", True)),
-                    include_settled=include_settled, fill_lead_logit=fill,
+                    include_settled=include_settled, fill_prior_logit=fill,
                 )
             except Exception as e:  # noqa: BLE001 -- degrade, never sink the lead
                 logger.exception(
