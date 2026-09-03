@@ -44,7 +44,9 @@ ScoreState argument.
 
 from __future__ import annotations
 
+import copy
 import logging
+import time
 from pathlib import Path
 from typing import Any, Final
 
@@ -123,6 +125,8 @@ class FirstServeInModel:
         # unusable: the weighted training base rate. Never a hardcoded constant
         # — a wrong global here would bias every match in the same direction.
         self._base_rate: float = 0.62
+        # Wall-time of the last fit(), seconds. Diagnostic only.
+        self.fit_timings: dict[str, float] = {}
 
     def __getstate__(self) -> dict[str, Any]:
         # Same reason as ScoreStateChainServeModel.__getstate__ (serve_model.py):
@@ -186,6 +190,7 @@ class FirstServeInModel:
 
         if "match_uid" not in df.columns:
             raise ValueError("FirstServeInModel.fit: df missing match_uid")
+        t0 = time.perf_counter()
         train_uids = df["match_uid"].unique().to_list()
 
         points_path = self._points_path or (
@@ -210,6 +215,7 @@ class FirstServeInModel:
             # recovery test and a valid configuration in its own right.
             self._model = None
             self._cols, self._is_diff = [], []
+            self.fit_timings = {"fit": time.perf_counter() - t0}
             return
 
         self._cols, self._is_diff = self._resolve_cols()
@@ -224,6 +230,7 @@ class FirstServeInModel:
                 "falling back to the weighted base rate"
             )
             self._model = None
+            self.fit_timings = {"fit": time.perf_counter() - t0}
             return
 
         X = train.select(self._cols).to_numpy().astype(np.float64)
@@ -231,6 +238,7 @@ class FirstServeInModel:
         w = train["_n_serve_pts"].to_numpy().astype(np.float64)
         self._model = _build_rate_regressor(self.model_type, self.params)
         self._model.fit(X, y, sample_weight=w)
+        self.fit_timings = {"fit": time.perf_counter() - t0}
         logger.info(
             "FirstServeInModel fit at match grain: %d rows, %d features "
             "(base rate %.4f)", len(train), len(self._cols), self._base_rate,
@@ -337,6 +345,7 @@ class _ConstantBranch:
         self.serve_branch = serve_branch
         self._points_path = points_path
         self._rate = 0.5
+        self.fit_timings: dict[str, float] = {}
 
     def fit(
         self,
@@ -347,6 +356,7 @@ class _ConstantBranch:
     ) -> None:
         from mvp.common.base_job import get_data_root
 
+        t0 = time.perf_counter()
         if preloaded_points is not None:
             points = preloaded_points
         else:
@@ -364,6 +374,7 @@ class _ConstantBranch:
                 f"points on this branch"
             )
         self._rate = float(won.mean())
+        self.fit_timings = {"fit": time.perf_counter() - t0}
 
     def predict_state_fn(self, df: pl.DataFrame):
         n = len(df)
@@ -419,6 +430,11 @@ class TwoLevelServeModel(ServeWinProbEstimator):
         # Counted rather than silent: the offset's trailing clip is a guard, and
         # a correction that gets truncated is not the correction that was fitted.
         self.offset_clipped_count = 0
+        # Components handed in already fitted (see attach_prefit); fit() skips
+        # them. Empty for every caller except the component-wise serve FS.
+        self._prefit: set[str] = set()
+        # Sum of the components' fit_timings from the last fit(). Diagnostic.
+        self.fit_timings: dict[str, float] = {}
 
         shared = dict(
             points_path=points_path, matches_path=matches_path,
@@ -475,13 +491,77 @@ class TwoLevelServeModel(ServeWinProbEstimator):
         preloaded_match_features: pl.DataFrame | None = None,
         preloaded_points: pl.DataFrame | None = None,
     ) -> None:
+        """Fit every component not handed in via `attach_prefit`, in the
+        fixed order first_in, win_first, win_second (they are independent
+        fits on the same frames, so order is bookkeeping, not semantics).
+        `fit_timings` afterwards is the sum over the components fitted HERE —
+        a prefit component's time belongs to whoever fitted it."""
         kw = dict(
             preloaded_match_features=preloaded_match_features,
             preloaded_points=preloaded_points,
         )
-        self._first_in.fit(df, **kw)
-        self._win_first.fit(df, **kw)
-        self._win_second.fit(df, **kw)
+        for component, model in self.components().items():
+            if component in self._prefit:
+                continue
+            model.fit(df, **kw)
+        timings: dict[str, float] = {}
+        for component, model in self.components().items():
+            if component in self._prefit:
+                continue  # its fit happened elsewhere; not this call's time
+            for k, v in getattr(model, "fit_timings", {}).items():
+                timings[k] = timings.get(k, 0.0) + v
+        self.fit_timings = timings
+
+    def components(self) -> dict[str, Any]:
+        """The three components by name — the inverse of `attach_prefit`,
+        and how the serve FS harvests fitted components to cache."""
+        return {
+            FIRST_IN: self._first_in,
+            WIN_FIRST: self._win_first,
+            WIN_SECOND: self._win_second,
+        }
+
+    # Attributes added after artifacts of this class were first pickled.
+    # `__setstate__` defaults them so an older artifact still refits and
+    # counts clips; the same pattern ScoreStateChainServeModel uses.
+    _POST_PICKLE_DEFAULTS: dict[str, Any] = {
+        "_prefit": set(),
+        "fit_timings": {},
+        "offset_clipped_count": 0,
+    }
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        for key, default in self._POST_PICKLE_DEFAULTS.items():
+            state.setdefault(key, copy.copy(default))
+        self.__dict__.update(state)
+
+    def attach_prefit(self, component: str, model: Any) -> None:
+        """Replace one component with an already-fitted instance; fit() then
+        leaves it alone.
+
+        For the component-wise serve FS: in a run selecting for one
+        component the other two are held at fixed feature sets, so refitting
+        them per candidate produced the identical model ~460 times a round
+        (plan 2026-09-03-serve-fs-wall-time, Phase 1). The selector fits
+        them once per fold and attaches a private copy per candidate — the
+        caller owns the copy; this method shares nothing.
+
+        The attached object must be the same class `__init__` would have
+        built for that component's feature set, fitted on the same rows with
+        the same params — equivalence with the per-candidate refit is the
+        contract, and the selector's tests pin it.
+        """
+        if component not in COMPONENTS:
+            raise ValueError(
+                f"unknown component {component!r}; expected one of {COMPONENTS}"
+            )
+        if component == FIRST_IN:
+            self._first_in = model
+        elif component == WIN_FIRST:
+            self._win_first = model
+        else:
+            self._win_second = model
+        self._prefit.add(component)
 
     @staticmethod
     def _engine_col(col: str) -> str:

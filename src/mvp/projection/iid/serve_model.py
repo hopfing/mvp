@@ -558,22 +558,19 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
         # column read.
         self._match_feature_is_diff: list[bool] = []
 
-        # Cached per-df state — populated by predict_state_fn().
-        self._X_match_A: np.ndarray | None = None   # server=A perspective
-        self._X_match_B: np.ndarray | None = None   # server=B perspective
-        self._point_constants: dict[str, np.ndarray] = {}
+        # Wall-time of the last fit(), by phase (seconds). Diagnostic only;
+        # the serve FS aggregates these onto its [diag] line (plan
+        # 2026-09-03-serve-fs-wall-time, Phase 0).
+        self.fit_timings: dict[str, float] = {}
 
     def __getstate__(self) -> dict[str, Any]:
         # _engine holds the global FeatureRegistry, which contains closure
         # funcs from register_diff/_sum/_matchup that pickle can't resolve by
         # qualified name. fit() and score_test_points() rebuild a fresh engine
         # when _engine is None, and predict_state_fn doesn't need one — so
-        # dropping it on save is safe. Per-df caches are stale across pickle.
+        # dropping it on save is safe.
         state = self.__dict__.copy()
         state["_engine"] = None
-        state["_X_match_A"] = None
-        state["_X_match_B"] = None
-        state["_point_constants"] = {}
         return state
 
     @property
@@ -690,15 +687,18 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
         points = self._apply_serve_branch(points)
         if len(points) == 0:
             raise ValueError("no points rows matched the training match_uids")
+        load_s = time.perf_counter() - t0
         logger.info(
             "Loaded %d points for %d train matches%s (%.1fs)",
             len(points), len(train_uids),
             "" if self.serve_branch is None else f" [serve=={self.serve_branch}]",
-            time.perf_counter() - t0,
+            load_s,
         )
 
         self._match_feature_cols = self._resolve_match_feature_cols()
 
+        join_s = 0.0
+        derive_s = 0.0
         if self.match_level_features:
             t_join = time.perf_counter()
             if preloaded_match_features is not None:
@@ -746,9 +746,10 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
                     renames[c] = "returner_" + c[len("opp_"):]
             if renames:
                 joined = joined.rename(renames)
+            join_s = time.perf_counter() - t_join
             logger.info(
                 "Joined %d match-level features (%.1fs)",
-                len(self.match_level_features), time.perf_counter() - t_join,
+                len(self.match_level_features), join_s,
             )
         else:
             joined = points
@@ -757,11 +758,12 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
         if derived:
             t_derive = time.perf_counter()
             joined = add_derived_point_features(joined, derived)
+            derive_s = time.perf_counter() - t_derive
             logger.info(
-                "Derived %d point features (%.1fs)",
-                len(derived), time.perf_counter() - t_derive,
+                "Derived %d point features (%.1fs)", len(derived), derive_s,
             )
 
+        t_matrix = time.perf_counter()
         joined = joined.filter(pl.col("point_won_by_server").is_not_null())
         if len(joined) == 0:
             raise ValueError("no valid training points after target filter")
@@ -777,6 +779,7 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
             if "server_id" in joined.columns
             else None
         )
+        matrix_s = time.perf_counter() - t_matrix
 
         logger.info(
             "Fitting score-state %s model (%d samples, %d features)",
@@ -793,9 +796,12 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
             seed=self.posterior_seed,
         )
         self._model.fit(X, y, groups=groups)
-        logger.info(
-            "Score-state fit complete in %.1fs", time.perf_counter() - t_fit,
-        )
+        fit_s = time.perf_counter() - t_fit
+        logger.info("Score-state fit complete in %.1fs", fit_s)
+        self.fit_timings = {
+            "load": load_s, "join": join_s, "derive": derive_s,
+            "matrix": matrix_s, "fit": fit_s,
+        }
 
     def score_test_points(
         self,
@@ -1300,9 +1306,13 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
                 "ScoreStateChainServeModel.predict_state_fn called before fit"
             )
         draw = self._resolve_draw(draw)
-        self._X_match_A = self._match_feature_values(df, swap=False)
-        self._X_match_B = self._match_feature_values(df, swap=True)
-        self._point_constants = self._point_constant_values(df)
+        # Locals, not instance state: the returned closures own these arrays.
+        # Assigning them onto `self` made every predict_state_fn call overwrite
+        # the previous call's arrays (unsafe for a fitted model shared across
+        # callers) and kept the last df's matrices alive on the instance.
+        X_match_A = self._match_feature_values(df, swap=False)
+        X_match_B = self._match_feature_values(df, swap=True)
+        point_constants = self._point_constant_values(df)
         n = len(df)
 
         # Server identity per perspective: in perspective A the row's own
@@ -1338,7 +1348,7 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
                 if name in self._STATE_DERIVABLE:
                     point_cols.append(np.full(n, state_vals[name], dtype=np.float64))
                 else:
-                    point_cols.append(self._point_constants[name])
+                    point_cols.append(point_constants[name])
             if point_cols:
                 X_point = np.column_stack(point_cols)
                 return np.hstack([X_match, X_point])
@@ -1351,11 +1361,11 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
         if self.gap_shrink != 1.0:
             _neutral = neutral_score_state()
             p_a0 = np.clip(
-                self._proba(_X_for(self._X_match_A, _neutral), draw, groups_a),
+                self._proba(_X_for(X_match_A, _neutral), draw, groups_a),
                 self.clip_min, self.clip_max,
             )
             p_b0 = np.clip(
-                self._proba(_X_for(self._X_match_B, _neutral), draw, groups_b),
+                self._proba(_X_for(X_match_B, _neutral), draw, groups_b),
                 self.clip_min, self.clip_max,
             )
             m0 = 0.5 * (p_a0 + p_b0)
@@ -1373,7 +1383,7 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
             cached = cache_a.get(key)
             if cached is not None:
                 return cached
-            X = _X_for(self._X_match_A, state)  # type: ignore[arg-type]
+            X = _X_for(X_match_A, state)
             p = self._proba(X, draw, groups_a) + shift_a
             p = np.clip(p, self.clip_min, self.clip_max)
             p = self._apply_offset(p, sc_offset)
@@ -1385,7 +1395,7 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
             cached = cache_b.get(key)
             if cached is not None:
                 return cached
-            X = _X_for(self._X_match_B, state)  # type: ignore[arg-type]
+            X = _X_for(X_match_B, state)
             p = self._proba(X, draw, groups_b) + shift_b
             p = np.clip(p, self.clip_min, self.clip_max)
             p = self._apply_offset(p, sc_offset)

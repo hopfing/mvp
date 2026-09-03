@@ -9,9 +9,11 @@ peak memory proportional to (rows × |selected| + |point_features|) rather than
 `model_forms` on the final feature set for comparison.
 """
 
+import copy
 import gc
 import logging
 import math
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -65,6 +67,7 @@ from mvp.projection.iid.serve_model import (
     swap_side_partner_specs,
 )
 from mvp.projection.iid.stateful_chain import match_distribution_from_state_fn
+from mvp.projection.iid.two_level_serve_model import TwoLevelServeModel
 
 logger = logging.getLogger(__name__)
 
@@ -210,6 +213,15 @@ class ServeDiscoverySelector:
         self.checkpoint_path = Path(checkpoint_path) if checkpoint_path else None
         self.run_name = run_name or self.config_path.stem
         self.checkpoint_interval = checkpoint_interval
+        # Two-level component runs: the two FIXED components fitted once per
+        # fold (plan 2026-09-03-serve-fs-wall-time, Phase 1). None for
+        # single-level runs. Keyed by fold index.
+        self._prefit_fixed: dict[int, dict[str, Any]] | None = None
+        # Per-phase wall-time accumulated across candidate-folds since the
+        # last [diag] line (Phase 0). Written from candidate threads.
+        self._phase_totals: dict[str, float] = {}
+        self._phase_cand_folds: int = 0
+        self._phase_lock = threading.Lock()
 
         # Match-grain cache for chain-metric path (lazily populated).
         self._match_df: pl.DataFrame | None = None
@@ -533,10 +545,11 @@ class ServeDiscoverySelector:
                             rss = process_rss_mb()
                             sys_pct = system_mem_used_pct()
                             logger.info(
-                                "  [diag] round %d eval=%d/%d s/it=%.2f rss=%s sys=%s",
+                                "  [diag] round %d eval=%d/%d s/it=%.2f rss=%s sys=%s %s",
                                 round_idx, eval_count, len(to_score), sec_per_it,
                                 f"{rss:.0f}MB" if rss is not None else "n/a",
                                 f"{sys_pct}%" if sys_pct is not None else "n/a",
+                                self._format_phases(self._take_phase_means()),
                             )
                             last_log_t = now
                             last_log_eval = eval_count
@@ -590,10 +603,11 @@ class ServeDiscoverySelector:
                             rss = process_rss_mb()
                             sys_pct = system_mem_used_pct()
                             logger.info(
-                                "  [diag] round %d eval=%d/%d s/it=%.2f rss=%s sys=%s",
+                                "  [diag] round %d eval=%d/%d s/it=%.2f rss=%s sys=%s %s",
                                 round_idx, eval_count, len(tagged), sec_per_it,
                                 f"{rss:.0f}MB" if rss is not None else "n/a",
                                 f"{sys_pct}%" if sys_pct is not None else "n/a",
+                                self._format_phases(self._take_phase_means()),
                             )
                             last_log_t = now
                             last_log_eval = eval_count
@@ -1186,6 +1200,117 @@ class ServeDiscoverySelector:
             (fold_bytes + parent_bytes) / gib,
             [len(f.train_df) for f in folds],
         )
+        # Up front, before any candidate thread exists — never lazily from a
+        # worker (the folds above are shared across threads by design).
+        self._build_prefit_fixed()
+
+    def _scoring_params(self) -> dict[str, Any]:
+        """The scorer params every CHAIN-PATH candidate model is built with
+        (the point-grain `_score_cv` path builds its own, uninjected).
+
+        ONE derivation site: `_build_prefit_fixed` must fit the fixed
+        two-level components with exactly what the candidate path uses, or
+        the model fitted once per fold is not the model the candidate loop
+        would have fitted.
+        """
+        params = dict(self.config.scoring_model.params)
+        # Per-fit threads are the config's to set. Logistic ignores n_jobs
+        # (sklearn >=1.8 no-op, and injecting it spams FutureWarnings) → never
+        # inject for it. Xgboost honors n_jobs as OpenMP threads → default to 1
+        # when unset so concurrent candidate threads don't oversubscribe; the
+        # validator caps n_parallel_candidates * n_jobs at the cpu count.
+        if self.config.scoring_model.type != "logistic" and "n_jobs" not in params:
+            params["n_jobs"] = 1
+        return params
+
+    def _build_prefit_fixed(self) -> None:
+        """Fit the two FIXED components of a two-level component run once per
+        fold, so the candidate loop only fits the component under selection.
+
+        `TwoLevelServeModel.fit` fits all three components; in a component
+        run the other two are held at their configured sets, so per-candidate
+        they were refit on identical rows with identical params and seed —
+        the identical model, ~460 times a round. Built here, before any
+        candidate thread exists. The selected component is passed EMPTY so
+        its placeholder branch costs nothing and is discarded; only the two
+        fixed components are kept, and each candidate gets a private
+        deepcopy (`_attach_prefit`), so nothing is shared across threads.
+
+        Equivalence with the per-candidate refit is the contract: same fold
+        frames, same `_scoring_params()`, same deterministic fit.
+        """
+        component = self.config.serve_component
+        self._prefit_fixed = None
+        if component is None or self._chain_folds is None:
+            return
+        t0 = time.perf_counter()
+        params = self._scoring_params()
+        # Same BLAS cap the candidate loop fits under: a no-op for xgboost
+        # (OpenMP), but a logistic scorer's lbfgs reduction order depends on
+        # the thread count, and "fitted once per fold" must be the same fit.
+        _, cap_n_jobs = resolve_candidate_parallelism(
+            params.get("n_jobs"), self.config.n_parallel_candidates,
+        )
+        prefit: dict[int, dict[str, Any]] = {}
+        with blas_thread_cap(self.config.scoring_model.type, cap_n_jobs):
+            for fold_idx, fold in enumerate(self._chain_folds):
+                model = self._build_candidate_model([], [], params)
+                if not isinstance(model, TwoLevelServeModel):
+                    raise TypeError(
+                        "serve_component is set but _build_candidate_model "
+                        f"returned {type(model).__name__}, not TwoLevelServeModel"
+                    )
+                model.fit(
+                    fold.train_df,
+                    preloaded_match_features=fold.feats,
+                    preloaded_points=fold.points,
+                )
+                prefit[fold_idx] = {
+                    name: fitted for name, fitted in model.components().items()
+                    if name != component
+                }
+        self._prefit_fixed = prefit
+        logger.info(
+            "Prefit fixed two-level components %s once per fold "
+            "(%d folds, %.1fs); candidates fit only %s",
+            sorted(next(iter(prefit.values()))), len(prefit),
+            time.perf_counter() - t0, component,
+        )
+
+    def _attach_prefit(self, model: Any, fold_idx: int) -> None:
+        """Hand a candidate model private copies of the fold's prefit
+        components. No-op for single-level runs."""
+        if self._prefit_fixed is None or not isinstance(model, TwoLevelServeModel):
+            return
+        for component, fitted in self._prefit_fixed[fold_idx].items():
+            model.attach_prefit(component, copy.deepcopy(fitted))
+
+    _PHASE_KEYS = ("load", "join", "derive", "matrix", "fit", "predict", "dp", "score")
+
+    def _record_phases(self, timing: dict[str, float], n_folds: int) -> None:
+        with self._phase_lock:
+            for k, v in timing.items():
+                self._phase_totals[k] = self._phase_totals.get(k, 0.0) + v
+            self._phase_cand_folds += n_folds
+
+    def _take_phase_means(self) -> dict[str, float]:
+        """Mean seconds per candidate-fold by phase since the last call; resets."""
+        with self._phase_lock:
+            n = self._phase_cand_folds
+            means = {k: v / n for k, v in self._phase_totals.items()} if n else {}
+            self._phase_totals = {}
+            self._phase_cand_folds = 0
+        return means
+
+    @classmethod
+    def _format_phases(cls, means: dict[str, float]) -> str:
+        """Only ever printed from the [diag] line, i.e. only when a
+        checkpoint path and interval are set — a checkpoint-less run emits no
+        phase readout."""
+        if not means:
+            return "phases=n/a"
+        parts = [f"{k}={means[k]:.2f}" for k in cls._PHASE_KEYS if k in means]
+        return "phases(s/cand-fold): " + " ".join(parts)
 
     def _score_cv_chain(
         self, match_level: list[str], point_level: list[str],
@@ -1196,32 +1321,47 @@ class ServeDiscoverySelector:
         if not match_level and not point_level:
             return float("inf")
         fold_scores: list[float] = []
-        for fold in self._chain_folds:
+        timing: dict[str, float] = {}
+
+        def _acc(key: str, secs: float) -> None:
+            timing[key] = timing.get(key, 0.0) + secs
+
+        for fold_idx, fold in enumerate(self._chain_folds):
             test_df = fold.test_df
 
-            scoring_params = dict(self.config.scoring_model.params)
-            # Per-fit threads are the config's to set. Logistic ignores n_jobs
-            # (sklearn >=1.8 no-op, and injecting it spams FutureWarnings) → never
-            # inject for it. Xgboost honors n_jobs as OpenMP threads → default to 1
-            # when unset so concurrent candidate threads don't oversubscribe; the
-            # validator caps n_parallel_candidates * n_jobs at the cpu count.
-            if self.config.scoring_model.type != "logistic" and "n_jobs" not in scoring_params:
-                scoring_params["n_jobs"] = 1
             model = self._build_candidate_model(
-                match_level, point_level, scoring_params,
+                match_level, point_level, self._scoring_params(),
             )
+            self._attach_prefit(model, fold_idx)
             model.fit(
                 fold.train_df,
                 preloaded_match_features=fold.feats,
                 preloaded_points=fold.points,
             )
+            for k, v in getattr(model, "fit_timings", {}).items():
+                _acc(k, v)
+            # Phase buckets, read literally when gating Phase 2:
+            #   predict = building the state fns + `predict` — which is
+            #             predict_state_fn at the neutral state, so this bucket
+            #             holds a SECOND, redundant matrix build per fold
+            #             (serve_model.py `predict`). Removing it is
+            #             equivalence-by-construction but outside the approved
+            #             plan; it needs its own test before it moves.
+            #   dp      = the set/match DP INCLUDING every state-conditioned
+            #             predict_proba the DP triggers through p_a_fn/p_b_fn
+            #             (cached per state key inside the model).
+            t = time.perf_counter()
             p_a_fn, p_b_fn = model.predict_state_fn(test_df)
             p_a, p_b = model.predict(test_df)
+            _acc("predict", time.perf_counter() - t)
             best_of = test_df["best_of"].to_numpy().astype(np.int64)
+            t = time.perf_counter()
             dist = match_distribution_from_state_fn(p_a_fn, p_b_fn, p_a, p_b, best_of)
+            _acc("dp", time.perf_counter() - t)
 
             y_games_a = test_df["_target_games_a"].to_numpy().astype(np.float64)
             y_games_b = test_df["_target_games_b"].to_numpy().astype(np.float64)
+            t = time.perf_counter()
             fold_scores.append(
                 score_chain(
                     self.config.metric, dist, y_games_a, y_games_b,
@@ -1230,6 +1370,7 @@ class ServeDiscoverySelector:
                     y_won=test_df["won"].to_numpy().astype(np.int64),
                 )
             )
+            _acc("score", time.perf_counter() - t)
             # Drop refs promptly, and bound memory with the same check_memory()
             # guard the rest of the codebase uses (classification FS at
             # fast_selection.py:522, the projection runners per fold). Aborts
@@ -1242,17 +1383,22 @@ class ServeDiscoverySelector:
             del model, p_a_fn, p_b_fn, p_a, p_b, dist
             check_memory("serve FS chain scoring")
 
-        # `del` alone does not reclaim these: p_a_fn / p_b_fn close over the
-        # model (serve_model.py:1280) while the model holds _X_match_A /
-        # _X_match_B / _point_constants assigned onto the instance
-        # (serve_model.py:1207-1209). That is a reference cycle, so refcounting
-        # cannot free it — only the cycle collector can, and it runs rarely
-        # enough that the arrays pile up.
-        #
-        # Measured before this call: RSS climbed ~22 MB per candidate (10789 ->
-        # 12449 MB over 75 candidates) and s/it tracked it almost exactly, 7.98
-        # -> 11.89. It never plateaued, and at that rate a run trips
-        # --memory-limit partway through round 1.
+        self._record_phases(timing, len(self._chain_folds))
+
+        # Kept on evidence, not on the explanation that used to sit here.
+        # Measured before this call was added: RSS climbed ~22 MB per
+        # candidate (10789 -> 12449 MB over 75 candidates) and s/it tracked it
+        # almost exactly, 7.98 -> 11.89; it never plateaued, and at that rate
+        # a run trips --memory-limit partway through round 1. The earlier
+        # comment attributed that to a model<->closure reference cycle through
+        # the arrays predict_state_fn assigned onto the instance. That was not
+        # a cycle (closures -> self -> arrays has no edge back to the closures;
+        # refcounting alone reclaims it), and those arrays are closure locals
+        # now (serve_model.py `_build_state_fns`). Whatever the collect is
+        # actually reclaiming has not been identified — plan
+        # 2026-09-03-serve-fs-wall-time, Phase 1 item 7: diagnose
+        # (DEBUG_SAVEALL, then tracemalloc / gc.get_objects deltas), and drop
+        # this only if the [diag] rss stays flat over >=100 candidates.
         #
         # Once per CANDIDATE, not per fold. An earlier comment here rejected
         # gc.collect() because a per-fold call under n_parallel_candidates > 1
