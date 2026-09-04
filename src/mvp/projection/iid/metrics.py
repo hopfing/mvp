@@ -53,6 +53,69 @@ def spread_cal_errs(
     return errs
 
 
+def _binned_reliability(p: np.ndarray, actual: np.ndarray) -> float:
+    """Count-weighted mean |gap| over fixed 0.05 buckets of predicted p.
+
+    The `*_cal_errs` pair above reduces each line to
+    `abs(p.mean() - actual.mean())`, which answers NET BIAS and is blind to
+    offsetting error: a candidate trading under-prediction on short matches
+    for over-prediction on long ones scores identically. This bins first, so
+    those cancel nowhere.
+
+    Fixed width over [0, 1], matching `_bucket_errors` in
+    `mvp/model/metrics.py`. Deliberately not the equal-count quartile scheme
+    in `diagnostics.py`, which answers a different question.
+    """
+    if p.size == 0:
+        return 0.0
+    edges = np.asarray([round(0.05 * i, 2) for i in range(21)], dtype=np.float64)
+    idx = np.clip(np.searchsorted(edges, p, side="right") - 1, 0, len(edges) - 2)
+    gaps: list[float] = []
+    weights: list[int] = []
+    for b in range(len(edges) - 1):
+        m = idx == b
+        n = int(m.sum())
+        if n == 0:
+            continue
+        gaps.append(abs(float(p[m].mean()) - float(actual[m].mean())))
+        weights.append(n)
+    if not gaps:
+        return 0.0
+    return float(np.average(gaps, weights=weights))
+
+
+def total_reliability(
+    dist,
+    y_games_a: np.ndarray,
+    y_games_b: np.ndarray,
+    total_lines: list[float],
+) -> float:
+    """Mean over lines of the binned reliability of the total-games O/U."""
+    obs_total = (y_games_a + y_games_b).astype(np.int64)
+    vals = [
+        _binned_reliability(dist.p_over_total(line),
+                            (obs_total > line).astype(np.float64))
+        for line in total_lines
+    ]
+    return float(np.mean(vals)) if vals else 0.0
+
+
+def spread_reliability(
+    dist,
+    y_games_a: np.ndarray,
+    y_games_b: np.ndarray,
+    spread_lines: list[float],
+) -> float:
+    """Mean over lines of the binned reliability of A's game-spread cover."""
+    obs_spread = (y_games_a - y_games_b).astype(np.float64)
+    vals = [
+        _binned_reliability(dist.p_a_spread_cover(line),
+                            (obs_spread > line).astype(np.float64))
+        for line in spread_lines
+    ]
+    return float(np.mean(vals)) if vals else 0.0
+
+
 def crps_discrete_pmf(obs_idx: np.ndarray, pmf: np.ndarray) -> float:
     """Continuous Ranked Probability Score for a discrete pmf.
 
@@ -85,6 +148,26 @@ def match_win_log_loss(p_match_win_a: np.ndarray, y_won: np.ndarray) -> float:
     p = np.clip(np.asarray(p_match_win_a, dtype=np.float64), 1e-15, 1 - 1e-15)
     y = np.asarray(y_won, dtype=np.float64)
     return float(-np.mean(y * np.log(p) + (1 - y) * np.log(1 - p)))
+
+
+def match_win_auc(p_match_win_a: np.ndarray, y_won: np.ndarray) -> float:
+    """ROC AUC of the chain's match-win probability against the actual winner.
+
+    The ranking counterpart to `match_win_log_loss`, on the same two arrays.
+    It earns its own name rather than riding along as the generic `roc_auc`
+    key because a projection's fold rows are nested-Platt-calibrated before
+    they become `player_prior_logit` (`mvp/model/features/prior.py`). Platt is
+    monotone: it repairs miscalibration and cannot repair ranking. Selecting
+    on log loss alone, which mixes the two, can therefore promote a candidate
+    whose calibration the downstream fit would have supplied for free over one
+    that ranks better and cannot be rescued.
+    """
+    from sklearn.metrics import roc_auc_score
+
+    y = np.asarray(y_won)
+    if y.size == 0 or len(np.unique(y)) < 2:
+        return 0.5
+    return float(roc_auc_score(y, np.asarray(p_match_win_a, dtype=np.float64)))
 
 
 def compute_iid_metrics(
@@ -289,6 +372,101 @@ def compute_hold_diagnostics(
     return metrics
 
 
+def first_in_metrics(
+    p: np.ndarray, y: np.ndarray, n: np.ndarray, *, min_bucket: int = 20,
+) -> dict[str, float]:
+    """Every first_in number, from the aggregated (match, server) frame.
+
+    `p` predicted first-serve-in rate, `y` observed rate, `n` service points
+    played. One implementation because the FS scorer and the runner's emit
+    both need these: two copies of the weighting is how the number a run
+    SELECTS on and the number it REPORTS come to disagree.
+
+    `wmse` is the pre-existing metric; the other four split what it bundles.
+    A model that orders servers well but sits systematically high scores the
+    same as one that is centred but orders poorly, and those call for
+    different next features.
+    """
+    p = np.asarray(p, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64)
+    n = np.asarray(n, dtype=np.float64)
+    if p.size == 0 or n.sum() <= 0:
+        return {}
+    w = n / n.sum()
+    resid = p - y
+
+    out: dict[str, float] = {
+        "rate_wmse": float(np.sum(w * resid**2)),
+        "rate_signed_bias": float(np.sum(w * resid)),
+    }
+
+    pc = np.clip(p, 1e-15, 1 - 1e-15)
+    out["rate_log_loss"] = float(
+        -np.sum(w * (y * np.log(pc) + (1 - y) * np.log(1 - pc)))
+    )
+
+    # Calibration: fixed 0.05 buckets, gap = weighted mean p - weighted mean y
+    # within the bucket, buckets combined weighted by their summed n. Buckets
+    # under `min_bucket` rows are dropped from BOTH sums.
+    #
+    # What the floor does and does not do: because buckets are combined by
+    # summed n, a sparse bucket is ALREADY down-weighted in proportion to its
+    # sample -- one row among sixty moves the result by ~1.7%, not more. So
+    # the floor is variance hygiene, not protection against a lone row
+    # dominating: a bucket with a handful of rows has an unbiased but very
+    # noisy gap, and dropping it trades a little coverage for a steadier
+    # number. 20 sits between the sparse tails (2-57 rows on a measured
+    # holdout) and the populated centre (2,400-2,900). `dropped` is returned
+    # so a fold that loses real support is visible rather than silent.
+    edges = np.asarray([round(0.05 * i, 2) for i in range(21)], dtype=np.float64)
+    idx = np.clip(np.searchsorted(edges, p, side="right") - 1, 0, len(edges) - 2)
+    gaps: list[float] = []
+    bw: list[float] = []
+    dropped = 0
+    for b in range(len(edges) - 1):
+        m = idx == b
+        cnt = int(m.sum())
+        if cnt == 0:
+            continue
+        if cnt < min_bucket:
+            dropped += cnt
+            continue
+        nb = n[m]
+        gaps.append(abs(float(np.average(p[m], weights=nb))
+                        - float(np.average(y[m], weights=nb))))
+        bw.append(float(nb.sum()))
+    out["rate_calibration_error"] = (
+        float(np.average(gaps, weights=bw)) if gaps else 0.0
+    )
+    out["rate_calibration_dropped"] = float(dropped)
+
+    # Weighted AUC over the aggregate: row i carries n_in positives and
+    # n - n_in negatives, all at the same score p_i. Equal to the point-grain
+    # AUC of the broadcast rate, without expanding to points. Ties are grouped
+    # by DISTINCT p value across the whole frame, not row by row: a round-1
+    # base-rate-only candidate gives every row an identical p, and a per-row
+    # rule would score that as skill instead of returning 0.5.
+    pos = y * n
+    neg = n - pos
+    order = np.argsort(p, kind="mergesort")
+    p_s, pos_s, neg_s = p[order], pos[order], neg[order]
+    bounds = np.flatnonzero(np.diff(p_s)) + 1
+    groups = np.split(np.arange(p_s.size), bounds)
+    conc = 0.0
+    tie = 0.0
+    seen_neg = 0.0
+    for g in groups:
+        gp, gn = pos_s[g].sum(), neg_s[g].sum()
+        conc += gp * seen_neg
+        tie += gp * gn
+        seen_neg += gn
+    denom = pos.sum() * neg.sum()
+    out["rate_roc_auc"] = (
+        float((conc + 0.5 * tie) / denom) if denom > 0 else 0.5
+    )
+    return out
+
+
 def compute_set_score_diagnostics(
     out: ProjectionOutput,
     test_df: pl.DataFrame,
@@ -350,6 +528,60 @@ def compute_set_score_diagnostics(
     return metrics
 
 
+def _sets_played(test_df: pl.DataFrame) -> np.ndarray:
+    played = np.zeros(len(test_df), dtype=np.float64)
+    for i in range(1, 6):
+        pg = test_df[f"player_set{i}_games"].to_numpy().astype(np.float64)
+        played += np.isfinite(pg).astype(np.float64)
+    return played
+
+
+def set_count_cal(
+    dist, best_of: np.ndarray, test_df: pl.DataFrame,
+) -> dict[str, float]:
+    """Calibration of the MATCH-level set count: straight sets vs not.
+
+    `chain_p_straight` ships as a `chain_shape` feature with nothing checking
+    it. `compute_set_score_diagnostics` scores INDIVIDUAL set scores (6-0,
+    7-6…), a different grain from how many sets the match took.
+
+    Takes `dist` rather than a ProjectionOutput so the FS chain scorer can
+    call it: that path builds a MatchDistribution and never a full
+    ProjectionOutput. Predicted is the same `set_outcome_probs` reduction
+    `shape_scalars` uses for `chain_p_straight`, so this scores the number the
+    feature actually carries.
+
+    bo3 and bo5 are scored separately — their supports differ (2 or 3 sets
+    against 3, 4 or 5), so pooling compares distributions over different
+    outcome spaces.
+    """
+    n = len(test_df)
+    p_straight = np.zeros(n, dtype=np.float64)
+    for k in ((2, 0), (0, 2), (3, 0), (0, 3)):
+        vec = dist.set_outcome_probs.get(k)
+        if vec is not None:
+            p_straight = p_straight + vec
+
+    played = _sets_played(test_df)
+    bo = np.asarray(best_of, dtype=np.float64)
+    metrics: dict[str, float] = {}
+    errs: list[float] = []
+    for n_best, straight in ((3.0, 2.0), (5.0, 3.0)):
+        m = bo == n_best
+        if not m.any():
+            continue
+        actual = float((played[m] == straight).mean())
+        pred = float(p_straight[m].mean())
+        tag = f"bo{int(n_best)}"
+        metrics[f"set_count_straight_pred_{tag}"] = pred
+        metrics[f"set_count_straight_actual_{tag}"] = actual
+        metrics[f"set_count_straight_bias_{tag}"] = pred - actual
+        errs.append(abs(pred - actual))
+    if errs:
+        metrics["iid_set_count_cal"] = float(np.mean(errs))
+    return metrics
+
+
 def compute_tiebreak_diagnostics(
     out: ProjectionOutput,
     test_df: pl.DataFrame,
@@ -391,5 +623,31 @@ def compute_tiebreak_diagnostics(
     metrics["tiebreak_rate_pred"] = pred_rate
     metrics["tiebreak_rate_actual"] = actual_rate
     metrics["tiebreak_rate_bias"] = pred_rate - actual_rate
+
+    # WHO wins a breaker, not whether one happens. `chain_tb_edge` ships as a
+    # feature off `t_ab` and nothing scored it; the rate above answers
+    # occurrence only. Same two columns the occurrence check uses: a non-null
+    # tiebreak score means the set went 7-6, so `player_games == 7` is exactly
+    # the player having taken it. Deliberately not `opp_set{i}_games`, which
+    # this function has never required.
+    t_ab = np.asarray(out.t_ab, dtype=np.float64)
+    tb_pred_sum = 0.0
+    tb_actual_sum = 0.0
+    n_tb = 0
+    for i in range(1, 6):
+        pg = test_df[f"player_set{i}_games"].to_numpy().astype(np.float64)
+        tb = test_df[f"player_set{i}_tiebreak"].to_numpy().astype(np.float64)
+        was_tb = np.isfinite(pg) & np.isfinite(tb)
+        if not was_tb.any():
+            continue
+        n_tb += int(was_tb.sum())
+        tb_pred_sum += float(t_ab[was_tb].sum())
+        tb_actual_sum += float((pg[was_tb] == 7).sum())
+    if n_tb:
+        pred_win = tb_pred_sum / n_tb
+        actual_win = tb_actual_sum / n_tb
+        metrics["tiebreak_win_pred"] = pred_win
+        metrics["tiebreak_win_actual"] = actual_win
+        metrics["iid_tiebreak_win_cal"] = abs(pred_win - actual_win)
 
     return metrics

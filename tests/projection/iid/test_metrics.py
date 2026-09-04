@@ -372,6 +372,35 @@ class TestTiebreakDiagnostics:
         m = compute_tiebreak_diagnostics(out, df)
         assert m["tiebreak_rate_actual"] == 1.0
         assert m["tiebreak_rate_bias"] < 0  # pred < 1.0
+        # WHO won the breaker, which the occurrence rate above cannot say.
+        # Every set here is 7-6 to the player, so actual is 1.0 against the
+        # fixture's t_ab, and the gap is the whole point of the metric.
+        assert m["tiebreak_win_actual"] == 1.0
+        assert m["tiebreak_win_pred"] == pytest.approx(float(out.t_ab.mean()))
+        assert m["iid_tiebreak_win_cal"] == pytest.approx(
+            abs(m["tiebreak_win_pred"] - 1.0)
+        )
+
+    def test_tiebreak_win_reads_the_loser_side_too(self):
+        """A 6-7 set is a tiebreak the player LOST. If the winner detection
+        keyed off occurrence alone, this would score identically to 7-6."""
+        n = 20
+        out = _make_projection_output(n)
+        df = pl.DataFrame({
+            "player_set1_games": [6] * n,          # 6-7: breaker lost
+            "player_set2_games": [7] * n,          # 7-6: breaker won
+            "player_set3_games": [None] * n,
+            "player_set4_games": [None] * n,
+            "player_set5_games": [None] * n,
+            "player_set1_tiebreak": [5] * n,
+            "player_set2_tiebreak": [7] * n,
+            "player_set3_tiebreak": [None] * n,
+            "player_set4_tiebreak": [None] * n,
+            "player_set5_tiebreak": [None] * n,
+        })
+        m = compute_tiebreak_diagnostics(out, df)
+        assert m["tiebreak_rate_actual"] == 1.0          # both sets had one
+        assert m["tiebreak_win_actual"] == pytest.approx(0.5)  # won half
 
     def test_empty_when_no_sets(self):
         n = 5

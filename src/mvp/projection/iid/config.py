@@ -246,7 +246,13 @@ class ServeDiscoveryConfig(BaseModel):
     metrics: IIDMetricsConfig = IIDMetricsConfig()
     metric: MetricName = "log_loss"
     selection_method: Literal["forward"] = "forward"
-    min_delta: float = 0.0001  # minimum fractional improvement to accept a candidate
+    # ABSOLUTE improvement required to accept a candidate, not fractional.
+    # None (the default) resolves per metric via `resolved_min_delta()`:
+    # one flat value makes a run halt earlier or later purely as a function
+    # of which `metric:` a config names, since CRPS runs near 3.4 while
+    # `branch_rate_wmse` is a squared residual on a [0, 1] rate. An explicit
+    # value in the config still wins.
+    min_delta: float | None = None
     # Cap on training rows per fold during candidate scoring (point-grain path only).
     # Has no effect when metric is a chain metric — use fs_match_subsample instead.
     # Final-form re-eval always runs on the full slice so reported metrics are honest.
@@ -261,6 +267,19 @@ class ServeDiscoveryConfig(BaseModel):
     # n_jobs in scoring_model.params defaults to 1; n_parallel_candidates * n_jobs
     # must not exceed the logical processor count.
     n_parallel_candidates: int = 1
+
+    def resolved_min_delta(self) -> float:
+        """This config's `min_delta`, or the metric's scale-appropriate default.
+
+        Mirrors `DiscoveryOptions.resolved_min_delta` on the classification
+        side for the same reason: the threshold is absolute, so its right value
+        tracks the metric's magnitude.
+        """
+        from mvp.projection.iid.metric_registry import default_serve_min_delta
+
+        if self.min_delta is not None:
+            return self.min_delta
+        return default_serve_min_delta(self.metric)
 
     @model_validator(mode="after")
     def _validate_branch_metric(self) -> "ServeDiscoveryConfig":

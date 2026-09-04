@@ -51,6 +51,7 @@ from mvp.model.discovery.selection import (
     _fs_progress_path,
 )
 from mvp.projection.iid.config import ServeDiscoveryConfig
+from mvp.projection.iid.metrics import first_in_metrics
 from mvp.projection.iid.metric_registry import (
     base_metric_of,
     is_branch_metric,
@@ -680,10 +681,11 @@ class ServeDiscoverySelector:
                 if best_cand is not None
                 else -math.inf
             )
-            if best_cand is None or best_delta < self.config.min_delta:
+            min_delta = self.config.resolved_min_delta()
+            if best_cand is None or best_delta < min_delta:
                 reason = (
                     "no candidate produced a finite score" if best_cand is None
-                    else f"improvement {best_delta:.6f} < min_delta {self.config.min_delta:.6f}"
+                    else f"improvement {best_delta:.6f} < min_delta {min_delta:.6f}"
                 )
                 logger.info("FS halting: %s", reason)
                 # The halt round's ranking is the only record of what nearly
@@ -1483,7 +1485,12 @@ class ServeDiscoverySelector:
         return branch.score_test_frame(joined)[base]
 
     def _score_first_in(self, model: Any, fold: _ChainFold) -> float:
-        """first_in: weighted MSE on the held-out (match, server) rate.
+        """first_in: the configured rate metric on the held-out (match, server)
+        aggregate.
+
+        Every value comes from `first_in_metrics`, which the runner also
+        calls — wmse, calibration error, weighted AUC, log loss and signed
+        bias — and the configured metric selects one by name.
 
         The A/B orientation is the hazard here — `test_df` is one row per
         match carrying `player_id` and `opp_id`, and joining the aggregate on
@@ -1520,10 +1527,20 @@ class ServeDiscoverySelector:
             return worst_score(self.config.metric)
         if joined["_n_serve_pts"].null_count() or joined["_pred"].null_count():
             raise ValueError("first_in branch scoring: null predictions or weights")
-        w = joined["_n_serve_pts"].to_numpy().astype(np.float64)
-        rate = (joined["_n_first_in"] / joined["_n_serve_pts"]).to_numpy()
-        pred_v = joined["_pred"].to_numpy().astype(np.float64)
-        return float(np.sum(w * (pred_v - rate) ** 2) / np.sum(w))
+        vals = first_in_metrics(
+            joined["_pred"].to_numpy().astype(np.float64),
+            (joined["_n_first_in"] / joined["_n_serve_pts"]).to_numpy(),
+            joined["_n_serve_pts"].to_numpy().astype(np.float64),
+        )
+        # One implementation for selection and for the runner's readout, so a
+        # change to the weighting cannot land in one path and miss the other.
+        key = self.config.metric[len("branch_"):]
+        if key not in vals:
+            raise ValueError(
+                f"first_in branch scoring: {self.config.metric} produced no "
+                f"value (have {sorted(vals)})"
+            )
+        return float(vals[key])
 
     def _score_cv_chain(
         self, match_level: list[str], point_level: list[str],

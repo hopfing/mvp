@@ -838,6 +838,14 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
         reaching into `_model` / `_match_feature_cols` from three places is how
         the three come to disagree. `score_test_points` is this plus its
         `point_` re-key, unchanged for its callers.
+
+        `full_range=True` unconditionally: these rows are one per point from
+        the SERVER's perspective (`apply_serve_branch` filters on `serve`), so
+        unlike the classification frame there is no mirrored partner row and
+        the default `p >= 0.50` mask would discard data rather than
+        de-duplicate it. It discards asymmetrically — win_first sits near
+        0.6901 and survives almost intact, win_second at 0.4968 loses about
+        half its rows. All three callers of this method are branch-grain.
         """
         from mvp.model.metrics import compute_metrics
 
@@ -846,7 +854,7 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
         feature_cols = self._match_feature_cols + self.point_level_features
         X = joined.select(feature_cols).to_numpy()
         y = joined["point_won_by_server"].cast(pl.Int64).to_numpy()
-        return compute_metrics(y, self._model.predict_proba(X))
+        return compute_metrics(y, self._model.predict_proba(X), full_range=True)
 
     def build_test_point_frame(
         self,

@@ -35,6 +35,8 @@ from mvp.projection.iid.artifacts import (
 from mvp.projection.iid.config import IIDProjectionConfig
 from mvp.projection.iid.diagnostics import IIDProjectionDiagnostics
 from mvp.projection.iid.metrics import (
+    first_in_metrics,
+    set_count_cal,
     compute_hold_diagnostics,
     compute_iid_metrics,
     compute_serve_diagnostics,
@@ -62,6 +64,20 @@ run_logger = logging.getLogger(__name__)
 # a KeyError rather than a missing number.
 _BRANCH_POINT_METRICS = (
     "log_loss", "brier_score", "roc_auc", "calibration_error",
+    # Direction, not just magnitude: `calibration_error` is unsigned, so an
+    # over- and an under-confident arm score alike. compute_metrics already
+    # computes this and it was being discarded.
+    "signed_calibration",
+)
+
+# first_in's readout. Every key `first_in_metrics` returns, so a run selected
+# on one of them reports it at the comparison endpoint -- which is what makes
+# two assembled configs comparable on the terms their components were chosen
+# on. `rate_calibration_dropped` rides along so a fold that loses most of its
+# bucket support is visible rather than silently averaged.
+_BRANCH_RATE_METRICS = (
+    "rate_wmse", "rate_signed_bias", "rate_log_loss",
+    "rate_calibration_error", "rate_calibration_dropped", "rate_roc_auc",
 )
 
 
@@ -85,9 +101,9 @@ def _two_level_branch_metrics(
     for name in COMPONENTS:
         branch = components[name]
         if name == FIRST_IN:
-            out[f"branch_{name}_rate_wmse"] = _first_in_rate_wmse(
-                model, test_df, fold_test_points,
-            )
+            scored_fi = _first_in_scores(model, test_df, fold_test_points)
+            for key in _BRANCH_RATE_METRICS:
+                out[f"branch_{name}_{key}"] = scored_fi.get(key, float("nan"))
             continue
         # NaN rather than raising for a featureless branch: the plan's A6 said
         # raise, but a `_ConstantBranch` (or an unfitted arm) is a legitimate
@@ -107,20 +123,23 @@ def _two_level_branch_metrics(
     return out
 
 
-def _first_in_rate_wmse(
+def _first_in_scores(
     model: "TwoLevelServeModel",
     test_df: pl.DataFrame,
     fold_test_points: pl.DataFrame | None,
-) -> float:
-    """Weighted MSE of P(1st in) against the realised (match, server) rate.
+) -> dict[str, float]:
+    """Every first_in number against the realised (match, server) rate.
 
-    Same quantity `branch_rate_wmse` selects on, and the same stacked join.
+    The same quantities the FS branch scorer selects on, through the same
+    `first_in_metrics` implementation and the same stacked join, so the number
+    a run selects on and the number it reports cannot drift apart.
+
     `validate="1:1"` catches the shape error (an aggregate joined at match
     grain is 1:m); it does not catch a swapped A/B stack, which is still 1:1
     — the FS-side orientation test is what pins that.
     """
     if fold_test_points is None or len(fold_test_points) == 0:
-        return float("nan")
+        return {}
     agg = first_in_counts(fold_test_points)
     fi_a, fi_b = model._first_in_for(test_df)
     pred = pl.concat([
@@ -133,11 +152,12 @@ def _first_in_rate_wmse(
         agg, on=["match_uid", "server_id"], how="inner", validate="1:1",
     )
     if joined.height == 0:
-        return float("nan")
-    w = joined["_n_serve_pts"].to_numpy().astype(np.float64)
-    rate = (joined["_n_first_in"] / joined["_n_serve_pts"]).to_numpy()
-    pred_v = joined["_pred"].to_numpy().astype(np.float64)
-    return float(np.sum(w * (pred_v - rate) ** 2) / np.sum(w))
+        return {}
+    return first_in_metrics(
+        joined["_pred"].to_numpy().astype(np.float64),
+        (joined["_n_first_in"] / joined["_n_serve_pts"]).to_numpy(),
+        joined["_n_serve_pts"].to_numpy().astype(np.float64),
+    )
 
 
 def preload_match_specs(serve_model_config) -> list[str]:
@@ -497,6 +517,9 @@ class IIDProjectionRunner:
                 metrics.update(compute_hold_diagnostics(out, test_df))
                 metrics.update(compute_set_score_diagnostics(out, test_df))
                 metrics.update(compute_tiebreak_diagnostics(out, test_df))
+                metrics.update(
+                    set_count_cal(out.distribution, out.best_of, test_df)
+                )
                 if isinstance(serve_model, ScoreStateChainServeModel):
                     metrics.update(serve_model.score_test_points(
                         test_df,

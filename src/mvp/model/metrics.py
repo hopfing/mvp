@@ -128,20 +128,38 @@ def fs_display_precision(min_delta: float) -> int:
 
 
 def _bucket_errors(
-    y_true: np.ndarray, y_prob: np.ndarray, signed: bool
+    y_true: np.ndarray, y_prob: np.ndarray, signed: bool,
+    full_range: bool = False,
 ) -> tuple[list[float], list[int]]:
-    """Per-bucket calibration errors and counts for probabilities >= 0.50.
+    """Per-bucket calibration errors and counts.
+
+    Default scores probabilities >= 0.50 only. That mask is there because the
+    classification frame carries BOTH orientations of every match (see
+    `symmetry.py`), so `p` and `1 - p` are both present and the mask
+    de-duplicates them.
+
+    `full_range=True` buckets [0.00, 1.00] over every row, for callers whose
+    rows carry no such mirror. Serve-branch rows are one per point from the
+    server's perspective: win_first sits near 0.69 and is scored almost in
+    full under the default, but win_second sits at 0.4968 and loses roughly
+    half its rows — so two win_second candidates can differ only on rows the
+    metric never sees.
 
     Returns parallel lists of (errors, counts) — one entry per non-empty bucket.
     """
-    mask = y_prob >= 0.50
-    y_true_filtered = y_true[mask]
-    y_prob_filtered = y_prob[mask]
+    if full_range:
+        y_true_filtered = y_true
+        y_prob_filtered = y_prob
+        bucket_edges = [round(0.05 * i, 2) for i in range(21)]
+    else:
+        mask = y_prob >= 0.50
+        y_true_filtered = y_true[mask]
+        y_prob_filtered = y_prob[mask]
+        bucket_edges = [0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90,
+                        0.95, 1.00]
 
     if len(y_true_filtered) == 0:
         return [], []
-
-    bucket_edges = [0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95, 1.00]
     errors: list[float] = []
     weights: list[int] = []
 
@@ -166,40 +184,48 @@ def _bucket_errors(
     return errors, weights
 
 
-def compute_calibration_error(y_true: np.ndarray, y_prob: np.ndarray) -> float:
+def compute_calibration_error(
+    y_true: np.ndarray, y_prob: np.ndarray, full_range: bool = False,
+) -> float:
     """Compute weighted mean calibration error for probabilities >= 0.50."""
-    errors, weights = _bucket_errors(y_true, y_prob, signed=False)
+    errors, weights = _bucket_errors(y_true, y_prob, signed=False, full_range=full_range)
     if not errors:
         return 0.0
     return float(np.average(errors, weights=weights))
 
 
-def compute_signed_calibration(y_true: np.ndarray, y_prob: np.ndarray) -> float:
+def compute_signed_calibration(
+    y_true: np.ndarray, y_prob: np.ndarray, full_range: bool = False,
+) -> float:
     """Compute signed calibration for probabilities >= 0.50.
 
     Positive = underconfident (actual win rate > predicted).
     Negative = overconfident (actual win rate < predicted).
     """
-    errors, weights = _bucket_errors(y_true, y_prob, signed=True)
+    errors, weights = _bucket_errors(y_true, y_prob, signed=True, full_range=full_range)
     if not errors:
         return 0.0
     return float(np.average(errors, weights=weights))
 
 
-def compute_calibration_error_max(y_true: np.ndarray, y_prob: np.ndarray) -> float:
+def compute_calibration_error_max(
+    y_true: np.ndarray, y_prob: np.ndarray, full_range: bool = False,
+) -> float:
     """Worst-bucket calibration error for probabilities >= 0.50.
 
     Tuning target for flattening the worst-offending bucket rather than the
     weighted average, which can hide a wildly miscalibrated bucket behind
     well-calibrated ones.
     """
-    errors, _ = _bucket_errors(y_true, y_prob, signed=False)
+    errors, _ = _bucket_errors(y_true, y_prob, signed=False, full_range=full_range)
     if not errors:
         return 0.0
     return float(max(errors))
 
 
-def compute_overconfidence_max(y_true: np.ndarray, y_prob: np.ndarray) -> float:
+def compute_overconfidence_max(
+    y_true: np.ndarray, y_prob: np.ndarray, full_range: bool = False,
+) -> float:
     """Worst overconfident-bucket magnitude for probabilities >= 0.50.
 
     Returns the largest amount by which any bucket's predicted mean exceeds
@@ -207,7 +233,7 @@ def compute_overconfidence_max(y_true: np.ndarray, y_prob: np.ndarray) -> float:
     is underconfident. Asymmetric counterpart to calibration_error_max that
     penalizes only the side of miscalibration that loses real money.
     """
-    errors, _ = _bucket_errors(y_true, y_prob, signed=True)
+    errors, _ = _bucket_errors(y_true, y_prob, signed=True, full_range=full_range)
     if not errors:
         return 0.0
     return float(max(0.0, -min(errors)))
@@ -423,6 +449,7 @@ def compute_metrics(
     y_prob: np.ndarray,
     threshold: float = 0.5,
     lambda_over: float | None = None,
+    full_range: bool = False,
 ) -> dict[str, float]:
     """Compute classification metrics.
 
@@ -431,6 +458,12 @@ def compute_metrics(
         y_prob: Predicted probabilities for positive class.
         threshold: Classification threshold for accuracy.
         lambda_over: Override for asymmetric_logloss's overconfidence penalty.
+        full_range: Score calibration over [0, 1] instead of masking to
+            p >= 0.50. Forwarded to ALL FOUR bucket-derived metrics below,
+            since each calls `_bucket_errors` itself rather than routing
+            through `compute_calibration_error` — passing it to one would
+            leave the other three truncated. Set by callers whose rows carry
+            no mirrored orientation; see `_bucket_errors`.
             When None, uses compute_asymmetric_logloss's default (2.0). Callers
             with a YAML-configured `model.params.lambda_over` should pass it
             through so the tune metric mirrors the training objective.
@@ -450,10 +483,14 @@ def compute_metrics(
         "log_loss": float(log_loss(y_true, y_prob_clipped)),
         "brier_score": float(brier_score_loss(y_true, y_prob)),
         "roc_auc": float(roc_auc_score(y_true, y_prob)),
-        "calibration_error": compute_calibration_error(y_true, y_prob),
-        "calibration_error_max": compute_calibration_error_max(y_true, y_prob),
-        "overconfidence_max": compute_overconfidence_max(y_true, y_prob),
-        "signed_calibration": compute_signed_calibration(y_true, y_prob),
+        "calibration_error": compute_calibration_error(
+            y_true, y_prob, full_range=full_range),
+        "calibration_error_max": compute_calibration_error_max(
+            y_true, y_prob, full_range=full_range),
+        "overconfidence_max": compute_overconfidence_max(
+            y_true, y_prob, full_range=full_range),
+        "signed_calibration": compute_signed_calibration(
+            y_true, y_prob, full_range=full_range),
         "error_rate_80plus": compute_error_rate_80plus(y_true, y_prob),
         "asymmetric_logloss": compute_asymmetric_logloss(y_true, y_prob, **asym_kwargs),
         # Tail-sensitive objectives (see each compute_* docstring).

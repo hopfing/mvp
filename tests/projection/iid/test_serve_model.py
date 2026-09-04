@@ -1158,7 +1158,11 @@ class TestBuildTestPointFrame:
         y_prob = m._model.predict_proba(frame.select(cols).to_numpy())
         from mvp.model.metrics import compute_metrics
 
-        expected = compute_metrics(y, y_prob)
+        # full_range=True to match `score_test_frame`: branch rows carry no
+        # mirrored partner, so it scores calibration over [0, 1] rather than
+        # masking to p >= 0.50. Without this the reference and the thing under
+        # test disagree on four keys.
+        expected = compute_metrics(y, y_prob, full_range=True)
         for k, v in expected.items():
             assert metrics[f"point_{k}"] == pytest.approx(v)
 

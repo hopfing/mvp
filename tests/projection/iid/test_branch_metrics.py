@@ -206,12 +206,21 @@ class TestRegistry:
         assert names == {
             "branch_log_loss", "branch_brier", "branch_roc_auc",
             "branch_calibration_error", "branch_rate_wmse",
+            "branch_rate_calibration_error", "branch_rate_roc_auc",
+            "branch_rate_log_loss",
         }
         assert base_metric_of("branch_log_loss") == "log_loss"
         assert base_metric_of("branch_brier") == "brier_score"
         assert base_metric_of("branch_roc_auc") == "roc_auc"
         assert base_metric_of("branch_calibration_error") == "calibration_error"
         assert base_metric_of("branch_rate_wmse") is None
+        # The rate metrics carry no base_metric: compute_metrics cannot score
+        # a weighted rate, so `branch_rate_metrics()` picks them out by that
+        # absence and the config guard uses it to refuse a rate metric on a
+        # win arm and a classification metric on first_in.
+        for n in ("branch_rate_calibration_error", "branch_rate_roc_auc",
+                  "branch_rate_log_loss"):
+            assert base_metric_of(n) is None
 
     def test_directions_match_the_classification_counterparts(self):
         from mvp.model.metrics import MAXIMIZE_METRICS  # noqa: F401  (existence)
@@ -719,10 +728,15 @@ class TestRunnerBranchEmit:
         # unfitted win branches -> NaN, not absent, not an exception
         assert np.isnan(out[f"branch_{WIN_FIRST}_log_loss"])
 
-    def test_first_in_wmse_matches_the_fs_scorer(self, tmp_path):
+    def test_first_in_readout_matches_the_fs_scorer(self, tmp_path):
         """The endpoint readout and the selection metric must be the same
-        quantity, or the comparison the plan exists for is meaningless."""
-        from mvp.projection.iid.runner import _first_in_rate_wmse
+        quantity, or the comparison the plan exists for is meaningless.
+
+        Checks EVERY first_in metric, not just wmse: both paths now go through
+        `first_in_metrics`, and the point of one implementation is that none
+        of the five can drift.
+        """
+        from mvp.projection.iid.runner import _first_in_scores
 
         sel = _selector(tmp_path, _config(
             tmp_path, metric="branch_rate_wmse", component=FIRST_IN,
@@ -733,9 +747,17 @@ class TestRunnerBranchEmit:
         raw = pl.read_parquet(sel.points_path).filter(
             pl.col("match_uid").is_in(fold.test_df["match_uid"].to_list())
         )
-        assert _first_in_rate_wmse(model, fold.test_df, raw) == pytest.approx(
+        readout = _first_in_scores(model, fold.test_df, raw)
+        assert readout["rate_wmse"] == pytest.approx(
             sel._score_first_in(model, fold), rel=1e-12
         )
+        # and each selectable rate metric agrees with its own FS scorer
+        for metric in ("branch_rate_calibration_error", "branch_rate_roc_auc",
+                       "branch_rate_log_loss"):
+            sel.config.metric = metric
+            assert readout[metric[len("branch_"):]] == pytest.approx(
+                sel._score_first_in(model, fold), rel=1e-12
+            ), metric
 
     def test_single_level_metrics_unchanged(self):
         """The new emit is gated on TwoLevelServeModel; a score_state model
