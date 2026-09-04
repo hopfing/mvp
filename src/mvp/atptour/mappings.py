@@ -107,6 +107,8 @@ SR_ID_MAPPING: dict[str, str] = {
     "SR:COMPETITOR:1149753": "J0FU",  # Andrew Johnson (USA)
     "SR:COMPETITOR:1276064": "A0O1",  # Michael Antonius (USA)
     "SR:COMPETITOR:1181737": "S1CU",  # Jack Secord (USA)
+    "SR:COMPETITOR:965785": "C0OJ",  # Brandon Carpico (USA)
+    "SR:COMPETITOR:1034525": "F0HZ",  # Nikita Samuel Filin (USA)
 }
 
 # Raw match_stats files that ATP serves with the wrong stats payload. Keyed by
