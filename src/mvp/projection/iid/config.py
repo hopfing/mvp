@@ -118,6 +118,21 @@ class IIDMetricsConfig(BaseModel):
             raise ValueError(
                 f"metrics.objective has duplicate metrics: {self.objective}"
             )
+        # The tune reads its trial value out of the projection runner's metrics
+        # dict, which holds COMPOSED metrics only. A non-chain name there either
+        # KeyErrors one trial in (point/branch names the runner never emits) or
+        # -- worse -- silently tunes something else: `log_loss` exists in that
+        # dict at MATCH-WIN grain, so a config that selected features on the
+        # point-grain log loss would tune the composed one. Refuse at load.
+        from mvp.projection.iid.metric_registry import grain_of
+
+        non_chain = [m for m in self.objective if grain_of(m) != "chain"]
+        if non_chain:
+            raise ValueError(
+                f"metrics.objective must name composed (chain-grain) metrics; "
+                f"{non_chain} are not. The projection runner does not emit "
+                f"them, so a tune would fail or optimise a different quantity."
+            )
         return self
 
 
@@ -246,6 +261,46 @@ class ServeDiscoveryConfig(BaseModel):
     # n_jobs in scoring_model.params defaults to 1; n_parallel_candidates * n_jobs
     # must not exceed the logical processor count.
     n_parallel_candidates: int = 1
+
+    @model_validator(mode="after")
+    def _validate_branch_metric(self) -> "ServeDiscoveryConfig":
+        """A branch metric scores the component this run selects for, on that
+        component's own target — so the metric and the component have to agree
+        about which target that is.
+
+        The scorer dispatches on the COMPONENT, so a mismatched pair does not
+        fail: `branch_log_loss` with `serve_component: first_in` would score
+        the weighted rate MSE and label every artifact -- history, checkpoint,
+        stop record, the promoted config's provenance -- `branch_log_loss`.
+        Both are minimize, so nothing downstream notices. That is exactly the
+        confound that makes two arms incomparable, so it is refused here.
+        """
+        from mvp.projection.iid.metric_registry import (
+            branch_rate_metrics,
+            is_branch_metric,
+        )
+
+        if not is_branch_metric(self.metric):
+            return self
+        if self.serve_component is None:
+            raise ValueError(
+                f"metric {self.metric!r} is per-branch and requires "
+                f"serve_component to be set (first_in / win_first / win_second)"
+            )
+        rate_metrics = branch_rate_metrics()
+        if self.metric in rate_metrics and self.serve_component != "first_in":
+            raise ValueError(
+                f"metric {self.metric!r} scores the first-serve-in rate and "
+                f"requires serve_component=first_in; got "
+                f"{self.serve_component!r}"
+            )
+        if self.metric not in rate_metrics and self.serve_component == "first_in":
+            raise ValueError(
+                f"metric {self.metric!r} scores point_won_by_server on a win "
+                f"branch; serve_component=first_in must use one of "
+                f"{sorted(rate_metrics)}"
+            )
+        return self
 
     @model_validator(mode="after")
     def _validate_parallelism(self) -> "ServeDiscoveryConfig":
@@ -382,17 +437,38 @@ class ServeDiscoveryConfig(BaseModel):
                     include_specs.append(partner)
                     seen.add(partner)
 
+        from mvp.projection.iid.metric_registry import grain_of
+
+        base_description = (
+            self.description
+            or "IID score-state projection from forward-selected features"
+        )
+        # Provenance: the two non-selected components come from `serve_model`
+        # with none of their own, so at minimum say what selected THIS one.
+        selected_by = (
+            f"{self.serve_component} selected on {self.metric}"
+            if self.serve_component else f"selected on {self.metric}"
+        )
+        # Carry the FS objective forward as the tune objective -- but only when
+        # it is composed. The runner emits composed metrics only, so a
+        # point/branch name here would fail a trial in, or silently tune
+        # match-win `log_loss` instead of the point-grain one that was
+        # selected on. Omitting leaves `mvp tune` to raise its own error
+        # naming this file and the field, which is the honest failure.
+        metrics_block: dict[str, Any] = {
+            "total_lines": list(self.metrics.total_lines),
+            "spread_lines": list(self.metrics.spread_lines),
+        }
+        if self.metrics.objective:
+            metrics_block["objective"] = list(self.metrics.objective)
+        elif grain_of(self.metric) == "chain":
+            metrics_block["objective"] = [self.metric]
+
         return {
-            "description": (
-                self.description
-                or "IID score-state projection from forward-selected features"
-            ),
+            "description": f"{base_description} [{selected_by}]",
             "data": self.data.model_dump(),
             "features": {"include": include_specs},
-            # Carry the FS objective forward as the tune objective. Without it the
-            # promoted config states nothing about what its features were selected
-            # against, and `mvp tune` would have to be told per invocation.
-            "metrics": {"objective": [self.metric]},
+            "metrics": metrics_block,
             "serve_model": serve_block,
             "validation": self.validation.model_dump(),
         }

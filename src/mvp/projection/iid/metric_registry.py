@@ -26,7 +26,7 @@ from mvp.projection.iid.metrics import (
     total_cal_errs,
 )
 
-Grain = Literal["point", "chain"]
+Grain = Literal["point", "chain", "branch"]
 Direction = Literal["minimize", "maximize"]
 ChainScorer = Callable[..., float]
 
@@ -37,6 +37,11 @@ class MetricSpec:
     grain: Grain
     direction: Direction
     chain_scorer: ChainScorer | None = None  # required iff grain == "chain"
+    # grain == "branch" only: the key `mvp.model.metrics.compute_metrics`
+    # returns for this metric. Carried rather than derived by stripping the
+    # `branch_` prefix at the call site, so the mapping has one home.
+    # `None` for the first_in rate metric, which compute_metrics cannot score.
+    base_metric: str | None = None
 
 
 def _score_iid_crps_total_games(dist, y_a, y_b, **_):
@@ -113,6 +118,28 @@ METRICS: dict[str, MetricSpec] = {
         ),
         MetricSpec("mae",  "chain", "minimize", _score_mae),
         MetricSpec("rmse", "chain", "minimize", _score_rmse),
+        # Per-branch selection (plan: 2026-09-03-per-branch-selection-metrics).
+        # A `serve_component` run scores the branch it is selecting for on that
+        # branch's OWN target instead of the composed chain: win_first on
+        # `point_won_by_server` over `serve == 1` rows, win_second over
+        # `serve == 2`, first_in on the first-serve-in rate. The chain metrics
+        # above are untouched and remain the default route; `metric:` picks.
+        MetricSpec("branch_log_loss", "branch", "minimize",
+                   base_metric="log_loss"),
+        MetricSpec("branch_brier", "branch", "minimize",
+                   base_metric="brier_score"),
+        MetricSpec("branch_roc_auc", "branch", "maximize",
+                   base_metric="roc_auc"),
+        MetricSpec("branch_calibration_error", "branch", "minimize",
+                   base_metric="calibration_error"),
+        # first_in only: weighted MSE on the (match, server) first-serve rate,
+        # weights = service points played. NOT a point-grain Brier on the
+        # broadcast rate -- the two rank identically
+        # (Brier = wMSE + sum n_g r_g(1-r_g)/N, the second term irreducible and
+        # model-independent) but the broadcast's dominant constant would leave
+        # the entire model-dependent range in the fourth decimal, and min_delta
+        # is an absolute threshold.
+        MetricSpec("branch_rate_wmse", "branch", "minimize"),
     ]
 }
 
@@ -123,6 +150,37 @@ def is_chain_metric(name: str) -> bool:
 
 def is_point_metric(name: str) -> bool:
     return METRICS[name].grain == "point"
+
+
+def is_branch_metric(name: str) -> bool:
+    """Scored on the selected serve component's own target, not the chain."""
+    return METRICS[name].grain == "branch"
+
+
+def grain_of(name: str) -> Grain:
+    return METRICS[name].grain
+
+
+def base_metric_of(name: str) -> str | None:
+    """The `compute_metrics` key a branch metric scores, if any."""
+    return METRICS[name].base_metric
+
+
+def needs_match_grain_prep(name: str) -> bool:
+    """Does this metric need the match-grain frame, folds and two-sided
+    feature frame that `_prepare_match_data` builds?
+
+    True for chain metrics (they run the chain over match-grain test rows) AND
+    for branch metrics (their branches read match-level features and their
+    held-out rows come from the same match-grain folds). False for point
+    metrics, which score the point matrix directly. Distinct from
+    `is_chain_metric`, which answers "does scoring go through the chain".
+    """
+    return METRICS[name].grain in ("chain", "branch")
+
+
+def branch_rate_metrics() -> set[str]:
+    return {n for n, s in METRICS.items() if s.grain == "branch" and s.base_metric is None}
 
 
 def is_minimize(name: str) -> bool:

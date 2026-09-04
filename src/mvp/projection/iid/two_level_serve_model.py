@@ -53,6 +53,7 @@ from typing import Any, Final
 import numpy as np
 import polars as pl
 
+from mvp.projection.iid.score_state_features import add_derived_point_features
 from mvp.projection.iid.serve_model import (
     ScoreStateChainServeModel,
     ServeStateFn,
@@ -73,6 +74,26 @@ WIN_SECOND: Final[str] = "win_second"
 COMPONENTS: Final[tuple[str, ...]] = (FIRST_IN, WIN_FIRST, WIN_SECOND)
 
 _SERVE_BRANCH: Final[dict[str, int]] = {WIN_FIRST: 1, WIN_SECOND: 2}
+
+
+def first_in_counts(
+    points: pl.DataFrame, *, extra: list[pl.Expr] | None = None,
+) -> pl.DataFrame:
+    """(match_uid, server_id) service-point and first-serve-in counts.
+
+    ONE definition. `FirstServeInModel.fit` aggregates its training target with
+    it, and both held-out scorers (the serve FS's branch metric and the
+    runner's per-branch emit) build their target with it — a second copy is how
+    a metric comes to score a subtly different quantity than the model fits.
+    Note what it does NOT do: no `point_won_by_server` filter, and `pl.len()`
+    as the denominator, so a row with a null outcome still counts as a service
+    point.
+    """
+    aggs = [
+        pl.len().alias("_n_serve_pts"),
+        (pl.col("serve") == 1).sum().alias("_n_first_in"),
+    ]
+    return points.group_by(["match_uid", "server_id"]).agg(aggs + list(extra or []))
 
 
 class FirstServeInModel:
@@ -147,6 +168,28 @@ class FirstServeInModel:
     def _resolve_cols(self) -> tuple[list[str], list[bool]]:
         return resolve_match_feature_cols(self.match_level_features)
 
+    def _has_features(self) -> bool:
+        return bool(self.match_level_features or self.point_level_features)
+
+    def _point_read_cols(self) -> list[str]:
+        """Parquet columns the configured point features need: the feature
+        itself when it is raw, its source columns when it is derived. Same map
+        `_first_in_for` reads at predict, so the two cannot drift."""
+        sources = ScoreStateChainServeModel._POINT_FEATURE_SOURCES
+        out: set[str] = set()
+        for name in self.point_level_features:
+            out.update(sources.get(name, (name,)))
+        return sorted(out)
+
+    def _design_cols(self) -> list[str]:
+        """Design-matrix columns, in the order fit and predict must agree on.
+
+        Match columns first (they alone are parallel to `_is_diff`, which the
+        perspective swap in `TwoLevelServeModel._first_in_for` iterates), then
+        the point columns. Both sides call this; the order is the contract.
+        """
+        return list(self._cols) + list(self.point_level_features)
+
     def _aggregate(self, points: pl.DataFrame) -> pl.DataFrame:
         """Collapse points to (match_uid, server_id) with the branch counts.
 
@@ -155,10 +198,7 @@ class FirstServeInModel:
         Taking a mean instead would quietly tolerate a non-constant column and
         turn a wrong feature into a plausible number.
         """
-        from mvp.projection.iid.score_state_features import (
-            DERIVED_POINT_FEATURES,
-            add_derived_point_features,
-        )
+        from mvp.projection.iid.score_state_features import DERIVED_POINT_FEATURES
 
         if self.point_level_features:
             wanted = [
@@ -167,16 +207,23 @@ class FirstServeInModel:
             ]
             if wanted:
                 points = add_derived_point_features(points, wanted)
-        aggs = [
-            pl.len().alias("_n_serve_pts"),
-            (pl.col("serve") == 1).sum().alias("_n_first_in"),
-        ]
-        aggs += [
-            pl.col(f).first().alias(f)
-            for f in self.point_level_features
-            if f in points.columns
-        ]
-        return points.group_by(["match_uid", "server_id"]).agg(aggs)
+        missing = [f for f in self.point_level_features if f not in points.columns]
+        if missing:
+            # Silently dropping these used to be harmless -- nothing read them
+            # (they never reached the design matrix). Now they are load-bearing
+            # on both sides, and a dropped column would make X narrower at fit
+            # than the predict-side read expects.
+            raise KeyError(
+                f"FirstServeInModel: point features absent from the points "
+                f"frame: {sorted(missing)}"
+            )
+        return first_in_counts(
+            points,
+            # Match-constant by definition, so `first()` is exact; a mean would
+            # quietly tolerate a non-constant column and turn a wrong feature
+            # into a plausible number.
+            extra=[pl.col(f).first().alias(f) for f in self.point_level_features],
+        )
 
     # -- fit -----------------------------------------------------------
     def fit(
@@ -199,8 +246,17 @@ class FirstServeInModel:
         if preloaded_points is not None:
             points = preloaded_points
         else:
+            # The configured point features (and, for a derived one, its source
+            # columns) have to come off the parquet too. Reading only the three
+            # keys was safe while point features were inert; now that they reach
+            # the design matrix, `_aggregate`'s derivation would raise
+            # ColumnNotFound on `surface` for a promoted first_in config with
+            # `first_in_point_features` -- i.e. exactly what a first_in run now
+            # produces -- on the non-preloaded path `projection_run` trains
+            # through.
             points = pl.read_parquet(
-                points_path, columns=["match_uid", "server_id", "serve"]
+                points_path,
+                columns=["match_uid", "server_id", "serve", *self._point_read_cols()],
             ).filter(pl.col("match_uid").is_in(train_uids))
         if len(points) == 0:
             raise ValueError("FirstServeInModel.fit: no points for training matches")
@@ -210,20 +266,29 @@ class FirstServeInModel:
             agg["_n_first_in"].sum() / max(agg["_n_serve_pts"].sum(), 1)
         )
 
-        if not self.match_level_features:
+        if not self._has_features():
             # Intercept-only is legitimate: it is the degenerate arm of the
             # recovery test and a valid configuration in its own right.
+            # Keyed on BOTH lists: gated on match features alone, a point-only
+            # arm returned here and every point candidate in a first_in FS run
+            # scored as the base rate (observed in fs_runs/20260821_base_fi,
+            # where all three surface one-hots scored byte-identically).
             self._model = None
             self._cols, self._is_diff = [], []
             self.fit_timings = {"fit": time.perf_counter() - t0}
             return
 
         self._cols, self._is_diff = self._resolve_cols()
-        feats = self._match_features(df, preloaded_match_features)
-        train = agg.join(
-            feats, left_on=["match_uid", "server_id"],
-            right_on=["match_uid", "player_id"], how="inner",
-        ).drop_nulls(self._cols)
+        design_cols = self._design_cols()
+        if self.match_level_features:
+            feats = self._match_features(df, preloaded_match_features)
+            train = agg.join(
+                feats, left_on=["match_uid", "server_id"],
+                right_on=["match_uid", "player_id"], how="inner",
+            ).drop_nulls(design_cols)
+        else:
+            # Point-only arm: the aggregate already carries every design column.
+            train = agg.drop_nulls(design_cols)
         if len(train) == 0:
             logger.warning(
                 "FirstServeInModel: no rows survived the feature join; "
@@ -233,7 +298,7 @@ class FirstServeInModel:
             self.fit_timings = {"fit": time.perf_counter() - t0}
             return
 
-        X = train.select(self._cols).to_numpy().astype(np.float64)
+        X = train.select(design_cols).to_numpy().astype(np.float64)
         y = (train["_n_first_in"] / train["_n_serve_pts"]).to_numpy()
         w = train["_n_serve_pts"].to_numpy().astype(np.float64)
         self._model = _build_rate_regressor(self.model_type, self.params)
@@ -241,7 +306,9 @@ class FirstServeInModel:
         self.fit_timings = {"fit": time.perf_counter() - t0}
         logger.info(
             "FirstServeInModel fit at match grain: %d rows, %d features "
-            "(base rate %.4f)", len(train), len(self._cols), self._base_rate,
+            "(%d match, %d point; base rate %.4f)", len(train),
+            len(design_cols), len(self._cols), len(self.point_level_features),
+            self._base_rate,
         )
 
     def _match_features(
@@ -273,9 +340,10 @@ class FirstServeInModel:
             if absent:
                 raise KeyError(
                     f"FirstServeInModel: match features absent from the preloaded "
-                    f"frame: {sorted(absent)}. The FS candidate pool must contain "
-                    f"every spec any held component references, or the column is "
-                    f"never materialized."
+                    f"frame: {sorted(absent)}. The caller must preload every spec "
+                    f"this component reads — for a two_level model that is the "
+                    f"UNION of the three components' match features, which is not "
+                    f"the same set as the FS candidate pool."
                 )
             return preloaded.select(
                 ["match_uid", "player_id", *[r for r, _ in pairs]]
@@ -575,7 +643,10 @@ class TwoLevelServeModel(ServeWinProbEstimator):
     def _first_in_for(self, df: pl.DataFrame) -> tuple[np.ndarray, np.ndarray]:
         """P(1st in) per match for A-serving and B-serving, as arrays."""
         n = len(df)
-        if self._first_in._model is None or not self.first_in_match_features:
+        # Keyed on BOTH lists, matching FirstServeInModel.fit's own guard: a
+        # point-only arm fits a real model, and gating on match features alone
+        # returned the base rate for it regardless.
+        if self._first_in._model is None or not self._first_in._has_features():
             base = np.full(n, self._first_in._base_rate, dtype=np.float64)
             return base, base
         # `_cols` are INFERENCE names (`server_*` / `returner_*`, from
@@ -600,13 +671,41 @@ class TwoLevelServeModel(ServeWinProbEstimator):
         # works — prefer the engine name, fall back to the inference name.
         read = [e if e in df.columns else c
                 for e, c in zip(engine_cols, cols, strict=True)]
-        X_a = df.select(read).to_numpy().astype(np.float64)
+        X_a = df.select(read).to_numpy().astype(np.float64) if read else (
+            np.zeros((n, 0), dtype=np.float64)
+        )
         # Swap perspective: diff-style columns negate, mirrored ones read the
-        # partner column. Same rule resolve_match_feature_cols encodes.
+        # partner column. Same rule resolve_match_feature_cols encodes. Only
+        # the MATCH block is perspective-dependent, which is why the point
+        # columns are appended after it (FirstServeInModel._design_cols).
         X_b = X_a.copy()
         for j, diff in enumerate(is_diff):
             if diff:
                 X_b[:, j] = -X_b[:, j]
+        point_cols = self._first_in.point_level_features
+        if point_cols:
+            # Match-constant by construction (the surface one-hots are the only
+            # point features a first_in arm can carry — every other name is
+            # STATE_DERIVABLE and refused at the FS seam). They are derived
+            # from `surface`, which the match frame has and the one-hots are
+            # not; derive them through the same map the score-state model uses
+            # rather than restating it here.
+            derived = ScoreStateChainServeModel._POINT_FEATURE_SOURCES
+            need_sources = {
+                src for name in point_cols for src in derived.get(name, ())
+            }
+            missing_src = [s for s in sorted(need_sources) if s not in df.columns]
+            if missing_src:
+                raise KeyError(
+                    f"TwoLevelServeModel: first_in point features {point_cols} "
+                    f"need source column(s) {missing_src}, absent from df"
+                )
+            frame = add_derived_point_features(
+                df, [c for c in point_cols if c not in df.columns],
+            )
+            X_pt = frame.select(point_cols).to_numpy().astype(np.float64)
+            X_a = np.hstack([X_a, X_pt])
+            X_b = np.hstack([X_b, X_pt])  # perspective-invariant
         return self._first_in.predict_rate(X_a), self._first_in.predict_rate(X_b)
 
     @staticmethod

@@ -37,8 +37,10 @@ from mvp.projection.iid.two_level_serve_model import (
     _ConstantBranch,
 )
 
+from tests.projection.iid.test_branch_metrics import _round1_ranking
 from tests.projection.iid.test_serve_discovery_swap_side import (
     DIFF_SPEC,
+    MATCHUP_SPEC,
     MIRROR_SPEC,
     MirroringFakeEngine,
 )
@@ -68,6 +70,12 @@ SHAPES = {
     "win_second": (WIN_SECOND, [], [MIRROR_SPEC], []),
     "win_first": (WIN_FIRST, [MIRROR_SPEC], [], []),
     "first_in": (FIRST_IN, [], [MIRROR_SPEC], [DIFF_SPEC]),
+    # A held arm carrying a spec that is NOT in the candidate pool. Every other
+    # shape draws its fixed features from the pool, which is why the
+    # materialization bug survived this file: `load_specs` was the pool plus
+    # its swap partners, so a fixed spec outside the pool was never loaded and
+    # the first prefit raised KeyError.
+    "fixed_outside_pool": (FIRST_IN, [], [MATCHUP_SPEC], []),
 }
 
 
@@ -117,8 +125,11 @@ def _points(n_matches: int, per_match: int = 48) -> pl.DataFrame:
     return pl.DataFrame(rows)
 
 
-def _two_level_config(tmp_path, shape) -> str:
+def _two_level_config(tmp_path, shape, point_pool=None) -> str:
     component, fi, w1, w2 = shape
+    # first_in refuses STATE-DERIVABLE point candidates, so a run() that
+    # selects it needs match-constant ones instead (the surface one-hots).
+    point_pool = point_pool if point_pool is not None else ["is_break_point"]
     path = tmp_path / "fs.yaml"
     path.write_text(dedent(f"""
         data:
@@ -133,6 +144,13 @@ def _two_level_config(tmp_path, shape) -> str:
           n_splits: 2
           min_train_size: 10
           test_size: 5
+        # Point-grain splits, used by `run()`'s base-matrix build. The defaults
+        # want 60k point rows; the fixture has ~1.9k.
+        point_validation:
+          type: walk_forward
+          n_splits: 2
+          min_train_size: 200
+          test_size: 100
         metric: iid_match_win_log_loss
         serve_component: {component}
         serve_model:
@@ -146,12 +164,15 @@ def _two_level_config(tmp_path, shape) -> str:
           win_second_point_features: []
         features:
           candidate_match_level_features: [{MIRROR_SPEC}, {DIFF_SPEC}]
-          candidate_point_level_features: [is_break_point]
+          candidate_point_level_features: {point_pool}
     """) + _SCORER)
     return str(path)
 
 
-def _make_selector(tmp_path, config_path) -> ServeDiscoverySelector:
+def _make_selector(
+    tmp_path, config_path, *, match_pool=None, engine=None,
+    prepare=True, checkpoint=False,
+) -> ServeDiscoverySelector:
     n = 40
     matches_path = tmp_path / "matches.parquet"
     _matches(n).write_parquet(matches_path)
@@ -162,9 +183,16 @@ def _make_selector(tmp_path, config_path) -> ServeDiscoverySelector:
         matches_path=matches_path,
         points_path=points_path,
         cache_dir=tmp_path / "cache",
+        # The per-round history is written beside the checkpoint, so a test
+        # that reads the round-1 ranking has to ask for one.
+        checkpoint_path=(tmp_path / "cp.json") if checkpoint else None,
     )
+    if not prepare:
+        return sel
     sel._prepare_match_data(
-        match_pool=[MIRROR_SPEC, DIFF_SPEC], engine=MirroringFakeEngine(), cache_key="k",
+        match_pool=list(match_pool) if match_pool else [MIRROR_SPEC, DIFF_SPEC],
+        engine=engine if engine is not None else MirroringFakeEngine(),
+        cache_key="k",
     )
     return sel
 
@@ -375,3 +403,84 @@ class TestPickleCompat:
         assert all("fit" in c.fit_timings for c in revived.components().values())
         p_a, p_b = revived.predict(fold.test_df)
         assert len(p_a) == len(p_b) == len(fold.test_df)
+
+
+class TestFixedArmSpecsOutsideThePool:
+    """`match_pool` is what FS SEARCHES; the fits READ the union of the three
+    components' match features.
+
+    A two_level component run holds the other two arms fixed at sets that come
+    from `serve_model`, not from the candidate pool. Those were only ever
+    materialized because the pool happened to be a superset of them, so
+    trimming first_in's pool to server-own specs left every fixed win_first
+    diff missing and `_build_prefit_fixed` raised KeyError on the first fold.
+    """
+
+    SHAPE = (FIRST_IN, [], [MATCHUP_SPEC], [])
+
+    def _build(self, tmp_path, point_pool=None, **kw):
+        engine = MirroringFakeEngine()
+        cfg = _two_level_config(tmp_path, self.SHAPE, point_pool=point_pool)
+        sel = _make_selector(tmp_path, cfg, engine=engine, **kw)
+        return sel, engine
+
+    def test_prefit_builds_with_the_fixed_spec_outside_the_pool(self, tmp_path):
+        # Reaching the assertions at all is the regression: _prepare_match_data
+        # -> _build_chain_folds -> _build_prefit_fixed used to raise.
+        sel, _ = self._build(tmp_path)
+        assert sel._prefit_fixed is not None
+        assert set(sel._prefit_fixed[0]) == set(COMPONENTS) - {FIRST_IN}
+        assert np.isfinite(sel._score_cv_chain([MIRROR_SPEC], []))
+
+    def test_fixed_spec_and_its_swap_partner_are_materialized(self, tmp_path):
+        sel, engine = self._build(tmp_path)
+        requested = engine.requested[-1]
+        assert MATCHUP_SPEC in requested
+        # register_matchup leaves mirror=True, so the B-serves side reads the
+        # opp_ column. Taking swap partners over match_pool alone would have
+        # missed it and the run would have died on win_second instead.
+        assert "opp_svc_elo_matchup" in requested
+        cols = sel._match_features_both_sides.columns
+        assert MATCHUP_SPEC in cols
+        assert "opp_svc_elo_matchup" in cols
+
+    def test_the_out_of_pool_spec_is_never_a_candidate(self, tmp_path, monkeypatch):
+        """Widening the frame must not widen the SEARCH. Asserted on the
+        round-1 ranking, which is the observable, rather than on the candidate
+        list the ranking is built from."""
+        sel, _ = self._build(
+            tmp_path, prepare=False, checkpoint=True,
+            point_pool=["is_surface_hard", "is_surface_clay"],
+        )
+        monkeypatch.setattr(
+            ServeDiscoverySelector, "_pre_cache_all",
+            lambda self, **kw: (MirroringFakeEngine(), "k"),
+        )
+        result = sel.run()
+        ranked = _round1_ranking(sel)
+        assert ranked, "no round-1 ranking recorded"
+        assert MATCHUP_SPEC not in ranked
+        assert MIRROR_SPEC in ranked
+        assert MATCHUP_SPEC not in result.selected_match_level
+
+    def test_extra_columns_do_not_perturb_a_score(self, tmp_path):
+        """Materializing more than the pool changes fold residency, not
+        results. Same config both sides — only the frame width differs.
+
+        A property test, NOT a guard on the union: its shape draws both fixed
+        arms from the pool, so it passes with the fix reverted. The union guard
+        is test_prefit_builds_with_the_fixed_spec_outside_the_pool, which
+        cannot even construct its selector under revert.
+        """
+        shape = SHAPES["first_in"]          # fixed arms are pool members here
+        cfg = _two_level_config(tmp_path, shape)
+        narrow = _make_selector(tmp_path, cfg, match_pool=[MIRROR_SPEC, DIFF_SPEC])
+        wide = _make_selector(
+            tmp_path, cfg, match_pool=[MIRROR_SPEC, DIFF_SPEC, MATCHUP_SPEC],
+        )
+        assert MATCHUP_SPEC not in narrow._match_features_both_sides.columns
+        assert MATCHUP_SPEC in wide._match_features_both_sides.columns
+        a = narrow._score_cv_chain([MIRROR_SPEC], [])
+        b = wide._score_cv_chain([MIRROR_SPEC], [])
+        assert np.isfinite(a)
+        assert a == b

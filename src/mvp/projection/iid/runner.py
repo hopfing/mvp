@@ -46,8 +46,98 @@ from mvp.projection.iid.serve_model import (
     ScoreStateChainServeModel,
     build_serve_model,
 )
+from mvp.projection.iid.two_level_serve_model import (
+    COMPONENTS,
+    FIRST_IN,
+    TwoLevelServeModel,
+    _ConstantBranch,
+    first_in_counts,
+)
 
 run_logger = logging.getLogger(__name__)
+
+# Metric keys emitted per serve-tree component. NaN rather than absent when a
+# component cannot be scored on a fold: `avg_metrics` is built from the FIRST
+# fold's key set, so a fold that emits these followed by one that does not is
+# a KeyError rather than a missing number.
+_BRANCH_POINT_METRICS = (
+    "log_loss", "brier_score", "roc_auc", "calibration_error",
+)
+
+
+def _two_level_branch_metrics(
+    model: "TwoLevelServeModel",
+    test_df: pl.DataFrame,
+    *,
+    fold_test_points: pl.DataFrame | None,
+    preloaded_match_features: pl.DataFrame | None,
+) -> dict[str, float]:
+    """Held-out metrics per serve-tree component, `branch_<component>_<name>`.
+
+    The composed metrics say how the chain did; these say how each branch did
+    on the quantity it estimates. Nothing consumes them as an objective — they
+    are the readout that makes two assembled configs comparable on the same
+    terms their components were selected on, and the first-serve-in accuracy
+    diagnostic the runner has never emitted.
+    """
+    out: dict[str, float] = {}
+    components = model.components()
+    for name in COMPONENTS:
+        branch = components[name]
+        if name == FIRST_IN:
+            out[f"branch_{name}_rate_wmse"] = _first_in_rate_wmse(
+                model, test_df, fold_test_points,
+            )
+            continue
+        # NaN rather than raising for a featureless branch: the plan's A6 said
+        # raise, but a `_ConstantBranch` (or an unfitted arm) is a legitimate
+        # production shape, and raising here would break `iid-project` for it.
+        # The key still has to appear -- see the key-set note above.
+        scored: dict[str, float] = {}
+        if not isinstance(branch, _ConstantBranch) and branch._model is not None:
+            joined = branch.build_test_point_frame(
+                test_df,
+                preloaded_points=fold_test_points,
+                preloaded_match_features=preloaded_match_features,
+            )
+            if joined is not None and len(joined):
+                scored = branch.score_test_frame(joined)
+        for key in _BRANCH_POINT_METRICS:
+            out[f"branch_{name}_{key}"] = scored.get(key, float("nan"))
+    return out
+
+
+def _first_in_rate_wmse(
+    model: "TwoLevelServeModel",
+    test_df: pl.DataFrame,
+    fold_test_points: pl.DataFrame | None,
+) -> float:
+    """Weighted MSE of P(1st in) against the realised (match, server) rate.
+
+    Same quantity `branch_rate_wmse` selects on, and the same stacked join.
+    `validate="1:1"` catches the shape error (an aggregate joined at match
+    grain is 1:m); it does not catch a swapped A/B stack, which is still 1:1
+    — the FS-side orientation test is what pins that.
+    """
+    if fold_test_points is None or len(fold_test_points) == 0:
+        return float("nan")
+    agg = first_in_counts(fold_test_points)
+    fi_a, fi_b = model._first_in_for(test_df)
+    pred = pl.concat([
+        test_df.select("match_uid", pl.col("player_id").alias("server_id"))
+        .with_columns(pl.Series("_pred", fi_a)),
+        test_df.select("match_uid", pl.col("opp_id").alias("server_id"))
+        .with_columns(pl.Series("_pred", fi_b)),
+    ])
+    joined = pred.join(
+        agg, on=["match_uid", "server_id"], how="inner", validate="1:1",
+    )
+    if joined.height == 0:
+        return float("nan")
+    w = joined["_n_serve_pts"].to_numpy().astype(np.float64)
+    rate = (joined["_n_first_in"] / joined["_n_serve_pts"]).to_numpy()
+    pred_v = joined["_pred"].to_numpy().astype(np.float64)
+    return float(np.sum(w * (pred_v - rate) ** 2) / np.sum(w))
 
 
 def preload_match_specs(serve_model_config) -> list[str]:
@@ -411,6 +501,12 @@ class IIDProjectionRunner:
                     metrics.update(serve_model.score_test_points(
                         test_df,
                         preloaded_points=fold_test_points,
+                        preloaded_match_features=preloaded_match_features,
+                    ))
+                elif isinstance(serve_model, TwoLevelServeModel):
+                    metrics.update(_two_level_branch_metrics(
+                        serve_model, test_df,
+                        fold_test_points=fold_test_points,
                         preloaded_match_features=preloaded_match_features,
                     ))
                 all_metrics.append(metrics)

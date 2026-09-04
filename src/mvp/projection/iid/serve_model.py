@@ -817,8 +817,6 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
         against `point_won_by_server`. Returns metrics with `point_` prefixes
         so they coexist with the chain's match-grain classification metrics.
         """
-        from mvp.model.metrics import compute_metrics
-
         if self._model is None:
             raise RuntimeError("score_test_points called before fit")
         joined = self.build_test_point_frame(
@@ -828,14 +826,27 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
         )
         if joined is None or len(joined) == 0:
             return {}
+        raw = self.score_test_frame(joined)
+        return {f"point_{k}": v for k, v in raw.items()}
 
+    def score_test_frame(self, joined: "pl.DataFrame") -> dict[str, float]:
+        """Classification metrics for a frame `build_test_point_frame` built.
+
+        The metric half of `score_test_points`, extracted so the X/y build and
+        the `predict_proba` call have one home: the per-branch FS scorer and
+        the runner's per-branch emit both need these numbers UNPREFIXED, and
+        reaching into `_model` / `_match_feature_cols` from three places is how
+        the three come to disagree. `score_test_points` is this plus its
+        `point_` re-key, unchanged for its callers.
+        """
+        from mvp.model.metrics import compute_metrics
+
+        if self._model is None:
+            raise RuntimeError("score_test_frame called before fit")
         feature_cols = self._match_feature_cols + self.point_level_features
         X = joined.select(feature_cols).to_numpy()
         y = joined["point_won_by_server"].cast(pl.Int64).to_numpy()
-
-        y_prob = self._model.predict_proba(X)
-        raw = compute_metrics(y, y_prob)
-        return {f"point_{k}": v for k, v in raw.items()}
+        return compute_metrics(y, self._model.predict_proba(X))
 
     def build_test_point_frame(
         self,

@@ -52,8 +52,10 @@ from mvp.model.discovery.selection import (
 )
 from mvp.projection.iid.config import ServeDiscoveryConfig
 from mvp.projection.iid.metric_registry import (
-    is_chain_metric,
+    base_metric_of,
+    is_branch_metric,
     is_minimize,
+    needs_match_grain_prep,
     score_chain,
     worst_score,
 )
@@ -67,7 +69,12 @@ from mvp.projection.iid.serve_model import (
     swap_side_partner_specs,
 )
 from mvp.projection.iid.stateful_chain import match_distribution_from_state_fn
-from mvp.projection.iid.two_level_serve_model import TwoLevelServeModel
+from mvp.projection.iid.two_level_serve_model import (
+    FIRST_IN,
+    TwoLevelServeModel,
+    _ConstantBranch,
+    first_in_counts,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -119,6 +126,33 @@ def live_partial_scores(
 _CHAIN_INCOMPATIBLE_POINT_FEATURES = frozenset(
     {"point_num", "serve", "is_second_serve"}
 )
+
+
+def _branch_point_columns() -> list[str]:
+    """Columns a win branch's held-out point frame must carry.
+
+    The UNION over the point candidate pool, not one candidate's list: the
+    frame is built once per fold and every candidate selects a different
+    subset out of it. Keys, every raw point feature that can be a candidate,
+    and the source columns the derived features read -- the latter taken from
+    the expressions themselves (`meta.root_names()`) rather than restated, so
+    a derivation that starts reading a new column cannot silently fall out of
+    the narrowing and surface as a ColumnNotFound deep inside the join.
+    """
+    from mvp.projection.iid.score_state_features import (
+        DERIVED_POINT_FEATURES,
+        RAW_POINT_FEATURES,
+    )
+
+    keys = ["match_uid", "server_id", "returner_id", "serve", "point_won_by_server"]
+    sources: set[str] = set()
+    for build in DERIVED_POINT_FEATURES.values():
+        sources.update(build().meta.root_names())
+    out: list[str] = []
+    for c in keys + list(RAW_POINT_FEATURES) + sorted(sources):
+        if c not in out:
+            out.append(c)
+    return out
 
 
 @dataclass
@@ -189,6 +223,18 @@ class _ChainFold:
     test_df: pl.DataFrame
     feats: pl.DataFrame
     points: pl.DataFrame
+    # HELD-OUT inputs, materialized only for a branch-metric run (plan:
+    # 2026-09-03-per-branch-selection-metrics). The chain scores on
+    # `test_df` through the composed distribution and needs neither.
+    #
+    # `test_points` is the win branches' test-side point frame, narrowed to
+    # the UNION over the whole point candidate pool -- the frame is built
+    # once and the candidate's point list changes per fit, so per-candidate
+    # narrowing is not available. `test_first_in` is the (match, server)
+    # first-serve aggregate, built to match FirstServeInModel._aggregate
+    # exactly (pl.len() denominator, no target filter).
+    test_points: pl.DataFrame | None = None
+    test_first_in: pl.DataFrame | None = None
 
 
 class ServeDiscoverySelector:
@@ -290,21 +336,17 @@ class ServeDiscoverySelector:
             point_pool = [f for f in point_pool if f not in point_excludes]
             logger.info("Excluded %d point-level specs (pool %d → %d)", before - len(point_pool), before, len(point_pool))
 
-        if is_chain_metric(self.config.metric) and self.config.features.candidate_match_level_features:
-            missing_base = [f for f in selected_match if f not in match_pool]
-            if missing_base:
-                raise ValueError(
-                    f"chain-metric FS: base_match_level_features {missing_base} are not in "
-                    f"candidate_match_level_features — base features must be included in the "
-                    f"candidate pool so they are available in the preloaded match feature frame"
-                )
-
-        if is_chain_metric(self.config.metric):
+        # Excluded for a BRANCH metric too, though nothing in branch scoring
+        # would break: the endpoint is a chain config, and within one branch
+        # `serve` / `is_second_serve` are constant, so a branch metric would
+        # rank them as harmless noise while the chain builds every ScoreState
+        # with serve_num=1.
+        if needs_match_grain_prep(self.config.metric):
             dropped = [f for f in point_pool if f in _CHAIN_INCOMPATIBLE_POINT_FEATURES]
             if dropped:
                 point_pool = [f for f in point_pool if f not in _CHAIN_INCOMPATIBLE_POINT_FEATURES]
                 logger.info(
-                    "Chain metric %s: excluding point features incompatible with deuce closed-form: %s",
+                    "Metric %s: excluding point features incompatible with the deuce closed-form: %s",
                     self.config.metric, dropped,
                 )
 
@@ -325,9 +367,10 @@ class ServeDiscoverySelector:
 
         fs_splits = self._maybe_subsample_splits(splits)
 
-        # Chain-metric path needs a match-grain df with all candidate match features
-        # materialized, plus match-grain folds from config.validation.
-        if is_chain_metric(self.config.metric):
+        # Chain and branch metrics both need a match-grain df with all candidate
+        # match features materialized, plus match-grain folds from
+        # config.validation. Branch scoring skips the chain, not the prep.
+        if needs_match_grain_prep(self.config.metric):
             self._prepare_match_data(match_pool=match_pool, engine=engine, cache_key=cache_key)
 
         candidate_match = [c for c in match_pool if c not in selected_match]
@@ -363,7 +406,7 @@ class ServeDiscoverySelector:
                     selected_match.append(feat)
                     if feat in candidate_match:
                         candidate_match.remove(feat)
-                    if not is_chain_metric(self.config.metric):
+                    if not needs_match_grain_prep(self.config.metric):
                         base_df = self._extend_df_with_match_feature(base_df, slim_matches, engine, cache_key, feat)
                 else:
                     selected_point.append(feat)
@@ -477,7 +520,10 @@ class ServeDiscoverySelector:
                 )
 
             eval_count = 0
-            chain_mode = is_chain_metric(self.config.metric)
+            # Both scoring routes that use the match-grain folds; `chain_mode`
+            # gates the parallel loop and the base_df extend, not the chain
+            # itself (see `_score_cv`'s dispatch).
+            chain_mode = needs_match_grain_prep(self.config.metric)
 
             if chain_mode and self.config.n_parallel_candidates > 1:
                 to_score = [(g, c) for g, c in tagged if c not in this_round_scores]
@@ -500,7 +546,7 @@ class ServeDiscoverySelector:
                     g, c = grain_cand
                     ml = _ml + [c] if g == "match" else list(_ml)
                     pl_feats = list(_pl) if g == "match" else _pl + [c]
-                    return g, c, self._score_cv_chain(ml, pl_feats)
+                    return g, c, self._score_cv_match_grain(ml, pl_feats)
 
                 # BLAS thread cap for a logistic scorer (whose fit ignores n_jobs)
                 # so concurrent worker fits don't oversubscribe; no-op for xgboost,
@@ -941,8 +987,8 @@ class ServeDiscoverySelector:
         match_level: list[str],
         point_level: list[str],
     ) -> float:
-        if is_chain_metric(self.config.metric):
-            return self._score_cv_chain(match_level, point_level)
+        if needs_match_grain_prep(self.config.metric):
+            return self._score_cv_match_grain(match_level, point_level)
         feature_cols = self._resolve_cols(match_level, point_level)
         fold_scores: list[float] = []
         for train_idx, test_idx in splits:
@@ -1055,10 +1101,24 @@ class ServeDiscoverySelector:
         # The two-sided frame is retained: the FS loop hands it to model.fit() per
         # candidate × fold, which is what keeps fit off engine.compute() (a full
         # 1.67M-row matches.parquet read each time).
+        fixed_specs = self._fixed_arm_match_specs()
         load_specs = list(match_pool)
-        for spec in swap_side_partner_specs(match_pool):
-            if spec not in load_specs:
+        seen = set(load_specs)
+        n_fixed_extra = 0
+        for spec in fixed_specs:
+            if spec not in seen:
+                seen.add(spec)
                 load_specs.append(spec)
+                n_fixed_extra += 1
+        # Partners are taken over the UNION, not over match_pool: win_second's
+        # fixed matchup specs are mirror=True, so their swap side reads opp_
+        # columns that no pool member would have pulled in.
+        n_swap_extra = 0
+        for spec in swap_side_partner_specs(load_specs):
+            if spec not in seen:
+                seen.add(spec)
+                load_specs.append(spec)
+                n_swap_extra += 1
         self._match_features_both_sides = engine.load_features_numpy(
             load_specs, both_sides_keys, cache_key,
         )
@@ -1100,8 +1160,8 @@ class ServeDiscoverySelector:
         self._fs_match_splits = self._maybe_subsample_match_splits(splits)
         logger.info(
             "Chain-metric path: match-grain df=%d matches, %d folds, %d candidate match feats "
-            "materialized (+%d opp_ swap-side cols)",
-            len(df), len(splits), len(match_pool), len(load_specs) - len(match_pool),
+            "materialized (+%d fixed-arm, +%d swap-side cols)",
+            len(df), len(splits), len(match_pool), n_fixed_extra, n_swap_extra,
         )
 
         # Pre-load points filtered to training matches to avoid 7.1M-row parquet read per fit call.
@@ -1155,20 +1215,36 @@ class ServeDiscoverySelector:
                 "lower validation.initial_train_months/test_months."
             )
         t0 = time.perf_counter()
+        branch_run = is_branch_metric(self.config.metric)
         folds: list[_ChainFold] = []
         for train_idx, test_idx in self._fs_match_splits:
             train_df = self._match_df[train_idx]
             train_uids = set(train_df["match_uid"].to_list())
+            test_df = self._match_df[test_idx]
+            test_points = test_first_in = None
+            if branch_run:
+                test_uids = set(test_df["match_uid"].to_list())
+                held = self._preloaded_points.filter(
+                    pl.col("match_uid").is_in(test_uids)
+                )
+                if self.config.serve_component == FIRST_IN:
+                    test_first_in = first_in_counts(held)
+                else:
+                    test_points = held.select(
+                        [c for c in _branch_point_columns() if c in held.columns]
+                    )
             folds.append(
                 _ChainFold(
                     train_df=train_df,
-                    test_df=self._match_df[test_idx],
+                    test_df=test_df,
                     feats=self._match_features_both_sides.filter(
                         pl.col("match_uid").is_in(train_uids)
                     ),
                     points=self._preloaded_points.filter(
                         pl.col("match_uid").is_in(train_uids)
                     ),
+                    test_points=test_points,
+                    test_first_in=test_first_in,
                 )
             )
         self._chain_folds = folds
@@ -1180,6 +1256,8 @@ class ServeDiscoverySelector:
         fold_bytes = sum(
             f.train_df.estimated_size() + f.test_df.estimated_size()
             + f.feats.estimated_size() + f.points.estimated_size()
+            + (f.test_points.estimated_size() if f.test_points is not None else 0)
+            + (f.test_first_in.estimated_size() if f.test_first_in is not None else 0)
             for f in folds
         )
         parent_bytes = (
@@ -1191,14 +1269,23 @@ class ServeDiscoverySelector:
         # unfiltered frame for the rest of the run. _match_features_both_sides is
         # NOT droppable: test_serve_discovery_swap_side.py reads it post-build.
         self._preloaded_points = None
+        held_bytes = sum(
+            (f.test_points.estimated_size() if f.test_points is not None else 0)
+            + (f.test_first_in.estimated_size() if f.test_first_in is not None else 0)
+            for f in folds
+        )
         logger.info(
-            "Chain-metric path: cached %d fold input sets in %.1fs "
+            "Match-grain path: cached %d fold input sets in %.1fs "
             "(%.2f GiB folds + %.2f GiB retained parents = %.2f GiB); "
-            "train matches %s",
+            "train matches %s%s",
             len(folds), time.perf_counter() - t0,
             fold_bytes / gib, parent_bytes / gib,
             (fold_bytes + parent_bytes) / gib,
             [len(f.train_df) for f in folds],
+            # Test rows are NOT subsampled (fs_match_subsample caps train
+            # only), so this is the one piece that scales with the full test
+            # fold; logged separately because it is the branch route's cost.
+            f"; held-out branch inputs {held_bytes / gib:.2f} GiB" if held_bytes else "",
         )
         # Up front, before any candidate thread exists — never lazily from a
         # worker (the folds above are shared across threads by design).
@@ -1312,6 +1399,132 @@ class ServeDiscoverySelector:
         parts = [f"{k}={means[k]:.2f}" for k in cls._PHASE_KEYS if k in means]
         return "phases(s/cand-fold): " + " ".join(parts)
 
+    def _score_cv_match_grain(
+        self, match_level: list[str], point_level: list[str],
+    ) -> float:
+        """Score one candidate set on the match-grain folds.
+
+        Two routes share those folds: the composed chain, and a per-branch
+        metric scoring the selected component on its own target. One entry
+        point so the serial and the parallel candidate loops cannot dispatch
+        differently — routing only one of them is how a branch run would end
+        up scored through the chain.
+        """
+        if is_branch_metric(self.config.metric):
+            return self._score_cv_branch(match_level, point_level)
+        return self._score_cv_chain(match_level, point_level)
+
+    def _score_cv_branch(
+        self, match_level: list[str], point_level: list[str],
+    ) -> float:
+        """Score the SELECTED component on its own held-out target.
+
+        No composition, no chain, no DP: the candidate model is built and
+        fitted exactly as the chain route builds it (same
+        `_build_candidate_model` / `_scoring_params`, same prefit for the two
+        fixed components), then only the component under selection is asked
+        for predictions.
+        """
+        assert self._chain_folds is not None, (
+            "_score_cv_branch called before _prepare_match_data"
+        )
+        if not match_level and not point_level:
+            return worst_score(self.config.metric)
+        component = self.config.serve_component
+        base = base_metric_of(self.config.metric)
+        fold_scores: list[float] = []
+        timing: dict[str, float] = {}
+
+        for fold_idx, fold in enumerate(self._chain_folds):
+            model = self._build_candidate_model(
+                match_level, point_level, self._scoring_params(),
+            )
+            self._attach_prefit(model, fold_idx)
+            model.fit(
+                fold.train_df,
+                preloaded_match_features=fold.feats,
+                preloaded_points=fold.points,
+            )
+            for k, v in getattr(model, "fit_timings", {}).items():
+                timing[k] = timing.get(k, 0.0) + v
+            branch = model.components()[component]
+            t = time.perf_counter()
+            if component == FIRST_IN:
+                score = self._score_first_in(model, fold)
+            else:
+                score = self._score_win_branch(branch, fold, base)
+            timing["score"] = timing.get("score", 0.0) + (time.perf_counter() - t)
+            fold_scores.append(score)
+            del model, branch
+            check_memory("serve FS branch scoring")
+
+        self._record_phases(timing, len(self._chain_folds))
+        gc.collect()
+        return float(np.mean(fold_scores))
+
+    def _score_win_branch(self, branch: Any, fold: _ChainFold, base: str) -> float:
+        """A win branch on `point_won_by_server` over its own serve rows."""
+        if isinstance(branch, _ConstantBranch):
+            raise TypeError(
+                "branch scoring needs a fitted branch, got _ConstantBranch — "
+                "the component under selection must carry features"
+            )
+        assert fold.test_points is not None, (
+            "branch run without a held-out point frame; _build_chain_folds "
+            "materializes it only when the metric is per-branch"
+        )
+        joined = branch.build_test_point_frame(
+            fold.test_df,
+            preloaded_match_features=self._match_features_both_sides,
+            preloaded_points=fold.test_points,
+        )
+        if joined is None or len(joined) == 0:
+            return worst_score(self.config.metric)
+        return branch.score_test_frame(joined)[base]
+
+    def _score_first_in(self, model: Any, fold: _ChainFold) -> float:
+        """first_in: weighted MSE on the held-out (match, server) rate.
+
+        The A/B orientation is the hazard here — `test_df` is one row per
+        match carrying `player_id` and `opp_id`, and joining the aggregate on
+        the wrong one scores A's prediction against B's realised rate and
+        returns a plausible number.
+
+        Stacking both sides into one keyed frame and joining with
+        `validate="1:1"` catches the SHAPE error: the aggregate has two rows
+        per match, so joining it at match grain is 1:m and cannot pass. It
+        does NOT catch a swapped A/B stack, which is still one-to-one —
+        `test_perfect_prediction_scores_zero_and_the_swap_does_not` is what
+        pins the orientation, and it is the test to keep if this is ever
+        refactored.
+        """
+        assert fold.test_first_in is not None, (
+            "first_in branch run without a held-out aggregate"
+        )
+        fi_a, fi_b = model._first_in_for(fold.test_df)
+        pred = pl.concat([
+            fold.test_df.select(
+                "match_uid",
+                pl.col("player_id").alias("server_id"),
+            ).with_columns(pl.Series("_pred", fi_a)),
+            fold.test_df.select(
+                "match_uid",
+                pl.col("opp_id").alias("server_id"),
+            ).with_columns(pl.Series("_pred", fi_b)),
+        ])
+        joined = pred.join(
+            fold.test_first_in, on=["match_uid", "server_id"],
+            how="inner", validate="1:1",
+        )
+        if joined.height == 0:
+            return worst_score(self.config.metric)
+        if joined["_n_serve_pts"].null_count() or joined["_pred"].null_count():
+            raise ValueError("first_in branch scoring: null predictions or weights")
+        w = joined["_n_serve_pts"].to_numpy().astype(np.float64)
+        rate = (joined["_n_first_in"] / joined["_n_serve_pts"]).to_numpy()
+        pred_v = joined["_pred"].to_numpy().astype(np.float64)
+        return float(np.sum(w * (pred_v - rate) ** 2) / np.sum(w))
+
     def _score_cv_chain(
         self, match_level: list[str], point_level: list[str],
     ) -> float:
@@ -1319,7 +1532,7 @@ class ServeDiscoverySelector:
             "_score_cv_chain called before _prepare_match_data"
         )
         if not match_level and not point_level:
-            return float("inf")
+            return worst_score(self.config.metric)
         fold_scores: list[float] = []
         timing: dict[str, float] = {}
 
@@ -1499,6 +1712,40 @@ class ServeDiscoverySelector:
             test_months=getattr(val, "test_months", None),
         )
 
+    def _fixed_arm_match_specs(self) -> list[str]:
+        """Match specs the fits READ but FS never SEARCHES.
+
+        `match_pool` is the candidate list; it is not what gets fitted. A
+        two_level component run holds the other two components fixed at sets
+        that come from `serve_model`, and those specs were only ever
+        materialized because the pool happened to be a superset of them.
+        Trimming first_in's pool to server-own specs broke that coincidence and
+        every fixed win_first diff went missing at the first prefit.
+
+        Both `_pre_cache_all` and `_prepare_match_data` read this. They have to
+        agree: `ensure_cached` deletes every cached parquet when the data key
+        moves (monthly, or on --refresh) and recomputes only what it was
+        handed, so a spec loaded here but not cached there is a file that no
+        longer exists. Unioning into the base list is also what retires the old
+        base-must-be-in-the-candidate-pool guard.
+
+        `match_level_features` is deliberately absent: no FS path builds a
+        model that reads it. `match_level_columns` likewise, and it would
+        actually break — it holds resolved column names, not specs.
+        """
+        specs: list[str] = list(self.config.features.base_match_level_features)
+        serve_model = self.config.serve_model
+        if serve_model is not None:
+            for component in (
+                serve_model.first_in_match_features,
+                serve_model.win_first_match_features,
+                serve_model.win_second_match_features,
+            ):
+                for spec in component:
+                    if spec not in specs:
+                        specs.append(spec)
+        return specs
+
     def _pre_cache_all(
         self,
         *,
@@ -1507,7 +1754,7 @@ class ServeDiscoverySelector:
     ) -> tuple[FeatureEngine, str]:
         """Cache all match-level specs to disk without loading them into memory."""
         all_match_specs: list[str] = []
-        for spec in base_match + candidate_match:
+        for spec in base_match + candidate_match + self._fixed_arm_match_specs():
             if spec not in all_match_specs:
                 all_match_specs.append(spec)
         for spec in get_filter_feature_specs(self.config.data.filters):
