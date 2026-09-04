@@ -2,6 +2,7 @@
 
 
 import logging
+import math
 import string
 from datetime import datetime
 from pathlib import Path
@@ -86,6 +87,17 @@ COLUMN_SCHEMA = [
     {"name": "p2_id", "owner": "pipeline"},
     {"name": "tournament_day", "owner": "pipeline"},
     {"name": "model_version", "owner": "pipeline"},
+    # How far the residual stage moved the lead's opinion, in logits, oriented
+    # onto the picked player: positive means the stage pushed TOWARD the pick.
+    # Blank when the lead's own probability wasn't recorded (single-stage
+    # configs, or a stage that failed to score and degraded to the lead).
+    #
+    # On the sheet because it is not recoverable afterwards. Both inputs live
+    # in predictions.parquet and both are overwritten every tick while a match
+    # is pending, so once a bet is placed the correction that produced the
+    # pick is gone. Frozen with pred_prob at stake entry, which is what makes
+    # it attributable later.
+    {"name": "lead_logit_diff", "owner": "pipeline"},
     {"name": "predicted_at", "owner": "pipeline"},
     {"name": "bet_placed_at", "owner": "pipeline"},
 ]
@@ -326,6 +338,19 @@ def prepare_predictions(predictions: pl.DataFrame) -> pl.DataFrame:
         # read picked - opponent regardless of which slot the pick landed in.
         pick_sign = 1 if prediction == "P1" else -1
 
+        # Stage correction in logits, oriented onto the pick. The lead and the
+        # shipped probability are both p1-oriented, so the p1 shift negates for
+        # a P2 pick -- the same reorientation `pick_sign` does for age_diff.
+        lead_p1 = row.get("lead_p1_win_prob")
+        if lead_p1 is None or not 0.0 < lead_p1 < 1.0 or not 0.0 < p1_prob < 1.0:
+            lead_logit_diff = None
+        else:
+            lead_logit_diff = round(
+                pick_sign * (math.log(p1_prob / (1 - p1_prob))
+                             - math.log(lead_p1 / (1 - lead_p1))),
+                3,
+            )
+
         predicted_at = row["predicted_at"]
         if isinstance(predicted_at, datetime):
             predicted_at_str = predicted_at.isoformat()
@@ -344,6 +369,7 @@ def prepare_predictions(predictions: pl.DataFrame) -> pl.DataFrame:
             "p1_elo": round(row["p1_elo"]),
             "p2_elo": round(row["p2_elo"]),
             "pred_prob": pred_prob,
+            "lead_logit_diff": lead_logit_diff,
             # picked - opponent age diff from the lead model's features (null -> blank)
             "age_diff": (
                 round(pick_sign * row["player_age_diff"], 1)
@@ -452,7 +478,7 @@ def merge_predictions(
     # which fit produced the number.
     REFRESH_COLUMNS = {"date", "time", "round", "tournament", "surface", "circuit", "tournament_day"}
     PREDICTION_REFRESH_COLUMNS = {
-        "prediction", "pred_prob", "consensus", "age_diff",
+        "prediction", "pred_prob", "lead_logit_diff", "consensus", "age_diff",
         "model_version", "predicted_at",
     }
     all_refresh = REFRESH_COLUMNS | PREDICTION_REFRESH_COLUMNS
