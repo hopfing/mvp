@@ -272,6 +272,11 @@ def set_score_distribution_from_state_fn(
     tb_kwargs = dict(
         sets_won_a=sets_won_a, sets_won_b=sets_won_b, best_of=best_of, n=n,
     )
+    # The two passes' hold caches are DISJOINT, not duplicated: the server at
+    # set cell (a, b) is a_serves_first XOR parity(a + b), so the a-first pass
+    # only ever needs A-holds at even cells and B-holds at odd ones, and the
+    # b-first pass the reverse. Sharing a cache across them saves nothing
+    # (measured: 304 hold builds per bo3 match either way).
     pmf_a_first = _set_score_pmf_one_server_stateful(
         p_a_fn, p_b_fn,
         tiebreak_win_from_state_fn(p_a_fn, p_b_fn, a_serves_first=True, **tb_kwargs),
@@ -451,8 +456,21 @@ def match_distribution_from_state_fn(
                 return full[m]
             return wrapped
 
-        sub_p_a_fn = _sub_fn(p_a_fn, mask)
-        sub_p_b_fn = _sub_fn(p_b_fn, mask)
+        if mask.all():
+            # Every match shares this best_of: `full[m]` would be an identity
+            # copy on each of the thousands of state calls per fold. Pass the
+            # fns through. The contract this makes explicit (the copy merely
+            # hid it) runs both ways: the DP never mutates a p_fn result --
+            # every consumer stores or reads, none writes -- AND a p_fn must
+            # not reuse-and-rewrite one output buffer across calls, because
+            # np.asarray(x, float64) at the three call sites returns the SAME
+            # object for float64 input and the DP caches it per game state.
+            # Today's models return either a frozen array or a fresh one per
+            # state key.
+            sub_p_a_fn, sub_p_b_fn = p_a_fn, p_b_fn
+        else:
+            sub_p_a_fn = _sub_fn(p_a_fn, mask)
+            sub_p_b_fn = _sub_fn(p_b_fn, mask)
 
         sub_total, sub_spread, sub_set_outcomes = _match_marginals_stateful(
             sub_p_a_fn, sub_p_b_fn, sub_p_a, sub_p_b,
@@ -550,32 +568,47 @@ def _match_marginals_stateful(
                 a_wins_set = bool(_SET_A_WINS[i])
                 p_set = set_pmf[:, i]
 
-                shifted_t = np.zeros_like(pmf_t)
-                if shift_t <= max_total:
-                    shifted_t[:, shift_t:] = pmf_t[:, : max_total + 1 - shift_t]
-
-                shifted_s = np.zeros_like(pmf_s)
-                if shift_s >= 0:
-                    if shift_s <= 2 * max_total:
-                        shifted_s[:, shift_s:] = pmf_s[:, : spread_size - shift_s]
-                else:
-                    abs_shift = -shift_s
-                    if abs_shift <= 2 * max_total:
-                        shifted_s[:, : spread_size - abs_shift] = pmf_s[:, abs_shift:]
-
-                contribution_t = p_set[:, None] * shifted_t
-                contribution_s = p_set[:, None] * shifted_s
-
                 if a_wins_set:
                     next_key = (sa + 1, sb)
                 else:
                     next_key = (sa, sb + 1)
-
+                # Joint first-touch: both accumulators exist together, whatever
+                # the shift guards below decide.
                 if next_key not in new_state_total:
                     new_state_total[next_key] = np.zeros_like(pmf_t)
                     new_state_spread[next_key] = np.zeros_like(pmf_s)
-                new_state_total[next_key] += contribution_t
-                new_state_spread[next_key] += contribution_s
+                acc_t = new_state_total[next_key]
+                acc_s = new_state_spread[next_key]
+
+                # Slice-accumulate: previously each outcome allocated a zeroed
+                # full-width copy, shift-copied the PMF into it, formed the
+                # product as another full-width temporary and added the whole
+                # width -- ~20 MB of traffic per outcome, ~1 GB per fold, and
+                # the DP's single largest cost (plan
+                # 2026-09-03-stateful-chain-dp-traffic). Only the window
+                # changes: outside it the accumulator received p_set * 0.0,
+                # and an accumulator seeded at +0.0 can never hold -0.0 (under
+                # round-to-nearest a + b is -0.0 only if both are), so eliding
+                # a +0.0 add is a no-op on every element. Inside the window the
+                # product and the add are the same two IEEE operations on the
+                # same operands in the same order. `acc_*` is never `pmf_*`:
+                # new_state_* is a fresh dict per pass, rebound only after it.
+                if shift_t <= max_total:
+                    acc_t[:, shift_t:] += (
+                        p_set[:, None] * pmf_t[:, : max_total + 1 - shift_t]
+                    )
+
+                if shift_s >= 0:
+                    if shift_s <= 2 * max_total:
+                        acc_s[:, shift_s:] += (
+                            p_set[:, None] * pmf_s[:, : spread_size - shift_s]
+                        )
+                else:
+                    abs_shift = -shift_s
+                    if abs_shift <= 2 * max_total:
+                        acc_s[:, : spread_size - abs_shift] += (
+                            p_set[:, None] * pmf_s[:, abs_shift:]
+                        )
 
         state_total = new_state_total
         state_spread = new_state_spread
