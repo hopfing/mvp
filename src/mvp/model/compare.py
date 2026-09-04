@@ -32,7 +32,7 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 
-from mvp.common.base_job import get_data_root
+from mvp.common.base_job import get_data_root, get_tuning_state_dir
 
 logger = logging.getLogger(__name__)
 
@@ -158,7 +158,7 @@ def top_trial_dirs(tag: str, dirs: list[Path], n: int) -> list[Path]:
 
     from mvp.model.tune_review import resolve_sort_keys, sort_trials
 
-    db = get_data_root() / "tuning" / f"{tag}.db"
+    db = get_tuning_state_dir() / f"{tag}.db"
     if not db.exists():
         raise FileNotFoundError(
             f"--top for side {tag!r} needs its tune study at {db}; pass "

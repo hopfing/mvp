@@ -1514,7 +1514,7 @@ def cmd_tune_review(args: argparse.Namespace) -> int:
     """Review tuning results."""
     import optuna
 
-    from mvp.common.base_job import get_data_root
+    from mvp.common.base_job import get_tuning_state_dir
     from mvp.model.tune_review import (
         format_leaderboard,
         format_param_importance,
@@ -1523,7 +1523,7 @@ def cmd_tune_review(args: argparse.Namespace) -> int:
     config_path = resolve_config_path(args.config, MODEL_DIR)
     if not config_path.exists():
         config_path = resolve_config_path(args.config, PROJECTION_DIR)
-    state_dir = get_data_root() / "tuning"
+    state_dir = get_tuning_state_dir()
     db_path = state_dir / f"{config_path.stem}.db"
 
     if not db_path.exists():

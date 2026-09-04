@@ -187,6 +187,10 @@ class TestMaterialize:
         root = tmp_path / "dataroot"
         (root / "tuning").mkdir(parents=True)
         monkeypatch.setenv("MVP_DATA_ROOT", str(root))
+        # The tuning dir is LOCAL and no longer derives from MVP_DATA_ROOT, so
+        # redirecting the data root alone would leave sweep reading the real
+        # one. Patch where sweep resolves it.
+        monkeypatch.setattr(sweep, "get_tuning_state_dir", lambda: root / "tuning")
 
         base = tmp_path / "totals.yaml"
         base.write_text(IID_YAML, encoding="utf-8")

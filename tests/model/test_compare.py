@@ -204,8 +204,10 @@ class TestFamilies:
         import optuna
 
         optuna.logging.set_verbosity(optuna.logging.WARNING)
-        monkeypatch.setattr(compare, "get_data_root", lambda: tmp_path)
         (tmp_path / "tuning").mkdir()
+        monkeypatch.setattr(
+            compare, "get_tuning_state_dir", lambda: tmp_path / "tuning",
+        )
         study = optuna.create_study(
             study_name="fam",
             storage=f"sqlite:///{tmp_path / 'tuning' / 'fam.db'}",

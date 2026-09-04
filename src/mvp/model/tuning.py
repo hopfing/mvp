@@ -18,7 +18,7 @@ from optuna.exceptions import ExperimentalWarning
 from tqdm import tqdm
 from tqdm.contrib.logging import logging_redirect_tqdm
 
-from mvp.common.base_job import get_data_root
+from mvp.common.base_job import get_data_root, get_tuning_state_dir
 from mvp.model.metrics import (
     CALIBRATION_INVARIANT_METRICS,
     MAXIMIZE_METRICS as _MODEL_MAXIMIZE_METRICS,
@@ -891,7 +891,7 @@ class HyperparamTuner:
                 self.search_space.pop(k, None)
 
         # Set up Optuna storage
-        state_dir_path = Path(state_dir) if state_dir else (get_data_root() / "tuning")
+        state_dir_path = Path(state_dir) if state_dir else get_tuning_state_dir()
         state_dir_path.mkdir(parents=True, exist_ok=True)
         self.db_path = state_dir_path / f"{self.config_path.stem}.db"
         # ?timeout=30: SQLite busy-timeout (seconds) so concurrent trials under a

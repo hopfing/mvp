@@ -21,7 +21,7 @@ from typing import Any
 import optuna
 import yaml
 
-from mvp.common.base_job import get_data_root
+from mvp.common.base_job import get_data_root, get_tuning_state_dir
 from mvp.model.sweep_select import (
     missing_metric_trials,
     select_diverse,
@@ -84,7 +84,7 @@ def load_study(
     would silently sweep the win-branch trials for a config whose `first_in`
     block was the one tuned.
     """
-    tuning_dir = state_dir or (get_data_root() / "tuning")
+    tuning_dir = state_dir or get_tuning_state_dir()
     db = tuning_dir / f"{stem}.db"
     if not db.exists():
         raise FileNotFoundError(f"no tuning study: {db}")
@@ -214,7 +214,7 @@ def materialize(
     out_dir = out_dir or sweep_config_dir()
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    db = (state_dir or (get_data_root() / "tuning")) / f"{stem}.db"
+    db = (state_dir or get_tuning_state_dir()) / f"{stem}.db"
     if not db.exists():
         logger.info("%s: no tuning study — evaluating the config as-is", stem)
         cfg_path = out_dir / f"{stem}.yaml"

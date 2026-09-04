@@ -34,6 +34,23 @@ def get_local_data_root() -> Path:
     return Path(__file__).resolve().parents[3] / "data"
 
 
+def get_tuning_state_dir() -> Path:
+    """Optuna study storage.
+
+    LOCAL, not the shared root. These are SQLite files and the shared root is
+    an SMB mount; SQLite needs POSIX advisory locking that SMB does not supply
+    reliably, which surfaced as an intermittent "disk I/O error" at the commit
+    of a FINISHED trial -- losing that trial's whole compute, twice, on the
+    same study. Tuning state is per-machine working state nothing else reads,
+    so nothing wants it shared either.
+
+    One home for the path: the tuner writes here while `mvp tune --review`,
+    `compare --top` and `iid-sweep` all read it, and four copies of the same
+    expression is how a move leaves three readers pointed at an empty dir.
+    """
+    return get_local_data_root() / "tuning"
+
+
 class BaseJob:
     """Base class providing file I/O and path management for pipeline jobs."""
 
