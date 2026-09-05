@@ -683,3 +683,101 @@ class TestTwoLevelEmitterIncludeList:
     def test_no_duplicates(self):
         inc = self._emit(["player_glicko_rd_diff"])   # also in W1
         assert len(inc) == len(set(inc))
+
+
+class TestFirstInPerspectiveSwap:
+    """`_first_in_for` must read the PARTNER column for the B-serving side.
+
+    The swap applied only the negation half of the rule, so mirrored features
+    kept A's values when B served. Every spec in the serve_base_first_in pool
+    is mirrored (108 of 108), which made the two sides come back IDENTICAL --
+    indistinguishable from a legitimately symmetric match rather than visibly
+    wrong. `_score_first_in` then stacked A's prediction against B's realised
+    first-serve rate on half the held-out rows.
+
+    The defect was a CALLER not applying the rule, not the rule being wrong, so
+    the tests that pin it have to go through `_first_in_for`. The two that call
+    `match_feature_matrix` directly are unit tests of the rule and pass on the
+    broken code — they are labelled as such rather than trusted to catch a
+    regression here.
+    """
+
+    class _FirstCol:
+        """Stub regressor: the prediction IS the first design column, so a
+        test can read back exactly which value reached each side."""
+
+        def predict(self, X):
+            return np.asarray(X)[:, 0]
+
+    def _model(self, spec):
+        from mvp.projection.iid.two_level_serve_model import FirstServeInModel
+
+        fi = FirstServeInModel("xgboost", [spec])
+        fi._cols, fi._is_diff = fi._resolve_cols()
+        fi._model = self._FirstCol()
+        est = TwoLevelServeModel.__new__(TwoLevelServeModel)
+        est._first_in = fi
+        return est
+
+    def test_mirrored_feature_reads_partner_column_on_swap(self):
+        est = self._model("player_svc_first_serve_in_pct(days=180)")
+        df = pl.DataFrame({
+            "player_svc_first_serve_in_pct_180d": [0.80],
+            "opp_svc_first_serve_in_pct_180d": [0.40],
+        })
+        a, b = est._first_in_for(df)
+        assert a[0] == pytest.approx(0.80)
+        assert b[0] == pytest.approx(0.40), (
+            "B's side read A's column — the mirrored half of the swap is gone"
+        )
+
+    def test_swapping_the_frame_swaps_the_sides(self):
+        # The property that does not depend on the stub: relabelling who is
+        # player_ and who is opp_ must exchange the two outputs.
+        est = self._model("player_svc_first_serve_in_pct(days=180)")
+        df = pl.DataFrame({
+            "player_svc_first_serve_in_pct_180d": [0.80, 0.55],
+            "opp_svc_first_serve_in_pct_180d": [0.40, 0.70],
+        })
+        flipped = df.rename({
+            "player_svc_first_serve_in_pct_180d": "_tmp",
+            "opp_svc_first_serve_in_pct_180d": "player_svc_first_serve_in_pct_180d",
+        }).rename({"_tmp": "opp_svc_first_serve_in_pct_180d"})
+        a, b = est._first_in_for(df)
+        a2, b2 = est._first_in_for(flipped)
+        np.testing.assert_allclose(a, b2)
+        np.testing.assert_allclose(b, a2)
+
+    def test_diff_feature_negates_instead_of_reading_a_partner(self):
+        # Rule-level unit test: passes on the broken caller by construction.
+        from mvp.projection.iid.serve_model import match_feature_matrix
+
+        cols, is_diff = ["server_age_diff"], [True]
+        df = pl.DataFrame({"player_age_diff": [3.0]})
+        assert match_feature_matrix(df, cols, is_diff, swap=False)[0, 0] == 3.0
+        assert match_feature_matrix(df, cols, is_diff, swap=True)[0, 0] == -3.0
+
+    def test_inference_name_frame_resolves_the_partner_side(self):
+        # Rule-level unit test; the caller-level pin is the test below.
+        # The FS scorer hands over a frame already in server_/returner_ names,
+        # where the partner of server_x is returner_x rather than opp_x.
+        from mvp.projection.iid.serve_model import match_feature_matrix
+
+        cols, is_diff = ["server_svc_ace_pct"], [False]
+        df = pl.DataFrame({"server_svc_ace_pct": [0.11], "returner_svc_ace_pct": [0.07]})
+        assert match_feature_matrix(df, cols, is_diff, swap=False)[0, 0] == pytest.approx(0.11)
+        assert match_feature_matrix(df, cols, is_diff, swap=True)[0, 0] == pytest.approx(0.07)
+
+    def test_inference_name_frame_swaps_through_the_caller(self):
+        # The FS scorer hands `_first_in_for` a frame already in inference
+        # names, so the partner of server_x is returner_x. Distinct from the
+        # rule-level test above: this one regresses if the caller stops
+        # applying the rule, which is exactly what happened.
+        est = self._model("player_svc_first_serve_in_pct(days=180)")
+        df = pl.DataFrame({
+            "server_svc_first_serve_in_pct_180d": [0.80],
+            "returner_svc_first_serve_in_pct_180d": [0.40],
+        })
+        a, b = est._first_in_for(df)
+        assert a[0] == pytest.approx(0.80)
+        assert b[0] == pytest.approx(0.40)

@@ -147,6 +147,84 @@ def build_serve_model(cfg: Any, engine: Any = None) -> "ServeWinProbEstimator":
     raise ValueError(f"Unknown serve model type: {cfg.type}")
 
 
+def perspective_column(
+    name: str, *, is_diff: bool, swap: bool,
+) -> tuple[str, str, float]:
+    """(engine column, inference-name fallback, sign) for one match feature.
+
+    ONE definition of the server-perspective rule. `swap=False` → A serves,
+    `swap=True` → B serves. Mirrored features (`is_diff=False`) read the
+    PARTNER's column on the swap side; diff features (`is_diff=True`) have only
+    a `player_` column in the frame, so the swap side is its negation.
+
+    The fallback exists because two frame conventions reach these readers: the
+    match-grain engine frame carries `player_`/`opp_` names, while the serve FS
+    scorer builds one already in inference names (`server_`/`returner_`). In
+    the latter the partner of `server_x` is `returner_x`, which is why the
+    fallback is perspective-dependent rather than a plain rename.
+    """
+    for pref, own, other in (
+        ("server_", ("player_", "server_"), ("opp_", "returner_")),
+        ("returner_", ("opp_", "returner_"), ("player_", "server_")),
+    ):
+        if not name.startswith(pref):
+            continue
+        base = name[len(pref):]
+        if is_diff:
+            # Only the player_ diff column exists. A server_ diff negates when
+            # B serves; a returner_ diff is the same quantity seen from the
+            # other side, so its signs are the mirror image.
+            sign = (-1.0 if swap else 1.0) if pref == "server_" else (
+                1.0 if swap else -1.0
+            )
+            return "player_" + base, "server_" + base, sign
+        src_pref, fb_pref = other if swap else own
+        return src_pref + base, fb_pref + base, 1.0
+    return name, name, 1.0
+
+
+def match_feature_matrix(
+    df: pl.DataFrame,
+    cols: list[str],
+    is_diff: list[bool] | None,
+    *,
+    swap: bool,
+    owner: str = "match_feature_matrix",
+) -> np.ndarray:
+    """Match-level design matrix in server perspective, via `perspective_column`.
+
+    Both `ScoreStateChainServeModel._match_feature_values` and
+    `TwoLevelServeModel._first_in_for` build their swap side here. A second copy
+    is how `_first_in_for` came to apply only the negation half of the rule,
+    leaving every mirrored column holding A's values on B's side -- silently,
+    because a mirrored-only feature set makes the two sides identical rather
+    than wrong-looking.
+    """
+    flags = is_diff or [False] * len(cols)
+    resolved: list[tuple[str, float]] = []
+    missing: list[str] = []
+    for name, diff in zip(cols, flags, strict=True):
+        engine, fallback, sign = perspective_column(name, is_diff=diff, swap=swap)
+        if engine in df.columns:
+            resolved.append((engine, sign))
+        elif fallback in df.columns:
+            resolved.append((fallback, sign))
+        else:
+            missing.append(engine)
+    if missing:
+        raise KeyError(
+            f"{owner}: match features missing from df (swap={swap}): "
+            f"{sorted(missing)}"
+        )
+    if not resolved:
+        return np.zeros((len(df), 0), dtype=np.float64)
+    out = []
+    for col, sign in resolved:
+        arr = df[col].to_numpy().astype(np.float64)
+        out.append(arr * sign if sign != 1.0 else arr)
+    return np.column_stack(out)
+
+
 def resolve_match_feature_cols(
     match_level_features: list[str],
 ) -> tuple[list[str], list[bool]]:
@@ -973,37 +1051,10 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
         (mirror=False) have no opp_ counterpart; the swap-side value is the
         negation of the player_ column.
         """
-        cols: list[np.ndarray] = []
-        is_diff_flags = self._match_feature_is_diff or [False] * len(self._match_feature_cols)
-        for name, is_diff in zip(self._match_feature_cols, is_diff_flags):
-            sign = 1.0
-            if name.startswith("server_"):
-                if is_diff:
-                    col = "player_" + name[len("server_"):]
-                    if swap:
-                        sign = -1.0
-                else:
-                    src_prefix = "opp_" if swap else "player_"
-                    col = src_prefix + name[len("server_"):]
-            elif name.startswith("returner_"):
-                if is_diff:
-                    # Only the player_ diff column exists in the df.
-                    # returner = non-server: equals -player_diff when A serves,
-                    # +player_diff when B serves (swap=True).
-                    col = "player_" + name[len("returner_"):]
-                    sign = 1.0 if swap else -1.0
-                else:
-                    src_prefix = "player_" if swap else "opp_"
-                    col = src_prefix + name[len("returner_"):]
-            else:
-                col = name
-            arr = df[col].to_numpy().astype(np.float64)
-            if sign != 1.0:
-                arr = arr * sign
-            cols.append(arr)
-        if not cols:
-            return np.zeros((len(df), 0), dtype=np.float64)
-        return np.column_stack(cols)
+        return match_feature_matrix(
+            df, self._match_feature_cols, self._match_feature_is_diff,
+            swap=swap, owner="ScoreStateChainServeModel",
+        )
 
     def _point_constant_values(self, df: pl.DataFrame) -> dict[str, np.ndarray]:
         """Broadcast-constant point features (surface flags, etc.) from df."""

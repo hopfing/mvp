@@ -59,6 +59,7 @@ from mvp.projection.iid.serve_model import (
     ServeStateFn,
     ServeWinProbEstimator,
     apply_serve_branch,
+    match_feature_matrix,
     neutral_score_state,
     resolve_match_feature_cols,
 )
@@ -651,15 +652,6 @@ class TwoLevelServeModel(ServeWinProbEstimator):
             self._win_second = model
         self._prefit.add(component)
 
-    @staticmethod
-    def _engine_col(col: str) -> str:
-        """Inference name -> engine name. Inverse of resolve_match_feature_cols."""
-        if col.startswith("server_"):
-            return "player_" + col[len("server_"):]
-        if col.startswith("returner_"):
-            return "opp_" + col[len("returner_"):]
-        return col
-
     def _first_in_for(self, df: pl.DataFrame) -> tuple[np.ndarray, np.ndarray]:
         """P(1st in) per match for A-serving and B-serving, as arrays."""
         n = len(df)
@@ -669,39 +661,17 @@ class TwoLevelServeModel(ServeWinProbEstimator):
         if self._first_in._model is None or not self._first_in._has_features():
             base = np.full(n, self._first_in._base_rate, dtype=np.float64)
             return base, base
-        # `_cols` are INFERENCE names (`server_*` / `returner_*`, from
-        # resolve_match_feature_cols at serve_model.py:159). `df` here is the
-        # match-grain frame, which carries the ENGINE names (`player_*` /
-        # `opp_*`) — the rename only happens inside FirstServeInModel.fit's own
-        # join. Selecting `_cols` straight off `df` therefore raised KeyError
-        # for every non-empty first_in feature set, which is every round of a
-        # first_in FS run. Map back to the engine names before reading.
-        cols, is_diff = self._first_in._cols, self._first_in._is_diff
-        engine_cols = [self._engine_col(c) for c in cols]
-        missing = [
-            e for e, c in zip(engine_cols, cols, strict=True)
-            if e not in df.columns and c not in df.columns
-        ]
-        if missing:
-            raise KeyError(
-                f"TwoLevelServeModel: first_in features missing from df: "
-                f"{sorted(missing)}"
-            )
-        # A frame already in inference names (the FS scorer builds one) still
-        # works — prefer the engine name, fall back to the inference name.
-        read = [e if e in df.columns else c
-                for e, c in zip(engine_cols, cols, strict=True)]
-        X_a = df.select(read).to_numpy().astype(np.float64) if read else (
-            np.zeros((n, 0), dtype=np.float64)
-        )
-        # Swap perspective: diff-style columns negate, mirrored ones read the
-        # partner column. Same rule resolve_match_feature_cols encodes. Only
-        # the MATCH block is perspective-dependent, which is why the point
+        # `_cols` are INFERENCE names; `match_feature_matrix` resolves them to
+        # whichever convention `df` carries and applies the perspective rule.
+        # Only the MATCH block is perspective-dependent, which is why the point
         # columns are appended after it (FirstServeInModel._design_cols).
-        X_b = X_a.copy()
-        for j, diff in enumerate(is_diff):
-            if diff:
-                X_b[:, j] = -X_b[:, j]
+        cols, is_diff = self._first_in._cols, self._first_in._is_diff
+        X_a = match_feature_matrix(
+            df, cols, is_diff, swap=False, owner="TwoLevelServeModel",
+        )
+        X_b = match_feature_matrix(
+            df, cols, is_diff, swap=True, owner="TwoLevelServeModel",
+        )
         point_cols = self._first_in.point_level_features
         if point_cols:
             # Match-constant by construction (the surface one-hots are the only
