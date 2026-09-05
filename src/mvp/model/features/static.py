@@ -80,7 +80,16 @@ def is_right_handed() -> pl.Expr:
     name="handedness_match",
     params=[],
     description="1 if same handedness, 0 if different",
-    mirror=False,
+    # SYMMETRIC, not anti-symmetric: "do these two share a handedness" reads
+    # the same from either side. `mirror=False` is the registry's flag for
+    # diff-style features, and `resolve_match_feature_cols` turns it into
+    # is_diff=True -- which makes the server-perspective swap NEGATE this to
+    # -1/-0, outside its own {0, 1} range. Mirrored instead: the opp_ column
+    # self-joins to the partner's row, where the value is identical by
+    # construction, so the swap reads it and gets the right answer.
+    # Contrast `lefty_vs_righty` below, which IS anti-symmetric (1/-1/0) and
+    # correctly stays mirror=False.
+    mirror=True,
     impute=None,
 )
 def handedness_match() -> pl.Expr:
