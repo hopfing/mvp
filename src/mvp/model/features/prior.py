@@ -36,6 +36,7 @@ a config offsetting on this filters its rows (the sugar does it).
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, replace
 from datetime import date, timedelta
@@ -78,6 +79,44 @@ PROJECTION_CONFIG_DIRS = (Path("projections"), Path("projections/production"))
 EVALUATIONS_ROOT: Path | None = None
 BACKTESTS_ROOT: Path | None = None
 PROJECTION_EVALUATIONS_ROOT: Path | None = None
+# Where PROMOTION copies the artifacts production depends on
+# (`mvp.model.prior_promotion`). Fingerprint dirs are scratch: the weekly wipe
+# deletes from model_evaluations, ad-hoc runs overwrite their files, and a
+# config edit moves the fingerprint. A stem with a dir here resolves HERE (see
+# `resolve_prior`), so production's training, serving and preflight all read
+# the one copy that only `mvp train` writes. Under the data root's models/
+# dir, which no wipe targets. None = data root / models / priors.
+PROMOTED_PRIORS_ROOT: Path | None = None
+
+
+def _promoted_root() -> Path:
+    return PROMOTED_PRIORS_ROOT or (get_data_root() / "models" / "priors")
+
+
+def promoted_dir(model: str) -> Path:
+    """Where `mvp train` promotes `model`'s prior artifacts to."""
+    return _promoted_root() / model
+
+
+# Written LAST by promotion, so its presence means the copy is complete. It
+# records the config fingerprint the copy was made from; `resolve_prior` only
+# redirects to a promoted copy whose fingerprint matches the CURRENT config,
+# so an edited config falls through to its (empty) fingerprint dir and is
+# caught -- preflight refuses, discovery regenerates -- instead of silently
+# reading a promotion of the old config.
+PROMOTED_MANIFEST = "promoted.json"
+
+
+def promoted_fingerprint(pdir: Path) -> str | None:
+    """The config fingerprint a promoted copy was made from, or None when no
+    complete promotion is there."""
+    p = pdir / PROMOTED_MANIFEST
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text(encoding="utf-8")).get("fingerprint")
+    except (OSError, ValueError):
+        return None
 
 
 @dataclass(frozen=True)
@@ -112,6 +151,13 @@ class PriorSource:
     @property
     def pmf_parquet(self) -> Path:
         return self.eval_dir / "total_games_pmf.parquet"
+
+    @property
+    def cutoffs_json(self) -> Path:
+        """Model kind, promoted copies: the backtest's fold test-start dates,
+        written by promotion so the forward splice does not depend on the lead
+        joblibs under backtests/lead (a wipe target) still being there."""
+        return self.eval_dir / "cutoffs.json"
 
     def _artifact_paths(self) -> tuple[Path, ...]:
         if self.kind == "projection":
@@ -301,6 +347,7 @@ def _tagged_fallback(
 
 def resolve_prior(
     model: str, config_dirs=None, projection_config_dirs=None,
+    *, promoted: bool = True,
 ) -> PriorSource:
     """Config stem -> its config file -> evaluation fingerprint -> eval dir.
 
@@ -311,7 +358,46 @@ def resolve_prior(
     projection_evaluations. Either way, a config copy that differs in
     fingerprinted fields falls back to the evaluation tagged with the stem
     in its source.txt, logged.
+
+    `promoted=True` (the default) then redirects to the PROMOTED copy under
+    `promoted_dir(model)` when one exists AND was made from a config with
+    this fingerprint. That is the copy production trains on, serves from and
+    preflights, and the only copy `mvp train` writes; an experiment naming a
+    promoted stem reads it too, which is the prior it would actually serve on
+    top of. A promoted copy of an EDITED config is not redirected to: the
+    current config fingerprints elsewhere, and a promotion of the old text
+    is not an evaluation of the new one. Promotion itself passes
+    `promoted=False` to reach the evaluation dir it regenerates and copies
+    FROM.
     """
+    source = _resolve_evaluation(model, config_dirs, projection_config_dirs)
+    if not promoted:
+        return source
+    pdir = promoted_dir(model)
+    if promoted_fingerprint(pdir) == source.fp:
+        candidate = replace(source, eval_dir=pdir)
+        # The copy must also pass the readers' own readiness checks. A
+        # promotion made before a reader-schema change (the SHAPE_COLUMNS
+        # case) is complete by manifest and unreadable by schema; redirecting
+        # to it would pin every reader -- including the discovery path that
+        # regenerates the fingerprint dir -- on a copy only `mvp train` can
+        # replace. Not redirected: production's preflight refuses by name,
+        # everything else resolves to the evaluation dir as before.
+        if prior_artifacts_ready(candidate) and _forward_artifact_ready(candidate):
+            return candidate
+        logger.warning(
+            "prior %s: promoted copy at %s is incomplete or predates the current "
+            "artifact schema; resolving to the evaluation dir instead",
+            model, pdir,
+        )
+    return source
+
+
+def _resolve_evaluation(
+    model: str, config_dirs=None, projection_config_dirs=None,
+) -> PriorSource:
+    """`resolve_prior` without the promoted-store redirect: the fingerprint
+    (or tagged-equivalent) evaluation dir the producers write to."""
     proj_path = _find_projection_config(model, projection_config_dirs)
     try:
         model_path = find_prior_config(model, config_dirs)
@@ -583,6 +669,19 @@ def _backtest_cutoffs(stems: list[str], backtests_root: Path | None = None) -> l
     return []
 
 
+def _promoted_cutoffs(source: PriorSource) -> list[date]:
+    """Fold cutoffs from a promoted copy's cutoffs.json, if it has one.
+    Promotion writes the dates `_backtest_cutoffs` would parse from the lead
+    joblib names at promotion time, so the promoted prior needs nothing under
+    backtests/lead to date its forward rows."""
+    p = source.cutoffs_json
+    if not p.exists():
+        return []
+    return sorted(
+        date.fromisoformat(s) for s in json.loads(p.read_text(encoding="utf-8"))
+    )
+
+
 def _source_tags(eval_dir: Path) -> list[str]:
     src = eval_dir / "source.txt"
     if not src.exists():
@@ -798,7 +897,7 @@ def build_prior_frame(
         )
     if source.backtest_csv.exists():
         stems = [source.stem] + [t for t in _source_tags(source.eval_dir) if t != source.stem]
-        cutoffs = _backtest_cutoffs(stems, backtests_root)
+        cutoffs = _promoted_cutoffs(source) or _backtest_cutoffs(stems, backtests_root)
         if cutoffs:
             parts.append(_backtest_rows(source.backtest_csv, cutoffs))
         else:

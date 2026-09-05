@@ -43,6 +43,14 @@ from mvp.model.features._score_helpers import (
 )
 from mvp.model.features import prior as _prior
 from mvp.model.prior_naming import prior_column, prior_model_of
+from mvp.model.prior_promotion import (
+    PreflightError,
+    declared_prior_stems,
+    dependency_order,
+    promote_prior,
+    regenerate_prior,
+    verify_promoted,
+)
 from mvp.model.features.elo import surface_elo_expr
 from mvp.model.imputation import apply_imputation, build_imputation, fit_imputation
 from mvp.model.models import EnsembleModel, XGBoostMTLModel, get_model
@@ -213,6 +221,198 @@ def _fill_prior_logit(
         .otherwise(prob_fallback)
         .alias(prob_col),
     ).drop("_inj_logit")
+
+
+def _scope_to_tournaments(
+    df: pl.DataFrame, tournament_keys: list[tuple[str, int]],
+) -> pl.DataFrame:
+    """Semi-join `df` to (tournament_id, year) pairs.
+
+    ONE definition. This was three byte-identical copies in this file, which is
+    how the uid-set logic beside it drifted into two versions with contradictory
+    comments. A semi-join keeps only left columns, so the temporary `_year` is
+    dropped explicitly.
+    """
+    if not tournament_keys:
+        # Scoping to no tournaments is an empty result, not an error. Only
+        # `_year` gets an explicit cast below, so an empty list leaves
+        # `tournament_id` at Null dtype and the join raises SchemaError against
+        # a str column. Predates this helper -- the inlined copies raised the
+        # same way -- and reachable: `cmd_live` takes its pairs straight from
+        # `get_active_tournaments()` with no empty guard, so a quiet day
+        # surfaced as "winner predictions failed" instead of "nothing to score".
+        return df.clear()
+    keys = pl.DataFrame({
+        "tournament_id": [t for t, _ in tournament_keys],
+        "_year": [y for _, y in tournament_keys],
+    }).with_columns(pl.col("_year").cast(pl.Int32))
+    return df.with_columns(
+        pl.col("effective_match_date").dt.year().alias("_year")
+    ).join(keys, on=["tournament_id", "_year"], how="semi").drop("_year")
+
+
+def _serving_uid_set(
+    df: pl.DataFrame,
+    *,
+    include_settled: bool,
+    match_uids: set[str] | None = None,
+    date_window: tuple[Any, Any] | None = None,
+    tournament_keys: list[tuple[str, int]] | None = None,
+) -> list[str]:
+    """Matches a projection prior should actually be served for.
+
+    ONE definition, because the two fill sites (`predict()`'s lead pass and
+    `_predict_raw`) had separate copies that drifted into contradicting each
+    other's comments.
+
+    `include_settled` marks a HISTORICAL run: the lead backtest sets it, and so
+    do several offline scripts (`cal_transport`, `oddspapi_gen_predictions`,
+    `_prune_serve_diff`). Every one of them either scores a past window or
+    discards the pending rows before scoring -- `cal_transport`'s default window
+    ends TODAY, so it does pull pending rows, and then inner-joins outcomes
+    filtered to `won.is_not_null()` to drop them. Either way they read the
+    TRAINED column and there is nothing to serve. Filling a settled row whose column is
+    legitimately null (RET/W-O/DEF/UNP dropped by `resolve_targets`, or a date
+    before the projection's first fold) is the in-sample leak
+    `_fill_prior_column`'s coalesce order exists to prevent.
+
+    The flag only APPROXIMATES "historical", which is worth knowing rather than
+    tightening: it does not filter to settled rows, it merely stops excluding
+    them (`cal_transport.py` carries its own comment about pending rows coming
+    back from it and poisoning metrics). A caller that passes it with a window
+    extending past today gets pending rows and no fill -- the original defect,
+    in the one path that would look like it was working.
+
+    Otherwise: pending rows, narrowed. `won` alone is not a bound; it stays null
+    forever on a schedule row that never resolved, so without the date and
+    tournament scoping the set accumulates dead history instead of tracking the
+    live card.
+    """
+    if include_settled:
+        return []
+    out = df.filter(pl.col("won").is_null())
+    if match_uids is not None:
+        out = out.filter(pl.col("match_uid").is_in(list(match_uids)))
+    if date_window is not None:
+        start, end = date_window
+        out = out.filter(
+            (pl.col("effective_match_date") >= start)
+            & (pl.col("effective_match_date") <= end)
+        )
+    if tournament_keys is not None:
+        out = _scope_to_tournaments(out, tournament_keys)
+    return sorted(out["match_uid"].unique().to_list())
+
+
+def _projection_priors_of(
+    config: Any, resolved_specs: list[str] | None = None,
+) -> list[str]:
+    """Projection-kind prior stems a config declares and does NOT offset on.
+
+    The offset's column is filled from the upstream model's live probability
+    (`_fill_prior_logit`); every other declared prior is left to the transform,
+    which for a projection kind produces null on every pending match. Those are
+    the ones that need serving.
+
+    Reads the same spec sites as `declared_prior_specs` (include, compute_only,
+    filter keys, offset, the ensemble union in `resolved_specs`) but keeps only
+    `player_prior_logit` declarations: `chain_shape(model=X)` names a
+    projection too, but its columns are shape scalars this serving path does
+    not produce, so serving X's match-win logit for it would fill a column the
+    config never reads.
+    """
+    from mvp.model.features.prior import resolve_prior
+    from mvp.model.prior_promotion import declared_prior_specs
+
+    offset_model = prior_model_of(config.offset.feature) if config.offset else None
+    out: list[str] = []
+    for spec in declared_prior_specs(config, resolved_specs):
+        model = prior_model_of(spec)
+        if model is None or model == offset_model or model in out:
+            continue
+        # Deliberately NOT swallowed. A dropped stem means no fill and a silent
+        # return to the NaN defect. Loud beats a column the model reads as
+        # missing on every live row.
+        try:
+            if resolve_prior(model).kind == "projection":
+                out.append(model)
+        except Exception as e:
+            raise RuntimeError(
+                f"cannot resolve declared prior {model!r}: {e}. Its column "
+                f"would silently reach the model as null on every row."
+            ) from e
+    return out
+
+
+def _shares_lead_domain(
+    stage_filters: dict[str, Any] | None, lead_filters: dict[str, Any] | None,
+) -> bool:
+    """Whether a stage's config filters, less its prior `not_null` clauses,
+    equal the lead's production filters.
+
+    Decides what an UNRAISED, empty scored set means in `_apply_stages`. A
+    stage scoped to the lead's own domain must score every match the lead
+    scored: its prior clause is filled for both orientations of every pending
+    uid before the scope check, and both frames come from the same
+    matches.parquet inside one `predict()` call, so 0/N there is a defect. A
+    stage with a NARROWER domain (say `surface: Clay`) legitimately scores 0/N
+    on a day with no clay; the degrade to the lead is its intended behaviour,
+    not an alert. List values compare order-insensitively.
+    """
+    def norm(filters: dict[str, Any] | None) -> dict[str, Any]:
+        out: dict[str, Any] = {}
+        for key, value in (filters or {}).items():
+            if prior_model_of(key) is not None:
+                continue
+            out[key] = (
+                tuple(sorted(str(v) for v in value)) if isinstance(value, list)
+                else value
+            )
+        return out
+
+    return norm(stage_filters) == norm(lead_filters)
+
+
+def _fill_prior_column(
+    df: pl.DataFrame, values: dict[tuple[str, str], float], logit_col: str
+) -> pl.DataFrame:
+    """Inject a prior logit into one named column, by (match_uid, player_id).
+
+    `_fill_prior_logit`'s counterpart for a prior that is not the offset: it
+    carries no `_PriorBinding` (that type exists to pair the offset's logit and
+    prob columns) and no probability column to keep consistent, because a
+    non-offset prior reaches the model only as its logit.
+
+    The COALESCE ORDER is the opposite of `_fill_prior_logit`'s, deliberately.
+    Injected-wins is right for the offset: the upstream model's live probability
+    is what the stage conditions on when the bet is placed. It is wrong here,
+    because the caller's uid set is not always pending -- `backtest.py:627`
+    predicts with `include_settled=True`, and for a settled match the transform
+    has already produced the honest value (walk-forward OOF, or post-train_end
+    forward rows). Overwriting those with a projection from a single fit through
+    the config's `date_range.end` would put an IN-SAMPLE number in every
+    backtest fold at or before that date, silently and in the flattering
+    direction.
+
+    Existing-wins costs nothing on the live path: a pending match can never
+    appear in the projection's artifacts (they are built through
+    `resolve_targets`, which drops matches without completed set scores), so the
+    trained column is guaranteed null there and the injection still wins on
+    every row it is meant to.
+    """
+    if not values:
+        return df
+    inj = pl.DataFrame({
+        "match_uid": [k[0] for k in values],
+        "player_id": [k[1] for k in values],
+        "_inj": [float(v) for v in values.values()],
+    })
+    out = df.join(inj, on=["match_uid", "player_id"], how="left")
+    expr = (
+        pl.coalesce(pl.col(logit_col), pl.col("_inj"))
+        if logit_col in out.columns else pl.col("_inj")
+    )
+    return out.with_columns(expr.alias(logit_col)).drop("_inj")
 
 
 def _odd_project_serving(
@@ -1526,6 +1726,71 @@ class ProductionPredictor:
             self._train_single(stage, previous_stem=previous)
             previous = Path(stage["config"]).stem
 
+    # -- Production owns its prior artifacts (mvp.model.prior_promotion) ------
+
+    def _entries(self) -> list[dict]:
+        """Every production entry in chain order: active, stages, voters."""
+        return (
+            [self.config["active"]]
+            + list(self.config.get("stages") or [])
+            + list(self.config.get("voters") or [])
+        )
+
+    def prior_dependencies(self) -> list[str]:
+        """Every prior stem any entry declares -- through its features, its
+        filters (config's and the production entry's), its offset, or its
+        ensemble bases -- in first-seen order."""
+        out: list[str] = []
+        for entry in self._entries():
+            cfg, resolved, _base = self._resolve_entry_features(entry)
+            for stem in declared_prior_stems(cfg, resolved, entry.get("filters")):
+                if stem not in out:
+                    out.append(stem)
+        return out
+
+    def _refuse_offset_on_active(self) -> None:
+        """An `active` entry that offsets on a prior can never serve: the
+        offset column is filled live from the UPSTREAM model's probability,
+        and `active` has no upstream. Its own `not_null` filter would then
+        empty every predict set. Refused at promotion and at preflight, so
+        the shape is caught before a tick rather than as a silent zero."""
+        cfg = self._experiment_config
+        offset_feature = cfg.offset.feature if cfg.offset else None
+        model = prior_model_of(offset_feature) if offset_feature else None
+        if model is not None:
+            raise PreflightError(
+                f"active entry {Path(self.config['active']['config']).stem} "
+                f"offsets on prior {model!r}: nothing fills an offset prior "
+                "for the lead. A residual model serves as a stage, not as active."
+            )
+
+    def promote_priors(self) -> list[str]:
+        """Regenerate and promote every prior production depends on, base-first.
+
+        Called by `mvp train` BEFORE any fit, and only there: `run_backtest`
+        also calls `train()`, per fold, and must not re-evaluate the chain.
+        Runs first because `_train_single` overwrites the live artifacts in
+        place, so a failure here leaves production untouched.
+        """
+        self._refuse_offset_on_active()
+        promoted: list[str] = []
+        for source in dependency_order(self.prior_dependencies()):
+            logger.info("Promoting prior %s (%s kind)", source.model, source.kind)
+            regenerate_prior(source)
+            promote_prior(source.model)
+            promoted.append(source.model)
+        return promoted
+
+    def preflight(self) -> list[str]:
+        """Verify every prior production reads is promoted, complete and
+        loadable. Never regenerates -- the tick calls this before scoring,
+        and `mvp train` calls it last as a self-check. Returns the stems."""
+        self._refuse_offset_on_active()
+        stems = [s.model for s in dependency_order(self.prior_dependencies())]
+        for stem in stems:
+            verify_promoted(stem)
+        return stems
+
     def load(self) -> dict[str, Any]:
         """Load the trained production model.
 
@@ -1597,11 +1862,40 @@ class ProductionPredictor:
         filter_specs = get_filter_feature_specs(config.data.filters) if scoped else []
         extra = compute_only + filter_specs
         all_specs = feature_specs + [s for s in extra if s not in feature_specs]
-        df = engine.compute(all_specs, extra_columns=_PREDICTOR_EXTRA_COLS)
+        # Priors the config declares that are NOT the offset get no fill below --
+        # `_prior_binding` resolves exactly one column. A projection-kind prior is
+        # null for every pending match by construction (its artifacts come from an
+        # evaluation, which resolves targets and so never sees one), so without
+        # this the model is served a feature it was trained with and never
+        # receives. Their specs ride THIS pass rather than a second engine's, so
+        # no extra full-corpus frame is held alongside this one.
+        proj_stems = _projection_priors_of(config, feature_specs)
+        extra_cols = list(_PREDICTOR_EXTRA_COLS)
+        if proj_stems:
+            from mvp.model.projection_serving import serving_requirements
+
+            for _stem in proj_stems:
+                _specs, _cols = serving_requirements(_stem)
+                all_specs += [s for s in _specs if s not in all_specs]
+                extra_cols += [c for c in _cols if c not in extra_cols]
+
+        df = engine.compute(all_specs, extra_columns=extra_cols)
         if fill_prior_logit:
             binding = _prior_binding(config.offset.feature if config.offset else None)
             if binding is not None:
                 df = _fill_prior_logit(df, fill_prior_logit, binding)
+        if proj_stems:
+            from mvp.model.projection_serving import pending_match_win_logits
+
+            _pending_uids = _serving_uid_set(
+                df, include_settled=include_settled, match_uids=match_uids,
+            )
+            for _stem in proj_stems:
+                df = _fill_prior_column(
+                    df,
+                    pending_match_win_logits(_stem, _pending_uids, df),
+                    prior_column(_stem),
+                )
 
         # Determine in-scope match UIDs for scoped voters
         in_scope_uids: set[str] | None = None
@@ -1611,13 +1905,7 @@ class ProductionPredictor:
 
         # Scope to tournaments
         if tournament_keys is not None:
-            keys_df = pl.DataFrame(
-                {"tournament_id": [t for t, _ in tournament_keys],
-                 "_year": [y for _, y in tournament_keys]},
-            ).with_columns(pl.col("_year").cast(pl.Int32))
-            df = df.with_columns(
-                pl.col("effective_match_date").dt.year().alias("_year")
-            ).join(keys_df, on=["tournament_id", "_year"], how="semi").drop("_year")
+            df = _scope_to_tournaments(df, tournament_keys)
 
         # Keep matches in the production set (pending only, unless include_settled)
         if include_settled:
@@ -1875,7 +2163,37 @@ class ProductionPredictor:
             # and restrict the bet set) even when they aren't model features.
             extra = extra + get_filter_feature_specs(config.data.eval_filters)
         all_specs = feature_specs + [s for s in extra if s not in feature_specs]
-        df = engine.compute(all_specs, extra_columns=_PREDICTOR_EXTRA_COLS)
+        # Same treatment the stage path gets in `_predict_raw`: a projection-kind
+        # prior the ACTIVE config declares is null for every pending match by
+        # construction, and nothing else fills it. Covered here so the defect is
+        # closed wherever the prior is declared, not only in a stage slot. Note
+        # this alone does NOT make a promoted residual model work: `predict()`
+        # has no offset fill, so such a config's offset prior stays null and its
+        # own `not_null` filter empties the predict set regardless.
+        lead_proj_stems = _projection_priors_of(config, feature_specs)
+        lead_extra_cols = list(_PREDICTOR_EXTRA_COLS)
+        if lead_proj_stems:
+            from mvp.model.projection_serving import serving_requirements
+
+            for _stem in lead_proj_stems:
+                _specs, _cols = serving_requirements(_stem)
+                all_specs += [sp for sp in _specs if sp not in all_specs]
+                lead_extra_cols += [c for c in _cols if c not in lead_extra_cols]
+
+        df = engine.compute(all_specs, extra_columns=lead_extra_cols)
+        if lead_proj_stems:
+            from mvp.model.projection_serving import pending_match_win_logits
+
+            _uids = _serving_uid_set(
+                df, include_settled=include_settled,
+                date_window=date_window, tournament_keys=tournament_keys,
+            )
+            for _stem in lead_proj_stems:
+                df = _fill_prior_column(
+                    df,
+                    pending_match_win_logits(_stem, _uids, df),
+                    prior_column(_stem),
+                )
 
         # Apply non-date filters (same as training, minus date range)
         if self.config["active"].get("filters"):
@@ -1883,13 +2201,7 @@ class ProductionPredictor:
 
         # Scope to specific tournaments if requested
         if tournament_keys is not None:
-            keys_df = pl.DataFrame(
-                {"tournament_id": [t for t, _ in tournament_keys],
-                 "_year": [y for _, y in tournament_keys]},
-            ).with_columns(pl.col("_year").cast(pl.Int32))
-            df = df.with_columns(
-                pl.col("effective_match_date").dt.year().alias("_year")
-            ).join(keys_df, on=["tournament_id", "_year"], how="semi").drop("_year")
+            df = _scope_to_tournaments(df, tournament_keys)
 
         # Keep pending matches (unless caller asked for settled too — backtest path)
         if include_settled:
@@ -2215,6 +2527,10 @@ class ProductionPredictor:
         self._stage_errors = []
         for stage in stages:
             stem = Path(stage["config"]).stem
+            # Stages honour their own config filters by default, so a
+            # narrower-domain stage never scores out of domain (those matches
+            # keep the previous probability and version).
+            scoped = bool(stage.get("scoped", True))
             logits = _logit(np.array([current[u] for u in uids]))
             fill: dict[tuple[str, str], float] = {}
             for uid, p1, p2, lg in zip(uids, p1_ids, p2_ids, logits):
@@ -2229,10 +2545,7 @@ class ProductionPredictor:
             try:
                 scored = self._predict_raw(
                     stage, tournament_keys, set(uids),
-                    # Stages honour their own config filters by default, so a
-                    # narrower-domain stage never scores out of domain (those
-                    # matches keep the previous probability and version).
-                    scoped=bool(stage.get("scoped", True)),
+                    scoped=scoped,
                     include_settled=include_settled, fill_prior_logit=fill,
                 )
             except Exception as e:  # noqa: BLE001 -- degrade, never sink the lead
@@ -2244,6 +2557,20 @@ class ProductionPredictor:
             for uid, p in scored.items():
                 current[uid] = p
                 version[uid] = stem
+            if uids and not scored and (
+                not scoped or _shares_lead_domain(
+                    ExperimentConfig.from_file(stage["config"]).data.filters,
+                    self.config["active"].get("filters"),
+                )
+            ):
+                # Nothing raised, nothing scored: every row keeps the lead's
+                # number under the lead's version. For an unscoped stage, or
+                # one scoped to the lead's own domain, that is a degrade -- the
+                # quiet kind. A narrower-domain stage is exempt: an empty
+                # in-scope set is its normal day (`_shares_lead_domain`).
+                self._stage_errors.append(
+                    f"stage {stem}: scored 0/{len(uids)} matches"
+                )
             logger.info(
                 "Stage %s scored %d/%d matches", stem, len(scored), len(uids),
             )

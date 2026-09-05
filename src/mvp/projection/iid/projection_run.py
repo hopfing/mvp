@@ -208,8 +208,15 @@ def _save_artifact(
     logger.info("Saved IID artifact to %s", path)
 
 
+def _normalize_config_text(text: str | None) -> str | None:
+    """Line-ending- and trailing-whitespace-insensitive form of a config file."""
+    if text is None:
+        return None
+    return "\n".join(line.rstrip() for line in text.splitlines()).strip()
+
+
 def _load_artifact(
-    config: IIDProjectionConfig, config_path: Path,
+    config: IIDProjectionConfig, config_path: Path, path: Path | None = None,
 ) -> TennisProjector | None:
     """The cached projector, or None if it does not match the current config text.
 
@@ -218,11 +225,24 @@ def _load_artifact(
     fingerprint (or a hand-edited file) can still diverge. Without this check, editing
     a config and re-running without `retrain` silently scores the OLD model.
     """
-    path = artifact_path(config, config_path)
+    # `path` lets a caller that resolved the artifact some other way (the serve
+    # path derives it from the same eval_dir the trained column's pmf comes
+    # from) load THAT file rather than a recomputed fingerprint dir, so the file
+    # checked and the file loaded cannot diverge.
+    path = path or artifact_path(config, config_path)
     if not path.exists():
         return None
     artifact = joblib.load(path)
-    if artifact.get("config_yaml") != Path(config_path).read_text(encoding="utf-8"):
+    # Compared on whitespace-only-insensitive text, so a reformat that changes
+    # nothing semantic does not read as a config edit and discard a good
+    # artifact. No projection config carries trailing whitespace today; this is
+    # tolerance for the general case, not a fix for an observed failure. Line
+    # endings are belt-and-braces: `splitlines()` normalizes them, but both
+    # sides already come through `Path.read_text`, which opens with universal
+    # newlines, so a CRLF checkout and an LF one compare equal regardless.
+    if _normalize_config_text(artifact.get("config_yaml")) != _normalize_config_text(
+        Path(config_path).read_text(encoding="utf-8")
+    ):
         logger.info(
             "IID artifact at %s was trained from different config text — retraining",
             path,

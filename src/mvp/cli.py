@@ -1362,11 +1362,27 @@ def cmd_train(args: argparse.Namespace) -> int:
     for section in _get_target_sections():
         print(f"\n--- Training {section} models ---")
         predictor = ProductionPredictor(target_section=section)
+        # Production owns its prior artifacts: regenerate every dependency from
+        # current code and data, base-first, and promote the copies production
+        # reads. Before any fit, because `_train_single` overwrites the live
+        # artifacts in place. `run_backtest` calls `train()` directly and must
+        # not re-evaluate the chain, which is why this lives here.
+        promoted = predictor.promote_priors()
+        if promoted:
+            print(f"Promoted prior(s): {', '.join(promoted)}")
         predictor.train()
         print(f"{section.capitalize()} model trained and saved.")
         n_voters = predictor.train_voters()
         if n_voters > 0:
             print(f"Trained {n_voters} {section} voter model(s).")
+        # The tick's own check, run here first: a promotion that did not leave
+        # a servable store fails the train, not the next live tick.
+        verified = predictor.preflight()
+        print(
+            f"Preflight OK: {len(verified)} promoted prior(s) verified "
+            f"({', '.join(verified)})" if verified
+            else "Preflight OK: no prior dependencies"
+        )
     return 0
 
 
@@ -3491,6 +3507,20 @@ def _alert_book_outages(
             )
 
 
+class PipelineRunError(RuntimeError):
+    """`cmd_live` finished with errors.
+
+    `already_alerted` means every one of them was posted to Discord at the
+    moment it happened (stage 2 does this for prediction failures, because
+    those rows are bettable before the run ends), so `main()` must not post
+    the end-of-run summary a second time.
+    """
+
+    def __init__(self, message: str, *, already_alerted: bool = False) -> None:
+        super().__init__(message)
+        self.already_alerted = already_alerted
+
+
 def cmd_live(args: argparse.Namespace) -> int:
     """Run live pipeline: extract, aggregate, predict."""
     from concurrent.futures import ThreadPoolExecutor
@@ -3521,6 +3551,9 @@ def cmd_live(args: argparse.Namespace) -> int:
     # signal completion for this tick.
 
     errors: list[str] = []
+    # Errors already posted to Discord as they happened; the end-of-run raise
+    # tells main() not to post those again.
+    alerted: set[str] = set()
     predictions = None
     all_odds_maps: dict[str, dict[str, dict[str, float]]] = {}
     all_opening_odds_maps: dict[str, dict[str, dict[str, float]]] = {}
@@ -3618,11 +3651,21 @@ def cmd_live(args: argparse.Namespace) -> int:
     lead_feature_frame = None
     try:
         predictor = ProductionPredictor(target_section="winner")
+        # Every prior production reads must be promoted, complete and loadable
+        # BEFORE anything is scored. A raise here means no predictions exist,
+        # so nothing reaches the sheet, and the except below alerts at once.
+        # Never regenerates: a live box must not start an evaluation.
+        predictor.preflight()
         predictions = predictor.predict(tournament_keys=pairs, include_features=True)
         # A residual stage that fails to score degrades to the lead's numbers
-        # (ProductionPredictor._apply_stages); carry it into the run report so
-        # the alert names the stage, instead of leaving it as a log line.
-        errors.extend(getattr(predictor, "_stage_errors", []))
+        # (ProductionPredictor._apply_stages). Those rows are bettable the
+        # moment they land on the sheet (stage 8), so the alert fires HERE,
+        # not with the end-of-run raise after stage 9.
+        stage_errors = list(getattr(predictor, "_stage_errors", []))
+        if stage_errors:
+            errors.extend(stage_errors)
+            alerted.update(stage_errors)
+            notify.post_failure("mvp-live", "; ".join(stage_errors))
         # Per-(match_uid, player_id) feature frame for the sheet's diff columns.
         lead_feature_frame = getattr(predictor, "_feature_frame", None)
 
@@ -3637,7 +3680,11 @@ def cmd_live(args: argparse.Namespace) -> int:
             report.record_predictions(total=0)
     except Exception as e:
         logger.error("Winner predictions failed: %s", e)
-        errors.append(f"winner predictions: {e}")
+        msg = f"winner predictions: {type(e).__name__}: {e}"
+        errors.append(msg)
+        alerted.add(msg)
+        # No predictions this tick. Say so now rather than after stage 9.
+        notify.post_failure("mvp-live", msg)
 
     # --- Stage 3: Additional target sections ---
     if predictions is not None and len(predictions) > 0:
@@ -3652,6 +3699,7 @@ def cmd_live(args: argparse.Namespace) -> int:
                     target_section=section,
                     predictions_path=ds_predictions_path,
                 )
+                ds_predictor.preflight()
                 ds_predictions = ds_predictor.predict(tournament_keys=pairs)
                 if len(ds_predictions) == 0:
                     print(f"\nNo pending {section} matches to predict.")
@@ -3940,8 +3988,9 @@ def cmd_live(args: argparse.Namespace) -> int:
     # --- Raise all collected errors at the very end ---
     if errors:
         summary = "; ".join(errors)
-        raise RuntimeError(
-            f"Pipeline finished with {len(errors)} error(s): {summary}"
+        raise PipelineRunError(
+            f"Pipeline finished with {len(errors)} error(s): {summary}",
+            already_alerted=all(e in alerted for e in errors),
         )
 
     return 0
@@ -4061,7 +4110,10 @@ def main(args: list[str] | None = None) -> int:
         try:
             return cmd_live(parsed)
         except Exception as e:
-            notify.post_failure("mvp-live", f"{type(e).__name__}: {e}")
+            # Stage 2 posts prediction failures the moment they happen; a run
+            # whose only errors were those has already been alerted once.
+            if not getattr(e, "already_alerted", False):
+                notify.post_failure("mvp-live", f"{type(e).__name__}: {e}")
             raise
     elif parsed.command == "books":
         try:

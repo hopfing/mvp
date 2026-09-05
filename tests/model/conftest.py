@@ -55,3 +55,16 @@ def isolated_registry():
     registry.clear()
     registry._features.update(saved)
     registry._output_to_feature.update(saved_outputs)
+
+
+@pytest.fixture(autouse=True)
+def _promoted_priors_in_tmp(tmp_path, monkeypatch):
+    """Prior resolution prefers the PROMOTED store when a stem has a dir there
+    (mvp.model.prior_promotion). Point it at tmp for every model test so no
+    test stem can collide with a real promoted prior on the data root."""
+    from mvp.model.features import prior
+
+    monkeypatch.setattr(prior, "PROMOTED_PRIORS_ROOT", tmp_path / "_promoted")
+    prior._cached_frame.cache_clear()
+    yield
+    prior._cached_frame.cache_clear()
