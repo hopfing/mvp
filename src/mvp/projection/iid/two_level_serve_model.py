@@ -285,10 +285,20 @@ class FirstServeInModel:
             train = agg.join(
                 feats, left_on=["match_uid", "server_id"],
                 right_on=["match_uid", "player_id"], how="inner",
-            ).drop_nulls(design_cols)
+            )
         else:
             # Point-only arm: the aggregate already carries every design column.
-            train = agg.drop_nulls(design_cols)
+            train = agg
+        if not _accepts_nan(self.model_type):
+            # Ridge cannot take NaN, so its rows have to be complete. XGBoost
+            # can, and dropping there is actively harmful: `drop_nulls` is
+            # ROW-wise over the whole design matrix, so one sparse column
+            # deletes those rows for every other feature too. Under FS that
+            # compounds -- `design_cols` carries the already-selected set, so a
+            # sparse selection shrinks the training frame for every candidate
+            # evaluated in later rounds. It also disagreed with predict, which
+            # hands NaN straight to XGBoost (`predict_rate`).
+            train = train.drop_nulls(design_cols)
         if len(train) == 0:
             logger.warning(
                 "FirstServeInModel: no rows survived the feature join; "
@@ -374,9 +384,19 @@ class FirstServeInModel:
         return np.clip(out, self.clip_min, self.clip_max)
 
 
+def _accepts_nan(model_type: str) -> bool:
+    """Whether the regressor `_build_rate_regressor` returns handles NaN itself.
+
+    ONE definition, read by both the dispatch below and `FirstServeInModel.fit`'s
+    null handling -- a second copy is how the fit comes to drop rows the model
+    would have been happy to take.
+    """
+    return model_type in ("xgboost", "hierarchical_boosted")
+
+
 def _build_rate_regressor(model_type: str, params: dict[str, Any]) -> Any:
     """Regressor for a rate in [0, 1]. Mirrors score_state_model's dispatch."""
-    if model_type in ("xgboost", "hierarchical_boosted"):
+    if _accepts_nan(model_type):
         from xgboost import XGBRegressor
 
         p = {"tree_method": "hist", "random_state": 42, **params}
