@@ -7,6 +7,7 @@ from pathlib import Path
 
 import polars as pl
 
+from mvp.atptour.bsr import BsrTracker
 from mvp.atptour.elo.mov import MovTracker
 from mvp.atptour.ratings import compute_all_ratings
 from mvp.common.base_job import BaseJob

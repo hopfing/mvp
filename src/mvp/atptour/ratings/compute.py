@@ -16,6 +16,7 @@ from mvp.atptour.elo.constants import (
     SURFACE_K_MULT,
     ServeEloConfig,
 )
+from mvp.atptour.bsr.filter import BsrTracker
 from mvp.atptour.elo.mov import MovTracker, margin_is_valid
 from mvp.atptour.elo.ratings import (
     PlayerRating,
@@ -262,6 +263,12 @@ def compute_all_ratings(
             (plus `reason`/`result_type` for the incomplete guard) or this
             raises: silently falling back to binary on EVERY row would make
             the variants degenerate copies of standard elo.
+        bsr_tracker: optional serve/return skill filter state (bsr/filter.py).
+            Same invariant as mov_tracker: None leaves every existing column
+            byte-identical. When passed, the frame must carry the serve-count
+            columns, `circuit`, `surface` and `indoor` — `_col` fills an absent
+            column with None, which would silently put every row outside the
+            filter's domain and emit 24 null columns without an error.
 
     Returns:
         DataFrame with additional rating columns.
