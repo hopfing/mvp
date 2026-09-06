@@ -179,14 +179,23 @@ model:
 
 
 class TestCmdTrain:
+    @patch("mvp.atptour.aggregators.matches.MatchesAggregator")
     @patch("mvp.model.predictor.ProductionPredictor")
-    def test_train_calls_predictor(self, mock_predictor_cls):
+    def test_train_calls_predictor(self, mock_predictor_cls, mock_aggregator):
+        """The aggregator is patched: unpatched, `cmd_train` rebuilds the
+        REAL matches.parquet on the shared data root from inside the test."""
         from mvp.cli import cmd_train
+
+        predictor = mock_predictor_cls.return_value
+        predictor.promote_priors.return_value = []
+        predictor.train_voters.return_value = 0
+        predictor.preflight.return_value = []
 
         args = SimpleNamespace()
         result = cmd_train(args)
 
-        mock_predictor_cls.return_value.train.assert_called_once()
+        mock_aggregator.return_value.run.assert_called_once()
+        predictor.train.assert_called_once()
         assert result == 0
 
 
