@@ -51,6 +51,23 @@ class TestParseArgs:
         args = parse_args(["live", "--refresh"])
         assert args.refresh is True
 
+    def test_iid_pin_subcommand(self):
+        from mvp.cli import parse_args
+
+        args = parse_args(["iid-pin", "srv_two_level_flat_bri__d01_t12"])
+        assert args.command == "iid-pin"
+        assert args.ref == "srv_two_level_flat_bri__d01_t12"
+        assert args.stem is None
+        assert args.production is False
+        assert args.force is False
+
+        args = parse_args([
+            "iid-pin", "8756a8a0c44c", "--as", "srv_bri", "--production", "--force",
+        ])
+        assert args.stem == "srv_bri"
+        assert args.production is True
+        assert args.force is True
+
     def test_train_subcommand(self):
         from mvp.cli import parse_args
 
@@ -691,3 +708,25 @@ class TestConfigDrift:
             "  metric: log_loss", "  metric: log_loss\n  forward_max_workers: 4"
         ))
         assert _config_drift(a, b) == []
+
+
+class TestIidPin:
+    def test_calls_pin_and_prints_the_spec(self, capsys):
+        from mvp.cli import cmd_iid_pin, parse_args
+        from mvp.projection.iid.pin import PinResult
+
+        result = PinResult(
+            stem="parent__d01_t12", fp="8756a8a0c44c",
+            eval_dir=Path("pe/8756a8a0c44c"),
+            config_path=Path("projections/parent__d01_t12.yaml"),
+            missing=("total_games_pmf.parquet", "serve_model.joblib"),
+        )
+        with patch("mvp.projection.iid.pin.pin", return_value=result) as mock_pin:
+            rc = cmd_iid_pin(parse_args(["iid-pin", "parent__d01_t12", "--production"]))
+        assert rc == 0
+        mock_pin.assert_called_once_with(
+            "parent__d01_t12", stem=None, production=True, force=False,
+        )
+        out = capsys.readouterr().out
+        assert "player_prior_logit(model=parent__d01_t12)" in out
+        assert "iid-backtest parent__d01_t12" in out

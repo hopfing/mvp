@@ -403,7 +403,7 @@ def _resolve_evaluation(
         model_path = find_prior_config(model, config_dirs)
     except FileNotFoundError:
         if proj_path is None:
-            raise
+            raise _unresolved(model, config_dirs, projection_config_dirs) from None
         model_path = None
     if model_path is not None and proj_path is not None:
         raise ValueError(
@@ -433,6 +433,58 @@ def _resolve_evaluation(
     return PriorSource(
         model=model, config_path=proj_path, fp=fp, eval_dir=eval_dir,
         kind="projection", forward_train_end=cfg.data.date_range.end,
+    )
+
+
+def _unresolved(
+    model: str, config_dirs=None, projection_config_dirs=None,
+) -> FileNotFoundError:
+    """The error for a stem in NEITHER namespace -- logged as well as
+    returned for raising.
+
+    A `model` run hits this inside the engine's cache-salt pass, after the
+    corpus has loaded, and without the log line the fix would appear only as
+    the last line of a traceback. The sweep case gets its own sentence: a
+    trial's materialized config sits in the sweep dir, which is scratch and
+    is never searched, so the stem looks real (`iid-rank` lists it, its
+    evaluation is complete) and still resolves nowhere until it is pinned
+    under projections/ (`mvp.projection.iid.pin`)."""
+    dirs = [
+        *(config_dirs or CONFIG_DIRS),
+        *(projection_config_dirs or PROJECTION_CONFIG_DIRS),
+    ]
+    msg = (
+        f"prior {model!r}: no {model}.yaml under "
+        f"{', '.join(str(d) for d in dirs)}. A model stem's config must be "
+        "under models/ (copy the tuned trial's config there); a projection "
+        "stem's under projections/."
+    )
+    hint = _sweep_trial_hint(model)
+    if hint:
+        msg = f"{msg} {hint}"
+    logger.error(msg)
+    return FileNotFoundError(msg)
+
+
+def _sweep_trial_hint(model: str) -> str | None:
+    """Where an unresolvable stem actually lives, when it is a sweep trial:
+    its materialized config in the sweep dir and/or the evaluation whose
+    source.txt recorded it as a run tag. None when it is neither."""
+    from mvp.projection.iid.artifacts import find_by_run_tag, sweep_config_dir
+
+    materialized = sweep_config_dir() / f"{model}.yaml"
+    tagged = find_by_run_tag(model)
+    where = []
+    if materialized.exists():
+        where.append(f"a materialized sweep config at {materialized}")
+    if tagged is not None:
+        where.append(f"evaluation {tagged.name}")
+    if not where:
+        return None
+    return (
+        f"The stem is a sweep trial ({' and '.join(where)}); the sweep dir is "
+        "scratch and is never searched. Pin it under projections/ with: "
+        f"poetry run py -m mvp iid-pin {model}"
     )
 
 

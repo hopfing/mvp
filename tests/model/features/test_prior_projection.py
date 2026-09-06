@@ -127,6 +127,51 @@ class TestResolve:
                 "dupe", config_dirs=(models,), projection_config_dirs=(proj_dir,),
             )
 
+    def test_unresolvable_stem_is_logged_and_names_both_namespaces(
+        self, tmp_path, monkeypatch, caplog,
+    ):
+        """A `model` run dies on this inside the engine's cache pass; the
+        log line is what a reader of the run log sees, not the traceback."""
+        import logging
+
+        monkeypatch.setenv("MVP_DATA_ROOT", str(tmp_path / "dataroot"))
+        models, projs = tmp_path / "models", tmp_path / "projections"
+        with caplog.at_level(logging.ERROR, logger="mvp.model.features.prior"):
+            with pytest.raises(FileNotFoundError) as ei:
+                prior.resolve_prior(
+                    "nowhere", config_dirs=(models,), projection_config_dirs=(projs,),
+                )
+        msg = str(ei.value)
+        assert str(models) in msg and str(projs) in msg
+        assert "iid-pin" not in msg  # not a sweep trial: no pin hint
+        assert any("nowhere" in r.message and r.levelno == logging.ERROR
+                   for r in caplog.records)
+
+    def test_sweep_trial_stem_names_the_pin_command(self, tmp_path, monkeypatch):
+        """The stem `iid-rank` shows and `iid-sweep` wrote is real, complete,
+        and unresolvable until pinned: the error says so and how."""
+        root = tmp_path / "dataroot"
+        monkeypatch.setenv("MVP_DATA_ROOT", str(root))
+        sweep_dir = root / "projections" / "iid" / "sweep_configs"
+        _write_proj_cfg(sweep_dir, "parent__d01_t12")
+        eval_dir = root / "projection_evaluations" / "8756a8a0c44c"
+        eval_dir.mkdir(parents=True)
+        (eval_dir / "source.txt").write_text(
+            chr(9).join(["parent", "parent__d01_t12", "2026-09-05T15:42:23"]) + chr(10),
+            encoding="utf-8",
+        )
+        with pytest.raises(FileNotFoundError) as ei:
+            prior.resolve_prior(
+                "parent__d01_t12",
+                config_dirs=(tmp_path / "models",),
+                projection_config_dirs=(tmp_path / "projections",),
+            )
+        msg = str(ei.value)
+        assert "sweep trial" in msg
+        assert str(sweep_dir / "parent__d01_t12.yaml") in msg
+        assert "evaluation 8756a8a0c44c" in msg
+        assert "poetry run py -m mvp iid-pin parent__d01_t12" in msg
+
     def test_missing_artifacts_refuse_without_regenerate(self, tmp_path, monkeypatch):
         """Train/serve (regenerate=False) refuse with the iid-project
         command, same as the model-prior convention."""

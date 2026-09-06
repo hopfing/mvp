@@ -275,3 +275,29 @@ def discover_fp_dirs() -> list[Path]:
     dirs = [p for p in root.iterdir() if p.is_dir()]
     dirs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
     return dirs
+
+
+def find_by_run_tag(tag: str) -> Path | None:
+    """The newest evaluation dir whose source.txt records `tag` as a RUN id
+    (field 2). Field 1 is the grouping source -- the PARENT stem for every
+    sweep trial -- so matching on it would hand a parent stem some arbitrary
+    trial's dir."""
+    for fp_dir in discover_fp_dirs():
+        if any(run_id == tag for _src, run_id, _ts in read_sources(fp_dir)):
+            return fp_dir
+    return None
+
+
+SWEEP_CONFIG_DIRNAME = "sweep_configs"
+
+
+def sweep_config_dir() -> Path:
+    """Where `iid-sweep` materializes one config per selected trial.
+
+    Scratch: the next sweep of the same parent rewrites it, and the prior
+    resolver never searches it. A trial a model config should name is pinned
+    under projections/ from its evaluation (`mvp.projection.iid.pin`).
+    """
+    from mvp.common.base_job import get_data_root
+
+    return get_data_root() / "projections" / "iid" / SWEEP_CONFIG_DIRNAME

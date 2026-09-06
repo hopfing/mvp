@@ -41,17 +41,11 @@ from mvp.projection.iid.artifacts import (
     SPREAD_BACKTEST_PARQUET,
     SPREAD_PMF_PARQUET,
     fp_dir_for,
+    sweep_config_dir,
 )
 from mvp.projection.iid.config import IIDProjectionConfig
 
 logger = logging.getLogger(__name__)
-
-SWEEP_CONFIG_DIRNAME = "sweep_configs"
-
-
-def sweep_config_dir() -> Path:
-    return get_data_root() / "projections" / "iid" / SWEEP_CONFIG_DIRNAME
-
 
 @dataclass
 class SweepEntry:

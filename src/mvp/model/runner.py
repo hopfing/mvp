@@ -652,6 +652,36 @@ class ExperimentRunner:
 
         return all_feature_specs, base_model_specs, model_date_ranges, meta_feature_indices, model_filters, model_sample_weights
 
+    def _resolve_prior_sources(self, all_specs: list[str]) -> None:
+        """Resolve every prior / chain-shape stem the run names BEFORE the
+        corpus loads.
+
+        The engine resolves each one itself when it salts the transform's
+        cache key, but that is after the parquet load, and an unresolvable
+        stem -- a sweep trial never pinned under projections/, a typo -- is a
+        config error that should be reported as one, first. Resolution only:
+        missing ARTIFACTS stay the engine's refusal (with the regenerate
+        command) and the discovery driver's regeneration; this catches the
+        stem that resolves nowhere, which `features/prior.py` logs and raises.
+        `all_specs` is the ensemble-aware union, so base configs' priors are
+        covered along with `features`, filter keys and the offset.
+        """
+        from mvp.model.features.prior import resolve_prior
+        from mvp.model.prior_promotion import declared_prior_specs, prior_stem_of
+
+        stems = [
+            stem for stem in (
+                prior_stem_of(spec)
+                for spec in declared_prior_specs(self.config, all_specs)
+            ) if stem
+        ]
+        for stem in dict.fromkeys(stems):
+            source = resolve_prior(stem)
+            run_logger.info(
+                "prior source %s: %s -> evaluation %s", stem, source.config_path,
+                source.fp,
+            )
+
     def run(self, trial: Any = None) -> dict[str, Any]:
         """Execute the experiment.
 
@@ -823,6 +853,7 @@ class ExperimentRunner:
                     if col not in runner_columns:
                         runner_columns.append(col)
 
+        self._resolve_prior_sources(all_specs)
         df = self.engine.compute(all_specs, extra_columns=runner_columns)
 
         # Apply additional filters (e.g., draw_type: "singles")

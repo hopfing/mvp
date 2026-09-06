@@ -154,6 +154,37 @@ validation:
         assert results["n_folds"] == 2
         assert "run_id" in results
 
+    def test_unresolvable_prior_fails_before_the_corpus_loads(
+        self, sample_config: Path, sample_matches: Path, tmp_path: Path, monkeypatch,
+    ):
+        """A prior stem in neither namespace is a config error: reported as
+        one before `engine.compute`, not from inside the cache-salt pass
+        after the parquet load."""
+        from unittest.mock import MagicMock
+
+        import mlflow
+
+        monkeypatch.setenv("MVP_DATA_ROOT", str(tmp_path / "dataroot"))
+        sample_config.write_text(
+            sample_config.read_text().replace(
+                "    - player_ranking_points_diff",
+                "    - player_ranking_points_diff" + chr(10)
+                + "    - player_prior_logit(model=nowhere)",
+            )
+        )
+        mlflow_dir = tmp_path / "mlruns"
+        mlflow.set_tracking_uri(f"file://{mlflow_dir}")
+        runner = ExperimentRunner(
+            config_path=sample_config,
+            matches_path=sample_matches,
+            cache_dir=tmp_path / "cache",
+            mlflow_dir=mlflow_dir,
+        )
+        runner.engine.compute = MagicMock()
+        with pytest.raises(FileNotFoundError, match="nowhere"):
+            runner.run()
+        runner.engine.compute.assert_not_called()
+
 
 class TestReportingCalibratedHoldout:
     """Deployment-frame (global-Platt) holdout metrics helper."""

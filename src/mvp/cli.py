@@ -1202,6 +1202,32 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         help="Show only the first N rows",
     )
 
+    # iid-pin subcommand - make a projection evaluation referenceable by stem
+    iid_pin_parser = subparsers.add_parser(
+        "iid-pin",
+        parents=[common],
+        help="Pin a projection evaluation (fingerprint or sweep run tag) under "
+             "projections/ so a model config can name it as a prior",
+    )
+    iid_pin_parser.add_argument(
+        "ref",
+        help="Evaluation fingerprint, or the run tag a sweep recorded for the "
+             "trial (e.g. srv_two_level_flat_bri__d01_t12)",
+    )
+    iid_pin_parser.add_argument(
+        "--as", dest="stem", default=None,
+        help="Stem to pin under (default: the evaluation's run tag)",
+    )
+    iid_pin_parser.add_argument(
+        "--production", action="store_true",
+        help="Write to projections/production/ (versioned; required for any "
+             "projection a production model references)",
+    )
+    iid_pin_parser.add_argument(
+        "--force", action="store_true",
+        help="Overwrite an existing config of the same stem with different content",
+    )
+
     # backtest subcommand - simulate a lead model's bets on a window with odds data
     bt_parser = subparsers.add_parser(
         "backtest",
@@ -3182,6 +3208,25 @@ def cmd_iid_rank(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_iid_pin(args: argparse.Namespace) -> int:
+    """Pin a projection evaluation under projections/ by stem."""
+    from mvp.projection.iid.pin import pin
+
+    result = pin(
+        args.ref, stem=args.stem, production=args.production, force=args.force,
+    )
+    print(f"Pinned evaluation {result.fp} -> {result.config_path}")
+    print(f"Reference it with: {result.spec}")
+    if result.missing:
+        print(
+            f"The evaluation lacks {', '.join(result.missing)}; the stem "
+            "resolves but cannot serve as a prior until produced with:"
+        )
+        for cmd in result.missing_commands:
+            print(f"  {cmd}")
+    return 0
+
+
 def cmd_model_report(args: argparse.Namespace) -> int:
     """Single-model end-to-end report across diagnostics, confidence, and backtest."""
     from mvp.model.report import run_report
@@ -4135,6 +4180,8 @@ def main(args: list[str] | None = None) -> int:
         return cmd_iid_sweep(parsed)
     elif parsed.command == "iid-rank":
         return cmd_iid_rank(parsed)
+    elif parsed.command == "iid-pin":
+        return cmd_iid_pin(parsed)
     elif parsed.command == "backtest":
         return cmd_backtest(parsed)
     elif parsed.command == "model-errors":
