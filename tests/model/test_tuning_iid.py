@@ -100,6 +100,44 @@ class TestObjective:
         tuner = _tuner(iid_config, tmp_path)
         assert [d.name for d in tuner.study.directions] == ["MINIMIZE"]
 
+    def test_match_win_auc_study_maximizes(self, tmp_path):
+        """The maximize set used to carry registry maximize entries only under
+        the `point_` prefix, so a study on the bare chain-grain name was built
+        as MINIMIZE and would have chosen the worst-ranking trial."""
+        p = tmp_path / "auc.yaml"
+        p.write_text(
+            IID_YAML.replace(
+                "objective: iid_crps_total_games", "objective: iid_match_win_auc",
+            ),
+            encoding="utf-8",
+        )
+        tuner = _tuner(p, tmp_path)
+        assert tuner.metrics == ["iid_match_win_auc"]
+        assert [d.name for d in tuner.study.directions] == ["MAXIMIZE"]
+
+    def test_every_iid_maximize_entry_is_in_the_direction_set(self):
+        from mvp.model.tuning import _MAXIMIZE_METRICS
+        from mvp.projection.iid.metric_registry import METRICS
+
+        for name, spec in METRICS.items():
+            in_set = name in _MAXIMIZE_METRICS
+            assert in_set == (spec.direction == "maximize"), name
+            assert (f"point_{name}" in _MAXIMIZE_METRICS) == (
+                spec.direction == "maximize"
+            ), name
+
+    def test_reliability_study_minimizes(self, tmp_path):
+        p = tmp_path / "rel.yaml"
+        p.write_text(
+            IID_YAML.replace(
+                "objective: iid_crps_total_games",
+                "objective:\n    - iid_crps_spread\n    - iid_spread_reliability",
+            ),
+            encoding="utf-8",
+        )
+        tuner = _tuner(p, tmp_path)
+        assert [d.name for d in tuner.study.directions] == ["MINIMIZE", "MINIMIZE"]
+
     def test_multi_objective_builds_a_pareto_study(self, tmp_path):
         p = tmp_path / "multi.yaml"
         p.write_text(

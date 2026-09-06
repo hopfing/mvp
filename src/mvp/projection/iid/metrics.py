@@ -201,6 +201,12 @@ def compute_iid_metrics(
     # Always emitted, under the registry's name: the serve FS promotes its
     # `metric` as `metrics.objective`, and the tune reads that key from here.
     metrics["iid_match_win_log_loss"] = match_win_log_loss(dist.p_match_win_a, y_won)
+    # Same contract for the ranking counterpart. Numerically the classification
+    # block's `roc_auc` (both score every row; this one returns 0.5 on a
+    # single-class fold where sklearn would raise), but emitted unconditionally
+    # under the registry name so `objective: iid_match_win_auc` resolves with
+    # the classification block off.
+    metrics["iid_match_win_auc"] = match_win_auc(dist.p_match_win_a, y_won)
 
     if include_regression:
         reg_metrics = compute_regression_metrics(
@@ -249,11 +255,17 @@ def compute_iid_metrics(
         cal_errs = total_cal_errs(dist, y_games_a, y_games_b, total_lines)
         metrics["iid_total_cal"] = float(sum(cal_errs))
         metrics["iid_total_cal_max"] = float(max(cal_errs))
+        metrics["iid_total_reliability"] = total_reliability(
+            dist, y_games_a, y_games_b, total_lines,
+        )
 
     if spread_lines:
         cal_errs = spread_cal_errs(dist, y_games_a, y_games_b, spread_lines)
         metrics["iid_spread_cal"] = float(sum(cal_errs))
         metrics["iid_spread_cal_max"] = float(max(cal_errs))
+        metrics["iid_spread_reliability"] = spread_reliability(
+            dist, y_games_a, y_games_b, spread_lines,
+        )
 
     return metrics
 

@@ -184,6 +184,64 @@ class TestComputeIIDMetrics:
         off = compute_iid_metrics(out, y_won, y_a, y_b, include_classification=False)
         assert off["iid_match_win_log_loss"] == pytest.approx(fs_score, abs=1e-12)
 
+    def test_every_chain_objective_is_emitted_and_equals_the_fs_scorer(self):
+        """`metrics.objective` accepts any chain-grain registry name and the
+        tune reads that key from this dict with a plain lookup. So every chain
+        metric the runner can compute here must be present, under the
+        registry's name, equal to the FS chain scorer -- otherwise a config
+        loads clean and KeyErrors one trial in. `iid_set_count_cal` is the one
+        exception: it needs sets played, which the runner merges from
+        `set_count_cal` separately."""
+        from mvp.projection.iid.metric_registry import chain_metric_names, score_chain
+
+        out = self._make_synthetic_projection(n=50)
+        rng = np.random.default_rng(6)
+        y_won = rng.integers(0, 2, 50)
+        y_a = rng.integers(0, 25, 50).astype(np.float64)
+        y_b = rng.integers(0, 25, 50).astype(np.float64)
+        total_lines = [20.5, 22.5]
+        spread_lines = [-2.5, 2.5]
+        m = compute_iid_metrics(
+            out, y_won, y_a, y_b,
+            total_lines=total_lines, spread_lines=spread_lines,
+            include_classification=False, include_regression=True,
+        )
+        expected = chain_metric_names() - {"iid_set_count_cal"}
+        missing = sorted(expected - set(m))
+        assert not missing, f"chain objectives the runner never emits: {missing}"
+        for name in sorted(expected):
+            fs_score = score_chain(
+                name, out.distribution, y_a, y_b,
+                total_lines=total_lines, spread_lines=spread_lines, y_won=y_won,
+            )
+            assert m[name] == pytest.approx(fs_score, abs=1e-12), name
+
+    def test_reliability_and_auc_do_not_depend_on_the_classification_block(self):
+        on = self._make_synthetic_projection(n=50)
+        rng = np.random.default_rng(7)
+        y_won = rng.integers(0, 2, 50)
+        y_a = rng.integers(0, 25, 50).astype(np.float64)
+        y_b = rng.integers(0, 25, 50).astype(np.float64)
+        kw = dict(total_lines=[20.5], spread_lines=[-2.5, 2.5])
+        with_cls = compute_iid_metrics(on, y_won, y_a, y_b, **kw)
+        without = compute_iid_metrics(on, y_won, y_a, y_b, include_classification=False, **kw)
+        for name in ["iid_match_win_auc", "iid_total_reliability", "iid_spread_reliability"]:
+            assert with_cls[name] == pytest.approx(without[name], abs=1e-12), name
+        # Same number as the classification block's roc_auc when that block is on.
+        assert with_cls["iid_match_win_auc"] == pytest.approx(with_cls["roc_auc"], abs=1e-12)
+        assert "roc_auc" not in without
+
+    def test_reliability_is_gated_on_its_lines_like_the_cal_sums(self):
+        out = self._make_synthetic_projection(n=50)
+        rng = np.random.default_rng(8)
+        y_won = rng.integers(0, 2, 50)
+        y_a = rng.integers(0, 25, 50).astype(np.float64)
+        y_b = rng.integers(0, 25, 50).astype(np.float64)
+        m = compute_iid_metrics(out, y_won, y_a, y_b, total_lines=[], spread_lines=[])
+        assert "iid_total_reliability" not in m
+        assert "iid_spread_reliability" not in m
+        assert "iid_total_cal" not in m
+
 
 def _make_projection_output(n, serve_prob=0.62):
     """Build a ProjectionOutput with known serve probs for diagnostic tests."""

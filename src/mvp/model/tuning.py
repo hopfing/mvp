@@ -47,17 +47,21 @@ _OBJECTIVE_FRAME_CAL = "forward_cal_v2"
 
 # Maximize metrics: the classification set (single-sourced from metrics.py,
 # includes the tail-sensitive ranking objectives weighted_concordance /
-# partial_auc_tail), plus projection/IID extras — r_squared and the
-# point-grain variants (re-emitted with a "point_" prefix by the score-state
-# serve model) for any registry entry whose direction is "maximize".
+# partial_auc_tail), plus projection/IID extras — r_squared and, for any
+# registry entry whose direction is "maximize", both its bare name (the
+# chain-grain objectives the projection runner emits, e.g. iid_match_win_auc)
+# and its point-grain variant (re-emitted with a "point_" prefix by the
+# score-state serve model). Before the bare names were here, a study on
+# iid_match_win_auc would have been built as MINIMIZE and picked the
+# worst-ranking trial.
+_IID_MAXIMIZE_NAMES = {
+    name for name, spec in _IID_METRICS.items() if spec.direction == "maximize"
+}
 _MAXIMIZE_METRICS = (
     _MODEL_MAXIMIZE_METRICS
     | {"r_squared"}
-    | {
-        f"point_{name}"
-        for name, spec in _IID_METRICS.items()
-        if spec.direction == "maximize"
-    }
+    | _IID_MAXIMIZE_NAMES
+    | {f"point_{name}" for name in _IID_MAXIMIZE_NAMES}
 )
 
 def _is_iid_config(raw: dict) -> bool:
