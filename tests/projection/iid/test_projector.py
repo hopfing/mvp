@@ -338,3 +338,23 @@ class TestPosteriorDraws:
         df = self._df(n=1)
         with pytest.raises(ValueError, match="n_draws"):
             TennisProjector(_FixedDrawServeModel([], [])).project(df)
+
+
+class TestBayesServeModelThroughTheProjector:
+    def test_two_draws_average_and_compress(self):
+        from mvp.projection.iid.serve_model import BSR_PSERVE_COLUMNS, BayesServeModel
+
+        n = 3
+        df = pl.DataFrame({
+            "match_uid": [f"m{i}" for i in range(n)], "best_of": [3, 3, 5],
+            BSR_PSERVE_COLUMNS[0]: [0.9, 0.5, 0.7], BSR_PSERVE_COLUMNS[1]: [0.4, 0.4, 0.4],
+            BSR_PSERVE_COLUMNS[2]: [0.3, 0.5, 0.4], BSR_PSERVE_COLUMNS[3]: [0.4, 0.4, 0.4],
+        })
+        point = TennisProjector(BayesServeModel(posterior_draws=1)).project(df)
+        mix = TennisProjector(BayesServeModel(posterior_draws=512, posterior_seed=0)).project(df)
+        # Jensen: the mixture win probability of a favorite sits below the point chain.
+        assert mix.distribution.p_match_win_a[0] < point.distribution.p_match_win_a[0]
+        assert 0.5 < mix.distribution.p_match_win_a[0]
+        # An even matchup stays even up to Monte-Carlo error (512 draws, fixed seed).
+        assert abs(mix.distribution.p_match_win_a[1] - 0.5) < 0.04
+        assert np.isfinite(mix.distribution.total_games_pmf).all()

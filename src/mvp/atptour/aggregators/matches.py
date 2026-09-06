@@ -807,7 +807,9 @@ class MatchesAggregator(BaseJob):
         _RATINGS_INPUT_COLS = [
             "match_uid", "player_id", "opp_id", "effective_match_date", "round_order",
             "tournament_start_date",
-            "surface", "round", "tournament_level", "won", "indoor",
+            # `circuit` is the serve/return skill filter's domain and mu-cell
+            # key; compute_all_ratings refuses a bsr tracker without it.
+            "surface", "round", "tournament_level", "won", "indoor", "circuit",
             "player_rank", "opp_rank",
             "pts_service_pts_won", "pts_service_pts_played",
             "opp_pts_service_pts_won", "opp_pts_service_pts_played",
@@ -842,8 +844,13 @@ class MatchesAggregator(BaseJob):
             # melo only: the gate passed its candidacy read (floor
             # complementarity -0.0054, 4/4 folds); kmov/kflat stay
             # research-only.
+            # bsr: the serve/return skill filter (plan
+            # 2026-09-06-bayesian-serve-return-skill), pre-match state columns
+            # for every selection pool and the bayes_chain projection stem.
             ratings_result = compute_all_ratings(
-                singles_slim, mov_tracker=MovTracker(variants=("melo",))
+                singles_slim,
+                mov_tracker=MovTracker(variants=("melo",)),
+                bsr_tracker=BsrTracker(),
             )
             # Extract only the new rating columns and join back
             join_keys = ["match_uid", "player_id"]

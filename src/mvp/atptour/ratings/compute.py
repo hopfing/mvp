@@ -236,6 +236,7 @@ def compute_all_ratings(
     serve_config: ServeEloConfig | None = None,
     stamp: bool = False,
     mov_tracker: "MovTracker | None" = None,
+    bsr_tracker: "BsrTracker | None" = None,
 ) -> pl.DataFrame:
     """Add all rating columns to matches DataFrame.
 
@@ -354,11 +355,29 @@ def compute_all_ratings(
         col_reason = _col("reason")
         col_result_type = _col("result_type")
 
+    if bsr_tracker is not None:
+        missing_bsr = [
+            c for c in (
+                "pts_service_pts_won", "pts_service_pts_played",
+                "opp_pts_service_pts_won", "opp_pts_service_pts_played",
+                "circuit", "surface", "indoor",
+            ) if c not in df_cols
+        ]
+        if missing_bsr:
+            raise ValueError(
+                f"bsr_tracker passed but {missing_bsr} absent — the filter "
+                "would see no observations or no domain and emit null columns "
+                "for every row without raising"
+            )
+        col_circuit = df["circuit"].to_list()
+
     elo_ratings: dict[str, PlayerRating] = {}
     glicko_ratings: dict[str, GlickoRating] = {}
     cols = ALL_RATING_COLUMNS + (SERVE_COUNT_COLUMNS if stamp else [])
     if mov_tracker is not None:
         cols = cols + mov_tracker.output_columns()
+    if bsr_tracker is not None:
+        cols = cols + bsr_tracker.output_columns()
     output: dict[str, list[float | None]] = {col: [] for col in cols}
     processed_matches: set[str] = set()
     # Cache pre-match ratings for each match_uid to handle both rows consistently
@@ -420,6 +439,10 @@ def compute_all_ratings(
             if mov_tracker is not None:
                 mov_tracker.append_output(
                     output, p_cached["mov"], o_cached["mov"]
+                )
+            if bsr_tracker is not None:
+                bsr_tracker.append_output(
+                    output, p_cached["bsr"], o_cached["bsr"]
                 )
             continue
 
@@ -502,6 +525,21 @@ def compute_all_ratings(
             mov_o_vals = mov_tracker.capture(opp_id)
             match_ratings_cache[match_uid][player_id]["mov"] = mov_p_vals
             match_ratings_cache[match_uid][opp_id]["mov"] = mov_o_vals
+        if bsr_tracker is not None:
+            # Seeds are the PRE-match base serve/return Elo from the capture
+            # dicts, so this is independent of where the serve-Elo update
+            # below lands. Predictive state for both players, whether or not
+            # this match carries counts; the update is applied after the
+            # pre-match values are recorded.
+            bsr_cap = bsr_tracker.capture_match(
+                player_id, opp_id, surface, col_circuit[i], indoor, match_date,
+                col_pts_service_pts_won[i], col_pts_service_pts_played[i],
+                col_opp_pts_service_pts_won[i], col_opp_pts_service_pts_played[i],
+                elo_player["serve_elo"], elo_player["return_elo"],
+                elo_opp["serve_elo"], elo_opp["return_elo"],
+            )
+            match_ratings_cache[match_uid][player_id]["bsr"] = bsr_cap.player
+            match_ratings_cache[match_uid][opp_id]["bsr"] = bsr_cap.opp
 
         # Record PRE-MATCH values
         _append_ratings_to_output(
@@ -509,6 +547,9 @@ def compute_all_ratings(
         )
         if mov_tracker is not None:
             mov_tracker.append_output(output, mov_p_vals, mov_o_vals)
+        if bsr_tracker is not None:
+            bsr_tracker.append_output(output, bsr_cap.player, bsr_cap.opp)
+            bsr_tracker.apply(bsr_cap)
 
         # Mark as processed and update ratings
         processed_matches.add(match_uid)

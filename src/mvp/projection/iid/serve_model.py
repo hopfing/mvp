@@ -119,6 +119,13 @@ def build_serve_model(cfg: Any, engine: Any = None) -> "ServeWinProbEstimator":
             posterior_draws=cfg.posterior_draws,
             posterior_seed=cfg.posterior_seed,
         )
+    if cfg.type == "bayes":
+        return BayesServeModel(
+            posterior_draws=cfg.posterior_draws,
+            posterior_seed=cfg.posterior_seed,
+            clip_min=cfg.clip_min,
+            clip_max=cfg.clip_max,
+        )
     if cfg.type == "two_level":
         from mvp.projection.iid.two_level_serve_model import TwoLevelServeModel
 
@@ -421,6 +428,20 @@ class ServeWinProbEstimator(ABC):
     @abstractmethod
     def required_columns(self) -> list[str]:
         """Columns the estimator needs in the input DataFrame."""
+
+    @property
+    def parity_columns(self) -> list[str]:
+        """Input columns whose live/train null share is a defect signal.
+
+        Opt-in per estimator. Many inputs are null by construction on some
+        rows (a tournament rate on a player's first match there, a 30-day
+        rolling stat after an idle month), so a blanket "all null means
+        broken" rule would fire on structural nulls the model was trained
+        with. An estimator lists here only the columns that are present on
+        essentially every training row and whose absence live means the
+        pipeline that produces them did not run.
+        """
+        return []
 
     @property
     def is_state_aware(self) -> bool:
@@ -1517,6 +1538,113 @@ class IdentityServeModel(ServeWinProbEstimator):
         p_a = np.clip(p_a, self.clip_min, self.clip_max)
         p_b = np.clip(p_b, self.clip_min, self.clip_max)
         return p_a, p_b
+
+
+BSR_PSERVE_COLUMNS: Final[tuple[str, str, str, str]] = (
+    "player_bsr_pserve_logit", "player_bsr_pserve_logit_sd",
+    "opp_bsr_pserve_logit", "opp_bsr_pserve_logit_sd",
+)
+
+
+class BayesServeModel(ServeWinProbEstimator):
+    """The serve/return skill filter's matchup posterior, through the chain.
+
+    Reads the pre-match columns the ratings pass emits (`mvp.atptour.bsr`):
+    each side's matchup serve-point win logit and its posterior sd, which
+    already includes the per-match random effect. Nothing is fit — the filter
+    ran inside the aggregate rebuild — so the estimator is a pure function of
+    its input frame, picklable, and usable after unpickling with no refit,
+    which the live projection path requires.
+
+    Draws are on the LOGIT scale, one standard normal per side per draw,
+    seeded by `(posterior_seed, draw)` so draw k is identical across calls,
+    folds and the forward run. A row where either side has no state carries a
+    null logit; the projection config excludes those rows with `not_null`
+    filters rather than imputing a league mean into the chain, so `predict`
+    raises on a null instead of guessing.
+    """
+
+    _POST_PICKLE_DEFAULTS: Final[dict[str, Any]] = {
+        "posterior_draws": 200,
+        "posterior_seed": 0,
+        "clip_min": SERVE_PROB_MIN,
+        "clip_max": SERVE_PROB_MAX,
+    }
+
+    def __init__(
+        self,
+        posterior_draws: int = 200,
+        posterior_seed: int = 0,
+        clip_min: float = SERVE_PROB_MIN,
+        clip_max: float = SERVE_PROB_MAX,
+    ) -> None:
+        if posterior_draws < 1:
+            raise ValueError(f"posterior_draws must be >= 1, got {posterior_draws}")
+        self.posterior_draws = int(posterior_draws)
+        self.posterior_seed = int(posterior_seed)
+        self.clip_min = clip_min
+        self.clip_max = clip_max
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        for name, default in self._POST_PICKLE_DEFAULTS.items():
+            state.setdefault(name, default)
+        self.__dict__.update(state)
+
+    @property
+    def required_columns(self) -> list[str]:
+        return list(BSR_PSERVE_COLUMNS)
+
+    @property
+    def parity_columns(self) -> list[str]:
+        # Present on every in-domain training row (the filter seeds a player
+        # at first sight), so all-null live means the ratings pass did not
+        # emit them — the 09-02 defect class.
+        return list(BSR_PSERVE_COLUMNS)
+
+    @property
+    def n_draws(self) -> int:
+        return self.posterior_draws
+
+    def fit(self, df: pl.DataFrame) -> None:
+        return None
+
+    def _inputs(self, df: pl.DataFrame) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        cols = [df[c].to_numpy().astype(np.float64) for c in BSR_PSERVE_COLUMNS]
+        eta_a, sd_a, eta_b, sd_b = cols
+        if np.isnan(eta_a).any() or np.isnan(eta_b).any():
+            n_bad = int(np.isnan(eta_a).sum() + np.isnan(eta_b).sum())
+            raise ValueError(
+                f"BayesServeModel: {n_bad} null matchup logit(s) in the frame. "
+                "The projection config must filter "
+                "player_bsr_pserve_logit / opp_bsr_pserve_logit: not_null; "
+                "a null is a player with no filter state, not a value to impute."
+            )
+        return eta_a, np.nan_to_num(sd_a), eta_b, np.nan_to_num(sd_b)
+
+    def _finish(self, eta_a: np.ndarray, eta_b: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        p_a = 1.0 / (1.0 + np.exp(-eta_a))
+        p_b = 1.0 / (1.0 + np.exp(-eta_b))
+        return (
+            np.clip(p_a, self.clip_min, self.clip_max),
+            np.clip(p_b, self.clip_min, self.clip_max),
+        )
+
+    def predict(self, df: pl.DataFrame) -> tuple[np.ndarray, np.ndarray]:
+        eta_a, _, eta_b, _ = self._inputs(df)
+        return self._finish(eta_a, eta_b)
+
+    def predict_draw(
+        self, df: pl.DataFrame, draw: int,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        if self.posterior_draws == 1:
+            return self.predict(df)
+        if not 0 <= draw < self.posterior_draws:
+            raise IndexError(f"draw {draw} outside [0, {self.posterior_draws})")
+        eta_a, sd_a, eta_b, sd_b = self._inputs(df)
+        rng = np.random.default_rng([self.posterior_seed, draw])
+        z_a = rng.standard_normal(len(eta_a))
+        z_b = rng.standard_normal(len(eta_b))
+        return self._finish(eta_a + sd_a * z_a, eta_b + sd_b * z_b)
 
 
 class MatchupServeModel(ServeWinProbEstimator):

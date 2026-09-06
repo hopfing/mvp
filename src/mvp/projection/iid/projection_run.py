@@ -41,6 +41,7 @@ from mvp.projection.iid.artifacts import (
     shape_scalars,
     write_pmf_parquet,
 )
+from mvp.projection.iid.column_checks import check_required_columns
 from mvp.projection.iid.config import IIDProjectionConfig
 from mvp.projection.iid.projector import ProjectionOutput, TennisProjector
 from mvp.projection.iid.serve_model import build_serve_model
@@ -186,7 +187,18 @@ def _train_projector(
     logger.info("Training projector on %d matches", len(train_df))
     projector = TennisProjector(build_serve_model(config.serve_model, engine=engine))
     projector.fit(train_df)
+    # The training-side half of the live/train parity read: the null share
+    # of each declared column on the frame the estimator was fit on, for the
+    # log, so the pending-side share has a number to be compared with. After
+    # fit, because the score-state estimators resolve their feature columns
+    # during fit and report only `best_of` before it.
+    check_required_columns(
+        train_df, list(projector.serve_model.required_columns),
+        where="projection (train)",
+        raise_on_all_null=False,
+    )
     return projector
+
 
 
 def _save_artifact(

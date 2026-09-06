@@ -22,7 +22,7 @@ class MatchupServeRegressorConfig(BaseModel):
 class ServeModelConfig(BaseModel):
     """Serve win prob estimator configuration."""
 
-    type: Literal["identity", "matchup", "score_state", "two_level"] = "identity"
+    type: Literal["identity", "matchup", "score_state", "two_level", "bayes"] = "identity"
     window: int | None = 90
     clip_min: float = 0.30
     clip_max: float = 0.90

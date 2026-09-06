@@ -1309,3 +1309,80 @@ class _StubEngine:
 
     def compute(self, feature_specs=None, extra_columns=None, **_):
         return self._frame
+
+
+class TestBayesServeModel:
+    def _df(self, eta_a, sd_a, eta_b, sd_b):
+        from mvp.projection.iid.serve_model import BSR_PSERVE_COLUMNS
+
+        return pl.DataFrame(dict(zip(BSR_PSERVE_COLUMNS, (eta_a, sd_a, eta_b, sd_b))))
+
+    def test_required_columns(self):
+        from mvp.projection.iid.serve_model import BSR_PSERVE_COLUMNS, BayesServeModel
+
+        assert BayesServeModel().required_columns == list(BSR_PSERVE_COLUMNS)
+
+    def test_predict_is_sigmoid_of_the_logit_clipped(self):
+        from mvp.projection.iid.serve_model import BayesServeModel
+
+        df = self._df([0.0, 0.6, 3.0], [0.2, 0.2, 0.2], [0.4, -3.0, 0.5], [0.2, 0.2, 0.2])
+        p_a, p_b = BayesServeModel().predict(df)
+        np.testing.assert_allclose(p_a[:2], [0.5, 1 / (1 + math.exp(-0.6))])
+        assert p_a[2] == SERVE_PROB_MAX and p_b[1] == SERVE_PROB_MIN
+        assert p_a.dtype == np.float64
+
+    def test_null_logit_raises_not_imputes(self):
+        from mvp.projection.iid.serve_model import BayesServeModel
+
+        df = self._df([0.5, math.nan], [0.2, 0.2], [0.4, 0.4], [0.2, 0.2])
+        with pytest.raises(ValueError, match="not_null"):
+            BayesServeModel().predict(df)
+
+    def test_draws_deterministic_and_distinct(self):
+        from mvp.projection.iid.serve_model import BayesServeModel
+
+        df = self._df([0.5] * 5, [0.3] * 5, [0.4] * 5, [0.3] * 5)
+        m = BayesServeModel(posterior_draws=8, posterior_seed=3)
+        assert m.n_draws == 8
+        a1, b1 = m.predict_draw(df, 2)
+        a2, b2 = m.predict_draw(df, 2)
+        np.testing.assert_array_equal(a1, a2)
+        np.testing.assert_array_equal(b1, b2)
+        a3, _ = m.predict_draw(df, 3)
+        assert not np.array_equal(a1, a3)
+        with pytest.raises(IndexError):
+            m.predict_draw(df, 8)
+
+    def test_draws_survive_joblib_round_trip(self, tmp_path):
+        import joblib
+
+        from mvp.projection.iid.serve_model import BayesServeModel
+
+        df = self._df([0.5, 0.2], [0.3, 0.1], [0.4, 0.6], [0.3, 0.1])
+        m = BayesServeModel(posterior_draws=4, posterior_seed=11)
+        joblib.dump(m, tmp_path / "m.joblib")
+        m2 = joblib.load(tmp_path / "m.joblib")
+        for d in range(4):
+            np.testing.assert_array_equal(m.predict_draw(df, d)[0], m2.predict_draw(df, d)[0])
+
+    def test_single_draw_degenerates_to_predict(self):
+        from mvp.projection.iid.serve_model import BayesServeModel
+
+        df = self._df([0.5, 0.2], [0.3, 0.1], [0.4, 0.6], [0.3, 0.1])
+        m = BayesServeModel(posterior_draws=1)
+        np.testing.assert_array_equal(m.predict_draw(df, 0)[0], m.predict(df)[0])
+
+    def test_setstate_fills_fields_added_later(self):
+        from mvp.projection.iid.serve_model import BayesServeModel
+
+        m = BayesServeModel.__new__(BayesServeModel)
+        m.__setstate__({"posterior_seed": 5})
+        assert m.posterior_draws == 200 and m.posterior_seed == 5
+        assert m.clip_min == SERVE_PROB_MIN
+
+    def test_factory_builds_from_config(self):
+        from mvp.projection.iid.config import ServeModelConfig
+        from mvp.projection.iid.serve_model import BayesServeModel, build_serve_model
+
+        m = build_serve_model(ServeModelConfig(type="bayes", posterior_draws=16, posterior_seed=2))
+        assert isinstance(m, BayesServeModel) and m.n_draws == 16 and m.posterior_seed == 2

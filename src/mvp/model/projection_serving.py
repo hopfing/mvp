@@ -75,17 +75,51 @@ def serving_requirements(stem: str) -> tuple[list[str], list[str]]:
     return specs, columns
 
 
-def _pending_frame(config: Any, df: pl.DataFrame, uids: list[str]) -> pl.DataFrame:
+def _pending_frame(
+    config: Any, df: pl.DataFrame, uids: list[str],
+    parity_columns: list[str] | None = None, stem: str = "",
+) -> pl.DataFrame:
     """The projection's frame for pending matches: its filters and collapse,
-    without `resolve_targets` — deviation (2) in the module docstring."""
+    without `resolve_targets` — deviation (2) in the module docstring.
+
+    The live/train parity check runs BEFORE the config's `not_null` filters:
+    those filters remove exactly the rows an all-null input would produce,
+    so a check placed after them sees a clean (or empty) frame and the
+    09-02 defect class passes silently. Order here: the other filters, the
+    check on `parity_columns`, then `not_null`, with a raise if `not_null`
+    empties a frame large enough to mean something.
+    """
     from mvp.model.config import apply_filters
+    from mvp.projection.iid.column_checks import ALL_NULL_MIN_ROWS, check_required_columns
     from mvp.projection.iid.projection_run import _collapse_to_match_rows
 
     out = df.filter(pl.col("match_uid").is_in(uids))
-    if config.data.filters:
-        out = apply_filters(out, config.data.filters)
+    filters = dict(config.data.filters or {})
+    not_null = {k: v for k, v in filters.items() if v == "not_null"}
+    others = {k: v for k, v in filters.items() if v != "not_null"}
+    if others:
+        out = apply_filters(out, others)
     out = out.filter(pl.col("best_of").is_in([3, 5]))
-    return _collapse_to_match_rows(out)
+    out = _collapse_to_match_rows(out)
+    if parity_columns:
+        check_required_columns(
+            out, list(parity_columns), where=f"projection {stem} (pending)",
+        )
+    if not_null:
+        before = out.height
+        out = apply_filters(out, not_null)
+        if before >= ALL_NULL_MIN_ROWS and out.height == 0:
+            raise ValueError(
+                f"projection {stem} (pending): the not_null filters on "
+                f"{sorted(not_null)} dropped all {before} rows — the frame "
+                "carries none of the input the estimator was trained on"
+            )
+        if out.height < before:
+            logger.info(
+                "projection %s (pending): not_null filters dropped %d of %d rows",
+                stem, before - out.height, before,
+            )
+    return out
 
 
 @lru_cache(maxsize=8)
@@ -212,7 +246,15 @@ def pending_match_win_logits(
             f"are produced together by promotion: poetry run py -m mvp train"
         )
 
-    pending = _pending_frame(config, df, list(uids))
+    # Live/train parity on the estimator's declared inputs runs inside
+    # `_pending_frame`, ahead of the config's not_null filters: a column that
+    # was present in training and is null on every pending row is the 09-02
+    # defect class, and it raises there (stage degrades, run report carries
+    # it) rather than projecting a frame the model never saw.
+    pending = _pending_frame(
+        config, df, list(uids),
+        parity_columns=list(projector.serve_model.parity_columns), stem=stem,
+    )
     if len(pending) == 0:
         return {}
 

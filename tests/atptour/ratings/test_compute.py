@@ -44,6 +44,7 @@ def _make_match_df() -> pl.DataFrame:
         "pts_return_pts_won": [None] * 6,
         "pts_return_pts_played": [None] * 6,
         "indoor": [False] * 6,
+        "circuit": ["tour"] * 6,
     })
 
 
@@ -487,3 +488,78 @@ class TestServeSeedAndReversion:
         a = out.filter(pl.col("player_id") == "A").sort("match_uid")
         vals = a["player_serve_elo"].to_list()
         assert vals[0] == pytest.approx(vals[-1], abs=1e-9), vals
+
+
+class TestBsrSeam:
+    """The serve/return skill filter rides the same seams as the MOV tracker."""
+
+    def test_default_path_untouched_by_tracker(self):
+        from mvp.atptour.bsr import BsrTracker
+
+        df = _make_match_df()
+        plain = compute_all_ratings(df)
+        with_bsr = compute_all_ratings(df, bsr_tracker=BsrTracker())
+        for col in ALL_RATING_COLUMNS:
+            assert plain[col].to_list() == with_bsr[col].to_list(), col
+
+    def test_columns_prematch_and_consistent(self):
+        from mvp.atptour.bsr import BsrTracker
+        from mvp.atptour.bsr.filter import BSR_VALUE_NAMES
+
+        df = _make_match_df()
+        out = compute_all_ratings(df, bsr_tracker=BsrTracker())
+        for name in BSR_VALUE_NAMES:
+            assert f"player_{name}" in out.columns and f"opp_{name}" in out.columns
+        # m1 carries counts: both players are seeded there, and the two rows
+        # of the match agree (A player_ values equal B opp_ values).
+        m1 = out.filter(pl.col("match_uid") == "m1")
+        a_row = m1.filter(pl.col("player_id") == "A")
+        b_row = m1.filter(pl.col("player_id") == "B")
+        assert a_row["player_bsr_serve_mu"][0] == b_row["opp_bsr_serve_mu"][0]
+        assert a_row["player_bsr_pserve_logit"][0] == b_row["opp_bsr_pserve_logit"][0]
+        # PRE-match: the counts of m1 do not enter the values emitted for m1.
+        assert a_row["player_bsr_n_serve_obs"][0] == 0
+        assert a_row["player_bsr_days_since_serve_obs"][0] is None
+        # m2 (A vs C, no counts): A has state and emits its predictive
+        # values; C has never been observed and emits its Elo seed, which
+        # is NOT stored (m3 is C's first observed match, so C is seeded
+        # there from m3's pre-match Elo, as the probe would).
+        m2 = out.filter((pl.col("match_uid") == "m2") & (pl.col("player_id") == "A"))
+        assert m2["player_bsr_n_serve_obs"][0] == 1
+        assert m2["player_bsr_serve_mu"][0] is not None
+        assert m2["opp_bsr_n_serve_obs"][0] == 0
+        assert m2["player_bsr_pserve_logit"][0] is not None
+        m3 = out.filter((pl.col("match_uid") == "m3") & (pl.col("player_id") == "C"))
+        assert m3["player_bsr_n_serve_obs"][0] == 0
+
+    def test_missing_circuit_refused(self):
+        from mvp.atptour.bsr import BsrTracker
+
+        df = _make_match_df().drop("circuit")
+        with pytest.raises(ValueError, match="circuit"):
+            compute_all_ratings(df, bsr_tracker=BsrTracker())
+
+    def test_beside_mov_tracker(self):
+        """The aggregator passes both trackers; every existing column stays
+        byte-identical and both sets of columns are present."""
+        from mvp.atptour.bsr import BsrTracker
+        from mvp.atptour.elo.mov import MovTracker
+
+        try:
+            from tests.atptour.elo.test_mov import _mov_match_df
+        except ImportError:  # pragma: no cover - layout guard
+            pytest.skip("mov fixture not importable")
+        df = _mov_match_df()
+        if "circuit" not in df.columns:
+            df = df.with_columns(pl.lit("tour").alias("circuit"))
+        for c in ("pts_service_pts_won", "pts_service_pts_played",
+                  "opp_pts_service_pts_won", "opp_pts_service_pts_played"):
+            if c not in df.columns:
+                df = df.with_columns(pl.lit(None).cast(pl.Int64).alias(c))
+        plain = compute_all_ratings(df, mov_tracker=MovTracker(("melo",)))
+        both = compute_all_ratings(
+            df, mov_tracker=MovTracker(("melo",)), bsr_tracker=BsrTracker(),
+        )
+        for col in ALL_RATING_COLUMNS + ["player_melo", "opp_melo"]:
+            assert plain[col].to_list() == both[col].to_list(), col
+        assert "player_bsr_serve_mu" in both.columns
