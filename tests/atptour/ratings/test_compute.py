@@ -18,6 +18,24 @@ from mvp.atptour.glicko.ratings import glicko2_update
 from mvp.atptour.ratings.compute import ALL_RATING_COLUMNS, compute_all_ratings
 
 
+def _with_bsr_inputs(df: pl.DataFrame, **counts) -> pl.DataFrame:
+    """Add every bsr count column the frame is missing, null unless named.
+
+    The ratings pass refuses the filter without all of them, so a fixture
+    that wants to exercise one stream still has to carry the rest; naming them
+    here keeps each test's intent visible instead of burying it in a fixture.
+    """
+    from mvp.atptour.bsr import bsr_input_columns
+
+    out = df
+    for name, values in counts.items():
+        out = out.with_columns(pl.Series(name, values, dtype=pl.Int32))
+    missing = [c for c in bsr_input_columns() if c not in out.columns]
+    return out.with_columns(
+        [pl.lit(None, dtype=pl.Int32).alias(c) for c in missing]
+    )
+
+
 def _make_match_df() -> pl.DataFrame:
     """Create a multi-match DataFrame for testing."""
     return pl.DataFrame({
@@ -496,7 +514,7 @@ class TestBsrSeam:
     def test_default_path_untouched_by_tracker(self):
         from mvp.atptour.bsr import BsrTracker
 
-        df = _make_match_df()
+        df = _with_bsr_inputs(_make_match_df())
         plain = compute_all_ratings(df)
         with_bsr = compute_all_ratings(df, bsr_tracker=BsrTracker())
         for col in ALL_RATING_COLUMNS:
@@ -506,7 +524,7 @@ class TestBsrSeam:
         from mvp.atptour.bsr import BsrTracker
         from mvp.atptour.bsr.filter import BSR_VALUE_NAMES
 
-        df = _make_match_df()
+        df = _with_bsr_inputs(_make_match_df())
         out = compute_all_ratings(df, bsr_tracker=BsrTracker())
         for name in BSR_VALUE_NAMES:
             assert f"player_{name}" in out.columns and f"opp_{name}" in out.columns
@@ -535,9 +553,96 @@ class TestBsrSeam:
     def test_missing_circuit_refused(self):
         from mvp.atptour.bsr import BsrTracker
 
-        df = _make_match_df().drop("circuit")
+        df = _with_bsr_inputs(_make_match_df()).drop("circuit")
         with pytest.raises(ValueError, match="circuit"):
             compute_all_ratings(df, bsr_tracker=BsrTracker())
+
+    def test_every_stream_input_is_guarded(self):
+        """A count column absent from the frame reads as -1 on every row, so
+        the stream would sit at its seed for the whole pass and emit constant
+        columns without an error. Each one must be refused by name."""
+        from mvp.atptour.bsr import BsrTracker, bsr_input_columns
+
+        base = _with_bsr_inputs(_make_match_df())
+        for col in ("svc_first_serve_in", "mb_opp_service_games",
+                    "player_bh_forced_errors", "opp_set3_tiebreak"):
+            assert col in bsr_input_columns()
+            with pytest.raises(ValueError, match=col):
+                compute_all_ratings(base.drop(col), bsr_tracker=BsrTracker())
+
+    def test_new_stream_columns_present_and_typed(self):
+        from mvp.atptour.bsr import BsrTracker
+        from mvp.atptour.bsr.filter import BSR_NEW_VALUE_NAMES
+
+        out = compute_all_ratings(
+            _with_bsr_inputs(_make_match_df()), bsr_tracker=BsrTracker(),
+        )
+        assert len(BSR_NEW_VALUE_NAMES) == 178
+        for name in BSR_NEW_VALUE_NAMES:
+            for side in ("player", "opp"):
+                col = f"{side}_{name}"
+                assert col in out.columns, col
+                assert out[col].dtype == pl.Float32, col
+        # The shipped twelve keep their own dtypes and their own path.
+        assert out["player_bsr_serve_mu"].dtype == pl.Float64
+        assert out["player_bsr_n_serve_obs"].dtype == pl.Int64
+
+    def test_nan_reaches_polars_as_null_not_as_a_value(self):
+        """Without nan_to_null a Float32 column of NaN reports zero nulls, and
+        both check_columns.py and the parity guard would read the filter as
+        fully populated on rows it never touched."""
+        from mvp.atptour.bsr import BsrTracker
+
+        df = _with_bsr_inputs(_make_match_df()).with_columns(
+            pl.lit("itf").alias("circuit")
+        )
+        out = compute_all_ratings(df, bsr_tracker=BsrTracker())
+        col = out["player_bsr_fsi_mu"]
+        assert col.null_count() == out.height
+        assert col.is_nan().sum() == 0
+
+    def test_streams_observe_independently_through_the_pass(self):
+        """A stream with counts updates; one without stays at its seed, on the
+        same rows."""
+        from mvp.atptour.bsr import BsrTracker
+
+        df = _with_bsr_inputs(
+            _make_match_df(),
+            svc_bp_saved=[3, 2, None, None, None, None],
+            svc_bp_faced=[5, 5, None, None, None, None],
+            opp_svc_bp_saved=[2, 3, None, None, None, None],
+            opp_svc_bp_faced=[5, 5, None, None, None, None],
+        )
+        out = compute_all_ratings(df, bsr_tracker=BsrTracker()).sort(
+            "match_uid", "player_id"
+        )
+        a2 = out.filter(
+            (pl.col("match_uid") == "m2") & (pl.col("player_id") == "A")
+        )
+        assert a2["player_bsr_bp_n_obs"][0] == 1
+        assert a2["player_bsr_bp_mu"][0] != 0.0
+        # ace saw nothing; its axis is still the (placeholder, zero) seed
+        assert a2["player_bsr_ace_n_obs"][0] == 0
+        assert a2["player_bsr_ace_mu"][0] == 0.0
+
+    def test_second_row_of_a_match_is_the_first_row_swapped(self):
+        from mvp.atptour.bsr import BsrTracker
+        from mvp.atptour.bsr.filter import BSR_NEW_VALUE_NAMES
+
+        df = _with_bsr_inputs(
+            _make_match_df(),
+            svc_bp_saved=[3, 2, None, None, None, None],
+            svc_bp_faced=[5, 5, None, None, None, None],
+            opp_svc_bp_saved=[2, 3, None, None, None, None],
+            opp_svc_bp_faced=[5, 5, None, None, None, None],
+        )
+        out = compute_all_ratings(df, bsr_tracker=BsrTracker())
+        m3 = out.filter(pl.col("match_uid") == "m3")
+        b = m3.filter(pl.col("player_id") == "B")
+        c = m3.filter(pl.col("player_id") == "C")
+        for name in BSR_NEW_VALUE_NAMES:
+            assert b[f"player_{name}"][0] == c[f"opp_{name}"][0], name
+            assert b[f"opp_{name}"][0] == c[f"player_{name}"][0], name
 
     def test_beside_mov_tracker(self):
         """The aggregator passes both trackers; every existing column stays
@@ -556,6 +661,7 @@ class TestBsrSeam:
                   "opp_pts_service_pts_won", "opp_pts_service_pts_played"):
             if c not in df.columns:
                 df = df.with_columns(pl.lit(None).cast(pl.Int64).alias(c))
+        df = _with_bsr_inputs(df)
         plain = compute_all_ratings(df, mov_tracker=MovTracker(("melo",)))
         both = compute_all_ratings(
             df, mov_tracker=MovTracker(("melo",)), bsr_tracker=BsrTracker(),
@@ -563,3 +669,126 @@ class TestBsrSeam:
         for col in ALL_RATING_COLUMNS + ["player_melo", "opp_melo"]:
             assert plain[col].to_list() == both[col].to_list(), col
         assert "player_bsr_serve_mu" in both.columns
+        assert "player_bsr_hold_indoor_mu" in both.columns
+
+
+class TestRatingsScatterJoin:
+    """The aggregator hands the pass a row index and scatters its output home
+    instead of joining it back. This pins the scatter to the join it replaced,
+    including on the doubles rows the pass never sees."""
+
+    @staticmethod
+    def _frame() -> pl.DataFrame:
+        return pl.DataFrame({
+            "match_uid": ["s1", "s1", "d1", "d1", "s2", "s2"],
+            "player_id": ["A", "B", "P", "Q", "A", "C"],
+            "draw_type": ["singles", "singles", "doubles", "doubles",
+                          "singles", "singles"],
+            "keep": [1, 2, 3, 4, 5, 6],
+        })
+
+    @staticmethod
+    def _scatter(combined, result, cols):
+        """The aggregator's scatter, as matches.py runs it."""
+        idx = result["_ratings_row_index"].to_numpy()
+        out = []
+        for c in cols:
+            src = result[c]
+            full = pl.repeat(
+                None, combined.height, dtype=src.dtype, eager=True
+            ).alias(c)
+            if src.dtype != pl.Null:
+                full = full.scatter(idx, src)
+            out.append(full)
+        return combined.with_columns(out).drop("_ratings_row_index")
+
+    def test_scatter_equals_the_left_join_it_replaced(self):
+        combined = self._frame().with_row_index("_ratings_row_index")
+        singles = combined.filter(pl.col("draw_type") == "singles")
+        result = singles.with_columns(
+            pl.Series("rating", [1.5, None, 3.5, 4.5], dtype=pl.Float64),
+            pl.Series("count", [7, 8, None, 10], dtype=pl.Int64),
+        )
+        cols = ("rating", "count")
+        joined = self._frame().join(
+            result.select("match_uid", "player_id", *cols),
+            on=["match_uid", "player_id"], how="left",
+        )
+        scattered = self._scatter(combined, result, cols)
+        assert scattered.columns == joined.columns
+        for c in ("keep", *cols):
+            assert scattered[c].to_list() == joined[c].to_list(), c
+            assert scattered[c].dtype == joined[c].dtype, c
+        # doubles rows are null on both sides
+        assert scattered["rating"][2] is None and scattered["count"][3] is None
+
+    def test_an_all_null_rating_column_survives(self):
+        """A column the pass never filled — the days-since clock on a frame
+        with no observation, say — comes back typed Null, and polars refuses
+        to scatter into that dtype. The left join produced a Null column, so
+        the scatter has to as well rather than raising."""
+        combined = self._frame().with_row_index("_ratings_row_index")
+        singles = combined.filter(pl.col("draw_type") == "singles")
+        result = singles.with_columns(
+            pl.Series("clock", [None] * 4, dtype=pl.Null),
+        )
+        joined = self._frame().join(
+            result.select("match_uid", "player_id", "clock"),
+            on=["match_uid", "player_id"], how="left",
+        )
+        scattered = self._scatter(combined, result, ("clock",))
+        assert scattered["clock"].to_list() == joined["clock"].to_list()
+        assert scattered["clock"].dtype == joined["clock"].dtype == pl.Null
+
+    def test_scatter_series_of_the_tracker_lands_on_the_same_rows(self):
+        from mvp.atptour.bsr import BsrTracker
+
+        combined = self._frame().with_row_index("_ratings_row_index")
+        singles = combined.filter(pl.col("draw_type") == "singles")
+        tracker = BsrTracker()
+        tracker.begin(singles.height)
+        # write a recognisable value into row 0 of the pass
+        tracker._out[:, 0] = 1.0
+        idx = singles["_ratings_row_index"].to_numpy()
+        series = tracker.scatter_series(idx, combined.height)
+        col = {s.name: s for s in series}["player_bsr_fsi_mu"]
+        assert col.to_list() == [1.0, None, None, None, None, None]
+
+
+class TestFullPassWithFrameIndex:
+    """The aggregator path end to end: the pass runs on the singles rows of a
+    frame that also holds doubles, tagged with their full-frame positions.
+    The pass must NOT attach the new-stream slab to its own (shorter) frame —
+    that raised ShapeError on the live aggregate (2026-09-06) — and the
+    aggregator's scatter must land every value on its original row with the
+    doubles rows null."""
+
+    def test_pass_leaves_full_frame_slab_to_the_aggregator(self):
+        from mvp.atptour.bsr import BsrTracker
+        from mvp.atptour.ratings.compute import RATINGS_ROW_INDEX
+
+        singles = _with_bsr_inputs(_make_match_df()).with_columns(
+            pl.lit("singles").alias("draw_type")
+        )
+        doubles = singles.head(2).with_columns(
+            pl.lit("doubles").alias("draw_type"),
+            pl.lit("dbl").alias("match_uid"),
+        )
+        combined = pl.concat([doubles, singles]).with_row_index(RATINGS_ROW_INDEX)
+        pass_frame = combined.filter(pl.col("draw_type") == "singles")
+        tracker = BsrTracker()
+        out = compute_all_ratings(pass_frame, bsr_tracker=tracker)
+        # The shipped columns ride the pass frame; the slab does not.
+        assert out.height == pass_frame.height
+        assert "player_bsr_serve_mu" in out.columns
+        assert "player_bsr_fsi_mu" not in out.columns
+        assert tracker.slab_is_scattered
+        idx = out[RATINGS_ROW_INDEX].to_numpy()
+        series = tracker.scatter_series(idx, combined.height)
+        by_name = {s.name: s for s in series}
+        col = by_name["player_bsr_fsi_mu"]
+        assert len(col) == combined.height
+        assert col[0] is None and col[1] is None  # the doubles rows
+        assert col.null_count() == 2
+        full = combined.with_columns(series)
+        assert full.height == combined.height

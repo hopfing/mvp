@@ -7,12 +7,18 @@ from pathlib import Path
 
 import polars as pl
 
-from mvp.atptour.bsr import BsrTracker
+from mvp.atptour.bsr import BsrTracker, bsr_input_columns
 from mvp.atptour.elo.mov import MovTracker
 from mvp.atptour.ratings import compute_all_ratings
+from mvp.atptour.ratings.compute import RATINGS_ROW_INDEX
 from mvp.common.base_job import BaseJob
 
 logger = logging.getLogger(__name__)
+
+# Carries each `combined` row's position into the singles-only ratings pass and
+# back out, so the pass's output scatters home instead of being joined on.
+# Leading underscore and dropped before step 9: never reaches the parquet.
+_ROW_IDX = RATINGS_ROW_INDEX
 
 ROUND_ORDER: dict[str, int] = {
     "Q1": 1,
@@ -803,6 +809,22 @@ class MatchesAggregator(BaseJob):
         combined = add_tournament_level(combined)
         combined = add_best_of(combined)
 
+        # Step 9: Add partner rows for doubles workload tracking, and put the
+        # frame in its final order — BEFORE the ratings pass attaches ~470
+        # columns to it. A sort gathers every column it carries, so sorting
+        # after the attach copies the wide frame (~6 GB) instead of the narrow
+        # one; the ratings pass reads its own key and does not care what order
+        # it is handed, and `with_columns` preserves whatever order the sort
+        # produced. Partner rows are doubles rows, so the pass never sees them
+        # and they come back null exactly as the left join left them.
+        combined = add_partner_workload_rows(combined)
+        logger.info("After partner expansion: %d rows", len(combined))
+
+        combined = combined.sort(
+            ["effective_match_date", "draw_type", "match_uid", "player_id"],
+            nulls_last=True,
+        )
+
         # Compute Elo ratings for singles matches only
         # Pass only the columns ratings needs to avoid .to_dicts() on the full wide DF
         _RATINGS_INPUT_COLS = [
@@ -835,10 +857,22 @@ class MatchesAggregator(BaseJob):
         ] + [f"opp_set{i}_games" for i in range(1, 6)] + [
             "reason", "result_type",
         ]
+        # Every count column the 21 observation streams read, both sides,
+        # derived from the stream table itself so a stream added there cannot
+        # arrive here unfed. compute_all_ratings REFUSES the bsr tracker
+        # without them.
+        _RATINGS_INPUT_COLS = list(
+            dict.fromkeys(_RATINGS_INPUT_COLS + bsr_input_columns())
+        )
         _ratings_cols = [c for c in _RATINGS_INPUT_COLS if c in combined.columns]
+        # A row-index scatter, not a left join. The join gathers a copy of the
+        # full frame with both inputs alive — 12-14 GB once the filter's ~400
+        # columns are in it, on a box with 16 GB — while `with_columns` over a
+        # scatter leaves `combined` itself untouched.
+        combined = combined.with_row_index(_ROW_IDX)
         singles_slim = combined.filter(
             pl.col("draw_type") == "singles"
-        ).select(_ratings_cols)
+        ).select(_ratings_cols + [_ROW_IDX])
         if not singles_slim.is_empty():
             # Fresh tracker per run, like the driver's own rating dicts —
             # MovTracker state does not reset itself, and this runs q15m.
@@ -848,30 +882,52 @@ class MatchesAggregator(BaseJob):
             # bsr: the serve/return skill filter (plan
             # 2026-09-06-bayesian-serve-return-skill), pre-match state columns
             # for every selection pool and the bayes_chain projection stem.
+            bsr_tracker = BsrTracker()
+            # The slab is allocated at the FULL frame's height, not at the
+            # last pass row's position: on a day whose last row is a doubles
+            # row the two differ, and the scatter would raise.
+            bsr_tracker.frame_height = combined.height
             ratings_result = compute_all_ratings(
                 singles_slim,
                 mov_tracker=MovTracker(variants=("melo",)),
-                bsr_tracker=BsrTracker(),
+                bsr_tracker=bsr_tracker,
             )
-            # Extract only the new rating columns and join back
-            join_keys = ["match_uid", "player_id"]
-            rating_cols = [c for c in ratings_result.columns if c not in _ratings_cols]
-            if rating_cols:
-                combined = combined.join(
-                    ratings_result.select(join_keys + rating_cols),
-                    on=join_keys,
-                    how="left",
-                )
+            # Scatter each rating column back to its row in `combined`.
+            # `pl.repeat(None, ...)` fixes the dtype first, so an Int64 column
+            # with nulls (bsr_n_serve_obs, the days-since clock) stays Int64
+            # rather than being widened to Float64 by a NaN fill; the doubles
+            # rows, which the pass never saw, come back null exactly as the
+            # left join left them.
+            new_cols = set(bsr_tracker.new_output_columns())
+            rating_cols = [
+                c for c in ratings_result.columns
+                if c not in _ratings_cols and c != _ROW_IDX and c not in new_cols
+            ]
+            row_idx = ratings_result[_ROW_IDX].to_numpy()
+            n_full = combined.height
+            scattered = []
+            for c in rating_cols:
+                src = ratings_result[c]
+                full = pl.repeat(
+                    None, n_full, dtype=src.dtype, eager=True
+                ).alias(c)
+                # A column the pass never filled in — every row null, so
+                # polars typed it Null — has nothing to scatter, and polars
+                # cannot scatter into that dtype. The left join produced a
+                # Null column here too, so this is the same result.
+                if src.dtype != pl.Null:
+                    full = full.scatter(row_idx, src)
+                scattered.append(full)
             del singles_slim, ratings_result
-
-        # Step 9: Add partner rows for doubles workload tracking
-        combined = add_partner_workload_rows(combined)
-        logger.info("After partner expansion: %d rows", len(combined))
-
-        combined = combined.sort(
-            ["effective_match_date", "draw_type", "match_uid", "player_id"],
-            nulls_last=True,
-        )
+            # After the frame is gone the tracker's slab is the only copy of
+            # the new streams' values; `scatter_series` releases it as soon as
+            # the full-length one exists.
+            scattered += bsr_tracker.scatter_series(row_idx, n_full)
+            combined = combined.with_columns(scattered)
+            del scattered, bsr_tracker
+        else:
+            del singles_slim
+        combined = combined.drop(_ROW_IDX)
 
         # Step 10: Validation
         warnings = validate_tournament_scheduling(combined)

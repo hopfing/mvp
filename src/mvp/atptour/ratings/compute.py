@@ -3,9 +3,13 @@
 
 import logging
 from datetime import date
+from typing import Any
 
+import numpy as np
 import polars as pl
 
+from mvp.atptour.bsr.constants import STREAMS, bsr_input_columns, mirror_col
+from mvp.atptour.bsr.filter import BsrCapture, BsrTracker
 from mvp.atptour.elo.constants import (
     DEFAULT_ELO,
     DEFAULT_RD,
@@ -16,15 +20,14 @@ from mvp.atptour.elo.constants import (
     SURFACE_K_MULT,
     ServeEloConfig,
 )
-from mvp.atptour.bsr.filter import BsrTracker
 from mvp.atptour.elo.mov import MovTracker, margin_is_valid
 from mvp.atptour.elo.ratings import (
     PlayerRating,
     apply_inactivity_rd,
     get_k_factor,
+    initialize_player,
     k_factor_from,
     serve_surprise,
-    initialize_player,
     update_ace_resistance,
     update_elo,
     update_first_serve_power,
@@ -33,7 +36,6 @@ from mvp.atptour.elo.ratings import (
     update_return_clutch,
     update_second_serve_reliability,
     update_serve_clutch,
-    update_serve_elo,
     update_surface_adj,
     update_tb_clutch,
 )
@@ -126,6 +128,11 @@ SERVE_ADJ_COLUMNS = [
 
 ALL_RATING_COLUMNS = ELO_COLUMNS + SERVE_ADJ_COLUMNS + GLICKO_COLUMNS
 
+# The aggregator tags each pass row with its position in the full frame under
+# this name; when present, the bsr tracker writes its slab at those positions
+# directly, so no second full-length copy is ever needed for the scatter.
+RATINGS_ROW_INDEX = "_ratings_row_index"
+
 
 SERVE_AXES = ("hard", "clay", "grass", "indoor")
 
@@ -196,8 +203,41 @@ def _capture_glicko_values(rating: GlickoRating) -> dict[str, float]:
     }
 
 
+class _ColWriter:
+    """One output column as a preallocated float64 array with an append cursor.
+
+    Replaces the per-column Python list: a list of 1.36M boxed floats costs
+    ~44 MB per column and ~4 GB across the ~90 rating columns at the moment
+    the frame is assembled, against ~11 MB per column here. `append` keeps
+    the list contract the rating/mov/bsr writers rely on (exactly one append
+    per row per column, in row order), `None` becomes NaN and is turned back
+    into a null when the Series is built with `nan_to_null=True`.
+    """
+
+    __slots__ = ("arr", "pos")
+
+    def __init__(self, arr: np.ndarray) -> None:
+        self.arr = arr
+        self.pos = 0
+
+    def append(self, value: Any) -> None:
+        self.arr[self.pos] = float("nan") if value is None else float(value)
+        self.pos += 1
+
+
+# Rating columns that are integer-valued and shipped as Int64: cast back after
+# the float64 slab so the parquet dtypes are unchanged by the slab.
+_INT_RATING_COLUMNS = frozenset({
+    "player_serve_match_count", "player_return_match_count",
+    "opp_serve_match_count", "opp_return_match_count",
+    "player_bsr_n_serve_obs", "opp_bsr_n_serve_obs",
+    "player_bsr_days_since_serve_obs", "opp_bsr_days_since_serve_obs",
+})
+
+
+
 def _append_ratings_to_output(
-    output: dict[str, list],
+    output: dict[str, Any],
     elo_player: dict[str, float],
     elo_opp: dict[str, float],
     glicko_player: dict[str, float],
@@ -217,6 +257,85 @@ def _append_ratings_to_output(
     for key in glicko_player:
         output[f"player_{key}"].append(glicko_player[key])
         output[f"opp_{key}"].append(glicko_opp[key])
+
+
+def _terms_expr(terms: tuple[tuple[int, str], ...], mirror: bool) -> pl.Expr:
+    """A stream's signed sum of count columns, for one side of the match.
+
+    Int64 for the arithmetic so a subtraction cannot wrap, Int32 at the end
+    because that is what the aggregate stores and what the filter reads. Null
+    propagates: a stream whose k needs three columns and has two says nothing
+    about this match, which is exactly the -1 the filter skips on.
+    """
+    expr: pl.Expr | None = None
+    for sign, col in terms:
+        term = pl.col(mirror_col(col) if mirror else col).cast(pl.Int64)
+        if sign < 0:
+            term = -term
+        expr = term if expr is None else expr + term
+    assert expr is not None
+    return expr
+
+
+def _tiebreak_exprs(mirror: bool) -> dict[str, tuple[pl.Expr, pl.Expr]]:
+    """(k, n) for the two tiebreak streams, from the per-set tiebreak scores.
+
+    The per-set columns hold the tiebreak POINT scores (8-6, say), so both
+    "tiebreaks won" and "tiebreak points won" derive from them with the full
+    history behind them; the match-box tiebreak-point columns are the same
+    observation from 2022 only and are not used. A set counts only when both
+    sides' scores are present, so a null on one side cannot inflate the other.
+    """
+    mine = "opp" if mirror else "player"
+    theirs = "player" if mirror else "opp"
+    tb_k: pl.Expr | None = None
+    tb_n: pl.Expr | None = None
+    pts_k: pl.Expr | None = None
+    pts_n: pl.Expr | None = None
+    for i in range(1, 6):
+        p = pl.col(f"{mine}_set{i}_tiebreak")
+        o = pl.col(f"{theirs}_set{i}_tiebreak")
+        both = p.is_not_null() & o.is_not_null()
+        k = (both & (p > o)).cast(pl.Int64)
+        n = both.cast(pl.Int64)
+        kk = pl.when(both).then(p.cast(pl.Int64)).otherwise(0)
+        nn = pl.when(both).then(p.cast(pl.Int64) + o.cast(pl.Int64)).otherwise(0)
+        tb_k = k if tb_k is None else tb_k + k
+        tb_n = n if tb_n is None else tb_n + n
+        pts_k = kk if pts_k is None else pts_k + kk
+        pts_n = nn if pts_n is None else pts_n + nn
+    return {"tb": (tb_k, tb_n), "tbpts": (pts_k, pts_n)}
+
+
+def _bsr_count_arrays(df: pl.DataFrame, n_rows: int) -> tuple[np.ndarray, ...]:
+    """Per-stream (k, n) for both sides as four `(n_rows, n_streams)` Int32
+    arrays, -1 marking "this stream has nothing for this row".
+
+    numpy, not `_col()`: the ~110 count columns behind these would be 20-57 MB
+    each as Python lists of boxed ints (~2 GB for the set) against 5.4 MB each
+    as Int32. Each column is materialised, written into its slice and dropped,
+    so the transient is one column, not the set.
+    """
+    out = []
+    for mirror in (False, True):
+        tb = _tiebreak_exprs(mirror)
+        k_arr = np.full((n_rows, len(STREAMS)), -1, dtype=np.int32)
+        n_arr = np.full((n_rows, len(STREAMS)), -1, dtype=np.int32)
+        for j, st in enumerate(STREAMS):
+            if st.derived is not None:
+                k_expr, n_expr = tb[st.derived]
+            else:
+                k_expr = _terms_expr(st.k_terms, mirror)
+                n_expr = _terms_expr(st.n_terms, mirror)
+            pair = df.select(
+                k_expr.fill_null(-1).cast(pl.Int32).alias("k"),
+                n_expr.fill_null(-1).cast(pl.Int32).alias("n"),
+            )
+            k_arr[:, j] = pair["k"].to_numpy()
+            n_arr[:, j] = pair["n"].to_numpy()
+        out.append(k_arr)
+        out.append(n_arr)
+    return tuple(out)
 
 
 def _count_tiebreaks(player_tbs: list, opp_tbs: list) -> tuple[int, int]:
@@ -363,11 +482,14 @@ def compute_all_ratings(
         col_result_type = _col("result_type")
 
     if bsr_tracker is not None:
+        # Every count column of every stream, not just the pooled pair: an
+        # absent column reads as -1 on every row, which would leave that
+        # stream at its seed for the whole pass and emit ~14 constant columns
+        # without an error. `bsr_input_columns()` is derived from the stream
+        # table itself, so adding a stream cannot forget to guard its inputs.
         missing_bsr = [
             c for c in (
-                "pts_service_pts_won", "pts_service_pts_played",
-                "opp_pts_service_pts_won", "opp_pts_service_pts_played",
-                "circuit", "surface", "indoor",
+                ["circuit", "surface", "indoor"] + bsr_input_columns()
             ) if c not in df_cols
         ]
         if missing_bsr:
@@ -377,6 +499,12 @@ def compute_all_ratings(
                 "for every row without raising"
             )
         col_circuit = df["circuit"].to_list()
+        bsr_kp, bsr_np, bsr_ko, bsr_no = _bsr_count_arrays(df, n)
+        bsr_tracker.begin(
+            n,
+            index=(df[RATINGS_ROW_INDEX].to_numpy()
+                   if RATINGS_ROW_INDEX in df.columns else None),
+        )
 
     elo_ratings: dict[str, PlayerRating] = {}
     glicko_ratings: dict[str, GlickoRating] = {}
@@ -385,10 +513,17 @@ def compute_all_ratings(
         cols = cols + mov_tracker.output_columns()
     if bsr_tracker is not None:
         cols = cols + bsr_tracker.output_columns()
-    output: dict[str, list[float | None]] = {col: [] for col in cols}
+    # One float64 slab for every list-written column (ratings, mov, the shipped
+    # bsr twelve, stamp counters); see _ColWriter. NaN until written.
+    _slab = np.full((len(cols), n), np.nan, dtype=np.float64)
+    output: dict[str, Any] = {col: _ColWriter(_slab[j]) for j, col in enumerate(cols)}
     processed_matches: set[str] = set()
     # Cache pre-match ratings for each match_uid to handle both rows consistently
     match_ratings_cache: dict[str, dict[str, dict[str, float]]] = {}
+    # The bsr capture rides its own cache: the new streams' values live in the
+    # tracker's slab, not in the per-column lists, so the second row of a match
+    # needs the first row's slab index rather than a dict of values.
+    bsr_cap_cache: dict[str, BsrCapture] = {}
 
     for i in range(n):
         match_uid = col_match_uid[i]
@@ -451,6 +586,7 @@ def compute_all_ratings(
                 bsr_tracker.append_output(
                     output, p_cached["bsr"], o_cached["bsr"]
                 )
+                bsr_tracker.replay_row(i, bsr_cap_cache.pop(match_uid), player_id)
             continue
 
         # First row for this match - apply inactivity and cache pre-match values
@@ -540,13 +676,12 @@ def compute_all_ratings(
             # pre-match values are recorded.
             bsr_cap = bsr_tracker.capture_match(
                 player_id, opp_id, surface, col_circuit[i], indoor, match_date,
-                col_pts_service_pts_won[i], col_pts_service_pts_played[i],
-                col_opp_pts_service_pts_won[i], col_opp_pts_service_pts_played[i],
-                elo_player["serve_elo"], elo_player["return_elo"],
-                elo_opp["serve_elo"], elo_opp["return_elo"],
+                bsr_kp[i], bsr_np[i], bsr_ko[i], bsr_no[i],
+                elo_player, elo_opp, i,
             )
             match_ratings_cache[match_uid][player_id]["bsr"] = bsr_cap.player
             match_ratings_cache[match_uid][opp_id]["bsr"] = bsr_cap.opp
+            bsr_cap_cache[match_uid] = bsr_cap
 
         # Record PRE-MATCH values
         _append_ratings_to_output(
@@ -1029,9 +1164,42 @@ def compute_all_ratings(
             player_rating.last_match_date = match_date
             opp_rating.last_match_date = match_date
 
-    # Add columns to DataFrame
-    for col_name, values in output.items():
-        df = df.with_columns(pl.Series(name=col_name, values=values))
+    if bsr_tracker is not None:
+        # The count arrays are ~590 MB and nothing reads them after the loop;
+        # holding them through the column assembly below would put them on top
+        # of its own peak.
+        del bsr_kp, bsr_np, bsr_ko, bsr_no
+
+    # Add columns to DataFrame from the slab rows. Every writer must have
+    # advanced exactly n times (one append per row per column), otherwise a
+    # column would be silently misaligned; that is the invariant the old
+    # list-length check expressed implicitly. `cols` preserves the insertion
+    # order, so the column order is unchanged. Integer-valued columns are cast
+    # back so the parquet dtypes are exactly what the list path produced.
+    series: list[pl.Series] = []
+    for col_name in cols:
+        w = output.pop(col_name)
+        if w.pos != n:
+            raise RuntimeError(
+                f"ratings pass wrote {w.pos} of {n} rows for {col_name!r}"
+            )
+        s = pl.Series(name=col_name, values=w.arr, nan_to_null=True)
+        if col_name in _INT_RATING_COLUMNS:
+            s = s.cast(pl.Int64)
+        series.append(s)
+    df = df.with_columns(series)
+    del series, _slab
+
+    if bsr_tracker is not None and not bsr_tracker.slab_is_scattered:
+        # The new streams' columns, zero-copy over the tracker's float32 slab.
+        # `new_series` applies nan_to_null, so a never-written row reads as a
+        # real null and `null_count()` stays honest. When the caller gave the
+        # tracker a full-frame row index (the aggregator), the slab is the
+        # caller's frame's length, not this one's, and the caller attaches it
+        # through `scatter_series`.
+        new_cols = bsr_tracker.new_series()
+        if new_cols:
+            df = df.with_columns(new_cols)
 
     if stamp:
         # The values actually in force, read off the instance used — never

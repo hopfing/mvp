@@ -16,11 +16,36 @@ import numpy as np
 import polars as pl
 import pytest
 
-from mvp.atptour.bsr.constants import MU_CELLS, SURFACE_INDEX, CIRCUIT_INDEX, BsrConfig
+from mvp.atptour.bsr.constants import (
+    CIRCUIT_INDEX,
+    MU_CELLS,
+    STREAM_INDEX,
+    STREAM_NAMES,
+    SURFACE_INDEX,
+    BsrConfig,
+    bsr_input_columns,
+)
 from mvp.atptour.bsr.filter import BsrTracker
 from mvp.atptour.ratings.compute import compute_all_ratings
 
 PROBE = Path(__file__).resolve().parents[3] / "scripts" / "bsr" / "probe_bsr.py"
+
+
+def _serve_outdoor_config() -> BsrConfig:
+    """The default config with the `serve` stream's indoor axis switched off.
+
+    `run_filter` has no indoor residual, so the probe and the tracker are the
+    same model only with that axis off. Under the default config the shipped
+    stream carries one and its twelve columns differ from the probe's on
+    indoor rows by design; everything else here is the shipped tune.
+    """
+    from dataclasses import replace
+
+    from mvp.atptour.bsr.constants import STREAMS
+
+    return BsrConfig(
+        streams=(replace(STREAMS[0], has_indoor=False),) + STREAMS[1:]
+    )
 
 
 def _load_probe():
@@ -65,14 +90,22 @@ def _synthetic_frame(n_matches: int = 48, seed: int = 7) -> pl.DataFrame:
         rows.append(dict(common, player_id=b, opp_id=a, won=not won,
                          pts_service_pts_won=y_b, pts_service_pts_played=n_b,
                          opp_pts_service_pts_won=y_a, opp_pts_service_pts_played=n_a))
-    return pl.DataFrame(rows).with_columns(
+    df = pl.DataFrame(rows).with_columns(
         pl.col("player_rank").cast(pl.Int64), pl.col("opp_rank").cast(pl.Int64),
     )
+    # The other 20 streams see nothing here: this frame is the probe's oracle
+    # for the pooled stream, and feeding the rest would not change it. The
+    # columns still have to exist, because the ratings pass refuses the tracker
+    # without every stream's inputs.
+    return df.with_columns([
+        pl.lit(None, dtype=pl.Int32).alias(c)
+        for c in bsr_input_columns() if c not in df.columns
+    ])
 
 
 def test_tracker_matches_probe_filter():
     pb = _load_probe()
-    cfg = BsrConfig()
+    cfg = _serve_outdoor_config()
     df = _synthetic_frame()
     out = compute_all_ratings(df, bsr_tracker=BsrTracker(cfg))
     # Probe observation rows: one per (match, server) with valid counts, seeds
@@ -117,12 +150,97 @@ def test_tracker_matches_probe_filter():
     # Final state, per player, all 14 slots the probe keeps.
     tracker = BsrTracker(cfg)
     compute_all_ratings(df, bsr_tracker=tracker)
+    # The tracker's state is per-stream parallel lists; the shipped pooled
+    # stream, which is what the probe models, is index 0 in every one of them.
     for pid, ps in res["state"].items():
         st = tracker._state[pid]
-        assert abs(st.sm - ps[0]) < 1e-9 and abs(st.sv - ps[1]) < 1e-9
-        assert abs(st.rm - ps[2]) < 1e-9 and abs(st.rv - ps[3]) < 1e-9
+        assert abs(st.sm[0] - ps[0]) < 1e-9 and abs(st.sv[0] - ps[1]) < 1e-9
+        assert abs(st.rm[0] - ps[2]) < 1e-9 and abs(st.rv[0] - ps[3]) < 1e-9
         for k in range(3):
-            assert abs(st.ssm[k] - ps[4][k]) < 1e-9 and abs(st.ssv[k] - ps[5][k]) < 1e-9
-            assert abs(st.rsm[k] - ps[6][k]) < 1e-9 and abs(st.rsv[k] - ps[7][k]) < 1e-9
-        assert st.n_s == ps[12] and st.n_r == ps[13]
+            assert abs(st.ssm[0][k] - ps[4][k]) < 1e-9
+            assert abs(st.ssv[0][k] - ps[5][k]) < 1e-9
+            assert abs(st.rsm[0][k] - ps[6][k]) < 1e-9
+            assert abs(st.rsv[0][k] - ps[7][k]) < 1e-9
+        assert st.n_s[0] == ps[12] and st.n_r[0] == ps[13]
     assert set(res["state"]) == set(tracker._state)
+
+
+def test_every_stream_matches_the_probe():
+    """Skeleton for the probe's multi-stream extension (build row 0).
+
+    The shipped stream is pinned above against `run_filter` as it stands. When
+    the probe grows per-stream results — `run_filter_streams(obs, P, ...)`
+    returning `{stream: {...}}`, or a `STREAMS`/`stream_results` surface —
+    this reads them and holds every stream to the same 1e-9, so a stream's
+    arithmetic here and in the tuning loop cannot diverge. Until then it skips
+    rather than passing vacuously.
+    """
+    pb = _load_probe()
+    hook = next(
+        (h for h in ("run_filter_streams", "run_filter_multi", "stream_results")
+         if hasattr(pb, h)),
+        None,
+    )
+    if hook is None:
+        pytest.skip(
+            "probe has no multi-stream entry point yet "
+            "(expected run_filter_streams / run_filter_multi / stream_results)"
+        )
+    cfg = BsrConfig()
+    df = _synthetic_frame()
+    tracker = BsrTracker(cfg)
+    out = compute_all_ratings(df, bsr_tracker=tracker)
+    try:
+        results = _probe_streams(pb, hook, out, cfg)
+    except (TypeError, KeyError, AttributeError) as exc:
+        pytest.skip(f"probe's {hook} has a shape this test does not know: {exc}")
+    shared = [s for s in STREAM_NAMES if s in results]
+    if not shared:
+        pytest.skip(f"probe's {hook} names no stream this build carries")
+    for name in shared:
+        j = STREAM_INDEX[name]
+        for pid, ps in results[name]["state"].items():
+            if pid not in tracker._state:
+                continue
+            st = tracker._state[pid]
+            assert abs(st.sm[j] - ps[0]) < 1e-9, (name, pid)
+            assert abs(st.sv[j] - ps[1]) < 1e-9, (name, pid)
+            assert abs(st.rm[j] - ps[2]) < 1e-9, (name, pid)
+            assert abs(st.rv[j] - ps[3]) < 1e-9, (name, pid)
+
+
+def _probe_streams(pb, hook: str, out, cfg):
+    """The probe's per-stream final states, keyed by stream name, computed
+    with THIS config's knobs and cells so the two implementations are the
+    same model: `{stream: {"state": {player_id: (sm, sv, rm, rv)}}}`.
+    """
+    import numpy as np
+
+    obj = getattr(pb, hook)
+    if not callable(obj):
+        return dict(obj)
+    params = {}
+    mus = {}
+    for st in cfg.streams:
+        params[st.name] = dict(
+            q_s=st.q_s, q_r=st.q_r, q_surf=st.q_surf, q_indoor=st.q_indoor,
+            v0=st.v0, seed_s=st.seed_s, seed_r=st.seed_r, tau2=st.tau2,
+            cap_days=cfg.cap_days, phi_surf=cfg.phi_surf, newton=cfg.newton,
+        )
+        mus[st.name] = np.asarray(st.mu_cells, dtype=float)
+    res = obj(out, params, mus)
+    players = res["_players"]
+    results = {}
+    for name, r in res.items():
+        if name.startswith("_"):
+            continue
+        state = {}
+        for i, pid in enumerate(players):
+            if not r["seen"][i]:
+                continue
+            state[pid] = (
+                float(r["sm"][i]), float(r["sv"][i]),
+                float(r["rm"][i]), float(r["rv"][i]),
+            )
+        results[name] = {"state": state}
+    return results

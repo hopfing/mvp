@@ -3948,7 +3948,21 @@ def cmd_live(args: argparse.Namespace) -> int:
             sheets = SheetsSync()
             existing = sheets.read_existing()
 
-            matches_df = pl.read_parquet(matches_path) if matches_path.exists() else pl.DataFrame()
+            # Only the columns merge_predictions reads: the winner lookup
+            # (gsheets/base.py:533-535), the walkover/retirement note
+            # (:570-571) and the indoor/outdoor court label (:779). Reading
+            # the whole parquet here cost ~800 columns x 1.7M rows on every
+            # 15-minute tick for five of them.
+            _merge_cols = [
+                "match_uid", "player_id", "won", "result_type", "indoor",
+            ]
+            if matches_path.exists():
+                _have = pl.scan_parquet(matches_path).collect_schema().names()
+                matches_df = pl.read_parquet(
+                    matches_path, columns=[c for c in _merge_cols if c in _have]
+                )
+            else:
+                matches_df = pl.DataFrame()
 
             # Enrich sheet rows with the lead's p1-perspective diffs (age,
             # recent match count), joined by p1_id so they read p1 - p2 like
