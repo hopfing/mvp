@@ -26,6 +26,12 @@ class ServeModelConfig(BaseModel):
     window: int | None = 90
     clip_min: float = 0.30
     clip_max: float = 0.90
+    # type == "bayes" only: the filter's matchup logit is over-dispersed
+    # against outcomes (slope 0.78, intercept +0.10 on 2016-2021 serve
+    # points); the stem uses intercept + slope * logit for the mean and
+    # for each posterior draw. Defaults leave the logit untouched.
+    calib_intercept: float = 0.0
+    calib_slope: float = 1.0
     # Compress the favorite-underdog serve gap toward the pair mean (1.0 = off).
     # Preserves serve levels; only narrows the between-player differential.
     gap_shrink: float = 1.0

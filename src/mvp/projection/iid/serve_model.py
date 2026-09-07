@@ -125,6 +125,8 @@ def build_serve_model(cfg: Any, engine: Any = None) -> "ServeWinProbEstimator":
             posterior_seed=cfg.posterior_seed,
             clip_min=cfg.clip_min,
             clip_max=cfg.clip_max,
+            calib_intercept=cfg.calib_intercept,
+            calib_slope=cfg.calib_slope,
         )
     if cfg.type == "two_level":
         from mvp.projection.iid.two_level_serve_model import TwoLevelServeModel
@@ -1569,6 +1571,8 @@ class BayesServeModel(ServeWinProbEstimator):
         "posterior_seed": 0,
         "clip_min": SERVE_PROB_MIN,
         "clip_max": SERVE_PROB_MAX,
+        "calib_intercept": 0.0,
+        "calib_slope": 1.0,
     }
 
     def __init__(
@@ -1577,13 +1581,22 @@ class BayesServeModel(ServeWinProbEstimator):
         posterior_seed: int = 0,
         clip_min: float = SERVE_PROB_MIN,
         clip_max: float = SERVE_PROB_MAX,
+        calib_intercept: float = 0.0,
+        calib_slope: float = 1.0,
     ) -> None:
         if posterior_draws < 1:
             raise ValueError(f"posterior_draws must be >= 1, got {posterior_draws}")
+        if calib_slope <= 0:
+            raise ValueError(f"calib_slope must be > 0, got {calib_slope}")
         self.posterior_draws = int(posterior_draws)
         self.posterior_seed = int(posterior_seed)
         self.clip_min = clip_min
         self.clip_max = clip_max
+        # The filter's logit is over-dispersed against serve-point outcomes;
+        # this is the fitted outcome ~ sigmoid(a + b * logit) map, applied to
+        # the mean and to every draw (the draw's spread scales with b too).
+        self.calib_intercept = float(calib_intercept)
+        self.calib_slope = float(calib_slope)
 
     def __setstate__(self, state: dict[str, Any]) -> None:
         for name, default in self._POST_PICKLE_DEFAULTS.items():
@@ -1622,8 +1635,9 @@ class BayesServeModel(ServeWinProbEstimator):
         return eta_a, np.nan_to_num(sd_a), eta_b, np.nan_to_num(sd_b)
 
     def _finish(self, eta_a: np.ndarray, eta_b: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        p_a = 1.0 / (1.0 + np.exp(-eta_a))
-        p_b = 1.0 / (1.0 + np.exp(-eta_b))
+        a, b = self.calib_intercept, self.calib_slope
+        p_a = 1.0 / (1.0 + np.exp(-(a + b * eta_a)))
+        p_b = 1.0 / (1.0 + np.exp(-(a + b * eta_b)))
         return (
             np.clip(p_a, self.clip_min, self.clip_max),
             np.clip(p_b, self.clip_min, self.clip_max),

@@ -1386,3 +1386,65 @@ class TestBayesServeModel:
 
         m = build_serve_model(ServeModelConfig(type="bayes", posterior_draws=16, posterior_seed=2))
         assert isinstance(m, BayesServeModel) and m.n_draws == 16 and m.posterior_seed == 2
+
+
+class TestBayesServeModelCalibration:
+    def _df(self, eta_a, sd_a, eta_b, sd_b):
+        from mvp.projection.iid.serve_model import BSR_PSERVE_COLUMNS
+
+        return pl.DataFrame(dict(zip(BSR_PSERVE_COLUMNS, (eta_a, sd_a, eta_b, sd_b))))
+
+    def test_defaults_leave_the_logit_untouched(self):
+        from mvp.projection.iid.serve_model import BayesServeModel
+
+        m = BayesServeModel(clip_min=0.0, clip_max=1.0)
+        p_a, _ = m.predict(self._df([0.0, 1.0], [0.1, 0.1], [0.0, 0.0], [0.1, 0.1]))
+        assert p_a[0] == pytest.approx(0.5)
+        assert p_a[1] == pytest.approx(1 / (1 + np.exp(-1.0)))
+
+    def test_intercept_and_slope_map_the_mean_and_the_draws(self):
+        from mvp.projection.iid.serve_model import BayesServeModel
+
+        m = BayesServeModel(clip_min=0.0, clip_max=1.0, calib_intercept=0.1, calib_slope=0.5)
+        df = self._df([1.0], [0.3], [-1.0], [0.3])
+        p_a, p_b = m.predict(df)
+        assert p_a[0] == pytest.approx(1 / (1 + np.exp(-(0.1 + 0.5 * 1.0))))
+        assert p_b[0] == pytest.approx(1 / (1 + np.exp(-(0.1 + 0.5 * -1.0))))
+        # a draw is the calibrated map of (logit + sd * z): its spread scales
+        # with the slope, so the calibrated draws are tighter than raw ones
+        raw = BayesServeModel(clip_min=0.0, clip_max=1.0, posterior_draws=64)
+        cal = BayesServeModel(clip_min=0.0, clip_max=1.0, posterior_draws=64,
+                              calib_intercept=0.0, calib_slope=0.5)
+        wide = pl.DataFrame({c: [0.0] if "sd" not in c else [1.0]
+                             for c in ["player_bsr_pserve_logit", "player_bsr_pserve_logit_sd",
+                                       "opp_bsr_pserve_logit", "opp_bsr_pserve_logit_sd"]})
+        raw_draws = np.array([raw.predict_draw(wide, k)[0][0] for k in range(64)])
+        cal_draws = np.array([cal.predict_draw(wide, k)[0][0] for k in range(64)])
+        assert cal_draws.std() < raw_draws.std()
+
+    def test_slope_must_be_positive(self):
+        from mvp.projection.iid.serve_model import BayesServeModel
+
+        with pytest.raises(ValueError):
+            BayesServeModel(calib_slope=0.0)
+
+    def test_pickle_defaults_for_old_artifacts(self):
+        from mvp.projection.iid.serve_model import BayesServeModel
+
+        m = BayesServeModel()
+        state = dict(m.__dict__)
+        state.pop("calib_intercept"); state.pop("calib_slope")
+        n = BayesServeModel.__new__(BayesServeModel)
+        n.__setstate__(state)
+        assert n.calib_intercept == 0.0 and n.calib_slope == 1.0
+
+    def test_config_reaches_the_model_and_the_fingerprint(self):
+        from mvp.common.config_hash import _IID_SERVE_MODEL_OPTIONAL_KEYS
+        from mvp.projection.iid.config import ServeModelConfig
+        from mvp.projection.iid.serve_model import build_serve_model
+
+        cfg = ServeModelConfig(type="bayes", calib_intercept=0.1, calib_slope=0.8)
+        m = build_serve_model(cfg)
+        assert m.calib_intercept == 0.1 and m.calib_slope == 0.8
+        keys = {k for k, _ in _IID_SERVE_MODEL_OPTIONAL_KEYS}
+        assert {"calib_intercept", "calib_slope"} <= keys

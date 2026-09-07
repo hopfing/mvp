@@ -263,6 +263,8 @@ _IID_SERVE_MODEL_OPTIONAL_KEYS: tuple[tuple[str, object], ...] = (
     ("surface_circuit_offset", {}),
     ("posterior_draws", 200),
     ("posterior_seed", 0),
+    ("calib_intercept", 0.0),
+    ("calib_slope", 1.0),
     # type == "two_level" only. Each is a per-component feature set, and two
     # two-level configs differing in ANY of them are different models — so all
     # of them have to reach the hash or the second run silently overwrites the
