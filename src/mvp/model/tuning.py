@@ -1552,7 +1552,14 @@ class HyperparamTuner:
             with redirect:
                 if parallel_trials > 1:
                     # Split the config's thread budget across the K concurrent trials.
-                    budget = self._get_base_params().get("n_jobs")
+                    # A joint two-level study prefixes its keys (win_n_jobs /
+                    # fi_n_jobs), so look there too before falling back to the
+                    # cpu default; otherwise the config's n_jobs is silently
+                    # ignored for exactly the configs with a first_in arm.
+                    base = self._get_base_params()
+                    budget = base.get("n_jobs")
+                    if budget is None:
+                        budget = base.get(f"{WIN_PREFIX}n_jobs")
                     if budget is None:
                         budget = _default_n_jobs()
                     self._per_trial_n_jobs = max(1, int(budget) // parallel_trials)
