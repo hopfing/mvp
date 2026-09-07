@@ -37,6 +37,7 @@ def env(tmp_path, monkeypatch):
     root = tmp_path / "dataroot"
     (root / "projection_evaluations").mkdir(parents=True)
     monkeypatch.setenv("MVP_DATA_ROOT", str(root))
+    monkeypatch.setenv("MVP_ARTIFACT_ROOT", str(root))
     monkeypatch.setattr(
         prior, "PROJECTION_EVALUATIONS_ROOT", root / "projection_evaluations",
     )

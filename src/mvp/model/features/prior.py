@@ -46,7 +46,7 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 
-from mvp.common.base_job import get_data_root
+from mvp.common.base_job import get_artifact_root, get_data_root
 from mvp.model.registry import register_transform
 
 logger = logging.getLogger(__name__)
@@ -229,12 +229,12 @@ def _load_config(path: Path):
 
 
 def _evaluations_root() -> Path:
-    return EVALUATIONS_ROOT or (get_data_root() / "model_evaluations")
+    return EVALUATIONS_ROOT or (get_artifact_root() / "model_evaluations")
 
 
 def _projection_evaluations_root() -> Path:
     return PROJECTION_EVALUATIONS_ROOT or (
-        get_data_root() / "projection_evaluations"
+        get_artifact_root() / "projection_evaluations"
     )
 
 
@@ -708,7 +708,7 @@ def _backtest_cutoffs(stems: list[str], backtests_root: Path | None = None) -> l
     under the first of ``stems`` that has any. The backtest keys its
     artifact dir by the config stem it ran under; a renamed config still
     finds them through the tags its evaluation's source.txt recorded."""
-    root = backtests_root or BACKTESTS_ROOT or (get_data_root() / "backtests")
+    root = backtests_root or BACKTESTS_ROOT or (get_artifact_root() / "backtests")
     for stem in stems:
         d = root / "lead" / stem
         tags = sorted(

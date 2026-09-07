@@ -20,7 +20,7 @@ import polars as pl
 import yaml
 from dateutil.relativedelta import relativedelta
 
-from mvp.common.base_job import get_data_root, get_local_data_root
+from mvp.common.base_job import get_artifact_root, get_data_root, get_local_data_root
 from mvp.model import backtest_views as views
 from mvp.model.cal_tiers import (
     classify_cal_tier,
@@ -31,7 +31,7 @@ from mvp.model.predictor import ProductionPredictor
 
 logger = logging.getLogger(__name__)
 
-ARTIFACT_ROOT = get_data_root() / "backtests" / "lead"
+ARTIFACT_ROOT = get_artifact_root() / "backtests" / "lead"
 ODDS_PATH = get_data_root() / "aggregate" / "odds" / "odds.parquet"
 MATCHES_PATH = get_data_root() / "aggregate" / "atptour" / "matches.parquet"
 PRODUCTION_CONFIG_PATH = Path("production.yaml")

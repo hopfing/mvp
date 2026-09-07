@@ -32,7 +32,7 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 
-from mvp.common.base_job import get_data_root, get_tuning_state_dir
+from mvp.common.base_job import get_artifact_root, get_tuning_state_dir
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +51,7 @@ _SYMMETRY_TOL = 1e-9
 
 
 def _evaluations_root() -> Path:
-    return EVALUATIONS_ROOT or (get_data_root() / "model_evaluations")
+    return EVALUATIONS_ROOT or (get_artifact_root() / "model_evaluations")
 
 
 def _source_tags(eval_dir: Path) -> set[str]:

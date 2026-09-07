@@ -25,7 +25,7 @@ from pathlib import Path
 
 import polars as pl
 
-from mvp.common.base_job import get_data_root
+from mvp.common.base_job import get_artifact_root
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +73,7 @@ def wipe_stale_evaluations() -> int:
 
     targets = [
         ARTIFACT_ROOT,
-        get_data_root() / "model_evaluations",
+        get_artifact_root() / "model_evaluations",
         MLRUNS_DIR,
     ]
     removed = 0
@@ -246,12 +246,12 @@ def load_diagnostics(
 
 def confidence_path(model_name: str) -> Path:
     """Legacy name-scoped path. Prefer `fp_confidence_path(config_path)`."""
-    return get_data_root() / "confidence" / model_name / "validation_results.json"
+    return get_artifact_root() / "confidence" / model_name / "validation_results.json"
 
 
 def backtest_path(model_name: str) -> Path:
     """Legacy name-scoped path. Prefer `fp_backtest_path(config_path)`."""
-    return get_data_root() / "backtests" / "lead" / f"{model_name}.csv"
+    return get_artifact_root() / "backtests" / "lead" / f"{model_name}.csv"
 
 
 def load_confidence(

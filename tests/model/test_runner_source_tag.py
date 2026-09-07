@@ -73,10 +73,10 @@ def _run(tmp_path, matches, monkeypatch, source):
 
     import mvp.common.config_hash as config_hash
 
-    # config_hash binds get_data_root at import; patch ITS reference so the
+    # config_hash binds get_artifact_root at import; patch ITS reference so the
     # fingerprint artifacts land in tmp, never the real evaluations root.
     data_root = tmp_path / "data"
-    monkeypatch.setattr(config_hash, "get_data_root", lambda: data_root)
+    monkeypatch.setattr(config_hash, "get_artifact_root", lambda: data_root)
 
     cfg = tmp_path / "tmp_trial_config.yaml"
     cfg.write_text(_CONFIG)

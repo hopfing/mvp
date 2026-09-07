@@ -267,9 +267,9 @@ def read_sources(fp_dir: Path) -> list[tuple[str, str, str]]:
 
 def discover_fp_dirs() -> list[Path]:
     """All projection-evaluation fingerprint dirs, newest first."""
-    from mvp.common.base_job import get_data_root
+    from mvp.common.base_job import get_artifact_root
 
-    root = get_data_root() / PROJECTION_EVAL_ROOT
+    root = get_artifact_root() / PROJECTION_EVAL_ROOT
     if not root.exists():
         return []
     dirs = [p for p in root.iterdir() if p.is_dir()]
@@ -298,6 +298,6 @@ def sweep_config_dir() -> Path:
     resolver never searches it. A trial a model config should name is pinned
     under projections/ from its evaluation (`mvp.projection.iid.pin`).
     """
-    from mvp.common.base_job import get_data_root
+    from mvp.common.base_job import get_artifact_root
 
-    return get_data_root() / "projections" / "iid" / SWEEP_CONFIG_DIRNAME
+    return get_artifact_root() / "projections" / "iid" / SWEEP_CONFIG_DIRNAME

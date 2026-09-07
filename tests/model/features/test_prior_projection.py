@@ -135,6 +135,7 @@ class TestResolve:
         import logging
 
         monkeypatch.setenv("MVP_DATA_ROOT", str(tmp_path / "dataroot"))
+        monkeypatch.setenv("MVP_ARTIFACT_ROOT", str(tmp_path / "dataroot"))
         models, projs = tmp_path / "models", tmp_path / "projections"
         with caplog.at_level(logging.ERROR, logger="mvp.model.features.prior"):
             with pytest.raises(FileNotFoundError) as ei:
@@ -152,6 +153,7 @@ class TestResolve:
         and unresolvable until pinned: the error says so and how."""
         root = tmp_path / "dataroot"
         monkeypatch.setenv("MVP_DATA_ROOT", str(root))
+        monkeypatch.setenv("MVP_ARTIFACT_ROOT", str(root))
         sweep_dir = root / "projections" / "iid" / "sweep_configs"
         _write_proj_cfg(sweep_dir, "parent__d01_t12")
         eval_dir = root / "projection_evaluations" / "8756a8a0c44c"

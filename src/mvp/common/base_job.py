@@ -34,6 +34,22 @@ def get_local_data_root() -> Path:
     return Path(__file__).resolve().parents[3] / "data"
 
 
+def get_artifact_root() -> Path:
+    """Root for regenerable research artifacts: model_evaluations,
+    projection_evaluations, backtests, confidence, model_sweeps, the iid sweep
+    configs and shap rankings.
+
+    MVP_ARTIFACT_ROOT env var, else <project>/data/artifacts. Deliberately NOT
+    the shared data root: nothing on the live host reads these (production's
+    priors are promoted to <data root>/models/priors by `mvp train`), they
+    accumulate, and the dev machines keep them identical via Syncthing.
+    """
+    env = os.environ.get("MVP_ARTIFACT_ROOT")
+    if env:
+        return Path(env)
+    return get_local_data_root() / "artifacts"
+
+
 def get_tuning_state_dir() -> Path:
     """Optuna study storage.
 

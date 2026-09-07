@@ -21,7 +21,7 @@ from typing import Any
 import optuna
 import yaml
 
-from mvp.common.base_job import get_data_root, get_tuning_state_dir
+from mvp.common.base_job import get_artifact_root, get_tuning_state_dir
 from mvp.model.sweep_select import (
     missing_metric_trials,
     select_diverse,
@@ -293,7 +293,7 @@ def run_entry(entry: SweepEntry, *, refresh: bool = False) -> str:
     from mvp.projection.iid.evaluation import run_backtest
     from mvp.projection.iid.runner import IIDProjectionRunner
 
-    fp_dir = get_data_root() / "projection_evaluations" / entry.fp
+    fp_dir = get_artifact_root() / "projection_evaluations" / entry.fp
     if not refresh and _is_complete(fp_dir):
         return "skip"
 

@@ -27,7 +27,7 @@ from typing import Any
 
 import polars as pl
 
-from mvp.common.base_job import get_data_root
+from mvp.common.base_job import get_artifact_root
 from mvp.common.config_hash import (
     compute_fingerprint,
     fingerprint_dir,
@@ -374,7 +374,7 @@ def _all_fingerprints_for_source(source_name: str) -> list[dict]:
     same source_name produced multiple distinct fingerprints).
     """
     out: list[dict] = []
-    fp_root = get_data_root() / "model_evaluations"
+    fp_root = get_artifact_root() / "model_evaluations"
     if not fp_root.exists():
         return out
     for fp_dir_p in fp_root.iterdir():

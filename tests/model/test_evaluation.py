@@ -39,7 +39,7 @@ def _setup_targets(tmp_path, monkeypatch):
     for d in (lead, evals, mlruns):
         d.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(backtest_mod, "ARTIFACT_ROOT", lead)
-    monkeypatch.setattr(ev, "get_data_root", lambda: tmp_path / "data")
+    monkeypatch.setattr(ev, "get_artifact_root", lambda: tmp_path / "data")
     monkeypatch.setattr(ev, "MLRUNS_DIR", mlruns)
     monkeypatch.setattr(ev, "_week_wiped", False)
     return lead, evals, mlruns

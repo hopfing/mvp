@@ -18,7 +18,7 @@ from typing import Any
 import polars as pl
 import yaml
 
-from mvp.common.base_job import get_data_root
+from mvp.common.base_job import get_artifact_root
 from mvp.model.metrics import compute_metrics
 from mvp.model.runner import ExperimentRunner
 
@@ -36,7 +36,7 @@ METRIC_COLS: list[tuple[str, str]] = [
 
 
 def _sweep_output_dir(config_name: str) -> Path:
-    out = get_data_root() / "model_sweeps" / config_name
+    out = get_artifact_root() / "model_sweeps" / config_name
     out.mkdir(parents=True, exist_ok=True)
     return out
 

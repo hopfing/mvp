@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING
 
 import yaml
 
-from mvp.common.base_job import get_data_root
+from mvp.common.base_job import get_artifact_root
 from mvp.model.config import ExperimentConfig
 from mvp.model.discovery.sweeps import build_feature_spec, parse_feature_spec
 
@@ -382,7 +382,7 @@ PROJECTION_EVAL_ROOT = "projection_evaluations"
 
 
 def fingerprint_dir(fp: str, root: str = MODEL_EVAL_ROOT) -> Path:
-    return get_data_root() / root / fp
+    return get_artifact_root() / root / fp
 
 
 def iid_fingerprint_dir(fp: str) -> Path:

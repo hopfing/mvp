@@ -21,7 +21,7 @@ import polars as pl
 import yaml
 
 from mvp import alerts, notify
-from mvp.common.base_job import get_data_root, get_local_data_root
+from mvp.common.base_job import get_artifact_root, get_data_root, get_local_data_root
 from mvp.common.enums import BOOK_DISPLAY_NAMES
 
 
@@ -916,7 +916,7 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
     )
     shap_parser.add_argument(
         "--output", "-o", type=str, required=True,
-        help="Output CSV stem (saved to B:/experiments/<stem>_shap_ranking.csv)",
+        help="Output CSV stem (saved to <artifact root>/experiments/<stem>_shap_ranking.csv)",
     )
 
     # tune subcommand - hyperparameter optimization
@@ -1747,7 +1747,7 @@ def _run_voter_confidence(args: argparse.Namespace, config_path: Path) -> int:
 
     voter_config = _resolve_voter_section(raw_config)
     config_name = config_path.stem
-    oof_dir = get_data_root() / "confidence" / config_name
+    oof_dir = get_artifact_root() / "confidence" / config_name
     oof_path = oof_dir / "oof.parquet"
     voter_names = [v["name"] for v in voter_config["voters"]]
 
@@ -2000,7 +2000,7 @@ def cmd_confidence(args: argparse.Namespace) -> int:
     )
     fp_dir = fingerprint_dir(fp)
     oof_path = fp_dir / "oof.parquet"
-    legacy_oof_path = get_data_root() / "confidence" / config_name / "oof.parquet"
+    legacy_oof_path = get_artifact_root() / "confidence" / config_name / "oof.parquet"
 
     # Resolve base model names for ensemble identity slices
     base_names = _get_ensemble_base_names(config_path)
@@ -2241,7 +2241,6 @@ def _is_serve_discovery(config_path: Path) -> bool:
 
 def cmd_shap_rank(args: argparse.Namespace) -> int:
     """Run SHAP-based one-shot feature ranking on the full feature pool."""
-    from mvp.common.base_job import get_data_root
     from mvp.model.discovery.config import DiscoveryConfig
     from mvp.model.discovery.discover import get_all_feature_specs
     from mvp.model.discovery.shap_ranking import ShapRanker
@@ -2272,7 +2271,7 @@ def cmd_shap_rank(args: argparse.Namespace) -> int:
     ranker.precompute()
     ranking = ranker.rank()
 
-    output_dir = get_data_root() / "experiments"
+    output_dir = get_artifact_root() / "experiments"
     output_dir.mkdir(parents=True, exist_ok=True)
     output_stem = args.output.removesuffix(".csv")
     output_path = output_dir / f"{output_stem}_shap_ranking.csv"
@@ -3338,11 +3337,10 @@ def _resolve_model_evaluation_dir(name_or_fp: str) -> "Path | None":
       - 12-char fingerprint hex
       - Model name (scans source.txt across all fingerprint dirs)
     """
-    from mvp.common.base_job import get_data_root
     from mvp.common.config_hash import compute_fingerprint, fingerprint_dir
     from mvp.model.config import ExperimentConfig
 
-    fp_root = get_data_root() / "model_evaluations"
+    fp_root = get_artifact_root() / "model_evaluations"
 
     # 1. YAML config path → compute fingerprint, look up (or return expected
     # path even if dir doesn't exist yet — auto-generation will create it)
