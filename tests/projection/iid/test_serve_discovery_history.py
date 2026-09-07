@@ -50,3 +50,27 @@ class TestStopRecord:
         lines = [json.loads(ln) for ln in hist.read_text().splitlines()]
         assert [ln["action"] for ln in lines] == ["add", "stop"]
         assert lines[-1]["ranking"][0] == ["b", 0.59999]
+
+
+class TestHaltReason:
+    """The halt record must say why the run stopped. A round where every
+    candidate scores finite but worse than the current score is the normal
+    end of a run, not a scoring failure."""
+
+    def test_all_finite_but_none_improves(self):
+        reason = ServeDiscoverySelector._halt_reason(
+            None, -math.inf, 1e-4, 0.563163, {"a": 0.5620, "b": 0.5631, "c": 0.5600},
+        )
+        assert reason == "no candidate improved on the current score 0.563163"
+
+    def test_every_score_non_finite(self):
+        reason = ServeDiscoverySelector._halt_reason(
+            None, -math.inf, 1e-4, 0.563163, {"a": math.nan, "b": math.inf},
+        )
+        assert reason == "no candidate produced a finite score"
+
+    def test_improvement_below_floor_names_the_delta(self):
+        reason = ServeDiscoverySelector._halt_reason(
+            "b", 0.00005, 1e-4, 0.563163, {"a": 0.5620, "b": 0.563213},
+        )
+        assert reason == "improvement 0.000050 < min_delta 0.000100"

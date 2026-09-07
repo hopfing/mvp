@@ -683,9 +683,8 @@ class ServeDiscoverySelector:
             )
             min_delta = self.config.resolved_min_delta()
             if best_cand is None or best_delta < min_delta:
-                reason = (
-                    "no candidate produced a finite score" if best_cand is None
-                    else f"improvement {best_delta:.6f} < min_delta {min_delta:.6f}"
+                reason = self._halt_reason(
+                    best_cand, best_delta, min_delta, current_score, this_round_scores,
                 )
                 logger.info("FS halting: %s", reason)
                 # The halt round's ranking is the only record of what nearly
@@ -953,6 +952,23 @@ class ServeDiscoverySelector:
         else:  # pragma: no cover - Literal-constrained
             raise ValueError(f"unknown serve_component: {component!r}")
         return build_serve_model(cfg, engine=self._engine)
+
+    @staticmethod
+    def _halt_reason(
+        best_cand: str | None,
+        best_delta: float,
+        min_delta: float,
+        current_score: float,
+        this_round_scores: dict[str, float],
+    ) -> str:
+        """Why the round halted. `best_cand` is None whenever nothing beat the
+        current score, which is how a run normally ends; only when every score
+        is non-finite did the round fail to score at all."""
+        if best_cand is not None:
+            return f"improvement {best_delta:.6f} < min_delta {min_delta:.6f}"
+        if any(math.isfinite(m) for m in this_round_scores.values()):
+            return f"no candidate improved on the current score {current_score:.6f}"
+        return "no candidate produced a finite score"
 
     @staticmethod
     def _stop_record(
