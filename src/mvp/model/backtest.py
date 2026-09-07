@@ -31,7 +31,7 @@ from mvp.model.predictor import ProductionPredictor
 
 logger = logging.getLogger(__name__)
 
-ARTIFACT_ROOT = Path("B:/backtests/lead")
+ARTIFACT_ROOT = get_data_root() / "backtests" / "lead"
 ODDS_PATH = get_data_root() / "aggregate" / "odds" / "odds.parquet"
 MATCHES_PATH = get_data_root() / "aggregate" / "atptour" / "matches.parquet"
 PRODUCTION_CONFIG_PATH = Path("production.yaml")

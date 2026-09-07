@@ -41,7 +41,11 @@ priority = "explicit"
 packages = [{include = "mvp", from = "src"}]
 
 [tool.poetry.dependencies]
-torch = {version = ">=2.2,<3.0.0", source = "pytorch-cuda"}
+# CUDA wheels exist only for Linux/Windows; macOS falls back to PyPI (CPU/MPS).
+torch = [
+    {version = ">=2.2,<3.0.0", source = "pytorch-cuda", markers = "sys_platform != 'darwin'"},
+    {version = ">=2.2,<3.0.0", markers = "sys_platform == 'darwin'"},
+]
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]

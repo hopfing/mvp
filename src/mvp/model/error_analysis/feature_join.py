@@ -27,7 +27,7 @@ from mvp.model.engine import FeatureEngine, get_feature_columns, make_fs_engine
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MATCHES_PATH = Path("B:/aggregate/atptour/matches.parquet")
+DEFAULT_MATCHES_PATH = get_data_root() / "aggregate" / "atptour" / "matches.parquet"
 
 
 def join_predictions_with_features(
