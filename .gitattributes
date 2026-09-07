@@ -1,0 +1,3 @@
+# Synced between machines by Syncthing; keep LF on every OS so git stays clean on both
+models/** text eol=lf
+projections/** text eol=lf

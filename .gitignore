@@ -25,3 +25,8 @@ discovery_stability_checkpoint_*.json
 discovery_checkpoint_*.json
 discovery_progress*.txt
 fs_history_*.jsonl
+
+# Syncthing markers (models/ and projections/ are synced between machines)
+.stfolder/
+.stignore
+.stversions/
