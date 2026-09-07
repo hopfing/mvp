@@ -223,7 +223,7 @@ def matchup(W, srv, ret, cell, is_indoor, mu, has_ret, has_surf, has_ind):
 
 @njit(cache=True)
 def emit_new(W, side, i, day, have_eta, last_s, n_s, tau2,
-             has_ret, has_surf, has_ind, out, row_off):
+             has_ret, has_surf, has_ind, emit_cnt, emit_rsd, out, row_off):
     """Streams 1..S-1 as the flat float vector of `new_value_names`, written
     into `out[row_off:row_off+n_new]` (a slab column slice). NaN is null.
     The branch sequence IS the name sequence; keep them edited together."""
@@ -234,16 +234,19 @@ def emit_new(W, side, i, day, have_eta, last_s, n_s, tau2,
         k += 1
         out[k] = math.sqrt(W[side, F_SV, j])
         k += 1
+        rsd = emit_rsd[j] == 1
         if has_surf[j]:
             out[k] = W[side, F_SSM, j]
             k += 1
-            out[k] = math.sqrt(W[side, F_SSV, j])
-            k += 1
+            if rsd:
+                out[k] = math.sqrt(W[side, F_SSV, j])
+                k += 1
         if has_ind[j]:
             out[k] = W[side, F_ISM, j]
             k += 1
-            out[k] = math.sqrt(W[side, F_ISV, j])
-            k += 1
+            if rsd:
+                out[k] = math.sqrt(W[side, F_ISV, j])
+                k += 1
         if has_ret[j]:
             out[k] = W[side, F_RM, j]
             k += 1
@@ -252,21 +255,24 @@ def emit_new(W, side, i, day, have_eta, last_s, n_s, tau2,
             if has_surf[j]:
                 out[k] = W[side, F_RSM, j]
                 k += 1
-                out[k] = math.sqrt(W[side, F_RSV, j])
-                k += 1
+                if rsd:
+                    out[k] = math.sqrt(W[side, F_RSV, j])
+                    k += 1
             if has_ind[j]:
                 out[k] = W[side, F_IRM, j]
                 k += 1
-                out[k] = math.sqrt(W[side, F_IRV, j])
-                k += 1
-        out[k] = n_s[j, i]
-        k += 1
-        ls = last_s[j, i]
-        if day >= 0 and ls >= 0:
-            out[k] = day - ls
-        else:
-            out[k] = NAN
-        k += 1
+                if rsd:
+                    out[k] = math.sqrt(W[side, F_IRV, j])
+                    k += 1
+        if emit_cnt[j] == 1:
+            out[k] = n_s[j, i]
+            k += 1
+            ls = last_s[j, i]
+            if day >= 0 and ls >= 0:
+                out[k] = day - ls
+            else:
+                out[k] = NAN
+            k += 1
         if have_eta:
             out[k] = W[side, F_ETA, j]
             k += 1
@@ -481,7 +487,7 @@ def capture_all(ia, ib, s, cell, day, is_indoor, in_domain,
                 sm, sv, rm, rv, ssm, ssv, rsm, rsv, ism, isv, irm, irv,
                 last_s, last_r, last_ss, last_rs, last_is, last_ir, n_s, seeded,
                 q_s, q_r, q_surf, q_indoor, cap_days, phi, tau2, mu,
-                has_ret, has_surf, has_ind,
+                has_ret, has_surf, has_ind, emit_cnt, emit_rsd,
                 seed_src_s, seed_src_r, seed_scale_s, seed_scale_r, seedable):
     """One match's whole capture in a single compiled call: observation
     masks, both sides' predictions, both matchups, and both sides' shipped
@@ -517,14 +523,14 @@ def capture_all(ia, ib, s, cell, day, is_indoor, in_domain,
     if have_a:
         emit_shipped(W, 0, ia, day, have_eta, last_s, n_s, tau2[0], out16[0])
         emit_new(W, 0, ia, day, have_eta, last_s, n_s, tau2,
-                 has_ret, has_surf, has_ind, vec[0], 0)
+                 has_ret, has_surf, has_ind, emit_cnt, emit_rsd, vec[0], 0)
     else:
         out16[0, :] = NAN
         vec[0, :] = NAN
     if have_b:
         emit_shipped(W, 1, ib, day, have_eta, last_s, n_s, tau2[0], out16[1])
         emit_new(W, 1, ib, day, have_eta, last_s, n_s, tau2,
-                 has_ret, has_surf, has_ind, vec[1], 0)
+                 has_ret, has_surf, has_ind, emit_cnt, emit_rsd, vec[1], 0)
     else:
         out16[1, :] = NAN
         vec[1, :] = NAN

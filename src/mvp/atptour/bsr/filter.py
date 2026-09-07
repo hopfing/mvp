@@ -125,20 +125,21 @@ def new_value_names(streams: tuple[StreamConfig, ...]) -> tuple[str, ...]:
     names: list[str] = []
     for st in streams[1:]:
         b = f"bsr_{st.name}"
+        rsd = st.emit_residual_sd
         names += [f"{b}_mu", f"{b}_sd"]
         if st.has_surface:
-            names += [f"{b}_surface_mu", f"{b}_surface_sd"]
+            names += [f"{b}_surface_mu"] + ([f"{b}_surface_sd"] if rsd else [])
         if st.has_indoor:
-            names += [f"{b}_indoor_mu", f"{b}_indoor_sd"]
+            names += [f"{b}_indoor_mu"] + ([f"{b}_indoor_sd"] if rsd else [])
         if st.has_returner:
             names += [f"{b}_r_mu", f"{b}_r_sd"]
             if st.has_surface:
-                names += [f"{b}_r_surface_mu", f"{b}_r_surface_sd"]
+                names += [f"{b}_r_surface_mu"] + ([f"{b}_r_surface_sd"] if rsd else [])
             if st.has_indoor:
-                names += [f"{b}_r_indoor_mu", f"{b}_r_indoor_sd"]
-        names += [
-            f"{b}_n_obs", f"{b}_days_since", f"{b}_logit", f"{b}_logit_sd",
-        ]
+                names += [f"{b}_r_indoor_mu"] + ([f"{b}_r_indoor_sd"] if rsd else [])
+        if st.emit_counts:
+            names += [f"{b}_n_obs", f"{b}_days_since"]
+        names += [f"{b}_logit", f"{b}_logit_sd"]
     return tuple(names)
 
 
@@ -284,6 +285,8 @@ class BsrTracker:
         self._has_ret = np.array([x.has_returner for x in st], dtype=np.uint8)
         self._has_surf = np.array([x.has_surface for x in st], dtype=np.uint8)
         self._has_ind = np.array([x.has_indoor for x in st], dtype=np.uint8)
+        self._emit_cnt = np.array([x.emit_counts for x in st], dtype=np.uint8)
+        self._emit_rsd = np.array([x.emit_residual_sd for x in st], dtype=np.uint8)
         self._q_s = np.array([x.q_s for x in st], dtype=np.float64)
         self._q_r = np.array([x.q_r for x in st], dtype=np.float64)
         self._q_surf = np.array([x.q_surf for x in st], dtype=np.float64)
@@ -337,7 +340,8 @@ class BsrTracker:
         _probe = np.zeros(self._n_new + 64, dtype=np.float64)
         written = kernel.emit_new(
             self._W, 0, 0, -1, False, self._last_s, self._n_s, self._tau2,
-            self._has_ret, self._has_surf, self._has_ind, _probe, 0,
+            self._has_ret, self._has_surf, self._has_ind,
+            self._emit_cnt, self._emit_rsd, _probe, 0,
         )
         if written != self._n_new:
             raise RuntimeError(
@@ -616,6 +620,7 @@ class BsrTracker:
             self._q_s, self._q_r, self._q_surf, self._q_indoor,
             self._cap_days, self._phi, self._tau2, self._mu,
             self._has_ret, self._has_surf, self._has_ind,
+            self._emit_cnt, self._emit_rsd,
             self._seed_src_s, self._seed_src_r,
             self._seed_scale_s, self._seed_scale_r, self._seedable,
         )

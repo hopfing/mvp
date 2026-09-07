@@ -366,20 +366,22 @@ class TestNameVectorLockstep:
         from mvp.atptour.bsr.filter import new_value_names
 
         base = BsrConfig()
-        # ace carries a returner, so a surface axis is four names, not two:
-        # the server's pair and the returner's.
+        # ace carries a returner, so a surface axis is two MEANS, the
+        # server's and the returner's (its spreads are not emitted: only the
+        # pooled stream's residual spreads are, see StreamConfig).
         flipped = self._cfg(ace={"has_surface": True})
         assert (
             len(new_value_names(flipped.streams))
-            == len(new_value_names(base.streams)) + 4
+            == len(new_value_names(base.streams)) + 2
         )
         t = BsrTracker(flipped)
         assert len(_cap(t).player_new) == len(new_value_names(flipped.streams))
-        # a stream with no returner gains only the server's pair
+        # a stream with no returner gains only the server's mean (its spread
+        # is not emitted off the pooled stream)
         no_ret = self._cfg(df={"has_indoor": True})
         assert (
             len(new_value_names(no_ret.streams))
-            == len(new_value_names(base.streams)) + 2
+            == len(new_value_names(base.streams)) + 1
         )
 
 
@@ -394,20 +396,22 @@ class TestPerStreamEmission:
         return vec[names.index(name)]
 
     def test_days_since_is_per_stream_and_nan_before_the_first_obs(self):
+        # Clocks are emitted on one stream per feed (bp keeps its own; ace's
+        # is a copy of the pooled stream's and is not emitted).
         t = BsrTracker()
-        cap0 = _cap(t, extra_p={"ace": (7, 80)})
+        cap0 = _cap(t, extra_p={"bp": (3, 5)})
         # nothing observed yet on either stream
-        assert math.isnan(self._val(cap0, "bsr_ace_days_since"))
         assert math.isnan(self._val(cap0, "bsr_bp_days_since"))
+        assert math.isnan(self._val(cap0, "bsr_tb_days_since"))
         t.apply(cap0)
         d1 = date(2020, 4, 19)  # 100 days later
         cap1 = _cap(t, y_p=None, n_p=None, y_o=None, n_o=None, d=d1)
-        assert self._val(cap1, "bsr_ace_days_since") == 100
-        # bp never observed, so its clock is still null
-        assert math.isnan(self._val(cap1, "bsr_bp_days_since"))
+        assert self._val(cap1, "bsr_bp_days_since") == 100
+        # tb never observed, so its clock is still null
+        assert math.isnan(self._val(cap1, "bsr_tb_days_since"))
         # and it is the SERVER-side clock, as the shipped column is: B
-        # returned that ace observation but never served one
-        assert math.isnan(self._val(cap1, "bsr_ace_days_since", side="opp"))
+        # returned that break-point observation but never served one
+        assert math.isnan(self._val(cap1, "bsr_bp_days_since", side="opp"))
 
     def test_returner_surface_and_indoor_residuals_are_emitted(self):
         """`bsr_w1_r_surface_mu` is the player's own return-side residual for
@@ -462,7 +466,7 @@ class TestArrayOutput:
         names = list(BSR_NEW_VALUE_NAMES)
         assert not math.isnan(cap.player_new[names.index("bsr_ace_mu")])
         assert math.isnan(cap.player_new[names.index("bsr_ace_logit")])
-        assert cap.player_new[names.index("bsr_ace_n_obs")] == 1
+        assert "bsr_ace_n_obs" not in names  # ace's count copies the pooled one
 
     def test_second_row_replay_swaps_the_two_sides(self):
         t = BsrTracker()

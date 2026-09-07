@@ -33,6 +33,7 @@ is not favourable, take no Elo seed.
 
 from __future__ import annotations
 
+import dataclasses as _dc
 from dataclasses import dataclass
 from datetime import date
 
@@ -122,6 +123,14 @@ class StreamConfig:
     tau2: float
     mu_cells: tuple[float, ...]
     derived: str | None = None
+    # Emission trims (2026-09-06 audit on 134k in-domain rows since 2022):
+    # a stream's observation count and days-since clock are emitted only
+    # where its observation set is its own (one clock per feed); the
+    # surface/indoor residual SPREADS are emitted only on the pooled stream,
+    # because a residual's variance depends on the observation history alone
+    # and the streams sharing a box score share it to four decimals.
+    emit_counts: bool = True
+    emit_residual_sd: bool = True
 
     def input_columns(self) -> tuple[str, ...]:
         """Player-side columns this stream reads, in no particular order."""
@@ -141,6 +150,8 @@ def _stream(
     seed_src_s: str | None = None,
     seed_src_r: str | None = None,
     derived: str | None = None,
+    emit_counts: bool = True,
+    emit_residual_sd: bool = True,
     q_s: float = _Q_S,
     q_r: float = _Q_R,
     q_surf: float = _Q_SURF,
@@ -158,6 +169,8 @@ def _stream(
         q_s=q_s, q_r=q_r, q_surf=q_surf, q_indoor=q_indoor, v0=v0,
         seed_s=seed_s, seed_r=seed_r, tau2=tau2, mu_cells=mu_cells,
         derived=derived,
+        emit_counts=emit_counts,
+        emit_residual_sd=emit_residual_sd,
     )
 
 
@@ -616,6 +629,20 @@ STREAMS: tuple[StreamConfig, ...] = (
             -0.9882335055, -1.0842098736, -1.0842098736, -1.0842098736,
         ),
     ),
+)
+
+# One clock per feed (see StreamConfig.emit_counts): the pooled stream's
+# count is shipped by name; these keep their own; every other stream's
+# tracks one of them at r > 0.999. Residual spreads only on the pooled
+# stream (the streams sharing a box score share them to four decimals).
+_KEEP_COUNTS = {"serve", "bp", "tb", "easyhold", "winner", "sp_winner", "rally_short"}
+STREAMS = tuple(
+    _dc.replace(
+        st,
+        emit_counts=st.name in _KEEP_COUNTS,
+        emit_residual_sd=(st.name == "serve"),
+    )
+    for st in STREAMS
 )
 
 STREAM_NAMES: tuple[str, ...] = tuple(s.name for s in STREAMS)

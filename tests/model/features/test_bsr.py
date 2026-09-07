@@ -51,10 +51,12 @@ class TestNewStreams:
 
     def test_the_two_name_sets_are_disjoint_and_complete(self):
         assert not set(BSR_NEW_VALUE_NAMES) & set(BASES)
-        # 20 streams x (mu, sd, n_obs, days_since, logit, logit_sd), plus the
-        # returner pair and the server- and returner-side surface and indoor
-        # pairs where the stream carries them: 3x16 + 10 (fsi: no returner) + 12x8 + 4x6 = 178.
-        assert len(BSR_NEW_VALUE_NAMES) == 178
+        # 20 streams x (mu, sd, logit, logit_sd) plus the returner pair and the
+        # surface/indoor residual MEANS where carried, plus a count/clock pair
+        # on the six streams that keep their own clock: 178 before the
+        # 2026-09-06 trim (14 residual-spread copies, 14 count and 14 clock
+        # copies removed) = 136.
+        assert len(BSR_NEW_VALUE_NAMES) == 136
 
     def test_every_stream_emits_its_axes_in_the_documented_order(self):
         """The name sequence per stream is a contract: the slab is written by
@@ -64,20 +66,21 @@ class TestNewStreams:
         expected: list[str] = []
         for st in STREAMS[1:]:
             b = f"bsr_{st.name}"
+            rsd = st.emit_residual_sd
             expected += [f"{b}_mu", f"{b}_sd"]
             if st.has_surface:
-                expected += [f"{b}_surface_mu", f"{b}_surface_sd"]
+                expected += [f"{b}_surface_mu"] + ([f"{b}_surface_sd"] if rsd else [])
             if st.has_indoor:
-                expected += [f"{b}_indoor_mu", f"{b}_indoor_sd"]
+                expected += [f"{b}_indoor_mu"] + ([f"{b}_indoor_sd"] if rsd else [])
             if st.has_returner:
                 expected += [f"{b}_r_mu", f"{b}_r_sd"]
                 if st.has_surface:
-                    expected += [f"{b}_r_surface_mu", f"{b}_r_surface_sd"]
+                    expected += [f"{b}_r_surface_mu"] + ([f"{b}_r_surface_sd"] if rsd else [])
                 if st.has_indoor:
-                    expected += [f"{b}_r_indoor_mu", f"{b}_r_indoor_sd"]
-            expected += [
-                f"{b}_n_obs", f"{b}_days_since", f"{b}_logit", f"{b}_logit_sd",
-            ]
+                    expected += [f"{b}_r_indoor_mu"] + ([f"{b}_r_indoor_sd"] if rsd else [])
+            if st.emit_counts:
+                expected += [f"{b}_n_obs", f"{b}_days_since"]
+            expected += [f"{b}_logit", f"{b}_logit_sd"]
         assert list(BSR_NEW_VALUE_NAMES) == expected
 
     def test_diffs_and_sums_on_the_means_and_logits(self):
@@ -96,7 +99,7 @@ class TestNewStreams:
         two posterior sds, of two counts or of two clocks is not a quantity."""
         registry = get_registry()
         for name in ("bsr_fsi_sd", "bsr_bp_n_obs", "bsr_ace_logit_sd",
-                     "bsr_ace_days_since", "bsr_hold_r_surface_sd"):
+                     "bsr_bp_days_since", "bsr_w1_r_sd"):
             with pytest.raises(Exception):
                 registry.get(f"{name}_diff")
 

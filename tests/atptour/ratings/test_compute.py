@@ -577,7 +577,7 @@ class TestBsrSeam:
         out = compute_all_ratings(
             _with_bsr_inputs(_make_match_df()), bsr_tracker=BsrTracker(),
         )
-        assert len(BSR_NEW_VALUE_NAMES) == 178
+        assert len(BSR_NEW_VALUE_NAMES) == 136
         for name in BSR_NEW_VALUE_NAMES:
             for side in ("player", "opp"):
                 col = f"{side}_{name}"
@@ -622,7 +622,7 @@ class TestBsrSeam:
         assert a2["player_bsr_bp_n_obs"][0] == 1
         assert a2["player_bsr_bp_mu"][0] != 0.0
         # ace saw nothing; its axis is still the (placeholder, zero) seed
-        assert a2["player_bsr_ace_n_obs"][0] == 0
+        # (its count is not emitted: it copies the pooled stream's)
         assert a2["player_bsr_ace_mu"][0] == 0.0
 
     def test_second_row_of_a_match_is_the_first_row_swapped(self):
