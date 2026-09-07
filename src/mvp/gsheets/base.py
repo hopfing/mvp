@@ -612,9 +612,13 @@ def merge_predictions(
             pl.Series("notes", new_notes),
         )
 
-    # 3c. Auto-fill p1_odds, p2_odds, book from best available odds.
-    # book = max odds, tiebroken by odds_maps iteration order.
+    # 3c. Auto-fill p1_odds, p2_odds, book from the books' current quotes.
+    # book = max odds on the predicted side, tiebroken by odds_maps iteration order.
     # book2 = max odds among remaining books within <0.02 of best, same tiebreak.
+    # An unstaked row with no current quote is blanked rather than left holding
+    # the previous sync's price: odds_maps carry only the latest books run, so a
+    # lingering value is a stale line pointing at a book that no longer offers
+    # it. Staked rows are frozen and never touched here.
     if len(merged) > 0 and odds_maps:
         new_p1_odds = []
         new_p2_odds = []
@@ -671,11 +675,11 @@ def merge_predictions(
                 new_books.append(primary)
                 new_books2.append(secondary)
             else:
-                new_books.append(current_book)
-                new_books2.append(current_book2)
+                new_books.append("")
+                new_books2.append("")
 
-            new_p1_odds.append(f"{best_p1:.2f}" if best_p1 is not None else current_p1_odds)
-            new_p2_odds.append(f"{best_p2:.2f}" if best_p2 is not None else current_p2_odds)
+            new_p1_odds.append(f"{best_p1:.2f}" if best_p1 is not None else "")
+            new_p2_odds.append(f"{best_p2:.2f}" if best_p2 is not None else "")
 
         merged = merged.with_columns(
             pl.Series("p1_odds", new_p1_odds),

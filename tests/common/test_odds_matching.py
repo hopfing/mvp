@@ -1,7 +1,7 @@
 """Tests for BaseOddsMatcher in mvp.common.odds_matching (event-map-based)."""
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -167,3 +167,96 @@ class TestMatch:
             with patch("mvp.analysis.event_map.load_event_map_with_overrides", return_value=event_map):
                 matcher.match(_make_predictions())
         assert "TEST events" in caplog.text
+
+
+def _make_run_odds(tmp_path, rows, tz=None):
+    """Write a moneyline.parquet with explicit run_at stamps.
+
+    rows: (event_id, player_name, odds, run_at) tuples.
+    """
+    odds_dir = tmp_path / "stage" / "testbook"
+    odds_dir.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame([
+        {
+            "test_event_id": eid,
+            "player_name": pname,
+            "odds": odds,
+            "fetched_at": run_at.replace(tzinfo=tz),
+            "run_at": run_at.replace(tzinfo=tz),
+            "event_status": "NOT_STARTED",
+        }
+        for eid, pname, odds, run_at in rows
+    ]).write_parquet(odds_dir / "moneyline.parquet")
+
+
+_TICK_1 = datetime(2026, 9, 7, 10, 45, 4)
+_TICK_2 = datetime(2026, 9, 7, 11, 0, 5)
+
+
+class TestRunAnchor:
+    """The live pipeline reads every book at one shared run stamp so a book
+    whose fetch failed this tick drops out instead of presenting its last
+    good run as current."""
+
+    def test_anchor_keeps_only_that_run(self, tmp_path):
+        _make_run_odds(tmp_path, [
+            ("e1", "Alice Smith", 2.0, _TICK_1), ("e1", "Bob Jones", 1.8, _TICK_1),
+            ("e1", "Alice Smith", 2.1, _TICK_2), ("e1", "Bob Jones", 1.75, _TICK_2),
+        ])
+        result = _TestMatcher(data_root=tmp_path).get_latest_odds(anchor=_TICK_1)
+        assert sorted(result["odds"].to_list()) == [1.8, 2.0]
+
+    def test_anchor_newer_than_book_yields_nothing(self, tmp_path):
+        """The book's newest run is one tick older than the anchor: stale."""
+        _make_run_odds(tmp_path, [
+            ("e1", "Alice Smith", 2.0, _TICK_1), ("e1", "Bob Jones", 1.8, _TICK_1),
+        ])
+        result = _TestMatcher(data_root=tmp_path).get_latest_odds(anchor=_TICK_2)
+        assert len(result) == 0
+
+    def test_no_anchor_uses_books_own_latest_run(self, tmp_path):
+        _make_run_odds(tmp_path, [
+            ("e1", "Alice Smith", 2.0, _TICK_1), ("e1", "Bob Jones", 1.8, _TICK_1),
+            ("e1", "Alice Smith", 2.1, _TICK_2), ("e1", "Bob Jones", 1.75, _TICK_2),
+        ])
+        result = _TestMatcher(data_root=tmp_path).get_latest_odds()
+        assert sorted(result["odds"].to_list()) == [1.75, 2.1]
+
+    def test_anchor_compares_wall_clock_across_zone_aware_stage(self, tmp_path):
+        _make_run_odds(tmp_path, [
+            ("e1", "Alice Smith", 2.0, _TICK_2), ("e1", "Bob Jones", 1.8, _TICK_2),
+        ], tz=UTC)
+        matcher = _TestMatcher(data_root=tmp_path)
+        assert matcher.latest_run_at() == _TICK_2
+        assert len(matcher.get_latest_odds(anchor=_TICK_2)) == 2
+
+    def test_latest_run_at(self, tmp_path):
+        _make_run_odds(tmp_path, [
+            ("e1", "Alice Smith", 2.0, _TICK_1), ("e1", "Alice Smith", 2.1, _TICK_2),
+        ])
+        assert _TestMatcher(data_root=tmp_path).latest_run_at() == _TICK_2
+
+    def test_latest_run_at_missing_file(self, tmp_path):
+        assert _TestMatcher(data_root=tmp_path).latest_run_at() is None
+
+    def test_latest_run_anchor_is_max_across_books(self, tmp_path):
+        from mvp.common.odds_matching import latest_run_anchor
+
+        fresh, stale = tmp_path / "fresh", tmp_path / "stale"
+        _make_run_odds(fresh, [("e1", "Alice Smith", 2.0, _TICK_2)])
+        _make_run_odds(stale, [("e1", "Alice Smith", 2.0, _TICK_1)])
+        matchers = [
+            _TestMatcher(data_root=fresh),
+            _TestMatcher(data_root=stale),
+            _TestMatcher(data_root=tmp_path / "empty"),
+        ]
+        assert latest_run_anchor(matchers) == _TICK_2
+        assert latest_run_anchor([_TestMatcher(data_root=tmp_path / "empty")]) is None
+
+    def test_match_with_stale_anchor_returns_no_odds(self, tmp_path):
+        _make_run_odds(tmp_path, [
+            ("e1", "Alice Smith", 2.0, _TICK_1), ("e1", "Bob Jones", 1.8, _TICK_1),
+        ])
+        matcher = _TestMatcher(data_root=tmp_path)
+        result = matcher.match(_make_predictions(), anchor=_TICK_2)
+        assert result.odds == {}

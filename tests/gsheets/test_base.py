@@ -1235,3 +1235,44 @@ class TestGenerateFormulas:
         assert "shrink" in USER_COLUMNS
         assert "shrink" in FORMULA_PRESERVE_COLUMNS
         assert COLUMN_NAMES.index("shrink") == COLUMN_NAMES.index("kelly_fraction") + 1
+
+
+class TestOddsBlankedWithoutCurrentQuote:
+    """odds_maps carry only the latest books run. An unstaked row nobody quotes
+    in that run must clear its price and book rather than keep a stale line
+    that points at a book no longer offering it."""
+
+    def test_unstaked_row_blanked_when_no_book_quotes_match(self):
+        row = _make_sheet_row(
+            match_uid="M1", prediction="P1", p1_odds="1.40", p2_odds="2.75",
+            stake="", book="Bet365", book2="BetMGM",
+        )
+        existing = _sheet_df([row])
+        new = prepare_predictions(_make_predictions(match_uid="OTHER"))
+        matches = _matches_df(
+            {"match_uid": [], "won": [], "player_id": [], "opp_id": []}
+        )
+        odds_maps = {"BetMGM": {"OTHER": {"A": 1.90, "B": 1.90}}}
+        result = merge_predictions(existing, new, matches, odds_maps=odds_maps)
+        m1 = result.filter(pl.col("match_uid") == "M1")
+        assert m1["p1_odds"][0] == ""
+        assert m1["p2_odds"][0] == ""
+        assert m1["book"][0] == ""
+        assert m1["book2"][0] == ""
+
+    def test_staked_row_keeps_its_line_when_no_book_quotes_match(self):
+        row = _make_sheet_row(
+            match_uid="M1", prediction="P1", p1_odds="1.40", p2_odds="2.75",
+            stake="10", book="Bet365", book2="",
+        )
+        existing = _sheet_df([row])
+        new = prepare_predictions(_make_predictions(match_uid="OTHER"))
+        matches = _matches_df(
+            {"match_uid": [], "won": [], "player_id": [], "opp_id": []}
+        )
+        odds_maps = {"BetMGM": {"OTHER": {"A": 1.90, "B": 1.90}}}
+        result = merge_predictions(existing, new, matches, odds_maps=odds_maps)
+        m1 = result.filter(pl.col("match_uid") == "M1")
+        assert m1["p1_odds"][0] == "1.40"
+        assert m1["p2_odds"][0] == "2.75"
+        assert m1["book"][0] == "Bet365"

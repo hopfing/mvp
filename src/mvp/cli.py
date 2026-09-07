@@ -3888,11 +3888,33 @@ def cmd_live(args: argparse.Namespace) -> int:
     if predictions is not None and len(predictions) > 0:
         import importlib
 
+        from mvp.common.odds_matching import latest_run_anchor
+
+        matchers = []
         for book in BOOK_REGISTRY:
             try:
                 mod = importlib.import_module(f"mvp.{book.domain}.matcher")
-                matcher = getattr(mod, book.matcher_class)()
-                result = matcher.match(predictions).odds or None
+                matchers.append((book, getattr(mod, book.matcher_class)()))
+            except Exception as e:
+                logger.error("%s odds lookup failed: %s", book.label, e)
+                errors.append(f"{book.label} odds lookup: {e}")
+
+        # Every book is read at one anchor: the newest run stamp any book
+        # staged, which is this tick's shared run_at once any scraper
+        # succeeded. A book whose fetch failed this tick therefore drops out
+        # instead of presenting its last good run as the current price.
+        try:
+            anchor = latest_run_anchor(m for _, m in matchers)
+        except Exception as e:
+            logger.error("Odds run anchor failed: %s", e)
+            errors.append(f"odds run anchor: {e}")
+            anchor = None
+        if anchor is not None:
+            print(f"Odds anchored to books run {anchor:%Y-%m-%d %H:%M:%S}")
+
+        for book, matcher in matchers:
+            try:
+                result = matcher.match(predictions, anchor=anchor).odds or None
                 if result:
                     all_odds_maps[book.code] = result
                     print(f"Matched {book.label} odds for {len(result)}/{len(predictions)} predictions")

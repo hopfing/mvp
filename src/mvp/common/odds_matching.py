@@ -2,7 +2,9 @@
 
 import logging
 import unicodedata
+from collections.abc import Iterable
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 import polars as pl
@@ -73,6 +75,18 @@ class OddsMatchResult:
     odds: dict[str, dict[str, float]] = field(default_factory=dict)
 
 
+def _naive(stamp: datetime) -> datetime:
+    """Drop tzinfo so stamps staged with and without a zone compare equal."""
+    return stamp.replace(tzinfo=None) if stamp.tzinfo is not None else stamp
+
+
+def latest_run_anchor(matchers: Iterable["BaseOddsMatcher"]) -> datetime | None:
+    """The newest run stamp any book staged: the shared stamp of the latest
+    tick that produced odds. None when no book has staged rows."""
+    stamps = [s for s in (m.latest_run_at() for m in matchers) if s is not None]
+    return max(stamps) if stamps else None
+
+
 class BaseOddsMatcher(BaseJob):
     """Looks up odds for predictions using the persisted event map.
 
@@ -91,25 +105,45 @@ class BaseOddsMatcher(BaseJob):
         super().__init__(domain=domain, data_root=data_root)
         self._logger = logging.getLogger(f"mvp.{domain}.matcher")
 
-    def get_latest_odds(self) -> pl.DataFrame:
-        """Read odds from the most recent run only.
-
-        Filters to run_at == max(run_at) so only events from the latest
-        pipeline run are included. Falls back to fetched_at if run_at
-        column doesn't exist yet (old data).
-        """
+    def _read_staged_moneyline(self) -> pl.DataFrame:
         odds_path = self.build_path("stage", "moneyline.parquet")
         if not odds_path.exists():
             return pl.DataFrame()
+        return pl.read_parquet(odds_path)
 
-        df = pl.read_parquet(odds_path)
+    @staticmethod
+    def _run_stamp_col(df: pl.DataFrame) -> str:
+        """run_at when staged; fetched_at for data that predates the column."""
+        return "run_at" if "run_at" in df.columns else "fetched_at"
+
+    def latest_run_at(self) -> datetime | None:
+        """This book's newest staged run stamp (tz stripped); None with no rows."""
+        df = self._read_staged_moneyline()
+        if len(df) == 0:
+            return None
+        return _naive(df[self._run_stamp_col(df)].max())
+
+    def get_latest_odds(self, anchor: datetime | None = None) -> pl.DataFrame:
+        """Read odds from one run only.
+
+        ``anchor`` is the run stamp every book scraped in a pipeline tick
+        shares (the books job stamps all scrapers with one ``run_at``). Given
+        one, only rows stamped exactly ``anchor`` survive, so a book whose
+        fetch failed this tick contributes nothing instead of presenting its
+        last good run as the current price. Without an anchor the book's own
+        newest run is used. Falls back to fetched_at if the run_at column
+        doesn't exist yet (old data).
+        """
+        df = self._read_staged_moneyline()
         if len(df) == 0:
             return df
 
-        # Filter to most recent run
-        ts_col = "run_at" if "run_at" in df.columns else "fetched_at"
-        max_run = df[ts_col].max()
-        df = df.filter(pl.col(ts_col) == max_run)
+        ts_col = self._run_stamp_col(df)
+        stamp = pl.col(ts_col)
+        if getattr(df.schema[ts_col], "time_zone", None):
+            stamp = stamp.dt.replace_time_zone(None)
+        target = _naive(anchor if anchor is not None else df[ts_col].max())
+        df = df.filter(stamp == target)
 
         if "event_status" in df.columns:
             df = df.filter(pl.col("event_status") == "NOT_STARTED")
@@ -141,9 +175,13 @@ class BaseOddsMatcher(BaseJob):
             .head(1)
         )
 
-    def match(self, predictions: pl.DataFrame) -> OddsMatchResult:
-        """Look up latest pre-match odds for predictions using the event map."""
-        return self._match_from_odds(predictions, self.get_latest_odds(), label="latest")
+    def match(
+        self, predictions: pl.DataFrame, anchor: datetime | None = None,
+    ) -> OddsMatchResult:
+        """Look up pre-match odds from the anchor run (or this book's latest)."""
+        return self._match_from_odds(
+            predictions, self.get_latest_odds(anchor), label="latest",
+        )
 
     def match_opening(self, predictions: pl.DataFrame) -> OddsMatchResult:
         """Look up opening (first NOT_STARTED) odds for predictions."""
