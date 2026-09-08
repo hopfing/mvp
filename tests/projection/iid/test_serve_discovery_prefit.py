@@ -246,11 +246,13 @@ class TestPrefitEquivalence:
     def test_prefit_scores_equal_the_per_candidate_refit(self, selector, shape):
         """Bitwise: same fold frames, same params, same seed => same booster."""
         for match_level, point_level in _candidates(shape[0]):
-            with_prefit = selector._score_cv_chain(match_level, point_level)
+            with_prefit = selector._score_cv_chain_detailed(match_level, point_level)[0]
             cache = selector._prefit_fixed
             selector._prefit_fixed = None  # today's path: every component refit
             try:
-                without = selector._score_cv_chain(match_level, point_level)
+                without = selector._score_cv_chain_detailed(
+                    match_level, point_level,
+                )[0]
             finally:
                 selector._prefit_fixed = cache
             assert np.isfinite(with_prefit)
@@ -297,7 +299,7 @@ class TestSingleLevel:
         """) + _SCORER)
         sel = _make_selector(tmp_path, str(cfg))
         assert sel._prefit_fixed is None
-        assert np.isfinite(sel._score_cv_chain([MIRROR_SPEC], []))
+        assert np.isfinite(sel._score_cv_chain_detailed([MIRROR_SPEC], [])[0])
         # one-level records all five fit phases
         means = sel._take_phase_means()
         assert {"load", "join", "derive", "matrix", "fit"} <= set(means)
@@ -325,9 +327,13 @@ class TestScoringParams:
 class TestThreadIsolation:
     def test_concurrent_candidates_match_sequential(self, selector, shape):
         cands = _candidates(shape[0])
-        sequential = [selector._score_cv_chain(m, p) for m, p in cands]
+        sequential = [
+            selector._score_cv_chain_detailed(m, p)[0] for m, p in cands
+        ]
         with ThreadPoolExecutor(max_workers=3) as ex:
-            concurrent = list(ex.map(lambda c: selector._score_cv_chain(*c), cands))
+            concurrent = list(
+                ex.map(lambda c: selector._score_cv_chain_detailed(*c)[0], cands)
+            )
         assert concurrent == sequential
 
 
@@ -357,7 +363,7 @@ class TestClosureLocals:
 class TestPhaseTimings:
     def test_fit_timings_and_diag_means(self, selector):
         selector._take_phase_means()  # reset whatever the fixture accumulated
-        selector._score_cv_chain([DIFF_SPEC], [])
+        selector._score_cv_chain_detailed([DIFF_SPEC], [])
         means = selector._take_phase_means()
         assert {"fit", "predict", "dp", "score"} <= set(means)
         assert all(v >= 0.0 for v in means.values())
@@ -430,7 +436,7 @@ class TestFixedArmSpecsOutsideThePool:
         sel, _ = self._build(tmp_path)
         assert sel._prefit_fixed is not None
         assert set(sel._prefit_fixed[0]) == set(COMPONENTS) - {FIRST_IN}
-        assert np.isfinite(sel._score_cv_chain([MIRROR_SPEC], []))
+        assert np.isfinite(sel._score_cv_chain_detailed([MIRROR_SPEC], [])[0])
 
     def test_fixed_spec_and_its_swap_partner_are_materialized(self, tmp_path):
         sel, engine = self._build(tmp_path)
@@ -480,7 +486,7 @@ class TestFixedArmSpecsOutsideThePool:
         )
         assert MATCHUP_SPEC not in narrow._match_features_both_sides.columns
         assert MATCHUP_SPEC in wide._match_features_both_sides.columns
-        a = narrow._score_cv_chain([MIRROR_SPEC], [])
-        b = wide._score_cv_chain([MIRROR_SPEC], [])
+        a = narrow._score_cv_chain_detailed([MIRROR_SPEC], [])[0]
+        b = wide._score_cv_chain_detailed([MIRROR_SPEC], [])[0]
         assert np.isfinite(a)
         assert a == b

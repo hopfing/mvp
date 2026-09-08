@@ -273,6 +273,15 @@ class ServeDiscoveryConfig(BaseModel):
     # n_jobs in scoring_model.params defaults to 1; n_parallel_candidates * n_jobs
     # must not exceed the logical processor count.
     n_parallel_candidates: int = 1
+    # Which scorer a chain run uses (spec: #107). "fixed" is today's scorer:
+    # every candidate is scored at the model's configured gap scale, which
+    # rewards dispersion from any source rather than ordering alone. "proxy"
+    # and "grid" fit the gap shrink on each fold's TRAIN side first, so a
+    # candidate competes on the ordering it adds. The grid is the fitter's
+    # DEFAULT_GRID and the proxy constant its default; neither gets a knob
+    # here, because a run that wants a different one wants the fitter called
+    # by hand, not an FS run nobody can reproduce from the yaml.
+    chain_shrink: Literal["fixed", "proxy", "grid"] = "fixed"
 
     def resolved_min_delta(self) -> float:
         """This config's `min_delta`, or the metric's scale-appropriate default.
@@ -324,6 +333,28 @@ class ServeDiscoveryConfig(BaseModel):
                 f"metric {self.metric!r} scores point_won_by_server on a win "
                 f"branch; serve_component=first_in must use one of "
                 f"{sorted(rate_metrics)}"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_chain_shrink(self) -> "ServeDiscoveryConfig":
+        """Fitting a gap shrink only means anything to a run scored through the
+        chain.
+
+        A point or blind branch run never reaches the chain scorer, so a
+        non-fixed value there would be silently ignored — an hour of compute
+        spent producing a ranking the operator believes was calibrated.
+        Refused at load instead, naming the grain the metric it was given
+        actually has. Pydantic has already rejected anything outside the
+        literal.
+        """
+        from mvp.projection.iid.metric_registry import grain_of, is_chain_metric
+
+        if self.chain_shrink != "fixed" and not is_chain_metric(self.metric):
+            raise ValueError(
+                f"chain_shrink={self.chain_shrink!r} requires a chain metric "
+                f"(iid_* family); got metric={self.metric!r}, which is a "
+                f"{grain_of(self.metric)} metric"
             )
         return self
 

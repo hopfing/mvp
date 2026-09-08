@@ -17,7 +17,7 @@ import numpy as np
 import polars as pl
 import pytest
 
-from mvp.projection.iid import serve_discovery as sd
+from mvp.projection.iid import calibration
 from mvp.projection.iid.config import (
     IIDMetricsConfig,
     IIDProjectionConfig,
@@ -459,8 +459,13 @@ def _round1_ranking(sel) -> list[str]:
 
 class TestDispatch:
     def _spy(self, monkeypatch):
+        # Spied on `_score_cv_chain_detailed`, not `_score_cv_chain`: the
+        # chain route goes through the detailed form (it is what carries the
+        # per-fold shrinks back to the round loop, #109) and the plain one is
+        # a wrapper some callers use. Patching the wrapper would count zero
+        # chain calls for a run that went through the chain.
         calls = {"chain": 0, "branch": 0}
-        orig_chain = ServeDiscoverySelector._score_cv_chain
+        orig_chain = ServeDiscoverySelector._score_cv_chain_detailed
         orig_branch = ServeDiscoverySelector._score_cv_branch
 
         def chain(self, *a, **k):
@@ -471,16 +476,24 @@ class TestDispatch:
             calls["branch"] += 1
             return orig_branch(self, *a, **k)
 
-        monkeypatch.setattr(ServeDiscoverySelector, "_score_cv_chain", chain)
+        monkeypatch.setattr(
+            ServeDiscoverySelector, "_score_cv_chain_detailed", chain,
+        )
         monkeypatch.setattr(ServeDiscoverySelector, "_score_cv_branch", branch)
+        # Patched in the calibration module: the chain evaluation the scorer
+        # runs lives there now (`score_at_shrink`), so that is where the DP is
+        # reached from. Patching the name in serve_discovery would count zero
+        # passes for a run that did go through the chain.
         dp = {"n": 0}
-        real_dp = sd.match_distribution_from_state_fn
+        real_dp = calibration.match_distribution_from_state_fn
 
         def dp_spy(*a, **k):
             dp["n"] += 1
             return real_dp(*a, **k)
 
-        monkeypatch.setattr(sd, "match_distribution_from_state_fn", dp_spy)
+        monkeypatch.setattr(
+            calibration, "match_distribution_from_state_fn", dp_spy,
+        )
         return calls, dp
 
     def test_serial_path_routes_to_branch(self, tmp_path, monkeypatch):
@@ -525,7 +538,7 @@ class TestDispatch:
             tmp_path, metric="iid_match_win_log_loss", component=WIN_FIRST,
         ))
         calls, dp = self._spy(monkeypatch)
-        sel._score_cv_match_grain([MIRROR_SPEC], [])
+        sel._score_cv_match_grain_detailed([MIRROR_SPEC], [])
         assert calls["chain"] == 1 and calls["branch"] == 0
         assert dp["n"] > 0
 
@@ -538,9 +551,11 @@ class TestDispatch:
         ))
         cands = [([MIRROR_SPEC], []), ([], ["is_break_point"]),
                  ([], ["sets_won_server"])]
-        seq = [sel._score_cv_match_grain(m, p) for m, p in cands]
+        seq = [sel._score_cv_match_grain_detailed(m, p)[0] for m, p in cands]
         with ThreadPoolExecutor(max_workers=3) as ex:
-            par = list(ex.map(lambda c: sel._score_cv_match_grain(*c), cands))
+            par = list(
+                ex.map(lambda c: sel._score_cv_match_grain_detailed(*c)[0], cands)
+            )
         assert par == seq
 
     def test_chain_incompatible_point_features_excluded_for_branch(

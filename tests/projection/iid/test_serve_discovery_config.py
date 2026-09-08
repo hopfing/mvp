@@ -200,6 +200,79 @@ class TestServeDiscoveryConfig:
         assert "point_validation" not in emitted
 
 
+class TestChainShrink:
+    """`chain_shrink` picks the scorer a chain FS run uses (spec: #107).
+
+    The default reproduces today's scorer exactly, so every existing run yaml
+    keeps its behaviour without carrying the field.
+    """
+
+    BASE = dedent("""
+        data:
+          date_range:
+            start: 2022-01-01
+            end: 2025-12-31
+          filters:
+            circuit: [tour]
+        features:
+          candidate_point_level_features:
+            - is_break_point
+    """)
+
+    def _cfg(self, extra: str) -> ServeDiscoveryConfig:
+        return ServeDiscoveryConfig.from_yaml(self.BASE + dedent(extra))
+
+    def test_defaults_to_fixed(self):
+        assert self._cfg("metric: iid_match_win_log_loss").chain_shrink == "fixed"
+
+    @pytest.mark.parametrize("value", ["fixed", "proxy", "grid"])
+    def test_the_three_values_are_accepted(self, value):
+        cfg = self._cfg(f"""
+            metric: iid_match_win_log_loss
+            chain_shrink: {value}
+        """)
+        assert cfg.chain_shrink == value
+
+    def test_any_other_value_is_rejected(self):
+        with pytest.raises(ValueError):
+            self._cfg("""
+                metric: iid_match_win_log_loss
+                chain_shrink: bogus
+            """)
+
+    def test_non_fixed_with_a_blind_branch_metric_is_rejected(self):
+        """A branch run never reaches the chain scorer, so a non-fixed value
+        there is a mistake that would otherwise cost an hour of compute before
+        showing itself."""
+        with pytest.raises(ValueError) as exc:
+            self._cfg("""
+                metric: branch_roc_auc
+                serve_component: win_first
+                chain_shrink: proxy
+            """)
+        assert (
+            "chain_shrink='proxy' requires a chain metric (iid_* family); "
+            "got metric='branch_roc_auc', which is a branch metric"
+        ) in str(exc.value)
+
+    def test_non_fixed_with_a_point_metric_names_the_point_grain(self):
+        with pytest.raises(ValueError) as exc:
+            self._cfg("""
+                metric: log_loss
+                chain_shrink: grid
+            """)
+        assert (
+            "got metric='log_loss', which is a point metric"
+        ) in str(exc.value)
+
+    def test_fixed_with_a_blind_branch_metric_is_fine(self):
+        cfg = self._cfg("""
+            metric: branch_roc_auc
+            serve_component: win_first
+        """)
+        assert cfg.chain_shrink == "fixed"
+
+
 class TestChainIncompatiblePointFeatures:
     """Features the chain cannot represent must never reach a chain-metric pool.
 

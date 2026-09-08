@@ -161,6 +161,23 @@ class TestScoreAtShrink:
             model, matches, _SPREAD, 2.0
         )
 
+    def test_the_callback_reports_the_three_phases(self):
+        """The serve FS shows per-phase seconds per candidate-fold on its
+        [diag] line, so the evaluation it shares with the fitter has to report
+        the same three buckets it used to time inline."""
+        model, matches = _synthetic_matches(true_shrink=1.3, n=60)
+        timing: dict[str, float] = {}
+
+        def record(key: str, secs: float) -> None:
+            timing[key] = timing.get(key, 0.0) + secs
+
+        scored = score_at_shrink(model, matches, _SPREAD, 1.2, on_phase=record)
+
+        assert set(timing) == {"predict", "dp", "score"}
+        assert all(isinstance(v, float) and v >= 0.0 for v in timing.values())
+        # Timing changes nothing about the answer.
+        assert scored == score_at_shrink(model, matches, _SPREAD, 1.2)
+
 
 class TestFitGapShrinkGrid:
     def test_grid_recovers_the_constructed_scale(self):

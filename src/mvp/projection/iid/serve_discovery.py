@@ -50,6 +50,11 @@ from mvp.model.discovery.selection import (
     _fs_history_path,
     _fs_progress_path,
 )
+from mvp.projection.iid.calibration import (
+    ChainObjective,
+    fit_gap_shrink,
+    score_at_shrink,
+)
 from mvp.projection.iid.config import ServeDiscoveryConfig
 from mvp.projection.iid.metrics import first_in_metrics
 from mvp.projection.iid.metric_registry import (
@@ -57,7 +62,6 @@ from mvp.projection.iid.metric_registry import (
     is_branch_metric,
     is_minimize,
     needs_match_grain_prep,
-    score_chain,
     worst_score,
 )
 from mvp.projection.iid.score_state_features import (
@@ -69,7 +73,6 @@ from mvp.projection.iid.serve_model import (
     ScoreStateChainServeModel,
     swap_side_partner_specs,
 )
-from mvp.projection.iid.stateful_chain import match_distribution_from_state_fn
 from mvp.projection.iid.two_level_serve_model import (
     FIRST_IN,
     TwoLevelServeModel,
@@ -181,14 +184,15 @@ class _ChainFold:
 
     Everything here depends only on the fold — not on which candidate is being
     scored — so it is materialized in `_prepare_match_data` rather than in
-    `_score_cv_chain`. Same reasoning as the classification FS
+    `_score_cv_chain_detailed`. Same reasoning as the classification FS
     (`fast_selection._compute_fold_margins`): work that varies only by fold, done
     per candidate, repeats identical work thousands of times per round. Here that
     was a `is_in` filter over the full preloaded points frame (~5M rows) plus two
     row-gathers of the wide match frame, once per candidate per fold.
 
-    SHARED ACROSS THREADS. `_score_cv_chain` runs under a ThreadPoolExecutor with
-    `n_parallel_candidates` workers, which previously each built private copies of
+    SHARED ACROSS THREADS. `_score_cv_chain_detailed` runs under a
+    ThreadPoolExecutor with `n_parallel_candidates` workers, which previously
+    each built private copies of
     these frames and now all read these. That is safe because every consumer path
     is non-mutating — `select` / `rename` / `join` / `filter` / `with_columns` all
     return new frames, and each `to_numpy()` on them is either a multi-column
@@ -505,6 +509,12 @@ class ServeDiscoverySelector:
 
             this_round_scores: dict[str, float] = dict(partial_round_scores)
             partial_round_scores = {}
+            # Per-fold shrinks for the candidates this round actually scores.
+            # Empty under `chain_shrink: fixed`, and a round resumed from a
+            # checkpoint carries none for its restored scores — the progress
+            # line is the only reader here, and #110 is what puts these in the
+            # round records and the checkpoint.
+            this_round_shrinks: dict[str, list[float]] = {}
 
             # Seed best from partial scores if any (before creating tqdm so log
             # lines don't interleave with the progress bar).
@@ -538,16 +548,19 @@ class ServeDiscoverySelector:
                            leave=False, ncols=120)
                 if best_cand is not None and hasattr(bar, "set_postfix"):
                     bar.set_postfix(
-                        best=f"{best_new_score:.6f}",
-                        feat=f"{best_cand}[{best_grain}]",
                         refresh=False,
+                        **self._progress_postfix(
+                            best_new_score, best_cand, best_grain,
+                            this_round_shrinks,
+                        ),
                     )
 
                 def _score_one(grain_cand, _ml=selected_match, _pl=selected_point):
                     g, c = grain_cand
                     ml = _ml + [c] if g == "match" else list(_ml)
                     pl_feats = list(_pl) if g == "match" else _pl + [c]
-                    return g, c, self._score_cv_match_grain(ml, pl_feats)
+                    score, shrinks = self._score_cv_match_grain_detailed(ml, pl_feats)
+                    return g, c, score, shrinks
 
                 # BLAS thread cap for a logistic scorer (whose fit ignores n_jobs)
                 # so concurrent worker fits don't oversubscribe; no-op for xgboost,
@@ -567,8 +580,11 @@ class ServeDiscoverySelector:
                 ):
                     futures = {executor.submit(_score_one, gc): gc for gc in to_score}
                     for future in as_completed(futures):
-                        grain, cand, score = future.result()
-                        this_round_scores[cand] = score
+                        grain, cand, score, shrinks = future.result()
+                        self._record_candidate(
+                            cand, score, shrinks,
+                            this_round_scores, this_round_shrinks,
+                        )
                         eval_count += 1
                         bar.update(1)
                         if self._is_better(score, best_new_score):
@@ -577,9 +593,11 @@ class ServeDiscoverySelector:
                             best_grain = grain
                             if hasattr(bar, "set_postfix"):
                                 bar.set_postfix(
-                                    best=f"{best_new_score:.6f}",
-                                    feat=f"{cand}[{grain}]",
                                     refresh=False,
+                                    **self._progress_postfix(
+                                        best_new_score, cand, grain,
+                                        this_round_shrinks,
+                                    ),
                                 )
                         if (
                             self.checkpoint_path
@@ -616,9 +634,11 @@ class ServeDiscoverySelector:
                 bar = tqdm(tagged, desc=desc, leave=False, ncols=120)
                 if best_cand is not None and hasattr(bar, "set_postfix"):
                     bar.set_postfix(
-                        best=f"{best_new_score:.6f}",
-                        feat=f"{best_cand}[{best_grain}]",
                         refresh=False,
+                        **self._progress_postfix(
+                            best_new_score, best_cand, best_grain,
+                            this_round_shrinks,
+                        ),
                     )
                 last_log_t = time.perf_counter()
                 last_log_eval = 0
@@ -626,18 +646,28 @@ class ServeDiscoverySelector:
                     if cand in this_round_scores:
                         score = this_round_scores[cand]
                     else:
-                        if grain == "match":
+                        shrinks: tuple[float, ...] = ()
+                        if chain_mode:
                             # Chain path ignores the extended point-grain df — it
                             # scores off self._match_df which already has every
                             # candidate match feature materialized. Skip the extend.
-                            if chain_mode:
-                                score = self._score_cv(base_df, fs_splits, selected_match + [cand], selected_point)
+                            ml, pl_feats = selected_match, selected_point
+                            if grain == "match":
+                                ml = ml + [cand]
                             else:
-                                extended = self._extend_df_with_match_feature(base_df, slim_matches, engine, cache_key, cand)
-                                score = self._score_cv(extended, fs_splits, selected_match + [cand], selected_point)
+                                pl_feats = pl_feats + [cand]
+                            score, shrinks = self._score_cv_match_grain_detailed(
+                                ml, pl_feats,
+                            )
+                        elif grain == "match":
+                            extended = self._extend_df_with_match_feature(base_df, slim_matches, engine, cache_key, cand)
+                            score = self._score_cv(extended, fs_splits, selected_match + [cand], selected_point)
                         else:
                             score = self._score_cv(base_df, fs_splits, selected_match, selected_point + [cand])
-                        this_round_scores[cand] = score
+                        self._record_candidate(
+                            cand, score, shrinks,
+                            this_round_scores, this_round_shrinks,
+                        )
                         eval_count += 1
                         if (
                             self.checkpoint_path
@@ -674,7 +704,12 @@ class ServeDiscoverySelector:
                         best_cand = cand
                         best_grain = grain
                         if hasattr(bar, "set_postfix"):
-                            bar.set_postfix(best=f"{best_new_score:.6f}", feat=f"{cand}[{grain}]", refresh=False)
+                            bar.set_postfix(
+                                refresh=False,
+                                **self._progress_postfix(
+                                    best_new_score, cand, grain, this_round_shrinks,
+                                ),
+                            )
 
             best_delta = (
                 self._improvement(current_score, best_new_score)
@@ -847,6 +882,56 @@ class ServeDiscoverySelector:
         )
         save_checkpoint(self.checkpoint_path, cp)
 
+    def _chain_objective(self) -> ChainObjective:
+        """What this run's chain evaluations score.
+
+        One derivation site: the scorer and the shrink fitter must measure the
+        same thing, or the shrink is chosen on a metric the score is not taken
+        on.
+        """
+        return ChainObjective(
+            self.config.metric,
+            tuple(self.config.metrics.total_lines),
+            tuple(self.config.metrics.spread_lines),
+        )
+
+    def _record_candidate(
+        self,
+        cand: str,
+        score: float,
+        shrinks: tuple[float, ...],
+        round_scores: dict[str, float],
+        round_shrinks: dict[str, list[float]],
+    ) -> None:
+        """File one scored candidate into the round's maps.
+
+        Both loop paths record through here so the two maps cannot fall out of
+        step — a candidate present in one and missing from the other is how a
+        progress line or a record would report another candidate's shrink.
+        """
+        round_scores[cand] = score
+        if shrinks:
+            round_shrinks[cand] = list(shrinks)
+
+    @staticmethod
+    def _progress_postfix(
+        best_score: float,
+        cand: str,
+        grain: str,
+        round_shrinks: dict[str, list[float]],
+    ) -> dict[str, str]:
+        """The progress bar's postfix for the round's current leader.
+
+        Carries the mean of the leader's per-fold shrinks when one was fitted,
+        so calibration can be watched while a run goes. A `fixed` run fits
+        none and gets the line it has always had.
+        """
+        postfix = {"best": f"{best_score:.6f}", "feat": f"{cand}[{grain}]"}
+        fitted = round_shrinks.get(cand)
+        if fitted:
+            postfix["shrink"] = f"{float(np.mean(fitted)):.2f}"
+        return postfix
+
     def _improvement(self, current: float, new: float) -> float:
         """Positive = better. For lower-is-better metrics, flip sign."""
         if is_minimize(self.config.metric):
@@ -1006,7 +1091,9 @@ class ServeDiscoverySelector:
         point_level: list[str],
     ) -> float:
         if needs_match_grain_prep(self.config.metric):
-            return self._score_cv_match_grain(match_level, point_level)
+            return self._score_cv_match_grain_detailed(
+                match_level, point_level,
+            )[0]
         feature_cols = self._resolve_cols(match_level, point_level)
         fold_scores: list[float] = []
         for train_idx, test_idx in splits:
@@ -1212,8 +1299,9 @@ class ServeDiscoverySelector:
         process's, so calling it on a path that unit tests exercise
         (`test_serve_discovery_swap_side.TestPrepareMatchData`) makes those tests
         fail whenever the dev box happens to sit above the limit — a real failure
-        seen when this was first written. The per-fold guard in `_score_cv_chain`
-        already bounds the loop and reaches the same condition one candidate
+        seen when this was first written. The per-fold guard in
+        `_score_cv_chain_detailed` already bounds the loop and reaches the same
+        condition one candidate
         later; the logged sizes below are what make the build itself auditable.
         """
         assert self._match_df is not None and self._fs_match_splits is not None, (
@@ -1390,7 +1478,10 @@ class ServeDiscoverySelector:
         for component, fitted in self._prefit_fixed[fold_idx].items():
             model.attach_prefit(component, copy.deepcopy(fitted))
 
-    _PHASE_KEYS = ("load", "join", "derive", "matrix", "fit", "predict", "dp", "score")
+    _PHASE_KEYS = (
+        "load", "join", "derive", "matrix", "fit", "shrink", "predict", "dp",
+        "score",
+    )
 
     def _record_phases(self, timing: dict[str, float], n_folds: int) -> None:
         with self._phase_lock:
@@ -1417,9 +1508,9 @@ class ServeDiscoverySelector:
         parts = [f"{k}={means[k]:.2f}" for k in cls._PHASE_KEYS if k in means]
         return "phases(s/cand-fold): " + " ".join(parts)
 
-    def _score_cv_match_grain(
+    def _score_cv_match_grain_detailed(
         self, match_level: list[str], point_level: list[str],
-    ) -> float:
+    ) -> tuple[float, tuple[float, ...]]:
         """Score one candidate set on the match-grain folds.
 
         Two routes share those folds: the composed chain, and a per-branch
@@ -1427,10 +1518,14 @@ class ServeDiscoverySelector:
         point so the serial and the parallel candidate loops cannot dispatch
         differently — routing only one of them is how a branch run would end
         up scored through the chain.
+
+        A branch run reports no shrinks: it never reaches the chain, which is
+        why a non-fixed `chain_shrink` beside a branch metric is refused at
+        config load rather than silently ignored here.
         """
         if is_branch_metric(self.config.metric):
-            return self._score_cv_branch(match_level, point_level)
-        return self._score_cv_chain(match_level, point_level)
+            return self._score_cv_branch(match_level, point_level), ()
+        return self._score_cv_chain_detailed(match_level, point_level)
 
     def _score_cv_branch(
         self, match_level: list[str], point_level: list[str],
@@ -1558,15 +1653,30 @@ class ServeDiscoverySelector:
             )
         return float(vals[key])
 
-    def _score_cv_chain(
+    def _score_cv_chain_detailed(
         self, match_level: list[str], point_level: list[str],
-    ) -> float:
+    ) -> tuple[float, tuple[float, ...]]:
+        """The chain score, plus the gap shrink each fold was scored at.
+
+        The shrinks are in fold order, and empty under `chain_shrink: fixed`:
+        that run fits nothing and scores every fold at the gap scale the
+        configured model already carries, so there is no fitted shrink to
+        report rather than a tuple repeating that value.
+        """
         assert self._chain_folds is not None, (
-            "_score_cv_chain called before _prepare_match_data"
+            "_score_cv_chain_detailed called before _prepare_match_data"
         )
         if not match_level and not point_level:
-            return worst_score(self.config.metric)
+            return worst_score(self.config.metric), ()
+        # Not "fixed" means every candidate is scored at its OWN train-fitted
+        # gap scale, so a candidate competes on the ordering it adds rather
+        # than on whether it happens to widen an under-dispersed gap (#107).
+        # The config validator has already refused this for a metric the chain
+        # never scores.
+        fit_shrink = self.config.chain_shrink != "fixed"
+        objective = self._chain_objective()
         fold_scores: list[float] = []
+        shrinks: list[float] = []
         timing: dict[str, float] = {}
 
         def _acc(key: str, secs: float) -> None:
@@ -1586,7 +1696,36 @@ class ServeDiscoverySelector:
             )
             for k, v in getattr(model, "fit_timings", {}).items():
                 _acc(k, v)
-            # Phase buckets, read literally when gating Phase 2:
+
+            # The model's OWN gap scale, which is what `fixed` scores at: it
+            # comes from `serve_model.gap_shrink`, so a yaml that sets it to
+            # something other than 1.0 must keep being scored at that value.
+            shrink = model.gap_shrink
+            if fit_shrink:
+                # TRAIN fold only, so the test fold never chooses a parameter
+                # it then scores. The fitter touches this candidate's own
+                # model and reads the fold frames, which is what keeps the
+                # parallel candidate loop safe: the folds stay read-only.
+                t = time.perf_counter()
+                fit = fit_gap_shrink(
+                    model, fold.train_df, fold.points,
+                    method=self.config.chain_shrink,
+                    objective=objective,
+                )
+                shrink = fit.shrink
+                shrinks.append(shrink)
+                _acc("shrink", time.perf_counter() - t)
+
+            # One shared definition of "score this model at this shrink"
+            # (calibration.score_at_shrink), which the fitter's grid also
+            # evaluates through — a second copy here is a copy that can drift
+            # from the one the shrink was chosen on. It holds the model at
+            # `shrink` for the evaluation and puts the model's own value back,
+            # so under `fixed` (where `shrink` IS the model's own value) the
+            # run is scored exactly as it was before any of this existed.
+            #
+            # It reports the phase buckets back through `_acc`, read literally
+            # when gating Phase 2:
             #   predict = building the state fns + `predict` — which is
             #             predict_state_fn at the neutral state, so this bucket
             #             holds a SECOND, redundant matrix build per fold
@@ -1596,37 +1735,23 @@ class ServeDiscoverySelector:
             #   dp      = the set/match DP INCLUDING every state-conditioned
             #             predict_proba the DP triggers through p_a_fn/p_b_fn
             #             (cached per state key inside the model).
-            t = time.perf_counter()
-            p_a_fn, p_b_fn = model.predict_state_fn(test_df)
-            p_a, p_b = model.predict(test_df)
-            _acc("predict", time.perf_counter() - t)
-            best_of = test_df["best_of"].to_numpy().astype(np.int64)
-            t = time.perf_counter()
-            dist = match_distribution_from_state_fn(p_a_fn, p_b_fn, p_a, p_b, best_of)
-            _acc("dp", time.perf_counter() - t)
-
-            y_games_a = test_df["_target_games_a"].to_numpy().astype(np.float64)
-            y_games_b = test_df["_target_games_b"].to_numpy().astype(np.float64)
-            t = time.perf_counter()
             fold_scores.append(
-                score_chain(
-                    self.config.metric, dist, y_games_a, y_games_b,
-                    total_lines=list(self.config.metrics.total_lines),
-                    spread_lines=list(self.config.metrics.spread_lines),
-                    y_won=test_df["won"].to_numpy().astype(np.int64),
+                score_at_shrink(
+                    model, test_df, objective, shrink, on_phase=_acc,
                 )
             )
-            _acc("score", time.perf_counter() - t)
             # Drop refs promptly, and bound memory with the same check_memory()
             # guard the rest of the codebase uses (classification FS at
             # fast_selection.py:522, the projection runners per fold). Aborts
             # cleanly if over --memory-limit.
             #
-            # Only the per-candidate objects are dropped. train_df / test_df /
+            # Only the per-candidate model is dropped: the state functions,
+            # the neutral predictions and the distribution are locals of the
+            # evaluation above and are already gone. train_df / test_df /
             # preloaded_* are borrowed from self._chain_folds and live for the
             # whole run by design, so deleting those names would free nothing and
             # would misrepresent what is reclaimable here.
-            del model, p_a_fn, p_b_fn, p_a, p_b, dist
+            del model
             check_memory("serve FS chain scoring")
 
         self._record_phases(timing, len(self._chain_folds))
@@ -1652,7 +1777,7 @@ class ServeDiscoverySelector:
         # that frequency against a ~10s candidate. Same pattern the tuner uses
         # per Optuna trial (tuning.py:989-991).
         gc.collect()
-        return float(np.mean(fold_scores))
+        return float(np.mean(fold_scores)), tuple(shrinks)
 
     def _resolve_cols(self, match_level: list[str], point_level: list[str]) -> list[str]:
         cols: list[str] = []
@@ -1704,9 +1829,10 @@ class ServeDiscoverySelector:
     ) -> list[tuple[list[int], list[int]]]:
         """Subsample train match indices per fold for fast chain-metric candidate scoring.
 
-        Mirrors _maybe_subsample_splits but operates on match-grain splits used by
-        _score_cv_chain. Test indices are kept at full size. Final-form eval always
-        uses the full _match_splits so reported metrics are honest.
+        Mirrors _maybe_subsample_splits but operates on match-grain splits used
+        by _score_cv_chain_detailed. Test indices are kept at full size.
+        Final-form eval always uses the full _match_splits so reported metrics
+        are honest.
         """
         cap = self.config.fs_match_subsample
         if cap is None:

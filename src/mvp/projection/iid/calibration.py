@@ -23,14 +23,20 @@ as a per-player offset inside its state functions, where the dynamic programme
 sees it.
 """
 
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal
 
 import numpy as np
 import polars as pl
 
+from mvp.projection.iid.chain import MatchDistribution
 from mvp.projection.iid.metric_registry import is_minimize, score_chain
-from mvp.projection.iid.stateful_chain import match_distribution_from_state_fn
+from mvp.projection.iid.stateful_chain import (
+    ServeStateFn,
+    match_distribution_from_state_fn,
+)
 
 # 0.6 to 2.0 inclusive, in steps of 0.1.
 DEFAULT_GRID: tuple[float, ...] = tuple(round(0.6 + 0.1 * i, 1) for i in range(15))
@@ -117,6 +123,8 @@ def score_at_shrink(
     matches: pl.DataFrame,
     objective: ChainObjective,
     shrink: float,
+    *,
+    on_phase: Callable[[str, float], None] | None = None,
 ) -> float:
     """Score `matches` through the chain with `model` held at `shrink`.
 
@@ -125,31 +133,88 @@ def score_at_shrink(
     scorer's own call sequence, and it is public so that scorer can call it
     (#109) instead of keeping a second copy that can drift from this one.
 
+    `on_phase`, when given, is called with each phase's wall seconds under the
+    serve FS's own bucket names -- `"predict"` for both predicts, `"dp"` for
+    the match distribution, `"score"` for the metric. That exists because the
+    FS reports seconds per candidate-fold per phase on its `[diag]` line, and
+    a shared evaluation that swallowed the split would have cost it three
+    buckets. With no callback no clock is read at all.
+
     The model's `gap_shrink` is restored before returning, on the exception
     path as well, so a caller's model is never left holding a probe value.
     """
     previous = model.gap_shrink
     try:
         model.gap_shrink = shrink
-        p_a_fn, p_b_fn = model.predict_state_fn(matches)
-        p_a, p_b = model.predict(matches)
-        dist = match_distribution_from_state_fn(
-            p_a_fn, p_b_fn, p_a, p_b,
-            matches["best_of"].to_numpy().astype(np.int64),
+        (p_a_fn, p_b_fn), (p_a, p_b) = _phase(
+            on_phase, "predict", _predict_both, model, matches,
         )
-        return float(
-            score_chain(
-                objective.metric,
-                dist,
-                matches["_target_games_a"].to_numpy().astype(np.float64),
-                matches["_target_games_b"].to_numpy().astype(np.float64),
-                total_lines=list(objective.total_lines),
-                spread_lines=list(objective.spread_lines),
-                y_won=matches["won"].to_numpy().astype(np.int64),
-            )
+        dist = _phase(
+            on_phase, "dp", _distribution, p_a_fn, p_b_fn, p_a, p_b, matches,
+        )
+        return _phase(
+            on_phase, "score", _score_distribution, dist, matches, objective,
         )
     finally:
         model.gap_shrink = previous
+
+
+def _phase[Result](
+    on_phase: Callable[[str, float], None] | None,
+    key: str,
+    run: Callable[..., Result],
+    *args: Any,
+) -> Result:
+    """Run `run(*args)`, reporting its wall seconds as `key` when asked.
+
+    Each phase takes what it needs and hands back what the next one uses, so
+    the call sequence is the same one whether or not a clock is running. A
+    timed copy beside an untimed copy would be two copies free to drift, which
+    is the thing this module exists to prevent.
+    """
+    if on_phase is None:
+        return run(*args)
+    started = time.perf_counter()
+    out = run(*args)
+    on_phase(key, time.perf_counter() - started)
+    return out
+
+
+def _predict_both(
+    model: Any, matches: pl.DataFrame,
+) -> tuple[tuple[ServeStateFn, ServeStateFn], tuple[np.ndarray, np.ndarray]]:
+    """The per-state serve functions, and the neutral-state pair the tiebreak
+    approximation reads."""
+    return model.predict_state_fn(matches), model.predict(matches)
+
+
+def _distribution(
+    p_a_fn: ServeStateFn,
+    p_b_fn: ServeStateFn,
+    p_a: np.ndarray,
+    p_b: np.ndarray,
+    matches: pl.DataFrame,
+) -> MatchDistribution:
+    return match_distribution_from_state_fn(
+        p_a_fn, p_b_fn, p_a, p_b,
+        matches["best_of"].to_numpy().astype(np.int64),
+    )
+
+
+def _score_distribution(
+    dist: MatchDistribution, matches: pl.DataFrame, objective: ChainObjective,
+) -> float:
+    return float(
+        score_chain(
+            objective.metric,
+            dist,
+            matches["_target_games_a"].to_numpy().astype(np.float64),
+            matches["_target_games_b"].to_numpy().astype(np.float64),
+            total_lines=list(objective.total_lines),
+            spread_lines=list(objective.spread_lines),
+            y_won=matches["won"].to_numpy().astype(np.int64),
+        )
+    )
 
 
 def fit_gap_shrink(
