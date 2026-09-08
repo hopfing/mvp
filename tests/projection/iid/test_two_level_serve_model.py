@@ -363,6 +363,7 @@ class TestFirstInPointFeatureBoundary:
         sel.matches_path = None
         sel.cache_dir = None
         sel._engine = None
+        sel._joint_selected = {}  # #113: read by _build_candidate_model; __new__ skips __init__
         return sel._build_candidate_model(["player_age_diff"], point_level, {})
 
     def test_surface_flags_are_accepted(self):
