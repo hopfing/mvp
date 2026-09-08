@@ -55,7 +55,7 @@ from mvp.projection.iid.calibration import (
     fit_gap_shrink,
     score_at_shrink,
 )
-from mvp.projection.iid.config import ServeDiscoveryConfig
+from mvp.projection.iid.config import ServeDiscoveryConfig, substitute_arm_lists
 from mvp.projection.iid.metrics import first_in_metrics
 from mvp.projection.iid.metric_registry import (
     base_metric_of,
@@ -1024,6 +1024,10 @@ class ServeDiscoverySelector:
         the single-level class, which meant a `serve_model.type` of anything
         else was silently ignored and FS selected features for a model the user
         was not going to run.
+
+        The substitution itself is `config.substitute_arm_lists`, shared with
+        the promotion helper so the model FS scores and the model FS promotes
+        cannot drift apart.
         """
         from mvp.projection.iid.serve_model import build_serve_model
 
@@ -1048,10 +1052,6 @@ class ServeDiscoverySelector:
                 "and defaulting them to empty would score the named component "
                 "against a model unlike the one being built"
             )
-        cfg = base.model_copy(deep=True)
-        cfg.type = "two_level"
-        cfg.model_type = self.config.scoring_model.type
-        cfg.params = dict(scoring_params)
         if component == "first_in":
             # first_in is fit at (match, server) grain with no ScoreState, so a
             # STATE-DERIVABLE point feature has nothing to be evaluated at and
@@ -1078,16 +1078,12 @@ class ServeDiscoverySelector:
                     "with no ScoreState. Match-constant point features (the "
                     "surface one-hots) are accepted."
                 )
-            cfg.first_in_match_features = list(match_level)
-            cfg.first_in_point_features = list(point_level)
-        elif component == "win_first":
-            cfg.win_first_match_features = list(match_level)
-            cfg.win_first_point_features = list(point_level)
-        elif component == "win_second":
-            cfg.win_second_match_features = list(match_level)
-            cfg.win_second_point_features = list(point_level)
-        else:  # pragma: no cover - Literal-constrained
-            raise ValueError(f"unknown serve_component: {component!r}")
+        cfg = substitute_arm_lists(
+            base, {component: (list(match_level), list(point_level))}
+        )
+        cfg.type = "two_level"
+        cfg.model_type = self.config.scoring_model.type
+        cfg.params = dict(scoring_params)
         return build_serve_model(cfg, engine=self._engine)
 
     @staticmethod

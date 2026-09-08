@@ -1,5 +1,6 @@
 """Configuration schema for the IID projection runner."""
 
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -206,6 +207,67 @@ class ServeDiscoveryFeaturesConfig(BaseModel):
     max_features: int | None = None  # cap on total selected features (base + FS additions)
 
 
+# The two-level serve model's three arms (the code's "components"), in the
+# order `two_level_serve_model.COMPONENTS` declares them. Restated here rather
+# than imported: this module is the schema layer, and importing the estimator
+# would pull polars and the whole serve_model stack into every config load.
+# `serve_component`'s Literal below is the same list for the same reason.
+SERVE_ARMS: tuple[str, ...] = ("first_in", "win_first", "win_second")
+
+
+class JointArmConfig(BaseModel):
+    """One arm's share of a joint forward selection (spec: #111).
+
+    Empty lists keep their existing single-arm meanings: an empty match list
+    expands to the full feature pool, an empty point list to the default point
+    pool. `max_features` is an OPTIONAL per-arm cap on top of the run-wide
+    `features.max_features`, so an arm that keeps losing rounds cannot be
+    starved and an arm at its cap costs no compute.
+    """
+
+    candidate_match_level_features: list[str] = []
+    candidate_point_level_features: list[str] = []
+    max_features: int | None = None
+
+
+class JointSelectionConfig(BaseModel):
+    """The arms one run searches at once, in tie-break order.
+
+    Insertion order is load-bearing: a round scores every (arm, candidate) pair
+    on one chain metric and resolves an exact tie by arm order, then candidate
+    name, so the ranking is the same on every machine.
+    """
+
+    arms: dict[str, JointArmConfig]
+
+
+def substitute_arm_lists(
+    serve_model: ServeModelConfig,
+    lists: Mapping[str, tuple[list[str], list[str]]],
+) -> ServeModelConfig:
+    """A copy of `serve_model` with the named arms' feature lists replaced.
+
+    The one place an arm's `(match, point)` pair is written into a two-level
+    serve model. Both callers need it and must agree: `_build_candidate_model`
+    at fit time and `_two_level_serve_block` at promotion time. They used to
+    hand-mirror the same three-branch `if/elif`, which is a silent-wrong
+    waiting to happen — FS would select against one model and promote another.
+
+    Arms absent from `lists` keep the values the config gave them, which is how
+    a run's held arms are carried forward.
+    """
+    out = serve_model.model_copy(deep=True)
+    for name, (match_level, point_level) in lists.items():
+        if name not in SERVE_ARMS:
+            raise ValueError(
+                f"unknown serve arm {name!r}; expected one of "
+                "first_in / win_first / win_second"
+            )
+        setattr(out, f"{name}_match_features", list(match_level))
+        setattr(out, f"{name}_point_features", list(point_level))
+    return out
+
+
 class ServeDiscoveryConfig(BaseModel):
     """Forward-selection discovery for the score-state serve model.
 
@@ -239,6 +301,14 @@ class ServeDiscoveryConfig(BaseModel):
     # legitimate and expected; `serve_model` is what carries their latest
     # selected sets between runs.
     serve_component: Literal["first_in", "win_first", "win_second"] | None = None
+    # Joint FS across two or three arms at once (spec: #111), mutually
+    # exclusive with `serve_component` above. Each round scores every
+    # (arm, candidate) pair on ONE chain metric and adds the winner to the arm
+    # it was scored in, so the metric decides which arm a feature belongs to
+    # instead of the order the operator happened to run the components in.
+    # Arms not listed here are held at their `serve_model` lists exactly as a
+    # component run holds its other two.
+    joint_selection: JointSelectionConfig | None = None
     # The two-level estimator this run selects a component of. Ignored when
     # `serve_component` is None. Its non-selected components supply the fixed
     # sets; the selected component's lists are overridden per candidate.
@@ -283,6 +353,13 @@ class ServeDiscoveryConfig(BaseModel):
     # by hand, not an FS run nobody can reproduce from the yaml.
     chain_shrink: Literal["fixed", "proxy", "grid"] = "fixed"
 
+    def joint_arms(self) -> list[str]:
+        """The arms this run searches, in config (tie-break) order. Empty for a
+        component run, which is the one-arm case of the same loop."""
+        if self.joint_selection is None:
+            return []
+        return list(self.joint_selection.arms)
+
     def resolved_min_delta(self) -> float:
         """This config's `min_delta`, or the metric's scale-appropriate default.
 
@@ -295,6 +372,71 @@ class ServeDiscoveryConfig(BaseModel):
         if self.min_delta is not None:
             return self.min_delta
         return default_serve_min_delta(self.metric)
+
+    @model_validator(mode="after")
+    def _validate_joint_selection(self) -> "ServeDiscoveryConfig":
+        """A joint run is one kind of run, scored on one comparable number.
+
+        Runs FIRST among the after-validators so a joint config's errors name
+        `joint_selection` rather than `serve_component`: `_validate_branch_metric`
+        would otherwise greet a joint config carrying a branch metric with
+        "requires serve_component to be set", which is advice that contradicts
+        rule 1. A no-op for every component run.
+
+        The shared `features` lists are refused rather than reinterpreted
+        (rules 6 and 7). Silently applying them would pin a feature into, or
+        offer it to, an arm that never asked for it — and in joint mode there
+        is no single arm they could sensibly mean.
+        """
+        from mvp.projection.iid.metric_registry import chain_metric_names, grain_of
+
+        if self.joint_selection is None:
+            return self
+        if self.serve_component is not None:
+            raise ValueError(
+                "joint_selection and serve_component are mutually exclusive"
+            )
+        if self.serve_model is None or self.serve_model.type != "two_level":
+            raise ValueError(
+                "joint_selection requires serve_model.type == 'two_level'"
+            )
+        for name in self.joint_selection.arms:
+            if name not in SERVE_ARMS:
+                raise ValueError(
+                    f"joint_selection.arms.{name}: not one of "
+                    "first_in / win_first / win_second"
+                )
+        if len(self.joint_selection.arms) < 2:
+            raise ValueError(
+                "joint_selection needs at least two arms; use serve_component "
+                "for a single arm"
+            )
+        grain = grain_of(self.metric)
+        if grain != "chain":
+            raise ValueError(
+                f"metric {self.metric!r} is {grain}-grain; joint_selection "
+                f"scores every arm on one chain metric (one of: "
+                f"{', '.join(sorted(chain_metric_names()))})"
+            )
+        if (
+            self.features.base_match_level_features
+            or self.features.base_point_level_features
+        ):
+            raise ValueError(
+                "joint_selection: features.base_match_level_features / "
+                "base_point_level_features must be empty; pin per arm via "
+                "serve_model.<arm>_match_features / <arm>_point_features"
+            )
+        if (
+            self.features.candidate_match_level_features
+            or self.features.candidate_point_level_features
+        ):
+            raise ValueError(
+                "joint_selection: features.candidate_match_level_features / "
+                "candidate_point_level_features must be empty; list candidates "
+                "per arm under joint_selection.arms.<arm>"
+            )
+        return self
 
     @model_validator(mode="after")
     def _validate_branch_metric(self) -> "ServeDiscoveryConfig":
@@ -389,8 +531,14 @@ class ServeDiscoveryConfig(BaseModel):
         selected_point_level: list[str],
         model_type: str = "logistic",
         model_params: dict[str, Any] | None = None,
+        selected_by_arm: Mapping[str, tuple[list[str], list[str]]] | None = None,
     ) -> dict[str, Any]:
         """Emit a runnable IIDProjectionConfig-compatible dict from FS output.
+
+        A joint run passes `selected_by_arm` and every searched arm's lists
+        land at once; `selected_match_level` / `selected_point_level` are then
+        the union used for the engine's include list. A component run passes
+        neither and is unaffected.
 
         `features.include` gets the selected match-level specs plus ONLY the
         `opp_` columns the swap (B-serves) perspective actually reads — match-
@@ -445,7 +593,12 @@ class ServeDiscoveryConfig(BaseModel):
                 include_specs.append(partner)
                 seen.add(partner)
 
-        if self.serve_component is None:
+        joint_arms = self.joint_arms()
+        if (
+            self.serve_component is None
+            and not joint_arms
+            and selected_by_arm is None
+        ):
             serve_block: dict[str, Any] = {
                 "type": "score_state",
                 "model_type": model_type,
@@ -457,6 +610,7 @@ class ServeDiscoveryConfig(BaseModel):
             serve_block = self._two_level_serve_block(
                 selected_match_level, selected_point_level,
                 model_type, model_params,
+                selected_by_arm=selected_by_arm,
             )
             # The engine has to compute EVERY component's match features, not
             # just the selected component's — the non-selected components are
@@ -501,10 +655,14 @@ class ServeDiscoveryConfig(BaseModel):
         )
         # Provenance: the two non-selected components come from `serve_model`
         # with none of their own, so at minimum say what selected THIS one.
-        selected_by = (
-            f"{self.serve_component} selected on {self.metric}"
-            if self.serve_component else f"selected on {self.metric}"
-        )
+        if joint_arms:
+            selected_by = (
+                f"joint({','.join(joint_arms)}) selected on {self.metric}"
+            )
+        elif self.serve_component:
+            selected_by = f"{self.serve_component} selected on {self.metric}"
+        else:
+            selected_by = f"selected on {self.metric}"
         # Carry the FS objective forward as the tune objective -- but only when
         # it is composed. The runner emits composed metrics only, so a
         # point/branch name here would fail a trial in, or silently tune
@@ -535,40 +693,36 @@ class ServeDiscoveryConfig(BaseModel):
         selected_point_level: list[str],
         model_type: str,
         model_params: dict[str, Any] | None,
+        selected_by_arm: Mapping[str, tuple[list[str], list[str]]] | None = None,
     ) -> dict[str, Any]:
-        """Promoted `serve_model` for a per-component FS run.
+        """Promoted `serve_model` for a two-level FS run.
 
-        Takes the run's `serve_model` as the base — which holds the other two
-        components' current sets — and substitutes the selected lists into the
-        component this run was selecting for. Emitting `type: score_state` here
-        (the single-level default) would silently discard the component
-        structure and the other two components entirely, producing a config that
-        runs but is not the model FS just scored.
+        Takes the run's `serve_model` as the base — which holds the held arms'
+        current sets — and substitutes the selected lists into the arm(s) this
+        run was selecting for: every entry of `selected_by_arm` for a joint
+        run, otherwise the single `serve_component`. Emitting
+        `type: score_state` here (the single-level default) would silently
+        discard the arm structure and the held arms entirely, producing a
+        config that runs but is not the model FS just scored.
 
-        Substitution mirrors `ServeDiscoverySelector._build_candidate_model`
-        exactly; the two must agree or FS would select against one model and
-        promote another.
+        Substitution goes through `substitute_arm_lists`, the same helper
+        `ServeDiscoverySelector._build_candidate_model` uses at fit time. The
+        two must agree or FS would select against one model and promote
+        another, which is why it is one function and not two.
         """
         if self.serve_model is None:
             raise ValueError(
                 "serve_component is set but serve_model is missing — there is "
                 "nothing to carry the non-selected components forward"
             )
-        block = self.serve_model.model_dump()
+        if selected_by_arm is None:
+            selected_by_arm = {
+                self.serve_component: (selected_match_level, selected_point_level)
+            }
+        block = substitute_arm_lists(self.serve_model, selected_by_arm).model_dump()
         block["type"] = "two_level"
         block["model_type"] = model_type
         block["params"] = model_params or {}
-        if self.serve_component == "first_in":
-            block["first_in_match_features"] = list(selected_match_level)
-            block["first_in_point_features"] = list(selected_point_level)
-        elif self.serve_component == "win_first":
-            block["win_first_match_features"] = list(selected_match_level)
-            block["win_first_point_features"] = list(selected_point_level)
-        elif self.serve_component == "win_second":
-            block["win_second_match_features"] = list(selected_match_level)
-            block["win_second_point_features"] = list(selected_point_level)
-        else:  # pragma: no cover - Literal-constrained
-            raise ValueError(f"unknown serve_component: {self.serve_component!r}")
         return block
 
 
