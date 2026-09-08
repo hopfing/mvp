@@ -15,6 +15,7 @@ import logging
 import math
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -749,6 +750,21 @@ class ServeDiscoverySelector:
                                 ),
                             )
 
+            # The round is over: re-pick the winner from the FULL ranking. The
+            # `best_*` the two loops above streamed is set by whichever
+            # candidate arrived first with a winning score, which under
+            # parallel scoring is nondeterministic — it feeds the progress bar
+            # and nothing else. Everything downstream (halt reason, records,
+            # what gets selected) reads the values decided here.
+            best_cand, best_new_score = self._pick_round_winner(
+                this_round_scores, current_score, order=lambda name: (name,),
+            )
+            best_grain = (
+                None if best_cand is None
+                else "match" if best_cand in candidate_match
+                else "point"
+            )
+
             best_delta = (
                 self._improvement(current_score, best_new_score)
                 if best_cand is not None
@@ -1018,6 +1034,40 @@ class ServeDiscoverySelector:
         if is_minimize(self.config.metric):
             return a < b
         return a > b
+
+    def _pick_round_winner(
+        self,
+        scores: dict[Any, float],
+        current_score: float,
+        order: Callable[[Any], tuple],
+    ) -> tuple[Any, float]:
+        """The round's winner, taken from the full ranking rather than from
+        whichever candidate arrived first carrying a winning score.
+
+        Ranking, not arrival, is what makes the choice reproducible: under
+        `n_parallel_candidates > 1` the order candidates complete in is
+        whatever the thread pool produces, so two candidates that tie EXACTLY
+        would otherwise resolve one way on one run and the other way on the
+        next — and a resumed round, which replays its restored scores in
+        checkpoint order, would differ again. Sorting the whole map by score
+        under the metric's direction and then by `order(key)` gives one answer
+        on every run and machine. `order` is the caller's tie-break key, with
+        the candidate name last in the tuple so the fallback is always total.
+
+        Non-finite scores are dropped before the sort — `-inf` would otherwise
+        rank ahead of every real score under a minimised metric. Returns
+        `(None, current_score)` when nothing is left or when nothing strictly
+        beats the incumbent, which is the signal `run()` reads as "halt".
+        """
+        finite = [(k, v) for k, v in scores.items() if math.isfinite(v)]
+        if not finite:
+            return None, current_score
+        sign = 1.0 if is_minimize(self.config.metric) else -1.0
+        ranked = sorted(finite, key=lambda kv: (sign * kv[1], order(kv[0])))
+        key, score = ranked[0]
+        if self._is_better(score, current_score):
+            return key, score
+        return None, current_score
 
     def _build_candidate_model(
         self,
