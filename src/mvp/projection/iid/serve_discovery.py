@@ -400,8 +400,22 @@ class ServeDiscoverySelector:
 
         rounds: list[FSRoundResult] = []
         partial_round_scores: dict[str, float] = {}
+        partial_round_shrinks: dict[str, list[float]] = {}
 
         if cp is not None:
+            # Before anything is restored and long before anything is scored:
+            # a round half-scored under one scorer and half under another is
+            # not a ranking, it is two rankings interleaved, and nothing
+            # downstream could tell. A checkpoint predating the field was
+            # written by the only scorer there was (#110).
+            written_under = cp.chain_shrink or "fixed"
+            if written_under != self.config.chain_shrink:
+                raise RuntimeError(
+                    f"checkpoint {self.checkpoint_path} was written under "
+                    f"chain_shrink={written_under!r}; the config says "
+                    f"{self.config.chain_shrink!r}. Restore the field or "
+                    f"delete the checkpoint to resume."
+                )
             # Replay completed rounds — extend base_df with any restored match features.
             for entry in cp.completed_rounds:
                 feat = entry["feature"]
@@ -441,6 +455,14 @@ class ServeDiscoverySelector:
             partial_round_scores = live_partial_scores(
                 cp.current_round_scores, candidate_match, candidate_point
             )
+            # Keyed off the surviving SCORES, not off the saved map: a
+            # candidate the pool no longer offers has had its score dropped,
+            # and a shrink without a score is a shrink no record can place.
+            partial_round_shrinks = {
+                c: cp.current_round_shrinks[c]
+                for c in partial_round_scores
+                if c in cp.current_round_shrinks
+            }
             dropped = len(cp.current_round_scores) - len(partial_round_scores)
             logger.info(
                 "Resumed from checkpoint: %d completed rounds, current score=%.6f, partial scores for %d candidates",
@@ -509,12 +531,13 @@ class ServeDiscoverySelector:
 
             this_round_scores: dict[str, float] = dict(partial_round_scores)
             partial_round_scores = {}
-            # Per-fold shrinks for the candidates this round actually scores.
-            # Empty under `chain_shrink: fixed`, and a round resumed from a
-            # checkpoint carries none for its restored scores — the progress
-            # line is the only reader here, and #110 is what puts these in the
-            # round records and the checkpoint.
-            this_round_shrinks: dict[str, list[float]] = {}
+            # Per-fold shrinks for the candidates this round has scored, seeded
+            # from the checkpoint exactly as the scores are: a resumed round
+            # would otherwise write a record whose shrink map covers only the
+            # candidates scored after the interruption, while its ranking
+            # covers all of them. Empty under `chain_shrink: fixed`.
+            this_round_shrinks: dict[str, list[float]] = dict(partial_round_shrinks)
+            partial_round_shrinks = {}
 
             # Seed best from partial scores if any (before creating tqdm so log
             # lines don't interleave with the progress bar).
@@ -628,6 +651,7 @@ class ServeDiscoverySelector:
                                 total_candidates=total_cands,
                                 current_round_scores=this_round_scores,
                                 best_metric=current_score,
+                                current_round_shrinks=this_round_shrinks,
                             )
                 bar.close()
             else:
@@ -698,6 +722,7 @@ class ServeDiscoverySelector:
                                 total_candidates=total_cands,
                                 current_round_scores=this_round_scores,
                                 best_metric=current_score,
+                                current_round_shrinks=this_round_shrinks,
                             )
                     if self._is_better(score, best_new_score):
                         best_new_score = score
@@ -728,6 +753,7 @@ class ServeDiscoverySelector:
                 _append_fs_history(history_path, self._stop_record(
                     round_idx, reason, current_score, best_cand, best_new_score,
                     this_round_scores, is_minimize(self.config.metric),
+                    shrinks=this_round_shrinks if self._fits_shrink else None,
                 ))
                 break
 
@@ -794,7 +820,7 @@ class ServeDiscoverySelector:
                 ),
                 encoding="utf-8",
             )
-            _append_fs_history(history_path, {
+            add_record: dict[str, Any] = {
                 "round": round_idx,
                 "action": "add",
                 "feature": best_cand,
@@ -803,7 +829,13 @@ class ServeDiscoverySelector:
                 "delta": best_delta,
                 "n_non_finite": len(this_round_scores) - len(ranked_round),
                 "ranking": ranked_round,
-            })
+            }
+            # Beside the ranking, never inside it: the `[feature, score]` pairs
+            # are what every existing reader of the history file destructures.
+            # A `fixed` run fits no shrink and writes the record unchanged.
+            if self._fits_shrink:
+                add_record["shrinks"] = this_round_shrinks
+            _append_fs_history(history_path, add_record)
 
             if not first_round_logged and round_idx == 1:
                 first_round_logged = True
@@ -833,6 +865,9 @@ class ServeDiscoverySelector:
                     current_round=round_idx,
                     total_candidates=0,
                     current_round_scores={},
+                    # No shrink map either: the round is committed, so there is
+                    # nothing partial to restore, and a map left here would
+                    # describe a round the next resume never runs.
                     best_metric=current_score,
                 )
 
@@ -865,6 +900,7 @@ class ServeDiscoverySelector:
         total_candidates: int,
         current_round_scores: dict[str, float],
         best_metric: float,
+        current_round_shrinks: dict[str, list[float]] | None = None,
     ) -> None:
         assert self.checkpoint_path is not None
         direction = "minimize" if is_minimize(self.config.metric) else "maximize"
@@ -879,8 +915,24 @@ class ServeDiscoverySelector:
             best_metric=best_metric,
             direction=direction,
             max_features=self.config.features.max_features or 0,
+            chain_shrink=self.config.chain_shrink,
+            current_round_shrinks={
+                k: list(v) for k, v in (current_round_shrinks or {}).items()
+            },
         )
         save_checkpoint(self.checkpoint_path, cp)
+
+    @property
+    def _fits_shrink(self) -> bool:
+        """Whether this run fits a gap shrink per candidate rather than
+        scoring at the model's configured one.
+
+        One derivation site for the same reason `_chain_objective` has one: the
+        scorer, the add record and the stop record must agree about what kind
+        of run this is, or a record reports a shrink the score was not taken at
+        (or omits one it was).
+        """
+        return self.config.chain_shrink != "fixed"
 
     def _chain_objective(self) -> ChainObjective:
         """What this run's chain evaluations score.
@@ -1064,15 +1116,22 @@ class ServeDiscoverySelector:
         best_score: float,
         this_round_scores: dict[str, float],
         minimize: bool,
+        shrinks: dict[str, list[float]] | None = None,
     ) -> dict[str, Any]:
         """History record for a halted round: the classification path's `stop`
-        shape (selection.py) plus the finite-ranked candidates of the round."""
+        shape (selection.py) plus the finite-ranked candidates of the round.
+
+        `shrinks` is the round's candidate-to-per-fold-shrink map, and it goes
+        BESIDE the ranking, never inside it: the ranking's `[feature, score]`
+        pairs are what every existing reader of the history file destructures.
+        A `fixed` run passes None and gets the record it has always written.
+        """
         ranked = sorted(
             ((f, m) for f, m in this_round_scores.items() if math.isfinite(m)),
             key=lambda x: x[1],
             reverse=not minimize,
         )
-        return {
+        rec: dict[str, Any] = {
             "round": round_idx,
             "action": "stop",
             "reason": reason,
@@ -1082,6 +1141,9 @@ class ServeDiscoverySelector:
             "n_non_finite": len(this_round_scores) - len(ranked),
             "ranking": ranked,
         }
+        if shrinks is not None:
+            rec["shrinks"] = shrinks
+        return rec
 
     def _score_cv(
         self,
@@ -1668,12 +1730,11 @@ class ServeDiscoverySelector:
         )
         if not match_level and not point_level:
             return worst_score(self.config.metric), ()
-        # Not "fixed" means every candidate is scored at its OWN train-fitted
-        # gap scale, so a candidate competes on the ordering it adds rather
-        # than on whether it happens to widen an under-dispersed gap (#107).
-        # The config validator has already refused this for a metric the chain
-        # never scores.
-        fit_shrink = self.config.chain_shrink != "fixed"
+        # A run that fits means every candidate is scored at its OWN
+        # train-fitted gap scale, so a candidate competes on the ordering it
+        # adds rather than on whether it happens to widen an under-dispersed
+        # gap (#107). The config validator has already refused this for a
+        # metric the chain never scores.
         objective = self._chain_objective()
         fold_scores: list[float] = []
         shrinks: list[float] = []
@@ -1701,7 +1762,7 @@ class ServeDiscoverySelector:
             # comes from `serve_model.gap_shrink`, so a yaml that sets it to
             # something other than 1.0 must keep being scored at that value.
             shrink = model.gap_shrink
-            if fit_shrink:
+            if self._fits_shrink:
                 # TRAIN fold only, so the test fold never chooses a parameter
                 # it then scores. The fitter touches this candidate's own
                 # model and reads the fold frames, which is what keeps the

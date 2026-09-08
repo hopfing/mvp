@@ -188,3 +188,63 @@ class TestFormatCheckpointInfo:
         msg = format_checkpoint_info(cp)
         assert "round 2/10" in msg
         assert "0/100" in msg
+
+
+class TestChainShrinkFields:
+    """A serve FS run resumed under a different scorer would mix partial round
+    scores from two of them, so the checkpoint records which scorer wrote it
+    and the shrinks the interrupted round had already fitted (#110)."""
+
+    @staticmethod
+    def _cp(**kwargs) -> SelectionCheckpoint:
+        base = dict(
+            run_name="win_second_chain",
+            started_at=datetime(2026, 9, 8, 9, 0),
+            updated_at=datetime(2026, 9, 8, 11, 30),
+            completed_rounds=[{"feature": "melo", "grain": "match", "score": 0.61}],
+            current_round=2,
+            total_candidates=40,
+            current_round_scores={"glicko_rd_diff": 0.605},
+            best_metric=0.61,
+            direction="minimize",
+            max_features=8,
+        )
+        base.update(kwargs)
+        return SelectionCheckpoint(**base)
+
+    def test_the_scorer_and_the_round_shrinks_round_trip(self, tmp_path):
+        path = tmp_path / "checkpoint.json"
+        save_checkpoint(path, self._cp(
+            chain_shrink="proxy",
+            current_round_shrinks={"glicko_rd_diff": [1.32, 1.28, 1.41]},
+        ))
+
+        loaded = load_checkpoint(path)
+
+        assert loaded.chain_shrink == "proxy"
+        assert loaded.current_round_shrinks == {
+            "glicko_rd_diff": [1.32, 1.28, 1.41]
+        }
+
+    def test_a_checkpoint_written_before_the_fields_existed_defaults(self, tmp_path):
+        """The classification FS shares this dataclass and never sets either
+        field, and a chain run interrupted before #110 landed has neither key
+        on disk. Both must load, and a missing scorer reads as unknown rather
+        than as any particular one."""
+        path = tmp_path / "checkpoint.json"
+        save_checkpoint(path, self._cp())
+        raw = json.loads(path.read_text())
+        del raw["chain_shrink"]
+        del raw["current_round_shrinks"]
+        path.write_text(json.dumps(raw))
+
+        loaded = load_checkpoint(path)
+
+        assert loaded.chain_shrink is None
+        assert loaded.current_round_shrinks == {}
+        assert loaded.current_round_scores == {"glicko_rd_diff": 0.605}
+
+    def test_a_run_that_sets_neither_defaults_both(self):
+        cp = self._cp()
+        assert cp.chain_shrink is None
+        assert cp.current_round_shrinks == {}

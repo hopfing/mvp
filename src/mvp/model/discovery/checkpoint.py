@@ -30,6 +30,27 @@ class SelectionCheckpoint:
     # resume so later rounds condition on the deployed columns, not the
     # block. Defaulted for back-compat.
     refined_families: dict[str, list[str]] = field(default_factory=dict)
+    # Serve chain FS: the scorer this checkpoint was written under
+    # (`fixed` / `proxy` / `grid`). A resume under a different one would mix
+    # partial round scores taken at two different gap scales, so the selector
+    # refuses it. None means "written before this field existed", which is a
+    # fixed-scorer run — and is also what the classification FS leaves, since
+    # it has no chain and never sets this.
+    #
+    # A plain `str | None`, not the `Literal["fixed", "proxy", "grid"]` the
+    # serve config declares. Two reasons. This dataclass is shared with the
+    # classification FS and has no business importing a projection config's
+    # vocabulary. And it is reconstructed straight from parsed JSON
+    # (`SelectionCheckpoint(**data)`) with no validation, so a value written by
+    # a newer version of the field would load either way — as a `str` it
+    # survives intact for the selector to name back to the operator, which is
+    # the whole point of recording it.
+    chain_shrink: str | None = None
+    # Per-fold gap shrinks the interrupted round had already fitted
+    # ({candidate: [shrink per fold]}), so a resumed round carries the shrinks
+    # of the candidates it already scored. Empty under a fixed scorer.
+    # Defaulted for back-compat, same as the three fields above.
+    current_round_shrinks: dict[str, list[float]] = field(default_factory=dict)
 
 
 def save_checkpoint(path: Path, cp: SelectionCheckpoint) -> None:

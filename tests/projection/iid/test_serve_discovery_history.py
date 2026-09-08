@@ -74,3 +74,40 @@ class TestHaltReason:
             "b", 0.00005, 1e-4, 0.563163, {"a": 0.5620, "b": 0.563213},
         )
         assert reason == "improvement 0.000050 < min_delta 0.000100"
+
+
+class TestStopRecordShrinks:
+    """A non-fixed run records the shrink every candidate was scored at, beside
+    the ranking rather than inside it — so a reader that only knows about the
+    `[feature, score]` pairs keeps working (#110)."""
+
+    def test_the_map_sits_beside_an_unchanged_ranking(self):
+        rec = ServeDiscoverySelector._stop_record(
+            5, "no candidate improved on the current score 0.600000", 0.6000,
+            None, math.inf, {"a": 0.6010, "b": 0.6005, "c": math.nan},
+            minimize=True,
+            shrinks={"a": [1.2, 1.3], "b": [0.9, 1.0], "c": [1.1, 1.1]},
+        )
+        assert rec["shrinks"] == {
+            "a": [1.2, 1.3], "b": [0.9, 1.0], "c": [1.1, 1.1],
+        }
+        assert list(rec["ranking"]) == [("b", 0.6005), ("a", 0.6010)]
+        assert _CLASSIFICATION_STOP_KEYS <= set(rec)
+
+    def test_an_empty_map_is_still_recorded(self):
+        """A resumed round that re-scored nothing fits no shrink, and the run
+        is still a non-fixed one — the key says so."""
+        rec = ServeDiscoverySelector._stop_record(
+            2, "reason", 0.6, "b", 0.5, {"b": 0.5}, minimize=True, shrinks={},
+        )
+        assert rec["shrinks"] == {}
+
+    def test_a_fixed_run_passes_none_and_the_record_is_unchanged(self):
+        args = (2, "reason", 0.6, "b", 0.5, {"b": 0.5, "c": 0.7})
+        with_none = ServeDiscoverySelector._stop_record(
+            *args, minimize=True, shrinks=None,
+        )
+        assert "shrinks" not in with_none
+        assert with_none == ServeDiscoverySelector._stop_record(
+            *args, minimize=True,
+        )
