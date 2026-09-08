@@ -16,12 +16,9 @@ not scored this round" is asserted.
 """
 
 import json
-from datetime import datetime
 
-import pytest
 import yaml
 
-from mvp.model.discovery.checkpoint import SelectionCheckpoint, save_checkpoint
 from mvp.model.discovery.selection import _fs_history_path, _fs_progress_path
 from mvp.projection.iid.serve_discovery import ServeDiscoverySelector
 from mvp.projection.iid.two_level_serve_model import (
@@ -398,21 +395,3 @@ class TestRecords:
         # ... and a searched arm's PINNED features are its base lines.
         assert f"   base. {MIRROR_SPEC} [match]" in text.split("first_in:")[1]
 
-
-class TestResumeNotYet:
-    """Deleted by #116, which is where joint resume gets built."""
-
-    def test_a_joint_config_with_a_checkpoint_refuses_to_resume(
-        self, tmp_path, monkeypatch,
-    ):
-        sel = _selector(tmp_path, monkeypatch, _joint_config(tmp_path, max_features=1))
-        _constant_scorer(sel)
-        now = datetime.now()
-        save_checkpoint(sel.checkpoint_path, SelectionCheckpoint(
-            run_name="joint", started_at=now, updated_at=now,
-            completed_rounds=[], current_round=1, total_candidates=0,
-            current_round_scores={}, best_metric=0.6, direction="minimize",
-            max_features=1, chain_shrink="fixed",
-        ))
-        with pytest.raises(NotImplementedError, match="joint resume: #116"):
-            sel.run()

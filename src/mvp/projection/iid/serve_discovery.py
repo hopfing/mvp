@@ -415,13 +415,40 @@ class ServeDiscoverySelector:
 
         # Attempt to restore from checkpoint
         cp = self._load_checkpoint() if self.checkpoint_path else None
-        if joint and cp is not None:
-            # A joint checkpoint would have to say which arm each completed
-            # round went to and which arm each partial score belongs to, and
-            # replaying it wrong is silent: the run would carry on from a
-            # selection that never happened. Refusing is the honest answer
-            # until #116 writes and reads that shape.
-            raise NotImplementedError("joint resume: #116")
+        if cp is not None:
+            # A checkpoint carries the SHAPE of the run that wrote it: a joint
+            # run tags every completed round with the arm that took it and
+            # keys every partial score `arm|grain|name`; a component run does
+            # neither, because it has one arm and never had to say so.
+            #
+            # Reading one as the other is silent, which is why it is refused
+            # rather than guessed at. A component checkpoint replayed by a
+            # joint run would put every round on whichever arm happened to be
+            # first and carry on from a selection that never happened; a joint
+            # checkpoint replayed by a component run would take `arm|grain|name`
+            # for a candidate name no pool offers, and drop the whole
+            # interrupted round on the floor.
+            #
+            # An EMPTY checkpoint answers to both and is accepted either way:
+            # a run interrupted before its first pair finished has nothing to
+            # contradict, and refusing it would make `--fresh` mandatory after
+            # an interruption that cost nothing.
+            joint_shaped = all(
+                "arm" in entry for entry in cp.completed_rounds
+            ) and all("|" in key for key in cp.current_round_scores)
+            component_shaped = not any(
+                "arm" in entry for entry in cp.completed_rounds
+            ) and not any("|" in key for key in cp.current_round_scores)
+            if joint and not joint_shaped:
+                raise ValueError(
+                    f"checkpoint {self.checkpoint_path} is from a component "
+                    f"run; use --fresh"
+                )
+            if not joint and not component_shaped:
+                raise ValueError(
+                    f"checkpoint {self.checkpoint_path} is from a joint run; "
+                    f"use --fresh"
+                )
 
         # Append-only per-round ranking log, sibling of the checkpoint. Unlike
         # the checkpoint it survives run completion, so the full per-round
@@ -455,13 +482,26 @@ class ServeDiscoverySelector:
                     f"delete the checkpoint to resume."
                 )
             # Replay completed rounds — extend base_df with any restored match
-            # features. Single-state by construction: a joint run was refused
-            # a resume above, so `states` here is the one component run's.
-            st = states[0]
+            # features. A joint entry names the arm that took its round and
+            # replays into THAT arm's state: the gate above has established
+            # that every entry names one, and a round replayed into the wrong
+            # arm is a model this run never scored. A component run has one
+            # state and every round replays into it, as it always has.
+            by_arm = {st.arm: st for st in states}
             for entry in cp.completed_rounds:
                 feat = entry["feature"]
                 grain = entry["grain"]
                 score = entry["score"]
+                if joint:
+                    st = by_arm.get(entry["arm"])
+                    if st is None:
+                        raise ValueError(
+                            f"checkpoint {self.checkpoint_path} has a completed round "
+                            f"for arm {entry['arm']!r}, which joint_selection no longer "
+                            "lists; use --fresh"
+                        )
+                else:
+                    st = states[0]
                 if grain == "match":
                     st.selected_match.append(feat)
                     if feat in st.candidate_match:
@@ -472,6 +512,7 @@ class ServeDiscoverySelector:
                     st.selected_point.append(feat)
                     if feat in st.candidate_point:
                         st.candidate_point.remove(feat)
+                union_match, union_point = self._union_selected(states)
                 rounds.append(
                     FSRoundResult(
                         # +1 because the fresh path (below) puts a
@@ -487,16 +528,40 @@ class ServeDiscoverySelector:
                         grain=grain,
                         score=score,
                         delta=0.0,  # not retained in checkpoint
-                        selected_match_level=list(st.selected_match),
-                        selected_point_level=list(st.selected_point),
+                        selected_match_level=union_match,
+                        selected_point_level=union_point,
                         arm=st.arm if joint else None,
                     )
                 )
             current_score = cp.best_metric
             round_idx = cp.current_round
-            partial_round_scores = live_partial_scores(
-                cp.current_round_scores, st.candidate_match, st.candidate_point
-            )
+            if joint:
+                # The same trim tolerance `live_partial_scores` gives a
+                # component run, applied to the keys a joint round writes: an
+                # `arm|grain|name` score survives when the arm it names still
+                # offers that candidate in that grain. Anything that resolves
+                # to nothing is dropped — an arm since taken out of the config,
+                # a candidate trimmed out of its pool, or one a replayed round
+                # above has just selected — for the reason
+                # `live_partial_scores` gives: it is not eligible to win the
+                # round, and left in it kills the run at the point of selection.
+                partial_round_scores = {}
+                for key, value in cp.current_round_scores.items():
+                    try:
+                        cp_st, cp_grain, cp_cand = self._parse_score_key(key, states)
+                    except (KeyError, ValueError):
+                        continue
+                    pool = (
+                        cp_st.candidate_match if cp_grain == "match"
+                        else cp_st.candidate_point
+                    )
+                    if cp_cand in pool:
+                        partial_round_scores[key] = value
+            else:
+                partial_round_scores = live_partial_scores(
+                    cp.current_round_scores,
+                    states[0].candidate_match, states[0].candidate_point,
+                )
             # Keyed off the surviving SCORES, not off the saved map: a
             # candidate the pool no longer offers has had its score dropped,
             # and a shrink without a score is a shrink no record can place.
