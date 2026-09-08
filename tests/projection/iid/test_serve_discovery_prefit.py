@@ -221,15 +221,18 @@ class TestPrefitEquivalence:
     def test_prefit_cache_holds_the_fixed_components(self, selector, shape):
         component = shape[0]
         assert selector._prefit_fixed is not None
-        assert set(selector._prefit_fixed) == set(range(len(selector._chain_folds)))
-        for fold_cache in selector._prefit_fixed.values():
+        # keyed ARM, then fold: a component run has exactly one arm key
+        assert set(selector._prefit_fixed) == {component}
+        by_fold = selector._prefit_fixed[component]
+        assert set(by_fold) == set(range(len(selector._chain_folds)))
+        for fold_cache in by_fold.values():
             assert set(fold_cache) == set(COMPONENTS) - {component}
             for fitted in fold_cache.values():
                 assert "fit" in fitted.fit_timings  # it was fitted
 
     def test_prefit_class_mix_matches_the_shape(self, selector, shape):
         component, fi, w1, w2 = shape
-        cache = selector._prefit_fixed[0]
+        cache = selector._prefit_fixed[component][0]
         expect = {
             FIRST_IN: (FirstServeInModel, bool(fi)),
             WIN_FIRST: (ScoreStateChainServeModel if w1 else _ConstantBranch, bool(w1)),
@@ -266,7 +269,7 @@ class TestPrefitEquivalence:
         selector._attach_prefit(model, 0)
         assert model._prefit == set(COMPONENTS) - {component}
         # private copies, not the cached objects
-        for name, cached in selector._prefit_fixed[0].items():
+        for name, cached in selector._prefit_fixed[component][0].items():
             assert model.components()[name] is not cached
         fold = selector._chain_folds[0]
         model.fit(fold.train_df, preloaded_match_features=fold.feats,
@@ -320,7 +323,7 @@ class TestScoringParams:
             selector.config.scoring_model.params.update(saved)
 
     def test_prefit_used_the_candidate_params(self, selector):
-        fitted = selector._prefit_fixed[0][WIN_FIRST]
+        fitted = selector._prefit_fixed[WIN_SECOND][0][WIN_FIRST]
         assert fitted.params == selector._scoring_params()
 
 
@@ -340,7 +343,7 @@ class TestThreadIsolation:
 @pytest.mark.parametrize("shape", ["win_second"], indirect=True)
 class TestClosureLocals:
     def test_predict_state_fn_leaves_nothing_on_the_instance(self, selector):
-        fitted = selector._prefit_fixed[0][WIN_FIRST]
+        fitted = selector._prefit_fixed[WIN_SECOND][0][WIN_FIRST]
         fold = selector._chain_folds[0]
         p_a_fn, p_b_fn = fitted.predict_state_fn(fold.test_df)
         for attr in ("_X_match_A", "_X_match_B", "_point_constants"):
@@ -351,7 +354,7 @@ class TestClosureLocals:
     def test_shared_fitted_model_survives_two_frames(self, selector):
         """Two predict_state_fn calls on one fitted model must not clobber
         each other — the arrays are per call, not per instance."""
-        fitted = selector._prefit_fixed[0][WIN_FIRST]
+        fitted = selector._prefit_fixed[WIN_SECOND][0][WIN_FIRST]
         f0, f1 = selector._chain_folds[0].test_df, selector._chain_folds[1].test_df
         a0, _ = fitted.predict_state_fn(f0)
         a1, _ = fitted.predict_state_fn(f1)
@@ -373,9 +376,9 @@ class TestPhaseTimings:
         assert ServeDiscoverySelector._format_phases({}) == "phases=n/a"
 
     def test_component_timings_have_the_registry_keys(self, selector):
-        fitted = selector._prefit_fixed[0][WIN_FIRST]
+        fitted = selector._prefit_fixed[WIN_SECOND][0][WIN_FIRST]
         assert set(fitted.fit_timings) == {"load", "join", "derive", "matrix", "fit"}
-        assert isinstance(selector._prefit_fixed[0][FIRST_IN].fit_timings.get("fit"), float)
+        assert isinstance(selector._prefit_fixed[WIN_SECOND][0][FIRST_IN].fit_timings.get("fit"), float)
         cb = _ConstantBranch(serve_branch=2)
         cb.fit(selector._chain_folds[0].train_df, preloaded_points=selector._chain_folds[0].points)
         assert "fit" in cb.fit_timings
@@ -435,7 +438,7 @@ class TestFixedArmSpecsOutsideThePool:
         # -> _build_chain_folds -> _build_prefit_fixed used to raise.
         sel, _ = self._build(tmp_path)
         assert sel._prefit_fixed is not None
-        assert set(sel._prefit_fixed[0]) == set(COMPONENTS) - {FIRST_IN}
+        assert set(sel._prefit_fixed[FIRST_IN][0]) == set(COMPONENTS) - {FIRST_IN}
         assert np.isfinite(sel._score_cv_chain_detailed([MIRROR_SPEC], [])[0])
 
     def test_fixed_spec_and_its_swap_partner_are_materialized(self, tmp_path):

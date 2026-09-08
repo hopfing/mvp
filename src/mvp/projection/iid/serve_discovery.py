@@ -168,6 +168,9 @@ class FSRoundResult:
     delta: float  # improvement over previous round
     selected_match_level: list[str] = field(default_factory=list)
     selected_point_level: list[str] = field(default_factory=list)
+    # Joint runs (#111): which arm this round's feature was added to. None for
+    # every single-arm run, whose arm is the config's `serve_component`.
+    arm: str | None = None
 
 
 @dataclass
@@ -176,6 +179,9 @@ class DiscoveryResult:
     selected_point_level: list[str]
     rounds: list[FSRoundResult]
     n_train_rows: int
+    # Joint runs (#111): the (match, point) pair each searched arm ended on.
+    # None for a single-arm run, whose one selection is the two lists above.
+    selected_by_arm: dict[str, tuple[list[str], list[str]]] | None = None
 
 
 @dataclass(frozen=True)
@@ -264,10 +270,17 @@ class ServeDiscoverySelector:
         self.checkpoint_path = Path(checkpoint_path) if checkpoint_path else None
         self.run_name = run_name or self.config_path.stem
         self.checkpoint_interval = checkpoint_interval
-        # Two-level component runs: the two FIXED components fitted once per
-        # fold (plan 2026-09-03-serve-fs-wall-time, Phase 1). None for
-        # single-level runs. Keyed by fold index.
-        self._prefit_fixed: dict[int, dict[str, Any]] | None = None
+        # Two-level runs: the FIXED components fitted once per fold (plan
+        # 2026-09-03-serve-fs-wall-time, Phase 1). None for single-level runs.
+        # Keyed ARM, then fold index, then the held component's name — a joint
+        # run prefits a different pair per searched arm, so the arm cannot stay
+        # implicit in the cache the way it was when only one was ever searched.
+        self._prefit_fixed: dict[str, dict[int, dict[str, Any]]] | None = None
+        # The other searched arms' CURRENT selections, read by
+        # `_build_candidate_model` when it fills in the arms it is not
+        # perturbing. Empty for a component run, whose other arms are held at
+        # the values `serve_model` gives them.
+        self._joint_selected: dict[str, tuple[list[str], list[str]]] = {}
         # Per-phase wall-time accumulated across candidate-folds since the
         # last [diag] line (Phase 0). Written from candidate threads.
         self._phase_totals: dict[str, float] = {}
@@ -1011,6 +1024,7 @@ class ServeDiscoverySelector:
         match_level: list[str],
         point_level: list[str],
         scoring_params: dict,
+        arm: str | None = None,
     ) -> "ScoreStateChainServeModel | Any":
         """The estimator a candidate feature set is scored through.
 
@@ -1025,13 +1039,20 @@ class ServeDiscoverySelector:
         else was silently ignored and FS selected features for a model the user
         was not going to run.
 
+        `arm` names which arm the candidate lists belong to, defaulting to the
+        config's `serve_component`. It is an ARGUMENT rather than a read of the
+        config because a joint run perturbs a different arm from one candidate
+        to the next within a single round; the arms it is NOT perturbing come
+        from `self._joint_selected`, falling back to the config for any arm no
+        round has selected for yet.
+
         The substitution itself is `config.substitute_arm_lists`, shared with
         the promotion helper so the model FS scores and the model FS promotes
         cannot drift apart.
         """
         from mvp.projection.iid.serve_model import build_serve_model
 
-        component = self.config.serve_component
+        component = arm if arm is not None else self.config.serve_component
         if component is None:
             return ScoreStateChainServeModel(
                 model_type=self.config.scoring_model.type,
@@ -1078,9 +1099,16 @@ class ServeDiscoverySelector:
                     "with no ScoreState. Match-constant point features (the "
                     "surface one-hots) are accepted."
                 )
-        cfg = substitute_arm_lists(
-            base, {component: (list(match_level), list(point_level))}
-        )
+        # The candidate lists go in LAST, so they win over `_joint_selected`
+        # for their own arm: that entry is the arm's selection as of the last
+        # completed round, which is exactly what this candidate perturbs.
+        lists = {
+            name: (list(sel_match), list(sel_point))
+            for name, (sel_match, sel_point) in self._joint_selected.items()
+            if name != component
+        }
+        lists[component] = (list(match_level), list(point_level))
+        cfg = substitute_arm_lists(base, lists)
         cfg.type = "two_level"
         cfg.model_type = self.config.scoring_model.type
         cfg.params = dict(scoring_params)
@@ -1474,9 +1502,9 @@ class ServeDiscoverySelector:
             params["n_jobs"] = 1
         return params
 
-    def _build_prefit_fixed(self) -> None:
-        """Fit the two FIXED components of a two-level component run once per
-        fold, so the candidate loop only fits the component under selection.
+    def _build_prefit_fixed(self, arms: list[str] | None = None) -> None:
+        """Fit the FIXED components of a two-level run once per fold and arm,
+        so the candidate loop only fits the arm under selection.
 
         `TwoLevelServeModel.fit` fits all three components; in a component
         run the other two are held at their configured sets, so per-candidate
@@ -1487,12 +1515,18 @@ class ServeDiscoverySelector:
         fixed components are kept, and each candidate gets a private
         deepcopy (`_attach_prefit`), so nothing is shared across threads.
 
+        `arms` defaults to the single `serve_component`, which is the component
+        run; a joint run passes the arms it searches and gets one cache each,
+        because the pair an arm holds fixed differs from arm to arm.
+
         Equivalence with the per-candidate refit is the contract: same fold
         frames, same `_scoring_params()`, same deterministic fit.
         """
-        component = self.config.serve_component
+        if arms is None:
+            component = self.config.serve_component
+            arms = [] if component is None else [component]
         self._prefit_fixed = None
-        if component is None or self._chain_folds is None:
+        if not arms or self._chain_folds is None:
             return
         t0 = time.perf_counter()
         params = self._scoring_params()
@@ -1502,38 +1536,58 @@ class ServeDiscoverySelector:
         _, cap_n_jobs = resolve_candidate_parallelism(
             params.get("n_jobs"), self.config.n_parallel_candidates,
         )
-        prefit: dict[int, dict[str, Any]] = {}
+        prefit: dict[str, dict[int, dict[str, Any]]] = {}
+        # One cap around the WHOLE build, not one per arm: the cap is there so
+        # every fit happens under the thread count the candidate loop fits
+        # under, and re-entering it per arm would only re-assert that.
         with blas_thread_cap(self.config.scoring_model.type, cap_n_jobs):
-            for fold_idx, fold in enumerate(self._chain_folds):
-                model = self._build_candidate_model([], [], params)
-                if not isinstance(model, TwoLevelServeModel):
-                    raise TypeError(
-                        "serve_component is set but _build_candidate_model "
-                        f"returned {type(model).__name__}, not TwoLevelServeModel"
+            for arm in arms:
+                by_fold: dict[int, dict[str, Any]] = {}
+                for fold_idx, fold in enumerate(self._chain_folds):
+                    model = self._build_candidate_model([], [], params, arm=arm)
+                    if not isinstance(model, TwoLevelServeModel):
+                        raise TypeError(
+                            "serve_component is set but _build_candidate_model "
+                            f"returned {type(model).__name__}, not TwoLevelServeModel"
+                        )
+                    model.fit(
+                        fold.train_df,
+                        preloaded_match_features=fold.feats,
+                        preloaded_points=fold.points,
                     )
-                model.fit(
-                    fold.train_df,
-                    preloaded_match_features=fold.feats,
-                    preloaded_points=fold.points,
-                )
-                prefit[fold_idx] = {
-                    name: fitted for name, fitted in model.components().items()
-                    if name != component
-                }
+                    by_fold[fold_idx] = {
+                        name: fitted for name, fitted in model.components().items()
+                        if name != arm
+                    }
+                prefit[arm] = by_fold
         self._prefit_fixed = prefit
         logger.info(
-            "Prefit fixed two-level components %s once per fold "
-            "(%d folds, %.1fs); candidates fit only %s",
-            sorted(next(iter(prefit.values()))), len(prefit),
-            time.perf_counter() - t0, component,
+            "Prefit fixed two-level components once per fold (%d folds, %.1fs); "
+            "candidates fit only their own arm: %s",
+            len(self._chain_folds), time.perf_counter() - t0,
+            "; ".join(
+                f"{arm} holds {sorted(next(iter(by_fold.values())))}"
+                for arm, by_fold in prefit.items()
+            ),
         )
 
-    def _attach_prefit(self, model: Any, fold_idx: int) -> None:
+    def _attach_prefit(
+        self, model: Any, fold_idx: int, arm: str | None = None,
+    ) -> None:
         """Hand a candidate model private copies of the fold's prefit
-        components. No-op for single-level runs."""
+        components for `arm` (default: the configured `serve_component`).
+
+        No-op for single-level runs, and for an arm this run did not prefit —
+        the candidate then fits all three components itself, which is slower
+        but still the same model."""
         if self._prefit_fixed is None or not isinstance(model, TwoLevelServeModel):
             return
-        for component, fitted in self._prefit_fixed[fold_idx].items():
+        by_fold = self._prefit_fixed.get(
+            arm if arm is not None else self.config.serve_component
+        )
+        if by_fold is None:
+            return
+        for component, fitted in by_fold[fold_idx].items():
             model.attach_prefit(component, copy.deepcopy(fitted))
 
     _PHASE_KEYS = (
@@ -1568,6 +1622,7 @@ class ServeDiscoverySelector:
 
     def _score_cv_match_grain_detailed(
         self, match_level: list[str], point_level: list[str],
+        arm: str | None = None,
     ) -> tuple[float, tuple[float, ...]]:
         """Score one candidate set on the match-grain folds.
 
@@ -1583,7 +1638,7 @@ class ServeDiscoverySelector:
         """
         if is_branch_metric(self.config.metric):
             return self._score_cv_branch(match_level, point_level), ()
-        return self._score_cv_chain_detailed(match_level, point_level)
+        return self._score_cv_chain_detailed(match_level, point_level, arm=arm)
 
     def _score_cv_branch(
         self, match_level: list[str], point_level: list[str],
@@ -1713,6 +1768,7 @@ class ServeDiscoverySelector:
 
     def _score_cv_chain_detailed(
         self, match_level: list[str], point_level: list[str],
+        arm: str | None = None,
     ) -> tuple[float, tuple[float, ...]]:
         """The chain score, plus the gap shrink each fold was scored at.
 
@@ -1743,9 +1799,9 @@ class ServeDiscoverySelector:
             test_df = fold.test_df
 
             model = self._build_candidate_model(
-                match_level, point_level, self._scoring_params(),
+                match_level, point_level, self._scoring_params(), arm=arm,
             )
-            self._attach_prefit(model, fold_idx)
+            self._attach_prefit(model, fold_idx, arm=arm)
             model.fit(
                 fold.train_df,
                 preloaded_match_features=fold.feats,
