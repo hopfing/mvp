@@ -2747,6 +2747,9 @@ def _cmd_experiment_serve(
         selected_point_level=result.selected_point_level,
         model_type=selector.config.scoring_model.type,
         model_params=selector.config.scoring_model.params,
+        # None for a component run; a joint run's per-arm selections, which
+        # the flat lists above cannot carry once two arms took one feature.
+        selected_by_arm=result.selected_by_arm,
     )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)

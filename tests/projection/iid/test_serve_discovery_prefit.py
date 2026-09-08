@@ -76,7 +76,25 @@ SHAPES = {
     # its swap partners, so a fixed spec outside the pool was never loaded and
     # the first prefit raised KeyError.
     "fixed_outside_pool": (FIRST_IN, [], [MATCHUP_SPEC], []),
+    # A JOINT run (#115), so its first slot is a TUPLE of the arms one loop
+    # searches at once rather than the one component the others name. Both win
+    # arms are searched from empty; first_in is held at MIRROR_SPEC and is what
+    # a joint run must carry through verbatim.
+    "joint": (("win_first", "win_second"), [MIRROR_SPEC], [], []),
 }
+
+
+def _component_or_skip(shape):
+    """The shape's single searched component, or skip.
+
+    The joint shape has a tuple of arms and no one component to hold the other
+    two against, so every assertion phrased as "the selected component" is
+    meaningless for it. Skipping is the honest answer: the joint equivalents
+    live in `test_serve_discovery_joint.py`.
+    """
+    if isinstance(shape[0], tuple):
+        pytest.skip("joint shape: no single serve_component")
+    return shape[0]
 
 
 def _matches(n: int) -> pl.DataFrame:
@@ -125,13 +143,41 @@ def _points(n_matches: int, per_match: int = 48) -> pl.DataFrame:
     return pl.DataFrame(rows)
 
 
-def _two_level_config(tmp_path, shape, point_pool=None) -> str:
+def _two_level_config(tmp_path, shape, point_pool=None, joint=None) -> str:
+    """A two-level FS config: a component run, or a joint one when `joint`
+    names the arms to search.
+
+    A joint config carries no `serve_component` and no shared
+    `features.candidate_*` — both are refused by the config validator, which
+    is the point: in joint mode there is no single arm the shared lists could
+    mean. Each listed arm gets its own block holding the same candidate lists
+    the shared block gives a component run, so the two shapes differ only in
+    how many arms the loop searches.
+    """
     component, fi, w1, w2 = shape
+    # The joint shape carries its arms where the component shapes carry a name.
+    if joint is None and isinstance(component, tuple):
+        joint = list(component)
     # first_in refuses STATE-DERIVABLE point candidates, so a run() that
     # selects it needs match-constant ones instead (the surface one-hots).
     point_pool = point_pool if point_pool is not None else ["is_break_point"]
+    if joint is None:
+        selection = f"serve_component: {component}\n"
+        candidates = (
+            "features:\n"
+            f"  candidate_match_level_features: [{MIRROR_SPEC}, {DIFF_SPEC}]\n"
+            f"  candidate_point_level_features: {point_pool}\n"
+        )
+    else:
+        selection = "joint_selection:\n  arms:\n" + "".join(
+            f"    {arm}:\n"
+            f"      candidate_match_level_features: [{MIRROR_SPEC}, {DIFF_SPEC}]\n"
+            f"      candidate_point_level_features: {point_pool}\n"
+            for arm in joint
+        )
+        candidates = ""
     path = tmp_path / "fs.yaml"
-    path.write_text(dedent(f"""
+    path.write_text(dedent(f"""\
         data:
           date_range:
             start: 2024-01-01
@@ -152,7 +198,6 @@ def _two_level_config(tmp_path, shape, point_pool=None) -> str:
           min_train_size: 200
           test_size: 100
         metric: iid_match_win_log_loss
-        serve_component: {component}
         serve_model:
           type: two_level
           model_type: xgboost
@@ -162,10 +207,7 @@ def _two_level_config(tmp_path, shape, point_pool=None) -> str:
           win_first_point_features: []
           win_second_match_features: {w2}
           win_second_point_features: []
-        features:
-          candidate_match_level_features: [{MIRROR_SPEC}, {DIFF_SPEC}]
-          candidate_point_level_features: {point_pool}
-    """) + _SCORER)
+    """) + selection + candidates + _SCORER)
     return str(path)
 
 
@@ -219,7 +261,7 @@ def _candidates(component):
 
 class TestPrefitEquivalence:
     def test_prefit_cache_holds_the_fixed_components(self, selector, shape):
-        component = shape[0]
+        component = _component_or_skip(shape)
         assert selector._prefit_fixed is not None
         # keyed ARM, then fold: a component run has exactly one arm key
         assert set(selector._prefit_fixed) == {component}
@@ -231,7 +273,8 @@ class TestPrefitEquivalence:
                 assert "fit" in fitted.fit_timings  # it was fitted
 
     def test_prefit_class_mix_matches_the_shape(self, selector, shape):
-        component, fi, w1, w2 = shape
+        component = _component_or_skip(shape)
+        _component, fi, w1, w2 = shape
         cache = selector._prefit_fixed[component][0]
         expect = {
             FIRST_IN: (FirstServeInModel, bool(fi)),
@@ -248,7 +291,7 @@ class TestPrefitEquivalence:
 
     def test_prefit_scores_equal_the_per_candidate_refit(self, selector, shape):
         """Bitwise: same fold frames, same params, same seed => same booster."""
-        for match_level, point_level in _candidates(shape[0]):
+        for match_level, point_level in _candidates(_component_or_skip(shape)):
             with_prefit = selector._score_cv_chain_detailed(match_level, point_level)[0]
             cache = selector._prefit_fixed
             selector._prefit_fixed = None  # today's path: every component refit
@@ -261,8 +304,28 @@ class TestPrefitEquivalence:
             assert np.isfinite(with_prefit)
             assert with_prefit == without, (match_level, point_level)
 
+    def test_joint_prefit_scores_equal_the_per_candidate_refit(self, tmp_path):
+        """Same contract with a cache PER ARM: a joint round prefits one pair
+        per searched arm, and a candidate scored against its arm's cache must
+        get the number a full three-component refit would have given."""
+        arms = list(SHAPES["joint"][0])
+        sel = _make_selector(tmp_path, _two_level_config(tmp_path, SHAPES["joint"]))
+        sel._joint_selected = {a: ([], []) for a in arms}
+        sel._build_prefit_fixed(arms=arms)
+        assert set(sel._prefit_fixed) == set(arms)
+        for arm in arms:
+            with_prefit = sel._score_cv_chain_detailed([DIFF_SPEC], [], arm=arm)[0]
+            cache = sel._prefit_fixed
+            sel._prefit_fixed = None
+            try:
+                without = sel._score_cv_chain_detailed([DIFF_SPEC], [], arm=arm)[0]
+            finally:
+                sel._prefit_fixed = cache
+            assert np.isfinite(with_prefit)
+            assert with_prefit == without, arm
+
     def test_candidate_model_fits_only_the_selected_component(self, selector, shape):
-        component = shape[0]
+        component = _component_or_skip(shape)
         params = selector._scoring_params()
         model = selector._build_candidate_model([DIFF_SPEC], [], params)
         assert isinstance(model, TwoLevelServeModel)
@@ -329,7 +392,7 @@ class TestScoringParams:
 
 class TestThreadIsolation:
     def test_concurrent_candidates_match_sequential(self, selector, shape):
-        cands = _candidates(shape[0])
+        cands = _candidates(_component_or_skip(shape))
         sequential = [
             selector._score_cv_chain_detailed(m, p)[0] for m, p in cands
         ]

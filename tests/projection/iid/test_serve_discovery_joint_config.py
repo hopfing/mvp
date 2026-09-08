@@ -402,10 +402,17 @@ SNAPSHOT = {
 }
 
 
+# The COMPONENT shapes only. `SHAPES` also carries the joint shape (#115),
+# whose first slot is a tuple of searched arms; it promotes through
+# `selected_by_arm`, which is `TestJointPromotion`'s subject below, and has no
+# single-component snapshot to be unchanged against.
+COMPONENT_SHAPES = [n for n, s in SHAPES.items() if not isinstance(s[0], tuple)]
+
+
 class TestPromotionUnchanged:
     """Every component shape promotes byte-identically across the refactor."""
 
-    @pytest.mark.parametrize("name", list(SHAPES), ids=list(SHAPES))
+    @pytest.mark.parametrize("name", COMPONENT_SHAPES, ids=COMPONENT_SHAPES)
     def test_promoted_serve_model_matches_the_snapshot(self, tmp_path, name):
         cfg = ServeDiscoveryConfig.from_file(
             _two_level_config(tmp_path, SHAPES[name])
@@ -417,7 +424,7 @@ class TestPromotionUnchanged:
         assert emitted["serve_model"] == SNAPSHOT[name]
 
     def test_snapshot_covers_every_shape(self):
-        assert set(SNAPSHOT) == set(SHAPES)
+        assert set(SNAPSHOT) == set(COMPONENT_SHAPES)
 
 
 class TestJointPromotion:

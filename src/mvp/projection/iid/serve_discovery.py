@@ -185,6 +185,43 @@ class DiscoveryResult:
     selected_by_arm: dict[str, tuple[list[str], list[str]]] | None = None
 
 
+@dataclass
+class _ArmState:
+    """One searched arm's live selection and its remaining candidate pools.
+
+    `run()` keeps one of these per arm it searches, in config order, and a
+    COMPONENT run is the one-arm case of the same list — which is what makes
+    the joint loop and the component loop one loop rather than two. `arm` is
+    the component name (None for a single-level run), the two `selected_`
+    lists start at the arm's pinned features and grow as it wins rounds, and
+    the two `candidate_` lists are its own pool minus what it has taken.
+
+    The lists are handed out by reference (`_joint_selected`), so a round's
+    candidate models see the arm's selection as of the last completed round.
+    """
+
+    arm: str | None
+    selected_match: list[str]
+    selected_point: list[str]
+    candidate_match: list[str]
+    candidate_point: list[str]
+    # Optional per-arm cap on top of the run-wide `features.max_features`, so
+    # one arm cannot take every round's win and starve the others.
+    cap: int | None = None
+
+    def active(self) -> bool:
+        """Whether this arm submits candidates to the next round.
+
+        A capped-out or exhausted arm is not merely skipped at selection
+        time: it contributes nothing to `tagged`, so none of its candidates is
+        fitted or scored, and it is left out of the round's prefit as well.
+        """
+        n_selected = len(self.selected_match) + len(self.selected_point)
+        if self.cap is not None and n_selected >= self.cap:
+            return False
+        return bool(self.candidate_match or self.candidate_point)
+
+
 @dataclass(frozen=True)
 class _ChainFold:
     """One fold's fit/score inputs for the chain-metric path, built once.
@@ -307,76 +344,52 @@ class ServeDiscoverySelector:
         self._engine: FeatureEngine | None = None
 
     def run(self) -> DiscoveryResult:
-        selected_match = list(self.config.features.base_match_level_features)
-        selected_point = list(self.config.features.base_point_level_features)
-        # Empty candidate list → full pool, matching classification / projection / IID FS.
-        match_pool = list(self.config.features.candidate_match_level_features)
-        if not match_pool:
-            match_pool = get_all_feature_specs(window_sizes=self.config.features.window_sizes)
-            logger.info("candidate_match_level_features empty → using full registered pool (%d specs)", len(match_pool))
-        point_pool = list(self.config.features.candidate_point_level_features)
-        if not point_pool:
-            point_pool = default_point_level_candidate_pool()
-            logger.info("candidate_point_level_features empty → using full default pool (%d specs)", len(point_pool))
+        joint_arms = self.config.joint_arms()
+        joint = bool(joint_arms)
+        # One state per searched arm, in config order — and a component run is
+        # the one-arm case, so everything below is written once.
+        states = self._build_arm_states(joint_arms)
+        if joint:
+            # By REFERENCE: `_build_candidate_model` fills in the arms it is
+            # not perturbing from here, and it must see the selection as of
+            # the last completed round rather than a snapshot of round 1.
+            self._joint_selected = {
+                st.arm: (st.selected_match, st.selected_point) for st in states
+            }
 
-        match_excludes = set(self.config.features.exclude_match_level_features)
-        if match_excludes:
-            unknown = match_excludes - set(match_pool)
-            if unknown:
-                raise ValueError(
-                    f"exclude_match_level_features contains specs not in the candidate pool: "
-                    f"{sorted(unknown)}"
-                )
-            base_conflict = match_excludes & set(selected_match)
-            if base_conflict:
-                raise ValueError(
-                    f"exclude_match_level_features overlaps base_match_level_features: "
-                    f"{sorted(base_conflict)}"
-                )
-            before = len(match_pool)
-            match_pool = [f for f in match_pool if f not in match_excludes]
-            logger.info("Excluded %d match-level specs (pool %d → %d)", before - len(match_pool), before, len(match_pool))
-
-        point_excludes = set(self.config.features.exclude_point_level_features)
-        if point_excludes:
-            unknown = point_excludes - set(point_pool)
-            if unknown:
-                raise ValueError(
-                    f"exclude_point_level_features contains specs not in the candidate pool: "
-                    f"{sorted(unknown)}"
-                )
-            base_conflict = point_excludes & set(selected_point)
-            if base_conflict:
-                raise ValueError(
-                    f"exclude_point_level_features overlaps base_point_level_features: "
-                    f"{sorted(base_conflict)}"
-                )
-            before = len(point_pool)
-            point_pool = [f for f in point_pool if f not in point_excludes]
-            logger.info("Excluded %d point-level specs (pool %d → %d)", before - len(point_pool), before, len(point_pool))
-
-        # Excluded for a BRANCH metric too, though nothing in branch scoring
-        # would break: the endpoint is a chain config, and within one branch
-        # `serve` / `is_second_serve` are constant, so a branch metric would
-        # rank them as harmless noise while the chain builds every ScoreState
-        # with serve_num=1.
-        if needs_match_grain_prep(self.config.metric):
-            dropped = [f for f in point_pool if f in _CHAIN_INCOMPATIBLE_POINT_FEATURES]
-            if dropped:
-                point_pool = [f for f in point_pool if f not in _CHAIN_INCOMPATIBLE_POINT_FEATURES]
-                logger.info(
-                    "Metric %s: excluding point features incompatible with the deuce closed-form: %s",
-                    self.config.metric, dropped,
-                )
+        # The specs every arm's fits READ (pinned) and the specs the search
+        # OFFERS (candidates), deduplicated across arms: one cache, one
+        # materialized match frame, however many arms this run searches.
+        pinned_match: list[str] = []
+        pinned_point: list[str] = []
+        pool_match: list[str] = []
+        pool_point: list[str] = []
+        for st in states:
+            for src, dst in (
+                (st.selected_match, pinned_match),
+                (st.selected_point, pinned_point),
+                (st.candidate_match, pool_match),
+                (st.candidate_point, pool_point),
+            ):
+                for spec in src:
+                    if spec not in dst:
+                        dst.append(spec)
 
         # Phase A: cache all match-level specs to disk (memory-bounded batches).
         # Phase B: build the point-grain base matrix with only base match features.
         # Match-level candidates are loaded lazily one at a time during FS.
-        engine, cache_key = self._pre_cache_all(base_match=selected_match, candidate_match=match_pool)
+        engine, cache_key = self._pre_cache_all(
+            base_match=pinned_match, candidate_match=pool_match,
+        )
         self._engine = engine
         base_df, slim_matches = self._build_base_matrix(
             engine, cache_key,
-            base_match=selected_match, base_point=selected_point, candidate_point=point_pool,
+            # A joint run pins PER ARM — its shared `features.base_*` lists are
+            # empty by validation — so the point-grain matrix, which only a
+            # non-chain metric ever scores off, gets no base features at all.
+            base_match=[] if joint else pinned_match,
+            base_point=[] if joint else pinned_point,
+            candidate_point=pool_point,
         )
         logger.info("Base matrix: %d rows, %d columns", len(base_df), len(base_df.columns))
 
@@ -390,14 +403,25 @@ class ServeDiscoverySelector:
         # match features materialized, plus match-grain folds from
         # config.validation. Branch scoring skips the chain, not the prep.
         if needs_match_grain_prep(self.config.metric):
-            self._prepare_match_data(match_pool=match_pool, engine=engine, cache_key=cache_key)
+            match_union = list(pinned_match)
+            for spec in pool_match:
+                if spec not in match_union:
+                    match_union.append(spec)
+            self._prepare_match_data(
+                match_pool=match_union, engine=engine, cache_key=cache_key,
+            )
 
-        candidate_match = [c for c in match_pool if c not in selected_match]
-        candidate_point = [c for c in point_pool if c not in selected_point]
         first_round_logged = False
 
         # Attempt to restore from checkpoint
         cp = self._load_checkpoint() if self.checkpoint_path else None
+        if joint and cp is not None:
+            # A joint checkpoint would have to say which arm each completed
+            # round went to and which arm each partial score belongs to, and
+            # replaying it wrong is silent: the run would carry on from a
+            # selection that never happened. Refusing is the honest answer
+            # until #116 writes and reads that shape.
+            raise NotImplementedError("joint resume: #116")
 
         # Append-only per-round ranking log, sibling of the checkpoint. Unlike
         # the checkpoint it survives run completion, so the full per-round
@@ -430,21 +454,24 @@ class ServeDiscoverySelector:
                     f"{self.config.chain_shrink!r}. Restore the field or "
                     f"delete the checkpoint to resume."
                 )
-            # Replay completed rounds — extend base_df with any restored match features.
+            # Replay completed rounds — extend base_df with any restored match
+            # features. Single-state by construction: a joint run was refused
+            # a resume above, so `states` here is the one component run's.
+            st = states[0]
             for entry in cp.completed_rounds:
                 feat = entry["feature"]
                 grain = entry["grain"]
                 score = entry["score"]
                 if grain == "match":
-                    selected_match.append(feat)
-                    if feat in candidate_match:
-                        candidate_match.remove(feat)
+                    st.selected_match.append(feat)
+                    if feat in st.candidate_match:
+                        st.candidate_match.remove(feat)
                     if not needs_match_grain_prep(self.config.metric):
                         base_df = self._extend_df_with_match_feature(base_df, slim_matches, engine, cache_key, feat)
                 else:
-                    selected_point.append(feat)
-                    if feat in candidate_point:
-                        candidate_point.remove(feat)
+                    st.selected_point.append(feat)
+                    if feat in st.candidate_point:
+                        st.candidate_point.remove(feat)
                 rounds.append(
                     FSRoundResult(
                         # +1 because the fresh path (below) puts a
@@ -460,14 +487,15 @@ class ServeDiscoverySelector:
                         grain=grain,
                         score=score,
                         delta=0.0,  # not retained in checkpoint
-                        selected_match_level=list(selected_match),
-                        selected_point_level=list(selected_point),
+                        selected_match_level=list(st.selected_match),
+                        selected_point_level=list(st.selected_point),
+                        arm=st.arm if joint else None,
                     )
                 )
             current_score = cp.best_metric
             round_idx = cp.current_round
             partial_round_scores = live_partial_scores(
-                cp.current_round_scores, candidate_match, candidate_point
+                cp.current_round_scores, st.candidate_match, st.candidate_point
             )
             # Keyed off the surviving SCORES, not off the saved map: a
             # candidate the pool no longer offers has had its score dropped,
@@ -489,12 +517,30 @@ class ServeDiscoverySelector:
                     dropped, round_idx,
                 )
         else:
-            if selected_match or selected_point:
-                current_score = self._score_cv(base_df, fs_splits, selected_match, selected_point)
-                logger.info("Base-only CV %s = %.6f (%d features)", self.config.metric, current_score, len(selected_match) + len(selected_point))
-            else:
+            union_match, union_point = self._union_selected(states)
+            if not union_match and not union_point:
                 current_score = worst_score(self.config.metric)
                 logger.info("No base features — starting from worst-case score")
+            elif joint:
+                # Every arm is at its pinned lists, which is the model the
+                # config already describes — so scoring the FIRST arm's lists
+                # scores that whole model once, not one arm of it.
+                first = next(st for st in states if st.selected_match or st.selected_point)
+                current_score = self._score_cv_match_grain_detailed(
+                    list(first.selected_match), list(first.selected_point),
+                    arm=first.arm,
+                )[0]
+                logger.info(
+                    "Pinned-only CV %s = %.6f (%d features across %d arms)",
+                    self.config.metric, current_score,
+                    len(union_match) + len(union_point), len(states),
+                )
+            else:
+                st = states[0]
+                current_score = self._score_cv(
+                    base_df, fs_splits, st.selected_match, st.selected_point,
+                )
+                logger.info("Base-only CV %s = %.6f (%d features)", self.config.metric, current_score, len(union_match) + len(union_point))
             rounds.append(
                 FSRoundResult(
                     round_idx=0,
@@ -502,8 +548,8 @@ class ServeDiscoverySelector:
                     grain="base",
                     score=current_score,
                     delta=0.0,
-                    selected_match_level=list(selected_match),
-                    selected_point_level=list(selected_point),
+                    selected_match_level=union_match,
+                    selected_point_level=union_point,
                 )
             )
             round_idx = 1
@@ -522,26 +568,46 @@ class ServeDiscoverySelector:
             lg.setLevel(logging.WARNING)
 
         while True:
+            n_selected = sum(
+                len(st.selected_match) + len(st.selected_point) for st in states
+            )
             if self.config.features.max_features is not None:
-                n_total = len(selected_match) + len(selected_point)
-                if n_total >= self.config.features.max_features:
+                # The run-wide cap counts ACROSS arms: a joint run's budget is
+                # a budget for the model, not one per arm.
+                if n_selected >= self.config.features.max_features:
                     break
-            if not candidate_match and not candidate_point:
+            active = [st for st in states if st.active()]
+            if not active:
                 break
 
             from tqdm import tqdm
 
             best_new_score = current_score
-            best_cand: str | None = None
+            best_key: Any = None
             best_grain: str | None = None
 
-            tagged = [("match", c) for c in candidate_match] + [("point", c) for c in candidate_point]
+            if joint:
+                # The pair an arm holds fixed moves whenever ANOTHER arm wins a
+                # round, so the per-arm prefit is rebuilt here rather than once
+                # at prep time — and only for the arms this round scores.
+                self._build_prefit_fixed(arms=[st.arm for st in active])
+
+            tagged: list[tuple[_ArmState, str, str]] = [
+                (st, grain, cand)
+                for st in active
+                for grain, cand in (
+                    [("match", c) for c in st.candidate_match]
+                    + [("point", c) for c in st.candidate_point]
+                )
+            ]
             total_cands = len(tagged)
             cap = self.config.features.max_features
             # Each round adds at most one feature — show the target count
             # this round is aiming for.
-            target_total = len(selected_match) + len(selected_point) + 1
+            target_total = n_selected + 1
             desc = f"Round {round_idx}" + (f" ({target_total}/{cap})" if cap else "")
+            if joint:
+                desc += f" [{len(active)} arms]"
 
             this_round_scores: dict[str, float] = dict(partial_round_scores)
             partial_round_scores = {}
@@ -560,8 +626,8 @@ class ServeDiscoverySelector:
                 cand_score = this_round_scores[best_prev_cand]
                 if self._is_better(cand_score, best_new_score):
                     best_new_score = cand_score
-                    best_cand = best_prev_cand
-                    best_grain = "match" if best_prev_cand in candidate_match else "point"
+                    best_key = best_prev_cand
+                    best_grain = self._parse_score_key(best_prev_cand, states)[1]
                 logger.info(
                     "  Restored %d/%d candidate scores from checkpoint",
                     len(this_round_scores), total_cands,
@@ -574,7 +640,11 @@ class ServeDiscoverySelector:
             chain_mode = needs_match_grain_prep(self.config.metric)
 
             if chain_mode and self.config.n_parallel_candidates > 1:
-                to_score = [(g, c) for g, c in tagged if c not in this_round_scores]
+                to_score = [
+                    item for item in tagged
+                    if self._score_key(item[0].arm, item[1], item[2])
+                    not in this_round_scores
+                ]
 
                 # Unlike the classification FS (threads/fit auto-derived to ~4),
                 # candidates and per-fit n_jobs are independent knobs here that
@@ -583,21 +653,18 @@ class ServeDiscoverySelector:
                 bar = tqdm(total=len(tagged), initial=len(this_round_scores),
                            desc=f"{desc} ({self.config.n_parallel_candidates}x{per_fit})",
                            leave=False, ncols=120)
-                if best_cand is not None and hasattr(bar, "set_postfix"):
+                if best_key is not None and hasattr(bar, "set_postfix"):
                     bar.set_postfix(
                         refresh=False,
                         **self._progress_postfix(
-                            best_new_score, best_cand, best_grain,
+                            best_new_score, best_key, best_grain,
                             this_round_shrinks,
                         ),
                     )
 
-                def _score_one(grain_cand, _ml=selected_match, _pl=selected_point):
-                    g, c = grain_cand
-                    ml = _ml + [c] if g == "match" else list(_ml)
-                    pl_feats = list(_pl) if g == "match" else _pl + [c]
-                    score, shrinks = self._score_cv_match_grain_detailed(ml, pl_feats)
-                    return g, c, score, shrinks
+                def _score_one(item):
+                    st, g, c = item
+                    return (st, g, c, *self._score_state_candidate(st, g, c, joint))
 
                 # BLAS thread cap for a logistic scorer (whose fit ignores n_jobs)
                 # so concurrent worker fits don't oversubscribe; no-op for xgboost,
@@ -615,24 +682,25 @@ class ServeDiscoverySelector:
                         max_workers=self.config.n_parallel_candidates
                     ) as executor,
                 ):
-                    futures = {executor.submit(_score_one, gc): gc for gc in to_score}
+                    futures = {executor.submit(_score_one, it): it for it in to_score}
                     for future in as_completed(futures):
-                        grain, cand, score, shrinks = future.result()
+                        st, grain, cand, score, shrinks = future.result()
+                        key = self._score_key(st.arm, grain, cand)
                         self._record_candidate(
-                            cand, score, shrinks,
+                            key, score, shrinks,
                             this_round_scores, this_round_shrinks,
                         )
                         eval_count += 1
                         bar.update(1)
                         if self._is_better(score, best_new_score):
                             best_new_score = score
-                            best_cand = cand
+                            best_key = key
                             best_grain = grain
                             if hasattr(bar, "set_postfix"):
                                 bar.set_postfix(
                                     refresh=False,
                                     **self._progress_postfix(
-                                        best_new_score, cand, grain,
+                                        best_new_score, key, grain,
                                         this_round_shrinks,
                                     ),
                                 )
@@ -657,10 +725,7 @@ class ServeDiscoverySelector:
                             last_log_eval = eval_count
                             self._save_checkpoint(
                                 started_at=started_at,
-                                completed_rounds=[
-                                    {"feature": r.feature_added, "grain": r.grain, "score": r.score}
-                                    for r in rounds if r.feature_added is not None
-                                ],
+                                completed_rounds=self._completed_entries(rounds),
                                 current_round=round_idx,
                                 total_candidates=total_cands,
                                 current_round_scores=this_round_scores,
@@ -670,40 +735,36 @@ class ServeDiscoverySelector:
                 bar.close()
             else:
                 bar = tqdm(tagged, desc=desc, leave=False, ncols=120)
-                if best_cand is not None and hasattr(bar, "set_postfix"):
+                if best_key is not None and hasattr(bar, "set_postfix"):
                     bar.set_postfix(
                         refresh=False,
                         **self._progress_postfix(
-                            best_new_score, best_cand, best_grain,
+                            best_new_score, best_key, best_grain,
                             this_round_shrinks,
                         ),
                     )
                 last_log_t = time.perf_counter()
                 last_log_eval = 0
-                for grain, cand in bar:
-                    if cand in this_round_scores:
-                        score = this_round_scores[cand]
+                for st, grain, cand in bar:
+                    key = self._score_key(st.arm, grain, cand)
+                    if key in this_round_scores:
+                        score = this_round_scores[key]
                     else:
                         shrinks: tuple[float, ...] = ()
                         if chain_mode:
                             # Chain path ignores the extended point-grain df — it
                             # scores off self._match_df which already has every
                             # candidate match feature materialized. Skip the extend.
-                            ml, pl_feats = selected_match, selected_point
-                            if grain == "match":
-                                ml = ml + [cand]
-                            else:
-                                pl_feats = pl_feats + [cand]
-                            score, shrinks = self._score_cv_match_grain_detailed(
-                                ml, pl_feats,
+                            score, shrinks = self._score_state_candidate(
+                                st, grain, cand, joint,
                             )
                         elif grain == "match":
                             extended = self._extend_df_with_match_feature(base_df, slim_matches, engine, cache_key, cand)
-                            score = self._score_cv(extended, fs_splits, selected_match + [cand], selected_point)
+                            score = self._score_cv(extended, fs_splits, st.selected_match + [cand], st.selected_point)
                         else:
-                            score = self._score_cv(base_df, fs_splits, selected_match, selected_point + [cand])
+                            score = self._score_cv(base_df, fs_splits, st.selected_match, st.selected_point + [cand])
                         self._record_candidate(
-                            cand, score, shrinks,
+                            key, score, shrinks,
                             this_round_scores, this_round_shrinks,
                         )
                         eval_count += 1
@@ -728,10 +789,7 @@ class ServeDiscoverySelector:
                             last_log_eval = eval_count
                             self._save_checkpoint(
                                 started_at=started_at,
-                                completed_rounds=[
-                                    {"feature": r.feature_added, "grain": r.grain, "score": r.score}
-                                    for r in rounds if r.feature_added is not None
-                                ],
+                                completed_rounds=self._completed_entries(rounds),
                                 current_round=round_idx,
                                 total_candidates=total_cands,
                                 current_round_scores=this_round_scores,
@@ -740,13 +798,13 @@ class ServeDiscoverySelector:
                             )
                     if self._is_better(score, best_new_score):
                         best_new_score = score
-                        best_cand = cand
+                        best_key = key
                         best_grain = grain
                         if hasattr(bar, "set_postfix"):
                             bar.set_postfix(
                                 refresh=False,
                                 **self._progress_postfix(
-                                    best_new_score, cand, grain, this_round_shrinks,
+                                    best_new_score, key, grain, this_round_shrinks,
                                 ),
                             )
 
@@ -756,15 +814,27 @@ class ServeDiscoverySelector:
             # parallel scoring is nondeterministic — it feeds the progress bar
             # and nothing else. Everything downstream (halt reason, records,
             # what gets selected) reads the values decided here.
-            best_cand, best_new_score = self._pick_round_winner(
-                this_round_scores, current_score, order=lambda name: (name,),
-            )
-            best_grain = (
-                None if best_cand is None
-                else "match" if best_cand in candidate_match
-                else "point"
-            )
+            arm_order = {st.arm: i for i, st in enumerate(states)}
 
+            def _order(key, _states=states, _order=arm_order):
+                # Arm first, candidate name second: two arms can score the same
+                # feature to the same number, and config order is the only
+                # tie-break that gives one answer on every machine.
+                st, _grain, cand = self._parse_score_key(key, _states)
+                return (_order[st.arm], cand)
+
+            best_key, best_new_score = self._pick_round_winner(
+                this_round_scores, current_score, order=_order,
+            )
+            best_state: _ArmState | None = None
+            best_cand: str | None = None
+            best_grain = None
+            if best_key is not None:
+                best_state, best_grain, best_cand = self._parse_score_key(
+                    best_key, states,
+                )
+
+            ranked_round = self._ranking(this_round_scores, states)
             best_delta = (
                 self._improvement(current_score, best_new_score)
                 if best_cand is not None
@@ -783,23 +853,28 @@ class ServeDiscoverySelector:
                     round_idx, reason, current_score, best_cand, best_new_score,
                     this_round_scores, is_minimize(self.config.metric),
                     shrinks=this_round_shrinks if self._fits_shrink else None,
+                    ranking=ranked_round,
+                    best_arm=best_state.arm if (joint and best_state) else None,
                 ))
                 break
 
             if best_grain == "match":
-                selected_match.append(best_cand)
-                candidate_match.remove(best_cand)
+                best_state.selected_match.append(best_cand)
+                best_state.candidate_match.remove(best_cand)
                 # Chain path doesn't use base_df for scoring — skip the extend.
                 if not chain_mode:
                     base_df = self._extend_df_with_match_feature(base_df, slim_matches, engine, cache_key, best_cand)
             else:
-                selected_point.append(best_cand)
-                candidate_point.remove(best_cand)
+                best_state.selected_point.append(best_cand)
+                best_state.candidate_point.remove(best_cand)
             current_score = best_new_score
             logger.info(
-                "Round %d: +%s [%s] → %s=%.6f (Δ=%.6f)",
-                round_idx, best_cand, best_grain, self.config.metric, current_score, best_delta,
+                "Round %d: +%s [%s]%s → %s=%.6f (Δ=%.6f)",
+                round_idx, best_cand, best_grain,
+                f" ({best_state.arm})" if joint else "",
+                self.config.metric, current_score, best_delta,
             )
+            union_match, union_point = self._union_selected(states)
             rounds.append(
                 FSRoundResult(
                     round_idx=round_idx,
@@ -807,8 +882,9 @@ class ServeDiscoverySelector:
                     grain=best_grain,
                     score=current_score,
                     delta=best_delta,
-                    selected_match_level=list(selected_match),
-                    selected_point_level=list(selected_point),
+                    selected_match_level=union_match,
+                    selected_point_level=union_point,
+                    arm=best_state.arm if joint else None,
                 )
             )
 
@@ -827,33 +903,19 @@ class ServeDiscoverySelector:
             #
             # Non-finite scores are dropped rather than sorted, matching the
             # round-1 console block below; the count is kept so a round that
-            # rejected many candidates is still legible.
-            ranked_round = sorted(
-                ((f, m) for f, m in this_round_scores.items() if math.isfinite(m)),
-                key=lambda x: x[1],
-                reverse=not is_minimize(self.config.metric),
-            )
-            # Selection ORDER, not grain-grouped: `rounds` is the interleaved
-            # record of what the search actually took and when, which grouping by
-            # grain destroys. Pinned base features precede it unnumbered — they
-            # were given, not chosen, and numbering them alongside the rounds
-            # would imply a search order they never had.
+            # rejected many candidates is still legible. `_ranking` is what
+            # decides whether a row also names the arm it was scored on.
             progress_path.write_text(
-                chr(10).join(
-                    [f"   base. {f} [match]" for f in
-                     self.config.features.base_match_level_features]
-                    + [f"   base. {f} [point]" for f in
-                       self.config.features.base_point_level_features]
-                    + [f"{r.round_idx:>7}. {r.feature_added} [{r.grain}]"
-                       for r in rounds if r.feature_added is not None]
-                ),
-                encoding="utf-8",
+                self._progress_text(states, rounds), encoding="utf-8",
             )
             add_record: dict[str, Any] = {
                 "round": round_idx,
                 "action": "add",
                 "feature": best_cand,
                 "grain": best_grain,
+                # A joint round's feature is only half the answer — which arm
+                # took it is the other half, and nothing else records it.
+                **({"arm": best_state.arm} if joint else {}),
                 "metric": current_score,
                 "delta": best_delta,
                 "n_non_finite": len(this_round_scores) - len(ranked_round),
@@ -868,17 +930,16 @@ class ServeDiscoverySelector:
 
             if not first_round_logged and round_idx == 1:
                 first_round_logged = True
-                reverse = not is_minimize(self.config.metric)
-                ranked = [
-                    (f, m) for f, m in this_round_scores.items() if math.isfinite(m)
-                ]
-                ranked.sort(key=lambda x: x[1], reverse=reverse)
+                ranked = ranked_round
                 n_dropped = len(this_round_scores) - len(ranked)
                 logger.info("")
                 logger.info("ROUND 1 FEATURE RANKING (%d candidates)", len(ranked))
                 logger.info("-" * 50)
-                for i, (feat, metric) in enumerate(ranked, 1):
-                    logger.info("  %3d. %s: %.6f", i, feat, metric)
+                for i, row in enumerate(ranked, 1):
+                    if joint:
+                        logger.info("  %3d. %s [%s]: %.6f", i, row[0], row[2], row[1])
+                    else:
+                        logger.info("  %3d. %s: %.6f", i, row[0], row[1])
                 if n_dropped:
                     logger.info("  (%d features rejected / returned non-finite)", n_dropped)
 
@@ -887,10 +948,7 @@ class ServeDiscoverySelector:
             if self.checkpoint_path:
                 self._save_checkpoint(
                     started_at=started_at,
-                    completed_rounds=[
-                        {"feature": r.feature_added, "grain": r.grain, "score": r.score}
-                        for r in rounds if r.feature_added is not None
-                    ],
+                    completed_rounds=self._completed_entries(rounds),
                     current_round=round_idx,
                     total_candidates=0,
                     current_round_scores={},
@@ -908,12 +966,337 @@ class ServeDiscoverySelector:
         for lg, lvl in prev_levels:
             lg.setLevel(lvl)
 
+        union_match, union_point = self._union_selected(states)
         return DiscoveryResult(
-            selected_match_level=selected_match,
-            selected_point_level=selected_point,
+            selected_match_level=union_match,
+            selected_point_level=union_point,
             rounds=rounds,
             n_train_rows=len(base_df),
+            # The flat lists above are the deduplicated UNION, which is what
+            # the engine include list wants; the per-arm pairs are what the
+            # emitted `serve_model` block wants, and one cannot be recovered
+            # from the other once two arms have taken the same feature.
+            selected_by_arm={
+                st.arm: (list(st.selected_match), list(st.selected_point))
+                for st in states
+            } if joint else None,
         )
+
+    def _build_pools(
+        self,
+        match_list: list[str],
+        point_list: list[str],
+        pinned_match: list[str],
+        pinned_point: list[str],
+    ) -> tuple[list[str], list[str]]:
+        """One arm's candidate pools, from the lists its config gives it.
+
+        Called once per searched arm — a component run is the one-arm case —
+        so an arm's empty list expands to the shared default exactly as the
+        shared list always has, the `exclude_*` lists apply to every arm, and
+        the point features the chain cannot represent are dropped wherever
+        they appear.
+
+        Pinned features come out LAST. They are already in the arm's selection,
+        so offering them back would let a round "select" a feature the arm
+        already carries, and the pool the caller unions for materialization
+        stays free of duplicates.
+        """
+        # Empty candidate list → full pool, matching classification / projection / IID FS.
+        match_pool = list(match_list)
+        if not match_pool:
+            match_pool = get_all_feature_specs(window_sizes=self.config.features.window_sizes)
+            logger.info("candidate_match_level_features empty → using full registered pool (%d specs)", len(match_pool))
+        point_pool = list(point_list)
+        if not point_pool:
+            point_pool = default_point_level_candidate_pool()
+            logger.info("candidate_point_level_features empty → using full default pool (%d specs)", len(point_pool))
+
+        match_excludes = set(self.config.features.exclude_match_level_features)
+        if match_excludes:
+            unknown = match_excludes - set(match_pool)
+            if unknown:
+                raise ValueError(
+                    f"exclude_match_level_features contains specs not in the candidate pool: "
+                    f"{sorted(unknown)}"
+                )
+            base_conflict = match_excludes & set(pinned_match)
+            if base_conflict:
+                raise ValueError(
+                    f"exclude_match_level_features overlaps base_match_level_features: "
+                    f"{sorted(base_conflict)}"
+                )
+            before = len(match_pool)
+            match_pool = [f for f in match_pool if f not in match_excludes]
+            logger.info("Excluded %d match-level specs (pool %d → %d)", before - len(match_pool), before, len(match_pool))
+
+        point_excludes = set(self.config.features.exclude_point_level_features)
+        if point_excludes:
+            unknown = point_excludes - set(point_pool)
+            if unknown:
+                raise ValueError(
+                    f"exclude_point_level_features contains specs not in the candidate pool: "
+                    f"{sorted(unknown)}"
+                )
+            base_conflict = point_excludes & set(pinned_point)
+            if base_conflict:
+                raise ValueError(
+                    f"exclude_point_level_features overlaps base_point_level_features: "
+                    f"{sorted(base_conflict)}"
+                )
+            before = len(point_pool)
+            point_pool = [f for f in point_pool if f not in point_excludes]
+            logger.info("Excluded %d point-level specs (pool %d → %d)", before - len(point_pool), before, len(point_pool))
+
+        # Excluded for a BRANCH metric too, though nothing in branch scoring
+        # would break: the endpoint is a chain config, and within one branch
+        # `serve` / `is_second_serve` are constant, so a branch metric would
+        # rank them as harmless noise while the chain builds every ScoreState
+        # with serve_num=1.
+        if needs_match_grain_prep(self.config.metric):
+            dropped = [f for f in point_pool if f in _CHAIN_INCOMPATIBLE_POINT_FEATURES]
+            if dropped:
+                point_pool = [f for f in point_pool if f not in _CHAIN_INCOMPATIBLE_POINT_FEATURES]
+                logger.info(
+                    "Metric %s: excluding point features incompatible with the deuce closed-form: %s",
+                    self.config.metric, dropped,
+                )
+
+        return (
+            [c for c in match_pool if c not in pinned_match],
+            [c for c in point_pool if c not in pinned_point],
+        )
+
+    def _build_arm_states(self, joint_arms: list[str]) -> list[_ArmState]:
+        """One `_ArmState` per arm this run searches, in config order.
+
+        A COMPONENT run is the one-arm case and is built here too: its arm is
+        `serve_component` (None for a single-level run), it is pinned by the
+        shared `features.base_*` lists and draws from the shared candidate
+        lists. That is what lets `run()` be one loop — the joint case adds
+        arms to a list, it does not add a branch.
+
+        A joint arm is pinned by its own `serve_model.<arm>_*_features`, which
+        is also where an unlisted (held) arm's features stay: those never
+        become a state, so nothing offers them a candidate and
+        `substitute_arm_lists` carries them through untouched.
+        """
+        if not joint_arms:
+            pinned_match = list(self.config.features.base_match_level_features)
+            pinned_point = list(self.config.features.base_point_level_features)
+            cand_match, cand_point = self._build_pools(
+                list(self.config.features.candidate_match_level_features),
+                list(self.config.features.candidate_point_level_features),
+                pinned_match, pinned_point,
+            )
+            return [
+                _ArmState(
+                    arm=self.config.serve_component,
+                    selected_match=pinned_match,
+                    selected_point=pinned_point,
+                    candidate_match=cand_match,
+                    candidate_point=cand_point,
+                )
+            ]
+
+        serve_model = self.config.serve_model
+        if serve_model is None:  # pragma: no cover - refused at config load
+            raise ValueError("joint_selection requires serve_model")
+        states: list[_ArmState] = []
+        for arm in joint_arms:
+            arm_cfg = self.config.joint_selection.arms[arm]
+            pinned_match = list(getattr(serve_model, f"{arm}_match_features"))
+            pinned_point = list(getattr(serve_model, f"{arm}_point_features"))
+            cand_match, cand_point = self._build_pools(
+                list(arm_cfg.candidate_match_level_features),
+                list(arm_cfg.candidate_point_level_features),
+                pinned_match, pinned_point,
+            )
+            states.append(
+                _ArmState(
+                    arm=arm,
+                    selected_match=pinned_match,
+                    selected_point=pinned_point,
+                    candidate_match=cand_match,
+                    candidate_point=cand_point,
+                    cap=arm_cfg.max_features,
+                )
+            )
+        logger.info(
+            "Joint forward selection over %d arms: %s",
+            len(states),
+            "; ".join(
+                f"{st.arm} pinned={len(st.selected_match) + len(st.selected_point)} "
+                f"pool={len(st.candidate_match) + len(st.candidate_point)}"
+                + (f" cap={st.cap}" if st.cap is not None else "")
+                for st in states
+            ),
+        )
+        return states
+
+    @staticmethod
+    def _union_selected(
+        states: list[_ArmState],
+    ) -> tuple[list[str], list[str]]:
+        """Every arm's selections, deduplicated, in arm-then-selection order.
+
+        The flat `selected_*_level` pair `DiscoveryResult` reports and every
+        round records. A feature the metric wanted on two arms appears once:
+        it is one column for the engine to compute, and which arms read it is
+        `selected_by_arm`'s job to say.
+        """
+        match_level: list[str] = []
+        point_level: list[str] = []
+        for st in states:
+            for src, dst in (
+                (st.selected_match, match_level),
+                (st.selected_point, point_level),
+            ):
+                for feat in src:
+                    if feat not in dst:
+                        dst.append(feat)
+        return match_level, point_level
+
+    def _score_key(self, arm: str | None, grain: str, cand: str) -> str:
+        """This round's key for one `(arm, grain, candidate)` score.
+
+        A component run keys by the bare candidate name — the shape the
+        checkpoint's `current_round_scores` carries and every history reader
+        already destructures — so its records come out byte for byte as they
+        always have. A joint run cannot: the same feature is offered to every
+        arm that lists it, and one arm's score for it is not the other's.
+        """
+        if self.config.joint_selection is None:
+            return cand
+        return f"{arm}|{grain}|{cand}"
+
+    def _parse_score_key(
+        self, key: str, states: list[_ArmState],
+    ) -> tuple[_ArmState, str, str]:
+        """`(state, grain, candidate)` for a key `_score_key` built."""
+        if self.config.joint_selection is None:
+            st = states[0]
+            return st, ("match" if key in st.candidate_match else "point"), key
+        arm, grain, cand = key.split("|", 2)
+        for st in states:
+            if st.arm == arm:
+                return st, grain, cand
+        raise KeyError(f"round score key {key!r} names no searched arm")
+
+    def _score_state_candidate(
+        self, state: _ArmState, grain: str, cand: str, joint: bool,
+    ) -> tuple[float, tuple[float, ...]]:
+        """Score one candidate on top of ITS OWN arm's current selection.
+
+        The lists come from the arm the candidate was offered to, not from a
+        single run-wide pair, which is the whole of what a joint round adds to
+        the scoring call. `arm` is passed only for a joint run: a component
+        run's arm is `config.serve_component` and the scorer defaults to it,
+        so its call is unchanged.
+        """
+        match_level = list(state.selected_match)
+        point_level = list(state.selected_point)
+        if grain == "match":
+            match_level.append(cand)
+        else:
+            point_level.append(cand)
+        if joint:
+            return self._score_cv_match_grain_detailed(
+                match_level, point_level, arm=state.arm,
+            )
+        return self._score_cv_match_grain_detailed(match_level, point_level)
+
+    def _completed_entries(self, rounds: list[FSRoundResult]) -> list[dict[str, Any]]:
+        """The checkpoint's `completed_rounds`, one entry per selected feature.
+
+        One derivation site for the three save sites (two mid-round, one
+        end-of-round commit), which used to repeat the same comprehension:
+        a joint run has to record the arm on all three or a resume would
+        replay its rounds into the wrong arms.
+        """
+        joint = self.config.joint_selection is not None
+        entries: list[dict[str, Any]] = []
+        for r in rounds:
+            if r.feature_added is None:
+                continue
+            entry: dict[str, Any] = {
+                "feature": r.feature_added, "grain": r.grain, "score": r.score,
+            }
+            if joint:
+                entry["arm"] = r.arm
+            entries.append(entry)
+        return entries
+
+    def _ranking(
+        self, scores: dict[str, float], states: list[_ArmState],
+    ) -> list[list[Any]]:
+        """This round's finite candidates, best first.
+
+        `[feature, score]` for a component run — the shape every existing
+        reader of the history file destructures — and `[feature, score, arm]`
+        for a joint run, where the same feature can hold two places in one
+        ranking and the pair alone would not say which is which.
+
+        Non-finite scores are dropped rather than sorted: `-inf` would
+        otherwise rank ahead of every real score under a minimised metric.
+        """
+        joint = self.config.joint_selection is not None
+        rows: list[list[Any]] = []
+        for key, metric in scores.items():
+            if not math.isfinite(metric):
+                continue
+            st, _grain, cand = self._parse_score_key(key, states)
+            rows.append([cand, metric, st.arm] if joint else [cand, metric])
+        rows.sort(key=lambda r: r[1], reverse=not is_minimize(self.config.metric))
+        return rows
+
+    def _progress_text(
+        self, states: list[_ArmState], rounds: list[FSRoundResult],
+    ) -> str:
+        """The live selected list, rewritten each round so it can be cat-ed.
+
+        Selection ORDER, not grain-grouped: `rounds` is the interleaved record
+        of what the search actually took and when, which grouping by grain
+        destroys. Pinned features precede it unnumbered — they were given, not
+        chosen, and numbering them alongside the rounds would imply a search
+        order they never had.
+
+        A joint run is grouped by ARM, in config order, because "round 4 took
+        this feature" is unreadable without knowing which arm now carries it;
+        the round numbers stay the run's, so the gaps in one arm's list are
+        the rounds its rivals won.
+        """
+        def _picked(arm: str | None) -> list[str]:
+            return [
+                f"{r.round_idx:>7}. {r.feature_added} [{r.grain}]"
+                for r in rounds
+                if r.feature_added is not None and (arm is None or r.arm == arm)
+            ]
+
+        if self.config.joint_selection is None:
+            lines = (
+                [f"   base. {f} [match]" for f in
+                 self.config.features.base_match_level_features]
+                + [f"   base. {f} [point]" for f in
+                   self.config.features.base_point_level_features]
+                + _picked(None)
+            )
+            return chr(10).join(lines)
+
+        serve_model = self.config.serve_model
+        lines = []
+        for st in states:
+            lines.append(f"{st.arm}:")
+            lines += [
+                f"   base. {f} [match]"
+                for f in getattr(serve_model, f"{st.arm}_match_features")
+            ]
+            lines += [
+                f"   base. {f} [point]"
+                for f in getattr(serve_model, f"{st.arm}_point_features")
+            ]
+            lines += _picked(st.arm)
+        return chr(10).join(lines)
 
     def _load_checkpoint(self) -> SelectionCheckpoint | None:
         if self.checkpoint_path is None:
@@ -1191,6 +1574,8 @@ class ServeDiscoverySelector:
         this_round_scores: dict[str, float],
         minimize: bool,
         shrinks: dict[str, list[float]] | None = None,
+        ranking: list | None = None,
+        best_arm: str | None = None,
     ) -> dict[str, Any]:
         """History record for a halted round: the classification path's `stop`
         shape (selection.py) plus the finite-ranked candidates of the round.
@@ -1199,8 +1584,15 @@ class ServeDiscoverySelector:
         BESIDE the ranking, never inside it: the ranking's `[feature, score]`
         pairs are what every existing reader of the history file destructures.
         A `fixed` run passes None and gets the record it has always written.
+
+        `ranking` is the round's ranking when the caller has already built one
+        — a joint run's rows carry the arm, which cannot be recovered from the
+        score map alone because its keys are the caller's. Omitted, the record
+        ranks the map itself, exactly as it always has. `best_arm` names the
+        arm the halting round's best candidate belonged to, and is written
+        only when there is one to name.
         """
-        ranked = sorted(
+        ranked = ranking if ranking is not None else sorted(
             ((f, m) for f, m in this_round_scores.items() if math.isfinite(m)),
             key=lambda x: x[1],
             reverse=not minimize,
@@ -1217,6 +1609,8 @@ class ServeDiscoverySelector:
         }
         if shrinks is not None:
             rec["shrinks"] = shrinks
+        if best_arm is not None:
+            rec["best_arm"] = best_arm
         return rec
 
     def _score_cv(
