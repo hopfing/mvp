@@ -24,7 +24,6 @@ import polars as pl
 from mvp.common.base_job import get_data_root, get_local_data_root
 from mvp.model.config import apply_filters, get_filter_feature_specs
 from mvp.model.engine import check_memory, make_fs_engine
-from mvp.model.features._score_helpers import total_games_lost, total_games_won
 from mvp.model.mlflow_logger import ExperimentLogger
 from mvp.model.splitters import BaseSplitter, make_splitter
 from mvp.projection.iid.artifacts import (
@@ -43,7 +42,8 @@ from mvp.projection.iid.metrics import (
     compute_set_score_diagnostics,
     compute_tiebreak_diagnostics,
 )
-from mvp.projection.iid.projector import TennisProjector
+from mvp.projection.iid.projection_run import resolve_targets
+from mvp.projection.iid.projector import TennisProjector, slice_output
 from mvp.projection.iid.serve_model import (
     ScoreStateChainServeModel,
     build_serve_model,
@@ -190,16 +190,24 @@ def preload_match_specs(serve_model_config) -> list[str]:
 
 
 def build_fold_match_frame(
-    test_df: pl.DataFrame, out: Any, fold_idx: int, y_won: np.ndarray
+    test_df: pl.DataFrame, out: Any, fold_idx: int,
+    y_won: np.ndarray | pl.Series,
+    scoreable: np.ndarray | pl.Series,
 ) -> pl.DataFrame:
-    """One fold's rows for the fold_match_win artifact.
+    """One fold's rows for the fold_match_win artifact — EVERY test row.
 
     Same alignment guard `build_pmf_frame` carries: the distribution indexes
     by row order, and a silent reorder here would hand every match another
     match's probability in the OOF store models train against. `won_a` (the
-    A row's outcome, the same array the fold metrics score against) rides
-    along so a consumer can calibrate the raw chain probability without
-    re-deriving outcomes.
+    A row's outcome) rides along so a consumer can calibrate the raw chain
+    probability without re-deriving outcomes; it is defined on every written
+    row, a retirement included, and is CAST rather than left to whatever dtype
+    the engine emitted.
+
+    `scoreable` marks the rows with a games target. The classification stack
+    scores unscoreable matches, so they are written: their absence is what made
+    the prior and the chain-shape columns null exactly on matches that ended
+    early (#118).
     """
     if not (test_df["match_uid"].to_numpy() == out.match_uid).all():
         raise ValueError(
@@ -212,7 +220,8 @@ def build_fold_match_frame(
         "effective_match_date": test_df["effective_match_date"],
         "fold_idx": pl.Series([fold_idx] * len(test_df), dtype=pl.Int32),
         "p_match_win_a": out.distribution.p_match_win_a,
-        "won_a": pl.Series(np.asarray(y_won).astype(np.int8)),
+        "won_a": pl.Series("won_a", y_won).cast(pl.Int8),
+        "scoreable": pl.Series("scoreable", scoreable).cast(pl.Int8),
         # Shape scalars ride the same aligned `out` — the winner-side
         # chain_shape transform consumes them the way the prior consumes
         # p_match_win_a.
@@ -265,30 +274,15 @@ class IIDProjectionRunner:
         )
 
     def _resolve_targets(self, df: pl.DataFrame) -> pl.DataFrame:
-        """Add per-row targets and filter invalid matches.
+        """Add per-row targets and the `_scoreable` flag.
 
-        Excludes walkovers/retirements/defaults/unplayed and rows missing
-        first two set scores. Adds `_target_games_a` (the row's player) and
-        `_target_games_b` (the row's opponent).
+        Delegates to `projection_run.resolve_targets` — ONE implementation, not
+        two. The copies drifted in meaning once before: the fold artifact and
+        the forward pmf are spliced into a single feature column, so a match
+        this walk-forward keeps and that one drops (or vice versa) is a hole in
+        the middle of a training column.
         """
-        df = df.filter(
-            pl.col("player_set1_games").is_not_null()
-            & pl.col("player_set2_games").is_not_null()
-        )
-        if "reason" in df.columns:
-            df = df.filter(
-                pl.col("reason").fill_null("").is_in(["W/O", "RET", "DEF", "UNP"]).not_()
-            )
-
-        df = df.with_columns(
-            total_games_won().cast(pl.Float64).alias("_target_games_a"),
-            total_games_lost().cast(pl.Float64).alias("_target_games_b"),
-        )
-        df = df.filter(
-            pl.col("_target_games_a").is_not_null()
-            & pl.col("_target_games_b").is_not_null()
-        )
-        return df
+        return resolve_targets(df)
 
     def _make_splitter(self) -> BaseSplitter:
         """Build the fold splitter from `config.validation`.
@@ -386,11 +380,16 @@ class IIDProjectionRunner:
         n_total = len(df)
         if n_total == 0:
             raise ValueError("No matches remain after filtering and target resolution")
+        # Two populations from here on: every match is predicted and written,
+        # the scoreable subset is fit and scored. Both counts are logged and
+        # persisted so a run's fit population is legible from its artifact.
+        n_scoreable = int(df["_scoreable"].sum())
 
         splitter = self._make_splitter()
         run_logger.info(
-            "IID projection on %d matches (after collapse), serve_model=%s",
-            n_total, self.config.serve_model.type,
+            "IID projection on %d matches (after collapse), %d scoreable, "
+            "serve_model=%s",
+            n_total, n_scoreable, self.config.serve_model.type,
         )
 
         check_memory("before iid projection fold loop")
@@ -462,11 +461,18 @@ class IIDProjectionRunner:
             for fold_idx, (train_idx, test_idx) in enumerate(splitter.split(df)):
                 check_memory(f"iid projection fold {fold_idx + 1} start")
                 t_fold = time.perf_counter()
-                train_df = df[train_idx]
+                # Fit on the scoreable rows (unchanged population); project the
+                # WHOLE test window and score the scoreable slice of it. The
+                # frame written to the fold artifact is the whole one: a match
+                # the classification stack scores but this artifact omits is a
+                # null feature that encodes the outcome (#118).
+                train_df = df[train_idx].filter(pl.col("_scoreable"))
                 test_df = df[test_idx]
+                mask = test_df["_scoreable"].to_numpy()
+                test_s = test_df.filter(pl.col("_scoreable"))
                 run_logger.info(
-                    "Fold %d: train=%d, test=%d",
-                    fold_idx + 1, len(train_df), len(test_df),
+                    "Fold %d: train=%d, test=%d (%d scoreable)",
+                    fold_idx + 1, len(train_df), len(test_df), len(test_s),
                 )
 
                 serve_model = build_serve_model(
@@ -477,8 +483,11 @@ class IIDProjectionRunner:
                 fold_train_points: pl.DataFrame | None = None
                 fold_test_points: pl.DataFrame | None = None
                 if preloaded_points_full is not None:
+                    # Keyed by the populations that use them: the fit's
+                    # scoreable train rows, and the scoreable test rows the
+                    # branch scorers score against.
                     train_uids = train_df["match_uid"].unique().to_list()
-                    test_uids = test_df["match_uid"].unique().to_list()
+                    test_uids = test_s["match_uid"].unique().to_list()
                     fold_train_points = preloaded_points_full.filter(
                         pl.col("match_uid").is_in(train_uids)
                     )
@@ -494,13 +503,17 @@ class IIDProjectionRunner:
                     projector.fit(train_df)
 
                 out = projector.project(test_df)
+                # Everything below scores: it reads the scoreable slice of the
+                # frame and the ALIGNED slice of the output. `out` itself stays
+                # whole -- the artifact is written from it.
+                out_s = slice_output(out, mask)
 
-                y_won = test_df["won"].to_numpy().astype(np.int64)
-                y_games_a = test_df["_target_games_a"].to_numpy().astype(np.float64)
-                y_games_b = test_df["_target_games_b"].to_numpy().astype(np.float64)
+                y_won = test_s["won"].to_numpy().astype(np.int64)
+                y_games_a = test_s["_target_games_a"].to_numpy().astype(np.float64)
+                y_games_b = test_s["_target_games_b"].to_numpy().astype(np.float64)
 
                 metrics = compute_iid_metrics(
-                    out,
+                    out_s,
                     y_won,
                     y_games_a,
                     y_games_b,
@@ -510,25 +523,25 @@ class IIDProjectionRunner:
                     include_regression=self.config.metrics.include_regression,
                 )
                 metrics.update(compute_serve_diagnostics(
-                    out, test_df,
+                    out_s, test_s,
                     clip_min=self.config.serve_model.clip_min,
                     clip_max=self.config.serve_model.clip_max,
                 ))
-                metrics.update(compute_hold_diagnostics(out, test_df))
-                metrics.update(compute_set_score_diagnostics(out, test_df))
-                metrics.update(compute_tiebreak_diagnostics(out, test_df))
+                metrics.update(compute_hold_diagnostics(out_s, test_s))
+                metrics.update(compute_set_score_diagnostics(out_s, test_s))
+                metrics.update(compute_tiebreak_diagnostics(out_s, test_s))
                 metrics.update(
-                    set_count_cal(out.distribution, out.best_of, test_df)
+                    set_count_cal(out_s.distribution, out_s.best_of, test_s)
                 )
                 if isinstance(serve_model, ScoreStateChainServeModel):
                     metrics.update(serve_model.score_test_points(
-                        test_df,
+                        test_s,
                         preloaded_points=fold_test_points,
                         preloaded_match_features=preloaded_match_features,
                     ))
                 elif isinstance(serve_model, TwoLevelServeModel):
                     metrics.update(_two_level_branch_metrics(
-                        serve_model, test_df,
+                        serve_model, test_s,
                         fold_test_points=fold_test_points,
                         preloaded_match_features=preloaded_match_features,
                     ))
@@ -549,16 +562,19 @@ class IIDProjectionRunner:
                     "opp_set3_tiebreak", "opp_set4_tiebreak", "opp_set5_tiebreak",
                 ]
                 all_predictions.append({
-                    "df": test_df.select(
-                        [c for c in pred_cols if c in test_df.columns]
+                    "df": test_s.select(
+                        [c for c in pred_cols if c in test_s.columns]
                     ),
-                    "out": out,
+                    "out": out_s,
                     "y_won": y_won,
                     "y_games_a": y_games_a,
                     "y_games_b": y_games_b,
                 })
                 fold_match_rows.append(
-                    build_fold_match_frame(test_df, out, fold_idx + 1, y_won)
+                    build_fold_match_frame(
+                        test_df, out, fold_idx + 1,
+                        test_df["won"], test_df["_scoreable"],
+                    )
                 )
 
                 run_logger.info(
@@ -615,6 +631,7 @@ class IIDProjectionRunner:
             "fold_metrics": all_metrics,
             "n_folds": len(all_metrics),
             "n_matches": n_total,
+            "n_scoreable": n_scoreable,
             "run_id": run_id,
             "diagnostics": diagnostic_results,
             "_config": self.config,

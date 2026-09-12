@@ -104,6 +104,7 @@ def _fold_match_win() -> pl.DataFrame:
             "fold_idx": pl.Series([1, 1, 2, 2], dtype=pl.Int32),
             "p_match_win_a": list(np.linspace(0.55, 0.75, n)),
             "won_a": pl.Series([1, 0, 1, 0], dtype=pl.Int8),
+            "scoreable": pl.Series([1, 1, 1, 0], dtype=pl.Int8),
             **{c: [0.5] * n for c in SHAPE_COLUMNS},
         }
     )
@@ -119,6 +120,7 @@ def _pmf() -> pl.DataFrame:
             "opp_id": ["B0"],
             "effective_match_date": [date(2026, 2, 1)],
             "p_match_win_a": [0.6],
+            "scoreable": pl.Series([1], dtype=pl.Int8),
             **{c: [0.5] for c in SHAPE_COLUMNS},
         }
     )

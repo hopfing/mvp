@@ -448,9 +448,10 @@ class TestBuildLedger:
     needing the stage tree on disk.
     """
 
-    def _pmf(self):
-        return _pmf(actual=24.0).with_columns(
-            pl.lit(22.4).alias("expected_total_games")
+    def _pmf(self, match_uid: str = "m1", scoreable: int = 1):
+        return _pmf(match_uid=match_uid, actual=24.0).with_columns(
+            pl.lit(22.4).alias("expected_total_games"),
+            pl.lit(scoreable, dtype=pl.Int8).alias("scoreable"),
         )
 
     def _install(self, monkeypatch, *, books=("dk", "br"), anchors_seen=None):
@@ -530,6 +531,35 @@ class TestBuildLedger:
         self._install(monkeypatch)
         led = build_ledger(self._pmf())
         assert (led["edge"] < 0).any()
+
+    def test_an_unscoreable_match_is_not_settled(self, monkeypatch):
+        """The pmf carries every projected match now, retirements included.
+        They leave the ledger at settlement -- on the flag, not on a missing
+        row -- so totals and spread CLV cover exactly the matches they did
+        before. `actual_total` is deliberately non-null here: only the
+        `scoreable` filter can exclude this row."""
+        from mvp.oddspapi import board as board_mod
+        from mvp.projection.iid.evaluation import build_ledger
+
+        self._install(monkeypatch, books=("dk",))
+
+        def two_match_board(times, market, *, books=None, **kw):
+            return pl.DataFrame({
+                "match_uid": ["m1", "m2"],
+                "book": ["dk", "dk"],
+                "points": [22.0, 22.0],
+                "over_odds": [2.0, 2.0],
+                "under_odds": [1.9, 1.9],
+                "p_over": [0.5, 0.5],
+                "is_main_line": [True, True],
+                "live_over": [True, True],
+                "live_under": [True, True],
+            })
+
+        monkeypatch.setattr(board_mod, "board_at", two_match_board)
+        pmf = pl.concat([self._pmf(), self._pmf("m2", scoreable=0)])
+        led = build_ledger(pmf, anchor_names=("open",))
+        assert set(led["match_uid"].unique().to_list()) == {"m1"}
 
     def test_rungs_outside_the_pmf_support_are_reported_not_silent(
         self, monkeypatch, caplog

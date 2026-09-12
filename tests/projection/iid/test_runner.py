@@ -179,13 +179,34 @@ class TestRunnerHelpers:
         result = runner._resolve_targets(df)
         assert len(result) == 0
 
+    def test_resolve_targets_keeps_retirements_unscoreable(self, tmp_path):
+        """The runner delegates to `projection_run.resolve_targets`, so the
+        fold split sees every match that was played. A retirement reaches a
+        test set — and the fold artifact — with no target."""
+        runner = self._make_runner(tmp_path)
+        df = self._build_match_df().with_columns(pl.lit("RET").alias("reason"))
+        result = runner._resolve_targets(df)
+        assert len(result) == 2
+        assert result["_scoreable"].to_list() == [False, False]
+        assert result["_target_games_a"].to_list() == [None, None]
+
     def test_resolve_targets_filters_missing_set_scores(self, tmp_path):
         runner = self._make_runner(tmp_path)
         df = self._build_match_df().with_columns(
             pl.lit(None).cast(pl.Int64).alias("player_set1_games"),
         )
         result = runner._resolve_targets(df)
-        assert len(result) == 0
+        assert len(result) == 2
+        assert result["_scoreable"].to_list() == [False, False]
+
+    def test_resolve_targets_is_the_projection_run_implementation(self, tmp_path):
+        """One implementation, not two: the fold artifact and the forward pmf
+        must agree on which matches exist and which are scoreable."""
+        from mvp.projection.iid import projection_run
+
+        runner = self._make_runner(tmp_path)
+        df = self._build_match_df()
+        assert runner._resolve_targets(df).equals(projection_run.resolve_targets(df))
 
     def test_collapse_to_match_rows_one_per_match(self, tmp_path):
         runner = self._make_runner(tmp_path)
@@ -345,3 +366,180 @@ class TestPreloadMatchSpecs:
         from mvp.projection.iid.runner import preload_match_specs
 
         assert preload_match_specs(self._cfg(type="two_level")) == []
+
+
+class _StubEngine:
+    """FeatureEngine stand-in: the runner's one `compute` call returns a frame
+    built here, so the end-to-end test needs no parquet and no cache."""
+
+    def __init__(self, frame: pl.DataFrame) -> None:
+        self._frame = frame
+
+    def compute(self, feature_specs=None, extra_columns=None, **_):
+        return self._frame
+
+
+_SET_COLS = [f"player_set{i}_games" for i in range(1, 6)] + [
+    f"opp_set{i}_games" for i in range(1, 6)
+] + [f"player_set{i}_tiebreak" for i in range(1, 6)] + [
+    f"opp_set{i}_tiebreak" for i in range(1, 6)
+]
+
+_E2E_YAML = textwrap.dedent(
+    """
+    description: e2e
+    data:
+      date_range:
+        start: "2024-01-01"
+        end: "2024-12-31"
+    features:
+      include:
+        - pts_service_won_pct(days=90)
+    serve_model:
+      type: identity
+      window: 90
+    validation:
+      type: date_expanding
+      initial_train_months: 6
+      test_months: 3
+    metrics:
+      total_lines: [21.5, 22.5]
+      spread_lines: [-2.5, 2.5]
+    """
+)
+
+# The retired match, inside fold 1's test window (2024-08-28).
+_RET_IDX = 40
+_RET_UID = f"m{_RET_IDX:03d}"
+
+
+def _e2e_frame(*, with_ret: bool) -> pl.DataFrame:
+    """Mirrored per-player rows for 60 matches across 2024, one of them a
+    retirement whose first two sets ARE present — the case the mask exists for:
+    unmasked, `total_games_won`'s fill_null(0) would hand it a real partial
+    total no book would have settled."""
+    from datetime import timedelta
+
+    rows: list[dict] = []
+    for i in range(60):
+        if i == _RET_IDX and not with_ret:
+            continue
+        reason = "RET" if i == _RET_IDX else None
+        day = date(2024, 1, 1) + timedelta(days=6 * i)
+        three_set = i % 4 == 3
+        # Seeded per match index, so removing one match leaves every other
+        # match's outcome identical -- the two runs differ in one row, nothing
+        # else.
+        a_wins = bool(np.random.default_rng(1000 + i).random() < 0.5)
+        a_sets = [6.0, 4.0 if three_set else 6.0, 6.0 if three_set else None]
+        b_sets = [3.0 + (i % 3), 6.0 if three_set else 3.0,
+                  4.0 if three_set else None]
+        a_serve = 0.60 + 0.002 * (i % 11)
+        b_serve = 0.58 + 0.002 * (i % 7)
+        for side in ("a", "b"):
+            mine, theirs = (a_sets, b_sets) if side == "a" else (b_sets, a_sets)
+            my_serve, their_serve = (
+                (a_serve, b_serve) if side == "a" else (b_serve, a_serve)
+            )
+            row = {
+                "match_uid": f"m{i:03d}",
+                "player_id": f"{'A' if side == 'a' else 'B'}{i:03d}",
+                "opp_id": f"{'B' if side == 'a' else 'A'}{i:03d}",
+                "won": a_wins if side == "a" else not a_wins,
+                "reason": reason,
+                "best_of": 3,
+                "circuit": "tour",
+                # Decorrelated from the winner: a segment that lines up with
+                # the outcome is single-class and cannot be scored.
+                "surface": "Hard" if (i // 3) % 2 else "Clay",
+                "round": "R32",
+                "effective_match_date": day,
+                "player_pts_service_won_pct_90d": my_serve,
+                "opp_pts_service_won_pct_90d": their_serve,
+                "pts_service_pts_won": 40.0 + i % 5,
+                "pts_service_pts_played": 70.0,
+                "opp_pts_service_pts_won": 38.0 + i % 4,
+                "opp_pts_service_pts_played": 70.0,
+                "svc_games_played": 10.0,
+                "svc_bp_saved": 2.0,
+                "svc_bp_faced": 3.0,
+                "opp_svc_games_played": 10.0,
+                "opp_svc_bp_saved": 1.0,
+                "opp_svc_bp_faced": 3.0,
+            }
+            for s in range(1, 6):
+                row[f"player_set{s}_games"] = (
+                    mine[s - 1] if s <= len(mine) else None
+                )
+                row[f"opp_set{s}_games"] = (
+                    theirs[s - 1] if s <= len(theirs) else None
+                )
+                row[f"player_set{s}_tiebreak"] = (
+                    7.0 if (s == 1 and i % 5 == 0) else None
+                )
+                row[f"opp_set{s}_tiebreak"] = (
+                    5.0 if (s == 1 and i % 5 == 0) else None
+                )
+            rows.append(row)
+    return pl.DataFrame(rows).with_columns(
+        [pl.col(c).cast(pl.Float64) for c in _SET_COLS]
+    )
+
+
+class TestRunWritesEveryMatch:
+    """End-to-end: the projection predicts every match in a fold's test window
+    and writes it; only fitting and scoring use the scoreable subset."""
+
+    def _run(self, tmp_path, monkeypatch, *, with_ret: bool):
+        from mvp.projection.iid.artifacts import fp_dir_for
+
+        monkeypatch.setenv("MVP_ARTIFACT_ROOT", str(tmp_path / "artifacts"))
+        config_path = tmp_path / "e2e.yaml"
+        config_path.write_text(_E2E_YAML, encoding="utf-8")
+        runner = IIDProjectionRunner(
+            config_path=config_path,
+            matches_path=tmp_path / "matches.parquet",
+            cache_dir=tmp_path / "cache",
+            log_to_mlflow=False,
+        )
+        runner.engine = _StubEngine(_e2e_frame(with_ret=with_ret))
+        result = runner.run()
+        return result, fp_dir_for(runner.config, config_path)
+
+    def test_the_retirement_is_in_the_oof_store_with_a_real_probability(
+        self, tmp_path, monkeypatch
+    ):
+        """The null-in-feature that encoded "this match ended early" is gone:
+        the row exists, carries a probability, and says it is not scoreable."""
+        result, fp_dir = self._run(tmp_path, monkeypatch, with_ret=True)
+        art = pl.read_parquet(fp_dir / "fold_match_win.parquet")
+
+        ret = art.filter(pl.col("match_uid") == _RET_UID)
+        assert ret.height == 1, "the retirement never reached the fold artifact"
+        assert ret["scoreable"][0] == 0
+        assert 0.0 < ret["p_match_win_a"][0] < 1.0
+        assert ret["won_a"][0] in (0, 1)
+        assert (
+            art.filter(pl.col("match_uid") != _RET_UID)["scoreable"] == 1
+        ).all()
+        assert result["n_scoreable"] == result["n_matches"] - 1
+
+    def test_scoring_is_unchanged_by_the_unscoreable_row(
+        self, tmp_path, monkeypatch
+    ):
+        """Fit and metric populations are exactly today's: the run with the
+        retirement scores identically to the run without it."""
+        with_ret, _ = self._run(tmp_path, monkeypatch, with_ret=True)
+        without, _ = self._run(tmp_path, monkeypatch, with_ret=False)
+
+        assert with_ret["n_matches"] == without["n_matches"] + 1
+        assert with_ret["n_scoreable"] == without["n_scoreable"]
+        assert with_ret["n_folds"] == without["n_folds"]
+        for mine, theirs in zip(with_ret["fold_metrics"], without["fold_metrics"]):
+            assert mine.keys() == theirs.keys()
+            for k in mine:
+                assert mine[k] == pytest.approx(theirs[k], nan_ok=True), k
+        for k in with_ret["metrics"]:
+            assert with_ret["metrics"][k] == pytest.approx(
+                without["metrics"][k], nan_ok=True
+            ), k

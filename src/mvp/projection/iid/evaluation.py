@@ -840,7 +840,14 @@ def build_ledger(
     if not books:
         raise MarketNotCarried(f"no entry books carry {market}")
     uids = pmf["match_uid"].unique()
-    outcomes = pmf.select("match_uid", market_pmf_spec(market)["outcome"])
+    # Settlement covers the SCOREABLE matches only. The pmf carries every match
+    # the projection predicted, retirements included (#118); their outcome
+    # column is null by construction, and `settle` inner-joins on `outcomes`, so
+    # filtering here drops them from totals/spread CLV exactly as their absence
+    # used to.
+    outcomes = pmf.filter(pl.col("scoreable") == 1).select(
+        "match_uid", market_pmf_spec(market)["outcome"]
+    )
 
     frames: list[pl.DataFrame] = []
     for name in anchor_names:

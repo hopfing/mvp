@@ -491,17 +491,21 @@ def _sweep_trial_hint(model: str) -> str | None:
 def prior_artifacts_ready(source: PriorSource) -> bool:
     """Fold OOF present with the columns the kind's CURRENT schema requires.
 
-    For projection sources the schema includes the chain-shape columns: the
-    writers always emit them now, so an artifact without them predates the
-    schema and must read as stale — otherwise the discovery completeness pass
-    short-circuits and the chain_shape transform crashes downstream on the
-    old file (the 2026-09-03 probe failure)."""
+    For projection sources the schema includes the chain-shape columns and
+    `scoreable`: the writers always emit them now, so an artifact without them
+    predates the schema and must read as stale — otherwise the discovery
+    completeness pass short-circuits and the chain_shape transform crashes
+    downstream on the old file (the 2026-09-03 probe failure). `scoreable`
+    additionally marks a REPOPULATED artifact: one written before #118 is
+    missing every match that ended early, not merely a column."""
     if source.kind == "projection":
         p = source.fold_match_win
         if not p.exists():
             return False
         cols = pl.scan_parquet(p).collect_schema().names()
-        required = {"p_match_win_a", "player_id", "opp_id", "won_a"}
+        required = {
+            "p_match_win_a", "player_id", "opp_id", "won_a", "scoreable",
+        }
         required |= set(SHAPE_COLUMNS)
         return required <= set(cols)
     p = source.fold_predictions
@@ -516,8 +520,8 @@ def _forward_artifact_ready(source: PriorSource) -> bool:
     ledger with the columns `_backtest_rows` needs. Without it every row after
     the evaluation window has a null prior, which an offset's not_null filter
     turns into an empty predict set (the 2026-08-31 backtest failure).
-    Projection pmfs must also carry the chain-shape columns (same staleness
-    rule as the fold artifact)."""
+    Projection pmfs must also carry the chain-shape columns and `scoreable`
+    (same staleness rule as the fold artifact)."""
     if source.kind == "projection":
         p = source.pmf_parquet
         if not p.exists():
@@ -525,6 +529,7 @@ def _forward_artifact_ready(source: PriorSource) -> bool:
         cols = pl.scan_parquet(p).collect_schema().names()
         return ({
             "player_id", "opp_id", "p_match_win_a", "effective_match_date",
+            "scoreable",
         } | set(SHAPE_COLUMNS)) <= set(cols)
     p = source.backtest_csv
     if not p.exists():
@@ -805,9 +810,16 @@ def _both_orientations(df: pl.DataFrame) -> pl.DataFrame:
 
 
 def _read_fold_match_win(path: Path) -> pl.DataFrame:
+    """Every written row, unfiltered.
+
+    `scoreable` is required but never filtered on: the projection predicts every
+    match, and the prior is consumed against the CLASSIFICATION target, which
+    includes retirements. Calibrating on completed matches only would leave the
+    prior systematically over-confident on the population it is used on.
+    """
     df = pl.read_parquet(path)
     required = {"match_uid", "player_id", "opp_id", "effective_match_date",
-                "fold_idx", "p_match_win_a", "won_a"}
+                "fold_idx", "p_match_win_a", "won_a", "scoreable"}
     missing = required - set(df.columns)
     if missing:
         raise ValueError(
@@ -1058,15 +1070,22 @@ _SHAPE_OUTPUTS = [f"player_{c}" for c in SHAPE_COLUMNS]
 
 
 def _shape_read(path: Path, source: PriorSource) -> pl.DataFrame:
+    """Every written row, unfiltered — same rule as `_read_fold_match_win`.
+
+    `scoreable` is part of the required set: an artifact without it predates
+    #118 and is missing every match that ended early, so the shape columns it
+    carries are null exactly on those matches downstream.
+    """
     df = pl.read_parquet(path)
-    missing = ({"match_uid", "player_id", "opp_id", "effective_match_date"}
+    missing = ({"match_uid", "player_id", "opp_id", "effective_match_date",
+                "scoreable"}
                | set(SHAPE_COLUMNS)) - set(df.columns)
     if missing:
         cmd = (source.forward_regenerate_command
                if path == source.pmf_parquet else source.regenerate_command)
         raise ValueError(
-            f"{path} is missing shape columns {sorted(missing)} (predates the "
-            f"chain_shape artifact schema). Regenerate: {cmd}"
+            f"{path} is missing columns {sorted(missing)} (predates the "
+            f"current projection artifact schema). Regenerate: {cmd}"
         )
     return df
 

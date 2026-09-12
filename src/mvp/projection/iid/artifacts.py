@@ -221,7 +221,7 @@ def write_pmf_parquet(
 
 _FOLD_MATCH_WIN_COLUMNS = [
     "match_uid", "player_id", "opp_id", "effective_match_date",
-    "fold_idx", "p_match_win_a", "won_a",
+    "fold_idx", "p_match_win_a", "won_a", "scoreable",
     *SHAPE_COLUMNS,
 ]
 
@@ -235,6 +235,12 @@ def write_fold_match_win(fp_dir: Path, frame: pl.DataFrame) -> Path:
     This is the per-row OOF store the winner-side prior consumes — before it
     existed, the walk-forward's predictions lived only in memory and
     `projection.json` kept aggregates.
+
+    EVERY match in a fold's test window is here, `scoreable` marking the ones
+    with a games target. A missing row is a null feature on a match the
+    classification stack scored, which is post-match information in a training
+    column (#118) — so the flag is part of the contract, and a frame without it
+    is refused.
     """
     missing = [c for c in _FOLD_MATCH_WIN_COLUMNS if c not in frame.columns]
     if missing:

@@ -312,6 +312,7 @@ class TestFoldMatchWin:
             "fold_idx": [1],
             "p_match_win_a": [0.6],
             "won_a": [1],
+            "scoreable": [1],
             **{c: [0.5] for c in SHAPE_COLUMNS},
         })
         path = write_fold_match_win(tmp_path, frame)
@@ -319,7 +320,7 @@ class TestFoldMatchWin:
         out = pl.read_parquet(path)
         assert out.columns == [
             "match_uid", "player_id", "opp_id", "effective_match_date",
-            "fold_idx", "p_match_win_a", "won_a",
+            "fold_idx", "p_match_win_a", "won_a", "scoreable",
             *SHAPE_COLUMNS,
         ]
 
@@ -330,3 +331,25 @@ class TestFoldMatchWin:
 
         with pytest.raises(ValueError, match="missing columns"):
             write_fold_match_win(tmp_path, pl.DataFrame({"match_uid": ["m0"]}))
+
+    def test_a_frame_without_scoreable_is_refused(self, tmp_path):
+        """Every row is written now, so which of them carry a target is part of
+        the contract rather than something a reader can infer."""
+        from datetime import date
+
+        import polars as pl
+
+        from mvp.projection.iid.artifacts import SHAPE_COLUMNS, write_fold_match_win
+
+        frame = pl.DataFrame({
+            "match_uid": ["m0"],
+            "player_id": ["A"],
+            "opp_id": ["B"],
+            "effective_match_date": [date(2025, 1, 1)],
+            "fold_idx": [1],
+            "p_match_win_a": [0.6],
+            "won_a": [1],
+            **{c: [0.5] for c in SHAPE_COLUMNS},
+        })
+        with pytest.raises(ValueError, match="scoreable"):
+            write_fold_match_win(tmp_path, frame)

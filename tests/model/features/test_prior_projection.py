@@ -57,8 +57,10 @@ def _fold_match_win(
         "fold_idx": pl.Series(folds, dtype=pl.Int32),
         "p_match_win_a": probs,
         "won_a": pl.Series(wins, dtype=pl.Int8),
-        # shape columns are part of the projection artifact schema now;
-        # readiness treats their absence as a stale artifact
+        # Every row the projection predicted is written; `scoreable` says which
+        # of them have a games target. Part of the schema, so readiness treats
+        # its absence (like the shape columns') as a stale artifact.
+        "scoreable": pl.Series([1] * n, dtype=pl.Int8),
         **{c: [0.5] * n for c in SHAPE_COLUMNS},
     })
 
@@ -75,6 +77,7 @@ def _write_pmf(src) -> None:
         "opp_id": ["B0"],
         "effective_match_date": [date(2026, 2, 1)],
         "p_match_win_a": [0.6],
+        "scoreable": pl.Series([1], dtype=pl.Int8),
         **{c: [0.5] for c in SHAPE_COLUMNS},
     }).write_parquet(src.pmf_parquet)
 
@@ -411,7 +414,7 @@ class TestFrame:
     def test_missing_columns_in_fold_artifact_raise(self, tmp_path):
         src = _source(tmp_path)
         src.eval_dir.mkdir(parents=True)
-        for col in ("opp_id", "won_a"):
+        for col in ("opp_id", "won_a", "scoreable"):
             _fold_match_win(_DAYS_2X2, _FOLDS_2X2, _WINS_2X2).drop(col).write_parquet(
                 src.fold_match_win
             )
@@ -519,3 +522,45 @@ class TestSweepTagFallback:
         )
         assert src.eval_dir != stale
         assert not prior.prior_artifacts_ready(src)
+
+
+class TestScoreableIsPartOfTheSchema:
+    """The projection now writes every match it predicted, `scoreable` saying
+    which of them have a games target. An artifact written before that is stale;
+    no reader on the prior path filters on the flag."""
+
+    def test_fold_artifact_without_scoreable_reads_as_stale(self, tmp_path):
+        src = _source(tmp_path)
+        src.eval_dir.mkdir(parents=True)
+        _fold_match_win(_DAYS_2X2, _FOLDS_2X2, _WINS_2X2).write_parquet(
+            src.fold_match_win
+        )
+        assert prior.prior_artifacts_ready(src)
+        pl.read_parquet(src.fold_match_win).drop("scoreable").write_parquet(
+            src.fold_match_win
+        )
+        assert not prior.prior_artifacts_ready(src)
+
+    def test_pmf_without_scoreable_reads_as_stale(self, tmp_path):
+        src = _source(tmp_path)
+        _write_pmf(src)
+        assert prior._forward_artifact_ready(src)
+        pl.read_parquet(src.pmf_parquet).drop("scoreable").write_parquet(
+            src.pmf_parquet
+        )
+        assert not prior._forward_artifact_ready(src)
+
+    def test_unscoreable_rows_are_calibrated_with_the_rest(self, tmp_path):
+        """The Platt fit's population is every written row. The prior is
+        consumed against the CLASSIFICATION target, which includes retirements;
+        calibrating on completed matches only would leave it systematically
+        over-confident on the population it is used on."""
+        src = _source(tmp_path)
+        src.eval_dir.mkdir(parents=True)
+        _fold_match_win(_DAYS_2X2, _FOLDS_2X2, _WINS_2X2).with_columns(
+            pl.Series("scoreable", [1, 0, 1, 0], dtype=pl.Int8)
+        ).write_parquet(src.fold_match_win)
+
+        frame = prior.build_prior_frame(src)
+        assert frame.height == 8  # four matches, both orientations, none dropped
+        assert set(frame["match_uid"].to_list()) == {"M0", "M1", "M2", "M3"}

@@ -79,7 +79,9 @@ class TestShapeScalars:
         assert all(len(v) == 2 for v in s.values())
 
 
-def _shape_fold_frame(days: list[date], folds: list[int]) -> pl.DataFrame:
+def _shape_fold_frame(
+    days: list[date], folds: list[int], scoreable: list[int] | None = None
+) -> pl.DataFrame:
     n = len(days)
     base = pl.DataFrame({
         "match_uid": [f"M{i}" for i in range(n)],
@@ -89,6 +91,7 @@ def _shape_fold_frame(days: list[date], folds: list[int]) -> pl.DataFrame:
         "fold_idx": pl.Series(folds, dtype=pl.Int32),
         "p_match_win_a": [0.6] * n,
         "won_a": pl.Series([i % 2 for i in range(n)], dtype=pl.Int8),
+        "scoreable": pl.Series(scoreable or [1] * n, dtype=pl.Int8),
     })
     for j, c in enumerate(SHAPE_COLUMNS):
         base = base.with_columns(
@@ -113,15 +116,21 @@ class TestShapeFrame:
     def test_mirror_semantics(self, tmp_path):
         src = _source(tmp_path)
         src.eval_dir.mkdir(parents=True)
-        _shape_fold_frame(_DAYS, _FOLDS).write_parquet(src.fold_match_win)
+        # M1 is unscoreable (a retirement): the shape transform reads every
+        # written row, so it mirrors like any other.
+        _shape_fold_frame(_DAYS, _FOLDS, scoreable=[1, 0, 1, 1]).write_parquet(
+            src.fold_match_win
+        )
         rows = prior._shape_fold_rows(src)
-        a = rows.filter(pl.col("player_id") == "A0")
-        b = rows.filter(pl.col("player_id") == "B0")
-        assert len(a) == 1 and len(b) == 1
-        for c in SHAPE_SYMMETRIC:
-            assert a[c][0] == b[c][0]
-        for c in SHAPE_ANTISYMMETRIC:
-            assert a[c][0] == -b[c][0]
+        assert len(rows) == 2 * len(_DAYS), "no row is filtered on scoreable"
+        for pair in (("A0", "B0"), ("A1", "B1")):
+            a = rows.filter(pl.col("player_id") == pair[0])
+            b = rows.filter(pl.col("player_id") == pair[1])
+            assert len(a) == 1 and len(b) == 1
+            for c in SHAPE_SYMMETRIC:
+                assert a[c][0] == b[c][0]
+            for c in SHAPE_ANTISYMMETRIC:
+                assert a[c][0] == -b[c][0]
 
     def test_fold_train_ends_precede_fold_days(self, tmp_path):
         src = _source(tmp_path)
@@ -138,6 +147,18 @@ class TestShapeFrame:
         src.eval_dir.mkdir(parents=True)
         legacy = _shape_fold_frame(_DAYS, _FOLDS).drop(SHAPE_COLUMNS)
         legacy.write_parquet(src.fold_match_win)
+        with pytest.raises(ValueError, match="iid-project"):
+            prior._shape_fold_rows(src)
+
+    def test_missing_scoreable_refused_with_command(self, tmp_path):
+        """An artifact written before the projection predicted every match is
+        missing a third of its rows, not just a column — same staleness rule as
+        the shape columns, same regenerate command."""
+        src = _source(tmp_path)
+        src.eval_dir.mkdir(parents=True)
+        _shape_fold_frame(_DAYS, _FOLDS).drop("scoreable").write_parquet(
+            src.fold_match_win
+        )
         with pytest.raises(ValueError, match="iid-project"):
             prior._shape_fold_rows(src)
 

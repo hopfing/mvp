@@ -23,7 +23,7 @@ from mvp.projection.iid.metrics import (
     compute_set_score_diagnostics,
     compute_tiebreak_diagnostics,
 )
-from mvp.projection.iid.projector import ProjectionOutput
+from mvp.projection.iid.projector import ProjectionOutput, slice_output
 from mvp.projection.iid.serve_model import SERVE_PROB_MAX, SERVE_PROB_MIN
 
 
@@ -93,7 +93,7 @@ class IIDProjectionDiagnostics:
                 mask = (combined_df[seg_col] == value).fill_null(False).to_numpy()
                 if not mask.any():
                     continue
-                sub_out = _slice_output(combined_out, mask)
+                sub_out = slice_output(combined_out, mask)
                 sub_df = combined_df.filter(pl.Series(mask))
                 m = compute_iid_metrics(
                     sub_out,
@@ -223,27 +223,3 @@ def _quartile_bucket(col_name: str) -> pl.Expr:
     )
 
 
-def _slice_output(out: ProjectionOutput, mask: np.ndarray) -> ProjectionOutput:
-    """Boolean-mask a ProjectionOutput along the match axis."""
-    sub_dist = MatchDistribution(
-        p_match_win_a=out.distribution.p_match_win_a[mask],
-        set_outcome_probs={
-            k: v[mask] for k, v in out.distribution.set_outcome_probs.items()
-        },
-        total_games_pmf=out.distribution.total_games_pmf[mask],
-        spread_pmf=out.distribution.spread_pmf[mask],
-        spread_offset=out.distribution.spread_offset,
-        expected_total_games=out.distribution.expected_total_games[mask],
-        expected_spread=out.distribution.expected_spread[mask],
-    )
-    return ProjectionOutput(
-        distribution=sub_dist,
-        match_uid=out.match_uid[mask],
-        best_of=out.best_of[mask],
-        p_a_serve_win=out.p_a_serve_win[mask],
-        p_b_serve_win=out.p_b_serve_win[mask],
-        h_a=out.h_a[mask],
-        h_b=out.h_b[mask],
-        t_ab=out.t_ab[mask],
-        set_score_pmf=out.set_score_pmf[mask],
-    )

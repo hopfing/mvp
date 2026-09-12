@@ -112,28 +112,52 @@ def artifact_path(config: IIDProjectionConfig, config_path: Path) -> Path:
 
 
 def resolve_targets(df: pl.DataFrame) -> pl.DataFrame:
-    """Drop matches whose total-games target is not meaningful.
+    """Keep every match that was played; flag the ones with a games target.
 
-    A retirement, walkover, default or unplayed match produces fewer games than the
-    match would have, so scoring one against a total records an "under" no book would
-    have settled that way. This is why the pmf's `actual_total` can be trusted as the
-    settlement source downstream.
+    PREDICTION NEEDS NO TARGET. A retirement is a match the chain would have
+    predicted pre-match, so it stays in the frame and reaches the artifacts —
+    dropping it before the split is what made every projection-derived feature
+    null exactly on matches that ended early, which is the outcome encoded in a
+    training column (#118).
+
+    What the target is undefined for is a different question, and `_scoreable`
+    carries it: both first-set-score columns present AND `reason` not in
+    {RET, DEF, UNP}. Fitting and scoring filter on it; the artifacts write it.
+
+    `_target_games_a/_b` are MASKED to null where not `_scoreable` rather than
+    computed and ignored. `total_games_won` / `total_games_lost` sum with
+    `fill_null(0)` and never null-propagate, so an unmasked retirement at
+    6-3 2-1 carries a real partial total (12.0) that no book would have settled
+    — and that total is what `actual_total` writes into the pmf.
+
+    Dropped, not flagged: a walkover (`reason == "W/O"`) is not a match — no
+    play, nothing to predict — and a row with a null `won` is not one either
+    stack can use. The walkover drop is explicit here rather than left to the
+    feature engine's own, so this function's contract holds on any frame.
     """
-    df = df.filter(
+    if "reason" in df.columns:
+        df = df.filter(pl.col("reason").fill_null("") != "W/O")
+    if "won" in df.columns:
+        df = df.filter(pl.col("won").is_not_null())
+
+    scoreable = (
         pl.col("player_set1_games").is_not_null()
         & pl.col("player_set2_games").is_not_null()
     )
     if "reason" in df.columns:
-        df = df.filter(
-            pl.col("reason").fill_null("").is_in(["W/O", "RET", "DEF", "UNP"]).not_()
+        scoreable = scoreable & (
+            pl.col("reason").fill_null("").is_in(["RET", "DEF", "UNP"]).not_()
         )
-    df = df.with_columns(
-        total_games_won().cast(pl.Float64).alias("_target_games_a"),
-        total_games_lost().cast(pl.Float64).alias("_target_games_b"),
-    )
-    return df.filter(
-        pl.col("_target_games_a").is_not_null()
-        & pl.col("_target_games_b").is_not_null()
+    df = df.with_columns(scoreable.alias("_scoreable"))
+    return df.with_columns(
+        pl.when(pl.col("_scoreable"))
+        .then(total_games_won().cast(pl.Float64))
+        .otherwise(None)
+        .alias("_target_games_a"),
+        pl.when(pl.col("_scoreable"))
+        .then(total_games_lost().cast(pl.Float64))
+        .otherwise(None)
+        .alias("_target_games_b"),
     )
 
 
@@ -176,6 +200,10 @@ def _train_projector(
     if config.data.filters:
         train_df = apply_filters(train_df, config.data.filters)
     train_df = resolve_targets(train_df)
+    # Fit population unchanged by #118: a serve model learns from points that
+    # were played to a finish. Whether it should also learn from a retired
+    # match's points is a modelling question with its own gate.
+    train_df = train_df.filter(pl.col("_scoreable"))
     train_df = train_df.filter(
         (pl.col("effective_match_date") >= config.data.date_range.start)
         & (pl.col("effective_match_date") <= config.data.date_range.end)
@@ -283,7 +311,12 @@ def build_test_set(
     *,
     require_odds_coverage: bool = False,
 ) -> pl.DataFrame:
-    """Settled 2026 matches, one row per match.
+    """Settled 2026 matches, one row per match — including unscoreable ones.
+
+    Every match with a result is projected; `_scoreable` says which of them have
+    a games target. The forward artifact is what the classification stack reads
+    for rows after the evaluation window, so a retirement missing from it is a
+    null feature on a match that was played (#118), not an absent match.
 
     `require_odds_coverage=True` inner-joins the SCRAPER `odds/event_map.parquet`,
     which lets a retired source govern which matches are evaluated. Default False:
@@ -311,6 +344,11 @@ def build_pmf_frame(test_df: pl.DataFrame, out: ProjectionOutput) -> pl.DataFram
     `total_games_pmf` is indexed BY GAME COUNT: element i is P(total == i games).
     Aligned to `test_df` positionally, which is why the two travel together.
 
+    EVERY projected match is written, `scoreable` marking the ones with a
+    settleable outcome. `actual_total` is null on the rest by construction
+    (`resolve_targets` masks the targets), and pricing filters on the flag
+    (`evaluation.build_ledger`) rather than on a null.
+
     The alignment is ASSERTED, not assumed. Taking identity from `test_df` and
     probabilities from `out.distribution` independently means an equal-length but
     reordered pair writes a silently wrong pmf — every match gets another match's
@@ -337,6 +375,10 @@ def build_pmf_frame(test_df: pl.DataFrame, out: ProjectionOutput) -> pl.DataFram
         "actual_total": (
             test_df["_target_games_a"] + test_df["_target_games_b"]
         ).cast(pl.Float64),
+        # Which rows have an outcome to settle against. Null by construction in
+        # `actual_total` above on the rest, but a reader should not have to
+        # infer "this match ended early" from a missing number.
+        "scoreable": test_df["_scoreable"].cast(pl.Int8),
         "p_match_win_a": out.distribution.p_match_win_a,
         "expected_total_games": out.distribution.expected_total_games,
         "total_games_pmf": [
@@ -388,6 +430,7 @@ def build_spread_pmf_frame(
         "actual_spread": (
             test_df["_target_games_a"] - test_df["_target_games_b"]
         ).cast(pl.Float64),
+        "scoreable": test_df["_scoreable"].cast(pl.Int8),
         "a_is_uid_min": (
             test_df["player_id"]
             == test_df["match_uid"].str.split("_").list.get(4)
@@ -428,7 +471,10 @@ def run_projection(
     test_df = build_test_set(config, df)
     if len(test_df) == 0:
         raise RuntimeError("No settled 2026 matches to project")
-    logger.info("Projecting %d 2026 matches", len(test_df))
+    logger.info(
+        "Projecting %d 2026 matches (%d scoreable)",
+        len(test_df), int(test_df["_scoreable"].sum()),
+    )
     out = projector.project(test_df)
 
     fp_dir = fp_dir_for(config, config_path)
