@@ -10,7 +10,7 @@ winner:
     train_date_range:
       end: '2026-06-30'
       start: '2022-01-01'
-    trained_at: '2026-09-05T23:19:01.555189+00:00'
+    trained_at: '2026-09-12T01:02:44.922166+00:00'
   history:
   - artifact: data/models/exp1206_23_offset_h37_t134.joblib
     config: models/production/archive/exp1206_23_offset_h37_t134.yaml
@@ -42,7 +42,7 @@ winner:
     train_date_range:
       end: '2026-06-30'
       start: '2023-01-01'
-    trained_at: '2026-09-05T23:19:42.297631+00:00'
+    trained_at: '2026-09-12T01:03:12.366919+00:00'
   voters:
   - artifact: data/models/lr_fs_15f_260331.joblib
     config: models/voters/lr_fs_15f_260331.yaml
