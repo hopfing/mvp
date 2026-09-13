@@ -19,6 +19,13 @@
 "Cesar Stefan Bentzel": "B0Y3"
 "Jan Patrick Sinescu": "S1H8"
 "Joaquin A Cardozo": "A0JW"
+"Alejo S Quilez": "S0XE"
+"Danial Spasov": "S1I0"
+"Felipe Meligeni Rodrigues Alves": "MW75"
+"Hao Duan": "H0MN"
+"Liu Ziyu": "L0PS"
+"Luis Carlos Alvarez Valdes": "A0IY"
+"Manas Manoj Dhamne": "D0JI"
 # Mojibake: B365 sometimes emits "Jose" with an accent as "JosA(c)" (UTF-8 read
 # as Latin-1). The clean spelling already resolves via bio names; this covers the
 # corrupt one. Escaped as \xC3\xA9 so this file stays pure ASCII -- the loader

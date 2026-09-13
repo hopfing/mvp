@@ -22,3 +22,8 @@
 # Our spelling drops the second 'd'; Marc Majdandzic (M0V5) is a different player.
 "Oliver Majdandzic": "M1D0"
 "N. Vijay Sundar Prashanth": "PA97"
+"Daniel Merida Aguilar": "M0N7"
+"Matthew Donald": "D0HM"
+# Matches our own name, but that resolves to T0M0, the stale one of ATP's two IDs
+# for this player. C0UQ is the one current draws use.
+"Quoc Cuong Tran": "C0UQ"
