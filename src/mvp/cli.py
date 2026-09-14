@@ -3091,7 +3091,14 @@ def cmd_iid_project(args: argparse.Namespace) -> int:
         MatchesAggregator().run()
         set_fs_cutoff(_date.today())
 
-    runner = IIDProjectionRunner(config_path=config_path)
+    from mvp.model.backtest import _frozen_matches_path
+
+    # Reads the week's frozen snapshot like every other evaluation; a
+    # --refresh rebuild of the live aggregate is picked up at the next weekly
+    # freeze, exactly as the classification backtest does.
+    runner = IIDProjectionRunner(
+        config_path=config_path, matches_path=_frozen_matches_path(),
+    )
     results = runner.run()
 
     print_iid_projection_summary(results, name=runner.run_name)

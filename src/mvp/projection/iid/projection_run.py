@@ -172,9 +172,12 @@ def _collapse_to_match_rows(df: pl.DataFrame) -> pl.DataFrame:
     )
 
 
-def compute_features(config: IIDProjectionConfig) -> tuple[pl.DataFrame, Any]:
+def compute_features(
+    config: IIDProjectionConfig, *, matches_path: Path | None = None,
+) -> tuple[pl.DataFrame, Any]:
     """One feature-engine pass, shared by training and the test set."""
-    matches_path = get_data_root() / "aggregate" / "atptour" / "matches.parquet"
+    if matches_path is None:
+        matches_path = get_data_root() / "aggregate" / "atptour" / "matches.parquet"
     cache_dir = get_local_data_root() / "features" / "cache"
     engine = make_fs_engine(matches_path=matches_path, cache_dir=cache_dir)
 
@@ -450,8 +453,13 @@ def run_projection(
     retrain: bool = False,
     source: str | None = None,
     run_id: str | None = None,
+    matches_path: Path | None = None,
 ) -> ProjectionRun:
     """Train (or load), project 2026, write the pmf. Returns everything together.
+
+    `matches_path` is the aggregate to project from; evaluation callers pass the
+    week's frozen snapshot (mvp.model.backtest._frozen_matches_path) so every
+    trial in a ranking is on the same data. None reads the live aggregate.
 
     `source` / `run_id` group this run under a parent config in the fingerprint dir's
     source.txt — a sweep passes its parent stem so `iid-rank` can show variants
@@ -465,7 +473,7 @@ def run_projection(
     config = IIDProjectionConfig.from_file(str(config_path))
     record_run(config, config_path, source=source, run_id=run_id)
 
-    df, engine = compute_features(config)
+    df, engine = compute_features(config, matches_path=matches_path)
     projector = train_or_load(config, config_path, df, retrain=retrain, engine=engine)
 
     test_df = build_test_set(config, df)

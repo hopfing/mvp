@@ -6,8 +6,10 @@ the `offset.prior` sugar for it, or `chain_shape(model=X)`. Those columns are
 built from X's EVALUATION artifacts, which live in a fingerprint-keyed scratch
 dir that:
 
-- the weekly eval wipe deletes from (`wipe_stale_evaluations` removes every
-  entry under model_evaluations whose mtime predates Monday);
+- the weekly eval wipes delete from (`wipe_stale_evaluations` removes every
+  entry under model_evaluations whose mtime predates Monday;
+  `wipe_stale_projection_evaluations` does the same for projection_evaluations
+  at the start of every `iid-sweep`);
 - any ad-hoc run of X overwrites (a 3-day backtest replaced the lead's forward
   ledger with 380 rows on 2026-09-05);
 - a config edit relocates (the fingerprint changes; production resolves to an
@@ -240,11 +242,14 @@ def regenerate_prior(source: PriorSource) -> None:
             "prior %s: regenerating projection walk-forward from %s",
             source.model, source.config_path,
         )
-        IIDProjectionRunner(config_path=source.config_path).run()
+        from mvp.model import backtest as _bt
+
+        frozen = _bt._frozen_matches_path()
+        IIDProjectionRunner(config_path=source.config_path, matches_path=frozen).run()
         logger.warning(
             "prior %s: refitting projector and forward pmf", source.model,
         )
-        run_projection(source.config_path, retrain=True)
+        run_projection(source.config_path, retrain=True, matches_path=frozen)
     else:
         from mvp.model.backtest import artifact_dir, run_backtest
         from mvp.model.runner import ExperimentRunner

@@ -14,14 +14,17 @@ Content-keying is what makes a sweep over hyperparameter variants meaningful:
 stem-keying wrote every variant of a config to the same path, so each run
 overwrote the last.
 
-The root is deliberately NOT `model_evaluations/` — see the note on
-PROJECTION_EVAL_ROOT in mvp.common.config_hash.
+The root is deliberately NOT `model_evaluations/` (fingerprint namespaces must
+not collide; see PROJECTION_EVAL_ROOT in mvp.common.config_hash). Like that
+root it is wiped weekly: `wipe_stale_projection_evaluations` runs at the start
+of every `iid-sweep` and removes dirs older than the week's frozen inputs.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -249,6 +252,50 @@ def write_fold_match_win(fp_dir: Path, frame: pl.DataFrame) -> Path:
     path = fp_dir / FOLD_MATCH_WIN_PARQUET
     frame.select(_FOLD_MATCH_WIN_COLUMNS).write_parquet(path)
     return path
+
+
+def evaluation_mtime(fp_dir: Path) -> float | None:
+    """When the evaluation was last written: the newest FILE directly in the
+    dir. Not the directory's own mtime, which NTFS leaves alone when a file is
+    rewritten in place (every writer here rewrites in place)."""
+    times = [p.stat().st_mtime for p in fp_dir.iterdir() if p.is_file()]
+    return max(times) if times else None
+
+
+def is_stale(fp_dir: Path, snapshot: float) -> bool:
+    """Older than the current frozen snapshot, or empty."""
+    t = evaluation_mtime(fp_dir)
+    return t is None or t < snapshot
+
+
+_wiped_roots: set[Path] = set()
+
+
+def wipe_stale_projection_evaluations(snapshot: float | None) -> int:
+    """Remove every fingerprint dir older than `snapshot` (the week's frozen
+    inputs). Once per process per root. The projection twin of
+    mvp.model.evaluation.wipe_stale_evaluations: evaluations from different
+    snapshots are not comparable, so the sweep clears them before writing."""
+    import shutil
+
+    from mvp.common.base_job import get_artifact_root
+
+    if snapshot is None:
+        return 0
+    root = get_artifact_root() / PROJECTION_EVAL_ROOT
+    if root in _wiped_roots or not root.exists():
+        return 0
+    _wiped_roots.add(root)
+    removed = 0
+    for child in root.iterdir():
+        if child.is_dir() and is_stale(child, snapshot):
+            shutil.rmtree(child, ignore_errors=True)
+            removed += 1
+    logger.info(
+        "Projection eval wipe: removed %d dir(s) older than snapshot %s",
+        removed, datetime.fromtimestamp(snapshot).isoformat(timespec="minutes"),
+    )
+    return removed
 
 
 def read_sources(fp_dir: Path) -> list[tuple[str, str, str]]:

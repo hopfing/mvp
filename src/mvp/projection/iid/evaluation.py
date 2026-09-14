@@ -940,11 +940,28 @@ def run_backtest(
     (`cli.py`), which passes the result to `print_backtest_summary`; `sweep.py`
     discards it.
     """
+    from mvp.model.backtest import _frozen_matches_path, _frozen_odds_root
     from mvp.projection.iid.artifacts import backtest_name
     from mvp.projection.iid.projection_run import run_projection
 
+    # Frozen inputs: the week's matches snapshot and the week's copy of the
+    # odds stage, so every evaluation in a ranking prices the same data.
+    frozen_matches = _frozen_matches_path()
+    with paths.frozen_stage(_frozen_odds_root()):
+        return _run_backtest_frozen(
+            config_path, retrain=retrain, source=source, run_id=run_id,
+            markets=markets, matches_path=frozen_matches,
+            run_projection=run_projection, backtest_name=backtest_name,
+        )
+
+
+def _run_backtest_frozen(
+    config_path, *, retrain, source, run_id, markets, matches_path,
+    run_projection, backtest_name,
+) -> dict[str, Path]:
     run = run_projection(
-        config_path, retrain=retrain, source=source, run_id=run_id
+        config_path, retrain=retrain, source=source, run_id=run_id,
+        matches_path=matches_path,
     )
     paths_out: dict[str, Path] = {}
     for mkt in markets:

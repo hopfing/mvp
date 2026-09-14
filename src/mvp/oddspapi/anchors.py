@@ -127,7 +127,7 @@ def _start_times(match_uids: pl.Series | None = None) -> pl.DataFrame:
     arbitrary one would make the anchor non-reproducible, which is the single property
     it exists to provide.
     """
-    fm = pl.read_parquet(paths.stage_root() / "_fixture_map.parquet")
+    fm = pl.read_parquet(paths.active_stage_root() / "_fixture_map.parquet")
     col = "true_start_time" if "true_start_time" in fm.columns else "start_time"
     out = (
         fm.filter(pl.col("match_uid").is_not_null())

@@ -30,6 +30,15 @@ _PROJ_YAML = textwrap.dedent(
     """
 )
 
+@pytest.fixture(autouse=True)
+def _no_real_freeze(tmp_path, monkeypatch):
+    """Regeneration paths pass the week's frozen matches snapshot to the runner;
+    the fakes here never read it, and building the real one copies 800 MB."""
+    import mvp.model.backtest as bt
+
+    monkeypatch.setattr(bt, "_frozen_matches_path", lambda: tmp_path / "frozen_matches.parquet")
+
+
 
 def _write_proj_cfg(d: Path, stem: str) -> Path:
     d.mkdir(parents=True, exist_ok=True)
@@ -209,7 +218,7 @@ class TestResolve:
         calls: list[str] = []
 
         class _FakeRunner:
-            def __init__(self, config_path):
+            def __init__(self, config_path, **kw):
                 calls.append(f"project:{config_path}")
 
             def run(self):
@@ -219,7 +228,7 @@ class TestResolve:
                 )
                 return {}
 
-        def _fake_run_projection(config_path):
+        def _fake_run_projection(config_path, **kw):
             calls.append(f"backtest:{config_path}")
             _write_pmf(src)
 
@@ -255,7 +264,7 @@ class TestResolve:
 
         calls: list[str] = []
 
-        def _fake_run_projection(config_path):
+        def _fake_run_projection(config_path, **kw):
             calls.append(str(config_path))
             _write_pmf(src)
 

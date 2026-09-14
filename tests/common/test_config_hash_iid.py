@@ -169,8 +169,9 @@ def test_scalar_objective_equals_its_one_element_list():
 
 
 def test_projection_eval_root_is_separate_from_model_evaluations():
-    """IID artifacts must not live under model_evaluations/ — wipe_stale_evaluations
-    clears that root weekly and would delete far more expensive runs."""
+    """IID artifacts must not live under model_evaluations/: a projection config
+    and a model config must never collide on a fingerprint. (Both roots are
+    wiped weekly, each by its own command.)"""
     fp = _fp(_make_base_config_dict())
     assert iid_fingerprint_dir(fp).parent.name == PROJECTION_EVAL_ROOT
     assert iid_fingerprint_dir(fp) != fingerprint_dir(fp)

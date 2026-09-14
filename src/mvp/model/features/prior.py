@@ -80,8 +80,8 @@ EVALUATIONS_ROOT: Path | None = None
 BACKTESTS_ROOT: Path | None = None
 PROJECTION_EVALUATIONS_ROOT: Path | None = None
 # Where PROMOTION copies the artifacts production depends on
-# (`mvp.model.prior_promotion`). Fingerprint dirs are scratch: the weekly wipe
-# deletes from model_evaluations, ad-hoc runs overwrite their files, and a
+# (`mvp.model.prior_promotion`). Fingerprint dirs are scratch: the weekly wipes
+# delete from model_evaluations and projection_evaluations, ad-hoc runs overwrite their files, and a
 # config edit moves the fingerprint. A stem with a dir here resolves HERE (see
 # `resolve_prior`), so production's training, serving and preflight all read
 # the one copy that only `mvp train` writes. Under the data root's models/
@@ -609,7 +609,12 @@ def ensure_prior_artifacts(source: PriorSource, regenerate: bool) -> None:
                 "offset.prior %s: regenerating at %s (iid-project on %s)",
                 source.model, source.eval_dir.name, source.config_path,
             )
-            IIDProjectionRunner(config_path=source.config_path).run()
+            from mvp.model import backtest as _bt
+
+            IIDProjectionRunner(
+                config_path=source.config_path,
+                matches_path=_bt._frozen_matches_path(),
+            ).run()
             _cached_frame.cache_clear()
             if not _ready_possibly_relocated(source, prior_artifacts_ready):
                 raise RuntimeError(
@@ -672,7 +677,9 @@ def ensure_prior_artifacts(source: PriorSource, regenerate: bool) -> None:
             "on %s)",
             source.model, source.eval_dir.name, source.config_path,
         )
-        run_projection(source.config_path)
+        from mvp.model import backtest as _bt
+
+        run_projection(source.config_path, matches_path=_bt._frozen_matches_path())
     else:
         from mvp.model.backtest import run_backtest
 

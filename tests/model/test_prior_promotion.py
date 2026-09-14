@@ -1,7 +1,7 @@
 """Production owns its prior artifacts (mvp.model.prior_promotion).
 
 The failures being pinned: production read its prior inputs from
-fingerprint-keyed scratch that the weekly wipe deletes from, ad-hoc runs
+fingerprint-keyed scratch that the weekly wipes delete from, ad-hoc runs
 overwrite, config edits relocate, and code changes silently stale. `mvp train`
 now regenerates every dependency base-first and copies it to a promoted store
 that `resolve_prior` prefers; the tick preflights that store before scoring.
@@ -30,6 +30,15 @@ _LEAD_CFG = {
     "model": {"type": "xgboost", "params": {"n_estimators": 5, "n_jobs": 1}},
     "target": "won",
 }
+
+@pytest.fixture(autouse=True)
+def _no_real_freeze(tmp_path, monkeypatch):
+    """Regeneration paths pass the week's frozen matches snapshot to the runner;
+    the fakes here never read it, and building the real one copies 800 MB."""
+    import mvp.model.backtest as bt
+
+    monkeypatch.setattr(bt, "_frozen_matches_path", lambda: tmp_path / "frozen_matches.parquet")
+
 
 
 def _stage_cfg(base: str) -> dict:
@@ -290,7 +299,7 @@ class TestRegeneratePrior:
         calls: list[tuple] = []
 
         class _Runner:
-            def __init__(self, config_path):
+            def __init__(self, config_path, **kw):
                 calls.append(("evaluate", Path(config_path)))
 
             def run(self):
@@ -326,7 +335,7 @@ class TestRegeneratePrior:
         calls: list[tuple] = []
 
         class _Runner:
-            def __init__(self, config_path):
+            def __init__(self, config_path, **kw):
                 calls.append(("walk_forward", Path(config_path)))
 
             def run(self):

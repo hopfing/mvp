@@ -14,7 +14,9 @@ pipeline location rather than from a working directory under scripts/.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterator
 
 from mvp.common.base_job import get_data_root
 
@@ -51,7 +53,31 @@ def reference_dir() -> Path:
 
 
 def markets_reference() -> Path:
+    if _frozen_stage is not None:
+        return _frozen_stage / "reference" / "markets_tennis.json"
     return reference_dir() / "markets_tennis.json"
+
+
+# Frozen-stage redirect. Projection evaluations price against a per-week copy
+# of the stage (mvp.model.backtest._frozen_odds_root); inside `frozen_stage`
+# every read that goes through `active_stage_root()` / `markets_reference()`
+# lands there. Live serving never enters it and keeps reading `stage_root()`.
+_frozen_stage: Path | None = None
+
+
+@contextmanager
+def frozen_stage(root: Path) -> Iterator[Path]:
+    global _frozen_stage
+    prev = _frozen_stage
+    _frozen_stage = root
+    try:
+        yield root
+    finally:
+        _frozen_stage = prev
+
+
+def active_stage_root() -> Path:
+    return _frozen_stage if _frozen_stage is not None else stage_root()
 
 
 def historical_dirs() -> list[Path]:

@@ -24,6 +24,7 @@ from mvp.model.tuning import _MAXIMIZE_METRICS
 from mvp.projection.iid.artifacts import (
     backtest_name,
     discover_fp_dirs,
+    is_stale,
     read_projection_json,
     read_sources,
 )
@@ -80,6 +81,9 @@ class RankRow:
     n_matches: int = 0
     fold_metrics: list = field(default_factory=list)
     betting: dict[str, dict[str, Any]] | None = None
+    # Written before the current frozen snapshot: not comparable to rows that
+    # were not. Set by collect_rows when a snapshot is given.
+    stale: bool = False
 
     @property
     def label(self) -> str:
@@ -379,7 +383,9 @@ def _betting_summary(
     return out if out["markets"] else None
 
 
-def collect_rows(source: str | None = None) -> list[RankRow]:
+def collect_rows(
+    source: str | None = None, snapshot: float | None = None,
+) -> list[RankRow]:
     rows: list[RankRow] = []
     for fp_dir in discover_fp_dirs():
         proj = read_projection_json(fp_dir)
@@ -398,6 +404,7 @@ def collect_rows(source: str | None = None) -> list[RankRow]:
             n_matches=proj.get("n_matches") or 0,
             fold_metrics=proj.get("fold_metrics") or [],
             betting=_betting_summary(fp_dir),
+            stale=snapshot is not None and is_stale(fp_dir, snapshot),
         ))
     return rows
 
@@ -587,7 +594,21 @@ def format_rank_table(
     source: str | None = None,
     top_n: int | None = None,
 ) -> list[str]:
-    rows = collect_rows(source=source)
+    from mvp.model.backtest import frozen_snapshot_mtime
+
+    snapshot = frozen_snapshot_mtime(create=False)
+    rows = collect_rows(source=source, snapshot=snapshot)
+    hidden = sum(1 for r in rows if r.stale)
+    rows = [r for r in rows if not r.stale]
+    footer: list[str] = []
+    if snapshot is None:
+        footer = ["", "No frozen snapshot yet; iid-sweep creates one."]
+    elif hidden:
+        footer = [
+            "",
+            f"{hidden} evaluation(s) from before the current snapshot hidden; "
+            "a sweep of their study re-evaluates them.",
+        ]
     if not rows:
         return [
             "No evaluated IID projection configs found.",
@@ -595,7 +616,7 @@ def format_rank_table(
             "Produce some with:",
             "  poetry run py -m mvp iid-project <config>          (distributional)",
             "  poetry run py -m mvp iid-sweep <config> --n-trials N",
-        ]
+        ] + footer
     rows = _sorted(rows, sort_metric)
     if top_n:
         rows = rows[:top_n]
@@ -617,4 +638,5 @@ def format_rank_table(
     missing_bt = sum(1 for r in rows if r.betting is None)
     if missing_bt:
         lines += ["", f"{missing_bt}/{len(rows)} runs have no backtest."]
+    lines += footer
     return lines

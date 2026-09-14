@@ -1000,6 +1000,11 @@ class TestMarketFailureIsolation:
             "mvp.projection.iid.projection_run.run_projection",
             lambda *a, **k: _Run(),
         )
+        # The frozen inputs are real files under the artifact root; keep the
+        # test off them.
+        import mvp.model.backtest as bt
+        monkeypatch.setattr(bt, "_frozen_matches_path", lambda: tmp_path / "m.parquet")
+        monkeypatch.setattr(bt, "_frozen_odds_root", lambda: tmp_path / "odds")
         out = ev.run_backtest(tmp_path / "cfg.yaml")
 
         assert calls == ["total_games", "game_spread"], "both attempted"

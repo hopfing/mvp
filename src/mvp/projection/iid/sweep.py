@@ -42,6 +42,7 @@ from mvp.projection.iid.artifacts import (
     SPREAD_PMF_PARQUET,
     fp_dir_for,
     sweep_config_dir,
+    wipe_stale_projection_evaluations,
 )
 from mvp.projection.iid.config import IIDProjectionConfig
 
@@ -297,8 +298,11 @@ def run_entry(entry: SweepEntry, *, refresh: bool = False) -> str:
     if not refresh and _is_complete(fp_dir):
         return "skip"
 
+    from mvp.model.backtest import _frozen_matches_path
+
     runner = IIDProjectionRunner(
         config_path=entry.config_path,
+        matches_path=_frozen_matches_path(),
         run_name=entry.unique_stem,
         log_to_mlflow=False,
         source=entry.parent_stem,
@@ -361,6 +365,16 @@ def run_sweep(
     if dry_run:
         print("DRY RUN — configs written, nothing evaluated.")
         return result
+
+    # Weekly wipe: freeze this week's inputs (matches + odds stage) if not yet
+    # frozen, then remove every projection evaluation older than the snapshot,
+    # so nothing from an earlier week sits beside what this sweep writes.
+    from mvp.model.backtest import frozen_snapshot_mtime
+
+    snapshot = frozen_snapshot_mtime(create=True)
+    removed = wipe_stale_projection_evaluations(snapshot)
+    if removed:
+        print(f"Weekly wipe: removed {removed} projection evaluation(s) older than the snapshot")
 
     t0 = time.perf_counter()
     for i, entry in enumerate(result.entries, 1):

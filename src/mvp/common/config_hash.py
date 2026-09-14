@@ -371,12 +371,13 @@ def compute_iid_fingerprint(
     ]
 
 
-# Projection evaluations live under their OWN root, deliberately.
-# `mvp.model.evaluation.wipe_stale_evaluations` clears everything in
-# model_evaluations/ older than the current ISO week, because classification
-# comparability is scoped to the weekly frozen-matches snapshot. IID projection
-# runs have no weekly-snapshot semantics and cost far more per run, so they must
-# not sit under that broom.
+# Projection evaluations live under their OWN root so a projection config and
+# a model config can never collide on a fingerprint. Both roots are wiped
+# weekly: model_evaluations/ by `mvp.model.evaluation.wipe_stale_evaluations`
+# on the first refresh of the ISO week, projection_evaluations/ by
+# `mvp.projection.iid.artifacts.wipe_stale_projection_evaluations` on the
+# first `iid-sweep`, each against the week's frozen inputs (matches and, for
+# projections, the odds stage; see `mvp.model.backtest._frozen_*`).
 MODEL_EVAL_ROOT = "model_evaluations"
 PROJECTION_EVAL_ROOT = "projection_evaluations"
 

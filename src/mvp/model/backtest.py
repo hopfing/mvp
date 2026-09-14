@@ -90,6 +90,90 @@ def _frozen_matches_path() -> Path:
     return FROZEN_MATCHES_PATH
 
 
+# Per-week frozen copy of the OddsPapi stage files the projection ledger reads
+# (every book's market parquets, the fixture map, the markets reference), beside
+# the frozen matches. Same rule as the matches snapshot: projection evaluations
+# from the same week price against byte-identical odds. `.frozen` is written
+# last and its mtime is the snapshot clock; copy2 preserves the source files'
+# own mtimes, which say nothing about when the copy was taken.
+FROZEN_ODDS_ROOT = FROZEN_MATCHES_PATH.parent / "oddspapi"
+FROZEN_ODDS_MARKER = FROZEN_ODDS_ROOT / ".frozen"
+_frozen_odds_cache: Path | None = None
+
+
+def _frozen_odds_root() -> Path:
+    """Return this week's frozen OddsPapi stage, refreshing it when missing or
+    stale (marker from before the current week). Memoized per process."""
+    global _frozen_odds_cache
+    if _frozen_odds_cache is not None:
+        return _frozen_odds_cache
+    from mvp.oddspapi import paths as odds_paths
+
+    today = date.today()
+    week_start = today - timedelta(days=today.weekday())
+    fresh = FROZEN_ODDS_MARKER.exists() and (
+        datetime.fromtimestamp(FROZEN_ODDS_MARKER.stat().st_mtime).date() >= week_start
+    )
+    if not fresh:
+        if FROZEN_ODDS_ROOT.exists():
+            shutil.rmtree(FROZEN_ODDS_ROOT, ignore_errors=True)
+        stage = odds_paths.stage_root()
+        n = 0
+        for book in odds_paths.ALL_BOOKS:
+            src = stage / book
+            files = sorted(src.glob("*.parquet")) if src.is_dir() else []
+            if not files:
+                continue
+            dst = FROZEN_ODDS_ROOT / book
+            dst.mkdir(parents=True, exist_ok=True)
+            for p in files:
+                # The live pipeline swaps a book directory aside and removes
+                # it every tick (oddspapi.transformer._swap_books_in); a file
+                # listed a moment ago can be gone. Skip it rather than lose
+                # the freeze: the marker below still dates the snapshot.
+                try:
+                    shutil.copy2(p, dst / p.name)
+                except FileNotFoundError:
+                    logger.warning("Frozen odds copy: %s vanished mid-copy; skipped", p)
+                    continue
+                n += 1
+        fixture_map = stage / "_fixture_map.parquet"
+        if fixture_map.exists():
+            FROZEN_ODDS_ROOT.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(fixture_map, FROZEN_ODDS_ROOT / fixture_map.name)
+        ref = odds_paths.markets_reference()
+        if ref.exists():
+            (FROZEN_ODDS_ROOT / "reference").mkdir(parents=True, exist_ok=True)
+            shutil.copy2(ref, FROZEN_ODDS_ROOT / "reference" / ref.name)
+        FROZEN_ODDS_ROOT.mkdir(parents=True, exist_ok=True)
+        FROZEN_ODDS_MARKER.write_text(datetime.now().isoformat(), encoding="utf-8")
+        logger.info(
+            "Froze oddspapi stage for week of %s: %d market file(s) -> %s",
+            week_start, n, FROZEN_ODDS_ROOT,
+        )
+    _frozen_odds_cache = FROZEN_ODDS_ROOT
+    return FROZEN_ODDS_ROOT
+
+
+def frozen_snapshot_mtime(*, create: bool) -> float | None:
+    """The cutoff evaluations must postdate to count as this snapshot's:
+    Monday 00:00 of the current ISO week, the same rule as
+    mvp.model.evaluation.wipe_stale_evaluations, so anything produced this
+    week survives even if it ran before the week's first freeze (every
+    this-week run read this week's frozen matches). `create=True` freezes
+    first (a sweep); False only reads (a rank) and returns None when there is
+    no snapshot."""
+    if create:
+        _frozen_matches_path()
+        _frozen_odds_root()
+    if not (FROZEN_MATCHES_PATH.exists() and FROZEN_ODDS_MARKER.exists()):
+        return None
+    today = date.today()
+    week_start = today - timedelta(days=today.weekday())
+    return datetime(week_start.year, week_start.month, week_start.day).timestamp()
+
+
+
 def artifact_dir(config_path: Path) -> Path:
     return ARTIFACT_ROOT / config_path.stem
 

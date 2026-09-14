@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import functools
 import logging
+from pathlib import Path
 
 import polars as pl
 
@@ -57,8 +58,8 @@ PARTICIPANT_SIDES = ("1", "2")
 PARTICIPANT_MARKETS_FLOOR = frozenset({"game_spread", "moneyline"})
 
 
-@functools.lru_cache(maxsize=1)
-def _participant_markets() -> frozenset[str]:
+@functools.lru_cache(maxsize=2)
+def _participant_markets(reference: Path | None = None) -> frozenset[str]:
     """Stage names whose sides are the fixture's participants.
 
     DERIVED, not hardcoded. `markets.participant_sided_markets` reads the feed's
@@ -99,7 +100,10 @@ def feed_sides(market: str) -> tuple[str, str]:
     oriented pair here silently matches nothing, because `anchors._load` reads
     `side` straight off the parquet and never sees a derived ordinal.
     """
-    return PARTICIPANT_SIDES if market in _participant_markets() else TOTALS_SIDES
+    return (
+        PARTICIPANT_SIDES if market in _participant_markets(paths.markets_reference())
+        else TOTALS_SIDES
+    )
 
 BOARD_SCHEMA: dict[str, pl.DataType] = {
     "match_uid": pl.String,
@@ -133,7 +137,7 @@ BOARD_SCHEMA: dict[str, pl.DataType] = {
 
 
 def market_path(book: str, market: str):
-    return paths.stage_root() / book / f"{market}.parquet"
+    return paths.active_stage_root() / book / f"{market}.parquet"
 
 
 def available_books(market: str) -> list[str]:
@@ -444,7 +448,7 @@ def board_at(
     feed_over, feed_under = feed_sides(market)
     over_side = over_side if over_side is not None else feed_over
     under_side = under_side if under_side is not None else feed_under
-    orient = market in _participant_markets()
+    orient = market in _participant_markets(paths.markets_reference())
     if orient and (over_side, under_side) != (feed_over, feed_under):
         # These are consumed as the FEED's vocabulary by
         # `_orient_participant_sides`, which reads them off the stage rows. An
