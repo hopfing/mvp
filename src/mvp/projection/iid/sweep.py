@@ -189,6 +189,17 @@ def select_trials(
     return select_diverse(trials, n)
 
 
+def config_objective(config_path: Path) -> str:
+    """The metric the config tunes on (`metrics.objective[0]`), the one source
+    the tuner itself reads. The default sort for `--select topn`."""
+    objective = IIDProjectionConfig.from_file(str(config_path)).metrics.objective
+    if not objective:
+        raise ValueError(
+            f"{config_path.name} sets no metrics.objective; pass --sort METRIC"
+        )
+    return objective[0]
+
+
 def materialize(
     config_arg: str,
     n_trials: int,
@@ -226,6 +237,9 @@ def materialize(
     # How the trials on disk are encoded, from the study — never re-derived from
     # the config file. See `build_trial_config`.
     joint = study_param_namespace(study) == NAMESPACE_JOINT
+    if select == "topn" and not sort:
+        sort = config_objective(base_path)
+        logger.info("%s: --select topn with no --sort; ranking on the config's objective %s", stem, sort)
     chosen = select_trials(trials, n_trials, select=select, sort=sort)
     tag = "h" if select == "topn" else "d"
 

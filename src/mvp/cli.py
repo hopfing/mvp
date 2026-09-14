@@ -1164,8 +1164,9 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
     )
     iid_sweep_parser.add_argument(
         "--sort", default=None,
-        help="Trial metric to rank by (required for --select topn). Bare metric "
-             "name, e.g. iid_crps_total_games — IID studies have no holdout block.",
+        help="Trial metric to rank by under --select topn; defaults to the "
+             "config's metrics.objective. Bare metric name, e.g. "
+             "iid_crps_total_games — IID studies have no holdout block.",
     )
     iid_sweep_parser.add_argument(
         "--serve-block", choices=["params", "first_in_params"], default=None,
@@ -3170,9 +3171,6 @@ def cmd_oddspapi_transform(args: argparse.Namespace) -> int:
 def cmd_iid_sweep(args: argparse.Namespace) -> int:
     """Evaluate N tuning trials of an IID projection config for comparison."""
     from mvp.projection.iid.sweep import run_sweep
-
-    if args.select == "topn" and not args.sort:
-        raise ValueError("--select topn requires --sort METRIC")
 
     if args.memory_limit is not None:
         from mvp.model import engine as _engine

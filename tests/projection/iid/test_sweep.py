@@ -449,3 +449,24 @@ class TestFingerprintCollisionWarning:
         with caplog.at_level("WARNING"):
             sweep._warn_fingerprint_collisions(entries)
         assert caplog.text == ""
+
+
+class TestConfigObjectiveDefault:
+    def _cfg(self, tmp_path, objective: str) -> Path:
+        cfg = tmp_path / "c.yaml"
+        cfg.write_text(dedent(f"""
+            data:
+              date_range: {{start: "2024-01-01", end: "2024-12-31"}}
+            features: {{include: []}}
+            serve_model: {{type: identity}}
+            {objective}
+        """), encoding="utf-8")
+        return cfg
+
+    def test_topn_defaults_to_the_config_objective(self, tmp_path):
+        cfg = self._cfg(tmp_path, "metrics: {objective: [iid_crps_spread]}")
+        assert sweep.config_objective(cfg) == "iid_crps_spread"
+
+    def test_missing_objective_asks_for_sort(self, tmp_path):
+        with pytest.raises(ValueError, match="--sort"):
+            sweep.config_objective(self._cfg(tmp_path, ""))
