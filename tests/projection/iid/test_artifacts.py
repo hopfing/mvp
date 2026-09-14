@@ -233,15 +233,6 @@ class TestPmfParquet:
             artifacts.write_pmf_parquet(fp_dir, pmf, market="moneyline")
 
 
-class TestClvJson:
-    def test_missing_returns_none(self, tmp_path):
-        assert artifacts.read_clv_json(tmp_path) is None
-
-    def test_read(self, tmp_path):
-        (tmp_path / "clv.json").write_text(json.dumps({"avg_clvpin": 0.004}))
-        assert artifacts.read_clv_json(tmp_path)["avg_clvpin"] == 0.004
-
-
 class TestCutoverPurge:
     """The fingerprint dir is odds-source-blind, so a cutover leaves two
     contracts at one path unless the old one is removed.

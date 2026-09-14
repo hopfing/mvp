@@ -9,7 +9,6 @@ Every artifact a comparison needs lives in one directory keyed by config content
         total_games_pmf.parquet per-match pmf, the input to CLV scoring
         serve_model.joblib      trained artifact (backtest)
         backtest.csv            per-bet rows (backtest)
-        clv.json                sharp-CLV summary (written by the oddspapi scorer)
 
 Content-keying is what makes a sweep over hyperparameter variants meaningful:
 stem-keying wrote every variant of a config to the same path, so each run
@@ -99,8 +98,9 @@ PMF_PARQUET_BY_MARKET: dict[str, str] = {
 # fingerprint dir (projection.json, config.yaml, the pmf, serve_model.joblib) is
 # odds-independent and survives.
 #
-# `clv.json` was never written by anything in `src/` — it came from the POC
-# scorer that the cross-book layer retires. Only `rank.py` reads it.
+# `clv.json` came from the retired POC scorer (scripts/oddspapi/
+# oddspapi_total_games_poc.py, removed 2026-09-14); the ledger's own `clv`
+# column replaced it. Nothing reads it; the purge still clears old copies.
 LEGACY_BACKTEST_CSV = "backtest.csv"
 CLV_JSON = "clv.json"
 
@@ -249,13 +249,6 @@ def write_fold_match_win(fp_dir: Path, frame: pl.DataFrame) -> Path:
     path = fp_dir / FOLD_MATCH_WIN_PARQUET
     frame.select(_FOLD_MATCH_WIN_COLUMNS).write_parquet(path)
     return path
-
-
-def read_clv_json(fp_dir: Path) -> dict[str, Any] | None:
-    path = fp_dir / CLV_JSON
-    if not path.exists():
-        return None
-    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def read_sources(fp_dir: Path) -> list[tuple[str, str, str]]:

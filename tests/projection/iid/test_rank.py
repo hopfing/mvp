@@ -26,7 +26,7 @@ def eval_root(tmp_path, monkeypatch):
 
 def _make_run(
     eval_root, fp, *, crps=2.90, source="parent", run_id=None,
-    with_backtest=False, with_clv=False, folds=(2.85, 2.95), totals_only=False,
+    with_backtest=False, folds=(2.85, 2.95), totals_only=False,
 ):
     d = eval_root / fp
     d.mkdir(parents=True, exist_ok=True)
@@ -86,10 +86,6 @@ def _make_run(
         # every existing fingerprint dir looks like after the per-market split,
         # so the reader must skip the missing market rather than blank the table.
         (d / "backtest_game_spread.parquet").unlink(missing_ok=True)
-    if with_clv:
-        (d / "clv.json").write_text(json.dumps({
-            "n": 3800, "avg_clvpin": 0.0031, "positive_rate": 0.54,
-        }))
     return d
 
 
@@ -213,14 +209,13 @@ class TestFormatting:
     def test_one_table_per_instrument_and_market(self, eval_root):
         """Cramming instruments into one row is what capped how much each could
         show; pooling markets invited a comparison that makes no sense."""
-        _make_run(eval_root, "aaa111", with_backtest=True, with_clv=True, run_id="run_a")
+        _make_run(eval_root, "aaa111", with_backtest=True, run_id="run_a")
         out = "\n".join(format_rank_table())
         for title in (
             "Table 1: TOTAL GAMES — distributional",
             "Table 2: GAME SPREAD — distributional",
             "Table 3: TOTAL GAMES — betting",
             "Table 4: GAME SPREAD — betting",
-            "Table 5: TOTAL GAMES — sharp CLV",
         ):
             assert title in out
 
@@ -256,14 +251,14 @@ class TestFormatting:
         assert "totals_cfg (" not in out
 
     def test_run_appears_once_per_table(self, eval_root):
-        """One row per config per table — 2 distributional + 2 betting + CLV.
+        """One row per config per table — 2 distributional + 2 betting.
 
         The betting tables put the selection policies in cell groups rather than
         stacked blocks precisely so a config stays one row; a sweep of twenty
         configs would otherwise render hundreds of rows and bury the ranking."""
-        _make_run(eval_root, "aaa111", with_backtest=True, with_clv=True, run_id="run_a")
+        _make_run(eval_root, "aaa111", with_backtest=True, run_id="run_a")
         body = [ln for ln in format_rank_table() if ln.strip().startswith("1 run_a")]
-        assert len(body) == 5
+        assert len(body) == 4
 
     def test_the_edge_curve_is_not_in_the_ranking_table(self, eval_root):
         """Bands are a property of one config. A curve per config per policy is
@@ -286,17 +281,7 @@ class TestFormatting:
         _make_run(eval_root, "aaa111", with_backtest=True, run_id="run_a")
         lines = format_rank_table()
         start = next(i for i, ln in enumerate(lines) if "Table 4" in ln)
-        end = next(i for i, ln in enumerate(lines) if "Table 5" in ln)
-        assert any("run_a" in ln for ln in lines[start:end])
-
-    def test_clv_table_excludes_spreads(self, eval_root):
-        """The oddspapi scorer prices total games; there is no spread equivalent."""
-        _make_run(eval_root, "aaa111", with_backtest=True, with_clv=True, run_id="run_a")
-        lines = format_rank_table()
-        start = next(i for i, ln in enumerate(lines) if "Table 3" in ln)
-        clv_block = "\n".join(lines[start:])
-        assert "3800" in clv_block
-        assert " spread " not in clv_block
+        assert any("run_a" in ln for ln in lines[start:])
 
     def test_policy_groups_are_labelled_over_their_columns(self, eval_root):
         """The band line centres each policy name over its cell group, so a
@@ -333,11 +318,10 @@ class TestFormatting:
         _make_run(eval_root, "aaa111", run_id="run_a")
         out = "\n".join(format_rank_table())
         assert "1/1 runs have no backtest" in out
-        assert "1/1 have no CLV" in out
 
     def test_no_composite_score_column(self, eval_root):
         """Instruments are shown side by side, never collapsed into one number."""
-        _make_run(eval_root, "aaa111", with_backtest=True, with_clv=True)
+        _make_run(eval_root, "aaa111", with_backtest=True)
         out = "\n".join(format_rank_table()).lower()
         assert "composite" not in out
         assert "overall score" not in out
@@ -530,8 +514,7 @@ class TestLegacyTotalsOnlyDirs:
                   totals_only=True)
         lines = format_rank_table()
         start = next(i for i, ln in enumerate(lines) if "Table 4" in ln)
-        end = next(i for i, ln in enumerate(lines) if "Table 5" in ln)
-        assert not any("run_a" in ln for ln in lines[start:end])
+        assert not any("run_a" in ln for ln in lines[start:])
 
 
 class TestBettingTableOrdering:

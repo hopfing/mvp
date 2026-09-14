@@ -24,7 +24,6 @@ from mvp.model.tuning import _MAXIMIZE_METRICS
 from mvp.projection.iid.artifacts import (
     backtest_name,
     discover_fp_dirs,
-    read_clv_json,
     read_projection_json,
     read_sources,
 )
@@ -81,7 +80,6 @@ class RankRow:
     n_matches: int = 0
     fold_metrics: list = field(default_factory=list)
     betting: dict[str, dict[str, Any]] | None = None
-    clv: dict[str, Any] | None = None
 
     @property
     def label(self) -> str:
@@ -388,7 +386,6 @@ def collect_rows(source: str | None = None) -> list[RankRow]:
             n_matches=proj.get("n_matches") or 0,
             fold_metrics=proj.get("fold_metrics") or [],
             betting=_betting_summary(fp_dir),
-            clv=read_clv_json(fp_dir),
         ))
     return rows
 
@@ -573,47 +570,6 @@ def render_betting(
     return lines
 
 
-def render_clv(rows: list[RankRow], table_no: int) -> list[str]:
-    """Sharp CLV vs the Pinnacle de-vigged close. Total games only — the
-    oddspapi scorer prices that market and there is no spread equivalent yet."""
-    scored = [r for r in rows if r.clv]
-    lines = _banner(f"Table {table_no}: TOTAL GAMES — sharp CLV (vs Pinnacle close)")
-    if not scored:
-        lines.append("No CLV artifacts. Score a fingerprint dir with:")
-        lines.append(
-            "  poetry run python scripts/oddspapi/oddspapi_total_games_poc.py <fp_dir>"
-        )
-        return lines
-    w = _name_width(scored)
-    lines.append(
-        "CLV asks whether the market moved toward the model, independent of "
-        "whether the match landed."
-    )
-    header = (
-        f"{'#':>2} {'Config':<{w}} {'matches':>8} {'bets':>6} {'N_clv':>6} "
-        f"{'CLV+%':>6} {'avgCLV':>8} {'Hit%':>5} {'ROI%':>6} {'fp':<12}"
-    )
-    lines += [header, "-" * len(header)]
-    ordered = sorted(
-        scored,
-        key=lambda r: -(r.clv.get("avg_clvpin")
-                        if r.clv.get("avg_clvpin") is not None else -1e18),
-    )
-    for i, r in enumerate(ordered, 1):
-        c = r.clv
-        lines.append(
-            f"{i:>2} {_label_of(r)[:w]:<{w}} "
-            f"{_fmt(c.get('n_matches_scored'), '.0f'):>8} "
-            f"{_fmt(c.get('n_bets'), '.0f'):>6} "
-            f"{_fmt(c.get('n'), '.0f'):>6} "
-            f"{_fmt(_pct(c.get('positive_rate')), '.1f'):>6} "
-            f"{_fmt(_pct(c.get('avg_clvpin')), '+.3f'):>8} "
-            f"{_fmt(_pct(c.get('hit_rate')), '.1f'):>5} "
-            f"{_fmt(_pct(c.get('roi')), '+.2f'):>6} {r.fp:<12}"
-        )
-    return lines
-
-
 def format_rank_table(
     sort_metric: str = "iid_crps_total_games",
     source: str | None = None,
@@ -645,14 +601,8 @@ def format_rank_table(
     for spec in MARKETS:
         lines += render_betting(rows, spec, table_no)
         table_no += 1
-    lines += render_clv(rows, table_no)
 
     missing_bt = sum(1 for r in rows if r.betting is None)
-    missing_clv = sum(1 for r in rows if r.clv is None)
-    if missing_bt or missing_clv:
-        lines += [
-            "",
-            f"{missing_bt}/{len(rows)} runs have no backtest; "
-            f"{missing_clv}/{len(rows)} have no CLV.",
-        ]
+    if missing_bt:
+        lines += ["", f"{missing_bt}/{len(rows)} runs have no backtest."]
     return lines
