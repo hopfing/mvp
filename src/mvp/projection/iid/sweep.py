@@ -364,15 +364,18 @@ def run_sweep(
 ) -> SweepResult:
     result = SweepResult()
     for config_arg in configs:
+        cfg_sort = sort
+        if select == "topn" and not cfg_sort:
+            cfg_sort = config_objective(_resolve_base(config_arg))
         entries = materialize(
-            config_arg, n_trials, select=select, sort=sort,
+            config_arg, n_trials, select=select, sort=cfg_sort,
             serve_block=serve_block,
         )
         result.entries.extend(entries)
-        label = "diverse (maximin over HP space)" if select == "diverse" else f"sort={sort}"
+        label = "diverse (maximin over HP space)" if select == "diverse" else f"sort={cfg_sort}"
         print(f"\n=== {Path(config_arg).stem}  {label}  selected {len(entries)} ===")
         for e in entries:
-            sv = f"  {sort}={e.sort_value:.5f}" if e.sort_value is not None else ""
+            sv = f"  {cfg_sort}={e.sort_value:.5f}" if e.sort_value is not None else ""
             print(f"  {e.rank:02d}  trial {e.trial_number:>4}{sv}  -> {e.unique_stem}  [{e.fp}]")
 
     print(f"\nConfigs written to {sweep_config_dir()}")
