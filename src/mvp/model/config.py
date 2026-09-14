@@ -607,6 +607,16 @@ class ExperimentConfig(_StrictModel):
                     f"metrics.objective is multi-objective ({obj}). Pareto tuning "
                     "and early stopping are mutually exclusive."
                 )
+            if "restricted_logloss" in obj:
+                # two_stage_fit stops on the objective through the metric's
+                # own cut (early_stopping.make_xgb_feval), while tuning scores
+                # trials on a fixed population; the round count would be
+                # chosen on a moving population the trials are never scored on.
+                raise ValueError(
+                    "early_stopping is not supported with metrics.objective "
+                    "restricted_logloss: the stopping metric is the own-cut "
+                    "value, not the fixed population. Run one or the other."
+                )
         return self
 
     @classmethod

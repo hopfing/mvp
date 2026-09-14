@@ -521,6 +521,15 @@ class DiscoveryConfig(BaseModel):
                 "date_expanding) so the watch embargo is time-ordered; got "
                 f"validation.type={self.validation.type!r}"
             )
+        if self.discovery.metric == "restricted_logloss":
+            # The emitted model config carries both blocks, and the runner's
+            # early stopping stops on the metric's own cut while the FS and
+            # the tune score on a fixed population.
+            raise ValueError(
+                "early_stopping is not supported with discovery.metric "
+                "restricted_logloss: the stopping metric is the own-cut value, "
+                "not the fixed population. Run one or the other."
+            )
         if self.discovery.stability_selection is not None:
             raise ValueError(
                 "early_stopping is not supported with stability_selection: "

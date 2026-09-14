@@ -86,6 +86,26 @@ def rll_offset_config(tmp_path: Path) -> Path:
     return path
 
 
+@pytest.fixture
+def rll_plain_config(tmp_path: Path) -> Path:
+    """No offset, no base: the pipeline screen's C2 row at round 1."""
+    config_dict = {
+        "data": {"date_range": {"start": "2024-01-01", "end": "2024-12-31"}},
+        "model": {"type": "xgboost", "params": {"n_estimators": 20}},
+        "validation": {
+            "type": "walk_forward",
+            "n_splits": 2,
+            "min_train_size": 50,
+            "test_size": 25,
+        },
+        "discovery": {"metric": "restricted_logloss"},
+    }
+    path = tmp_path / "rll_plain.yaml"
+    with open(path, "w") as f:
+        yaml.dump(config_dict, f)
+    return path
+
+
 def _fast(config_path: Path, matches: Path, cache: Path) -> FastForwardSelector:
     fast = FastForwardSelector(
         config=DiscoveryConfig.from_file(config_path),
@@ -101,6 +121,18 @@ def _collect(scorer, specs):
     rows: list = []
     scorer.score_with_folds(specs, _collect=rows)
     return rows
+
+
+class TestConfigRefusals:
+    def test_early_stopping_with_rll_metric_refused_at_load(self, rll_plain_config):
+        cfg = yaml.safe_load(rll_plain_config.read_text())
+        cfg["validation"] = {
+            "type": "date_expanding", "initial_train_months": 3, "test_months": 1,
+        }
+        cfg["early_stopping"] = {"enabled": True}
+        rll_plain_config.write_text(yaml.dump(cfg))
+        with pytest.raises(ValueError, match="early_stopping.*restricted_logloss"):
+            DiscoveryConfig.from_file(rll_plain_config)
 
 
 class TestSetIncumbentMasks:
@@ -141,6 +173,27 @@ class TestSetIncumbentMasks:
         # (a fold with none is reported as nan, not an error).
         for cov, ll in zip(info["coverage"], info["incumbent_masked_logloss"]):
             assert np.isfinite(ll) == (cov > 0)
+
+    def test_empty_incumbent_without_offset_scores_every_test_row(
+        self, rll_plain_config, sample_matches, tmp_path
+    ):
+        """Round 1 of an offset-free, unseeded run has no reference model, so
+        every test row is scored: the first pick is made on plain log loss
+        over the whole fold, not on a confident subset."""
+        fast = _fast(rll_plain_config, sample_matches, tmp_path / "cache")
+        scorer = fast.create_scorer("restricted_logloss")
+        info = fast.set_incumbent_masks([])
+        for fold_idx, (train_idx, test_idx) in enumerate(fast.folds):
+            mask = fast.score_masks[fold_idx]
+            assert mask[test_idx].all()
+            assert not mask[train_idx].any()
+            assert info["coverage"][fold_idx] == pytest.approx(1.0)
+        _, per_fold = scorer.score_with_folds([CAND_SPECS[0]])
+        rows = _collect(scorer, [CAND_SPECS[0]])
+        for (fold_idx, test_idx, y_prob), got in zip(rows, per_fold):
+            assert got == pytest.approx(
+                _masked_log_loss(fast.y[test_idx], y_prob), rel=1e-9
+            )
 
     def test_incumbent_rescored_on_its_own_mask_matches_diagnostics(
         self, rll_offset_config, sample_matches, tmp_path

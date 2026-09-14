@@ -101,18 +101,68 @@ def _with_fixed_rll(
     if not mask.any():
         # The metric's own coverage penalty kept every value finite; a fixed
         # population with no rows has no value at all, and a NaN objective
-        # would reach Optuna unguarded. Fail loudly: it means the offset is
-        # never confident on this slice, which is a config problem.
+        # would reach Optuna unguarded. Fail loudly: the reference model
+        # (offset or baseline) is never confident on this slice, which is a
+        # config problem.
         raise ValueError(
-            "fixed restricted_logloss population is empty: the offset is not "
-            f"confident on any of the {mask.size} scored rows"
+            "fixed restricted_logloss population is empty: the reference "
+            f"model is not confident on any of the {mask.size} scored rows"
         )
     out = dict(metrics)
     out["restricted_logloss_own_mask"] = metrics["restricted_logloss"]
+    # The fixed population removes the metric's coverage guard, so a trial's
+    # own confident share is recorded beside the value rather than folded
+    # into it.
+    out["restricted_logloss_own_coverage"] = float(
+        np.mean(np.abs(np.asarray(y_prob, dtype=float) - 0.5) > RESTRICTED_LOGLOSS_TAU)
+    )
     out["restricted_logloss"] = _masked_log_loss(
         np.asarray(y_true)[mask], np.asarray(y_prob)[mask]
     )
     return out
+
+
+SCORE_MASK_KEYS = ("match_uid", "player_id")
+
+
+def _score_mask_for_fold(
+    mask_df: "pl.DataFrame", test_df: "pl.DataFrame", fold_idx: int | None = None,
+) -> np.ndarray:
+    """Row-align a persisted fixed population to one test fold by key.
+
+    `mask_df` carries (match_uid, player_id, confident) and, when built by
+    the tuner, a 1-based `fold_idx`. With `fold_idx` given and present, only
+    that fold's rows are used: a row can sit in two test windows under an
+    overlapping splitter, and its confident flag belongs to the fold whose
+    model produced it. Every test row must be present: a row the population
+    never scored is reported by name, not silently dropped, because that is
+    how a refreshed snapshot shows up. Rows in the population absent from
+    this fold are ignored (they belong to other folds, or vanished from the
+    frame)."""
+    if fold_idx is not None and "fold_idx" in mask_df.columns:
+        mask_df = mask_df.filter(pl.col("fold_idx") == fold_idx + 1)
+    keyed = mask_df.select([*SCORE_MASK_KEYS, "confident"]).unique(
+        subset=list(SCORE_MASK_KEYS), keep="first"
+    )
+    joined = test_df.select(list(SCORE_MASK_KEYS)).join(
+        keyed, on=list(SCORE_MASK_KEYS), how="left", maintain_order="left",
+    )
+    conf = joined["confident"]
+    if conf.null_count():
+        missing = joined.filter(pl.col("confident").is_null())
+        sample = [
+            f"{m}/{pid}" for m, pid in zip(
+                missing["match_uid"].head(5).to_list(),
+                missing["player_id"].head(5).to_list(),
+            )
+        ]
+        raise ValueError(
+            f"{conf.null_count()} of {test_df.height} test rows are not in the "
+            "fixed restricted_logloss population (first: "
+            f"{', '.join(sample)}). The population was built on a different "
+            "frame; rebuild it (new study) rather than scoring on a partial one."
+        )
+    return conf.to_numpy().astype(bool)
 
 
 def _pooled_score_mask(predictions: list[dict]) -> np.ndarray | None:
@@ -251,6 +301,7 @@ class ExperimentRunner:
         report_calibrated_holdout: bool = False,
         report_calibrated_objective: bool = False,
         source: str | None = None,
+        score_mask: "pl.DataFrame | None" = None,
     ) -> None:
         """Initialize runner.
 
@@ -315,6 +366,11 @@ class ExperimentRunner:
         self.config_path = Path(config_path)
         self.config = ExperimentConfig.from_file(str(config_path))
         self.source = source
+        # Fixed restricted_logloss population supplied by the caller (the
+        # tuner, from the baseline model's out-of-fold predictions) for
+        # configs with no offset. (match_uid, player_id, confident); aligned
+        # to each test fold by key in run(). None = no external population.
+        self.score_mask = score_mask
         from mvp.common.base_job import get_data_root, get_local_data_root
 
         self.matches_path = Path(matches_path) if matches_path else (
@@ -719,11 +775,18 @@ class ExperimentRunner:
         # move their own scored set. Without an offset there is no shared
         # reference, and the candidate-dependent cut is the thing to avoid.
         fixed_rll = "restricted_logloss" in (self.config.metrics.objective or [])
-        if fixed_rll and offset_cfg is None:
-            raise ValueError(
-                "metrics.objective includes restricted_logloss, which needs a "
-                "fixed scoring population: set `offset` (its margin defines the "
-                "confident rows every trial is scored on), or tune on log_loss."
+        if fixed_rll and offset_cfg is None and self.score_mask is not None:
+            run_logger.info(
+                "restricted_logloss objective: scoring every fold on the "
+                "supplied fixed population (%d keyed rows)", self.score_mask.height,
+            )
+        elif fixed_rll and offset_cfg is None:
+            # No shared reference: the value is the metric's own cut, which is
+            # fine for a single evaluation (mvp model, backtest, seeds) and is
+            # what the tuner refuses to optimise on — it supplies score_mask.
+            run_logger.info(
+                "restricted_logloss objective with no offset and no fixed "
+                "population: reported on each fold's own confident rows"
             )
         if fixed_rll and self.inner_cv_folds > 0:
             # The inner-CV regroup rebuilds prediction dicts without the mask
@@ -1378,9 +1441,14 @@ class ExperimentRunner:
                     )
                     model.set_history_features(history_df)
 
-                # Fixed restricted_logloss population for this fold (offset
-                # runs tuning on it); stays None on every other path.
+                # Fixed restricted_logloss population for this fold: the
+                # offset's confident rows (set in the offset branch below) or
+                # the caller-supplied keyed population; None on every other path.
                 fold_score_mask: np.ndarray | None = None
+                if fixed_rll and offset_cfg is None and self.score_mask is not None:
+                    fold_score_mask = _score_mask_for_fold(
+                        self.score_mask, test_df, fold_idx
+                    )
                 if is_ensemble and base_model_specs is not None:
                     assert isinstance(model, EnsembleModel)
                     model.configure(base_model_specs)

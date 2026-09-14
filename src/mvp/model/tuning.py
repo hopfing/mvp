@@ -1051,6 +1051,144 @@ class HyperparamTuner:
         # Enqueue baseline trial from config params
         self._enqueue_baseline()
 
+        # Fixed restricted_logloss population for OFFSET-FREE configs. Offset
+        # configs get theirs from the offset margin inside the runner; a
+        # config with no offset has no shared reference, so the baseline
+        # model's out-of-fold confident rows are it (see _ensure_rll_mask).
+        self._rll_mask: Any | None = None
+        if (
+            not self.is_iid
+            and self.model_type not in _PROJECTION_MODEL_TYPES
+            and "restricted_logloss" in self.metrics
+            and self.base_config.get("offset") is None
+        ):
+            self._rll_mask = self._ensure_rll_mask()
+
+    @property
+    def rll_mask_path(self) -> Path:
+        """Where the offset-free fixed population lives: beside the study DB,
+        so the two resume together on the machine that owns the study."""
+        return self.db_path.with_name(f"{self.db_path.stem}__rll_mask.parquet")
+
+    def _ensure_rll_mask(self) -> Any:
+        """Load or build the baseline model's confident rows as the fixed
+        population every trial's restricted_logloss is scored on.
+
+        Built ONCE per study from the config's own params through the same
+        runner settings the trials use (holdout block, no calibration) and
+        persisted keyed by (match_uid, player_id), so a resume re-aligns by
+        key and a row the population never scored is reported by name
+        (runner._score_mask_for_fold). A study with trials but no file cannot
+        recover the population its trials were scored on; it refuses rather
+        than rebuild one that may differ.
+        """
+        import numpy as np
+        import polars as pl
+
+        from mvp.model.metrics import RESTRICTED_LOGLOSS_TAU
+        from mvp.model.runner import _masked_log_loss
+
+        path = self.rll_mask_path
+        # The enqueued baseline is WAITING, not scored; only trials that ran
+        # (or are running) were scored on the population the file held.
+        scored = [
+            t for t in self.study.trials
+            if t.state != optuna.trial.TrialState.WAITING
+        ]
+        if scored and path.exists():
+            mask = pl.read_parquet(path)
+            logger.info(
+                "restricted_logloss fixed population: %d keyed rows from %s",
+                mask.height, path,
+            )
+            return mask
+        if scored:
+            raise ValueError(
+                f"study '{self.config_path.stem}' has {len(scored)} "
+                f"trial(s) scored on a fixed restricted_logloss population, but "
+                f"{path} is missing. The population cannot be recovered; use a "
+                f"fresh study (rename the config or delete {self.db_path})."
+            )
+
+        from mvp.model.runner import ExperimentRunner
+
+        # A study with no scored trials ALWAYS builds, overwriting any file a
+        # deleted study left behind: "delete the DB" is the documented fresh
+        # start, and a fresh study must not adopt a population it did not
+        # build and cannot vouch for.
+        if path.exists():
+            logger.info(
+                "restricted_logloss fixed population: %s belongs to a study "
+                "with no scored trials; rebuilding", path,
+            )
+        logger.info(
+            "restricted_logloss fixed population: fitting the baseline "
+            "(config params plus any pinned params) once to mark its "
+            "confident out-of-fold rows"
+        )
+        # Pinned params (--param) are applied to every trial, so the reference
+        # model carries them too.
+        temp_path = self._build_trial_config(
+            {**self._get_base_params(), **self.pinned_params}
+        )
+        try:
+            runner = ExperimentRunner(
+                config_path=temp_path,
+                matches_path=self.matches_path,
+                cache_dir=self.cache_dir,
+                run_name=f"tune_{self.config_path.stem}_rll_mask",
+                log_to_mlflow=False,
+                holdout_folds=self.outer_folds,
+                inner_cv_folds=0,
+                calibrate=False,
+            )
+            result = runner.run()
+        finally:
+            temp_path.unlink(missing_ok=True)
+
+        frames = []
+        coverage: list[float] = []
+        masked_ll: list[float] = []
+        for fold_idx, pred in enumerate(result["all_predictions"]):
+            y_prob = np.asarray(pred["y_prob"], dtype=float)
+            confident = np.abs(y_prob - 0.5) > RESTRICTED_LOGLOSS_TAU
+            coverage.append(float(confident.mean()))
+            masked_ll.append(
+                _masked_log_loss(np.asarray(pred["y_true"])[confident], y_prob[confident])
+                if confident.any() else float("nan")
+            )
+            frames.append(
+                pred["df"].select(["match_uid", "player_id"]).with_columns(
+                    pl.lit(fold_idx + 1).cast(pl.Int32).alias("fold_idx"),
+                    pl.Series("confident", confident),
+                )
+            )
+        mask = pl.concat(frames)
+        # Per fold, not pooled: _with_fixed_rll scores blocks per fold, so a
+        # single empty fold would abort every trial after this build passed.
+        empty = [i + 1 for i, c in enumerate(coverage) if c == 0.0]
+        if empty:
+            raise ValueError(
+                "restricted_logloss fixed population is empty on fold(s) "
+                f"{empty}: the baseline model is not confident on any of their "
+                "out-of-fold rows, so no trial could be scored there"
+            )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        mask.write_parquet(path)
+        self.study.set_user_attr("rll_mask_rows", int(mask.height))
+        self.study.set_user_attr("rll_mask_folds", len(coverage))
+        self.study.set_user_attr("rll_mask_coverage", coverage)
+        self.study.set_user_attr("rll_mask_baseline_masked_logloss", masked_ll)
+        logger.info(
+            "restricted_logloss fixed population: %d rows over %d folds; "
+            "coverage per fold %s; baseline log loss on its own confident rows %s; "
+            "written to %s",
+            mask.height, len(coverage),
+            [round(c, 3) for c in coverage],
+            [round(v, 4) for v in masked_ll], path,
+        )
+        return mask
+
     def _preflight_fold_check(self) -> None:
         """Fail fast (at construction, before any Optuna storage side effects) if a
         calendar date-window config's span can't feed a trustworthy forward-aligned
@@ -1394,6 +1532,7 @@ class HyperparamTuner:
                     calibrate=False,
                     report_calibrated_holdout=True,
                     report_calibrated_objective=self.search_calibrated,
+                    score_mask=self._rll_mask,
                 )
             # IID / projection runners don't currently support pruning;
             # only ExperimentRunner threads `trial` through. Pass it where
