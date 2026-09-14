@@ -431,6 +431,26 @@ class TestSelectionCandidateSets:
         assert _select_one_per_match(dead, "max_edge").height == 0
         assert _select_one_per_match(dead, "main").height == 1
 
+    def test_main_takes_the_models_side_of_the_consensus_line(self):
+        """Both sides of the consensus line are on the board. The under is the
+        longer price but the model favours the over; `main` must take the over
+        at its best price, and only `main_price` takes the longer under."""
+        from mvp.projection.iid.rank import _select_one_per_match
+
+        board = pl.DataFrame([
+            _rung("m1", "dk", 21.5, "over", 1.90, 0.58, 0.05, True),
+            _rung("m1", "br", 21.5, "over", 1.95, 0.58, 0.07, True),
+            _rung("m1", "dk", 21.5, "under", 2.05, 0.42, -0.07, True),
+            _rung("m1", "br", 21.5, "under", 2.10, 0.42, -0.06, True),
+        ])
+        picked = _select_one_per_match(board, "main")
+        assert picked.height == 1
+        assert picked["side"][0] == "over"
+        assert picked["book"][0] == "br"          # best price for that side
+        assert picked["edge"][0] == pytest.approx(0.07)
+        old = _select_one_per_match(board, "main_price")
+        assert old["side"][0] == "under" and old["book"][0] == "br"
+
     def test_main_stays_on_the_main_line(self):
         from mvp.projection.iid.rank import _select_one_per_match
 

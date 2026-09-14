@@ -170,10 +170,16 @@ def _select_one_per_match(bets: pl.DataFrame, policy: str) -> pl.DataFrame:
     the deep end. `main` is the separate baseline.
 
       main     — main lines only. The consensus line (the one most books have as
-                 their main), at the best price among books offering it. The
-                 neutral baseline: bet the number the market agrees on, shop the
-                 price. Main lines are the whole candidate set here because
-                 consensus is not defined anywhere else.
+                 their main), the SIDE the model favours on it (largest edge),
+                 at the best price among books offering that side. The neutral
+                 baseline: bet the number the market agrees on, take the model's
+                 side, shop the price. Main lines are the whole candidate set
+                 here because consensus is not defined anywhere else.
+      main_price — the pre-2026-09-14 `main`: consensus line, then best price
+                 across BOTH sides, so the longer-priced side was taken whatever
+                 the model thought and the gate then dropped the model's side
+                 whenever it was the shorter one. Kept reachable for comparison;
+                 not a rendered policy.
       safest   — the shallow end: of the rungs with edge, the easiest to beat.
                  `model_p` is P(this bet wins), read off the pmf's cumulative, so
                  within a side it is monotone in the line by construction, and
@@ -188,11 +194,11 @@ def _select_one_per_match(bets: pl.DataFrame, policy: str) -> pl.DataFrame:
     Applying it after the collapse instead let a policy name a dead rung and drop
     a match that had a live one.
     """
-    if policy not in SELECTION_POLICIES:
+    if policy not in SELECTION_POLICIES and policy != "main_price":
         raise ValueError(f"unknown selection policy: {policy!r}")
     if bets.is_empty():
         return bets
-    if policy == "main":
+    if policy in ("main", "main_price"):
         bets = bets.filter(pl.col("is_main_line").fill_null(False))
     else:
         bets = bets.filter(pl.col("edge") > 0)
@@ -208,15 +214,21 @@ def _select_one_per_match(bets: pl.DataFrame, policy: str) -> pl.DataFrame:
         keys, desc = ["edge", "odds"], [True, True]
     elif policy == "safest":
         keys, desc = ["model_p", "odds"], [True, True]
-    else:  # main
-        # Consensus line first (most books quoting it), then best price on it.
+    else:  # main / main_price
+        # Consensus line first (most books quoting it). Then, for `main`, the
+        # model's side: `edge` is model_p minus the implied probability, so the
+        # largest edge on the line is the side the model favours at its best
+        # available price — sorting on edge picks side and shops the price in
+        # one key, with odds breaking exact ties. `main_price` skips the side
+        # key and takes the longest price on the line regardless of side.
         support = (
             bets.group_by(["match_uid", "market", "points"])
             .agg(pl.col("book").n_unique().alias("_support"))
         )
         bets = bets.join(support, on=["match_uid", "market", "points"], how="left")
+        keys = ["_support", "edge", "odds"] if policy == "main" else ["_support", "odds"]
         return (
-            bets.sort(["_support", "odds"], descending=[True, True], nulls_last=True)
+            bets.sort(keys, descending=[True] * len(keys), nulls_last=True)
             .group_by(["match_uid", "market"], maintain_order=True)
             .first()
             .drop("_support")
