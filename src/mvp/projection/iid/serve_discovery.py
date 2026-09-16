@@ -286,6 +286,45 @@ class _ChainFold:
     test_first_in: pl.DataFrame | None = None
 
 
+def _subsample_train_splits(
+    splits: list[tuple[list[int], list[int]]],
+    *,
+    cap: int | None,
+    frac: float | None,
+    seed: int,
+    label: str,
+) -> list[tuple[list[int], list[int]]]:
+    """Thin each fold's TRAIN indices for candidate scoring; test indices untouched.
+
+    Two forms, mutually exclusive (the config validators enforce it). `cap` is
+    a COUNT, the same ceiling on every fold, which flattens an expanding window
+    into a fixed-volume one with density decaying fold by fold. `frac` is a
+    FRACTION of each fold's own training rows, which keeps the window's shape:
+    fold sizes keep their ratios and density is constant. Both draw without
+    replacement from `seed` and sort back into walk-forward order. Neither is
+    applied to the final-form re-eval, which runs on the full slice.
+    """
+    if cap is None and frac is None:
+        return splits
+    rng = np.random.default_rng(seed)
+    sampled: list[tuple[list[int], list[int]]] = []
+    for train_idx, test_idx in splits:
+        fold_cap = cap if frac is None else max(1, int(round(frac * len(train_idx))))
+        if len(train_idx) > fold_cap:
+            picked = rng.choice(np.asarray(train_idx), size=fold_cap, replace=False)
+            picked.sort()
+            sampled.append((picked.tolist(), test_idx))
+        else:
+            sampled.append((train_idx, test_idx))
+    original_sizes = [len(t) for t, _ in splits]
+    sampled_sizes = [len(t) for t, _ in sampled]
+    if frac is None:
+        logger.info("%s: cap=%d, train sizes %s → %s", label, cap, original_sizes, sampled_sizes)
+    else:
+        logger.info("%s: frac=%.2f, train sizes %s → %s", label, frac, original_sizes, sampled_sizes)
+    return sampled
+
+
 class ServeDiscoverySelector:
     """Forward-selection orchestrator for the score-state serve model."""
 
@@ -2440,28 +2479,17 @@ class ServeDiscoverySelector:
 
         Test indices are kept at full size so held-out metric values stay
         comparable across candidates. Sampled indices are sorted to preserve
-        the walk-forward time order within train.
+        the walk-forward time order within train. Count form
+        (`fs_train_subsample`) or fraction form (`fs_train_subsample_frac`);
+        see `_subsample_train_splits` for the difference.
         """
-        cap = self.config.fs_train_subsample
-        if cap is None:
-            return splits
-        rng = np.random.default_rng(self.config.fs_subsample_seed)
-        sampled: list[tuple[list[int], list[int]]] = []
-        for train_idx, test_idx in splits:
-            if len(train_idx) > cap:
-                idx_arr = np.asarray(train_idx)
-                picked = rng.choice(idx_arr, size=cap, replace=False)
-                picked.sort()
-                sampled.append((picked.tolist(), test_idx))
-            else:
-                sampled.append((train_idx, test_idx))
-        original_sizes = [len(t) for t, _ in splits]
-        sampled_sizes = [len(t) for t, _ in sampled]
-        logger.info(
-            "FS train subsample: cap=%d, train sizes %s → %s",
-            cap, original_sizes, sampled_sizes,
+        return _subsample_train_splits(
+            splits,
+            cap=self.config.fs_train_subsample,
+            frac=self.config.fs_train_subsample_frac,
+            seed=self.config.fs_subsample_seed,
+            label="FS train subsample",
         )
-        return sampled
 
     def _maybe_subsample_match_splits(
         self,
@@ -2473,27 +2501,17 @@ class ServeDiscoverySelector:
         by _score_cv_chain_detailed. Test indices are kept at full size.
         Final-form eval always uses the full _match_splits so reported metrics
         are honest.
+
+        Count form (`fs_match_subsample`) or fraction form
+        (`fs_match_subsample_frac`); see `_subsample_train_splits`.
         """
-        cap = self.config.fs_match_subsample
-        if cap is None:
-            return splits
-        rng = np.random.default_rng(self.config.fs_subsample_seed)
-        sampled: list[tuple[list[int], list[int]]] = []
-        for train_idx, test_idx in splits:
-            if len(train_idx) > cap:
-                idx_arr = np.asarray(train_idx)
-                picked = rng.choice(idx_arr, size=cap, replace=False)
-                picked.sort()
-                sampled.append((picked.tolist(), test_idx))
-            else:
-                sampled.append((train_idx, test_idx))
-        original_sizes = [len(t) for t, _ in splits]
-        sampled_sizes = [len(t) for t, _ in sampled]
-        logger.info(
-            "Chain FS match subsample: cap=%d, train sizes %s → %s",
-            cap, original_sizes, sampled_sizes,
+        return _subsample_train_splits(
+            splits,
+            cap=self.config.fs_match_subsample,
+            frac=self.config.fs_match_subsample_frac,
+            seed=self.config.fs_subsample_seed,
+            label="Chain FS match subsample",
         )
-        return sampled
 
     def _make_splitter(self) -> Any:
         val = self.config.point_validation

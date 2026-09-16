@@ -333,10 +333,21 @@ class ServeDiscoveryConfig(BaseModel):
     # Has no effect when metric is a chain metric — use fs_match_subsample instead.
     # Final-form re-eval always runs on the full slice so reported metrics are honest.
     fs_train_subsample: int | None = None
+    # Fraction form of fs_train_subsample (point-grain path only); keeps the
+    # expanding window's shape the way fs_match_subsample_frac does below.
+    # Mutually exclusive with fs_train_subsample.
+    fs_train_subsample_frac: float | None = None
     # Cap on training MATCHES per fold during candidate chain scoring (chain-metric path).
     # Mirrors fs_train_subsample for the match-grain path used by iid_total_cal etc.
     # Final-form re-eval always runs on the full slice so reported metrics are honest.
     fs_match_subsample: int | None = None
+    # Fraction of each fold's training MATCHES kept during candidate chain scoring.
+    # Unlike the count cap above, this keeps the expanding window's shape: every
+    # fold is thinned by the same ratio, so later folds still train on more matches
+    # than earlier ones and the sample density is constant across folds. Mutually
+    # exclusive with fs_match_subsample. Final-form re-eval always runs on the full
+    # slice so reported metrics are honest.
+    fs_match_subsample_frac: float | None = None
     fs_subsample_seed: int = 42
     # Number of candidates to score in parallel (chain-metric path only).
     # Uses threading — XGBoost releases the GIL during BLAS/tree ops.
@@ -498,6 +509,21 @@ class ServeDiscoveryConfig(BaseModel):
                 f"(iid_* family); got metric={self.metric!r}, which is a "
                 f"{grain_of(self.metric)} metric"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_subsample(self) -> "ServeDiscoveryConfig":
+        for count_name, frac_name in (
+            ("fs_train_subsample", "fs_train_subsample_frac"),
+            ("fs_match_subsample", "fs_match_subsample_frac"),
+        ):
+            frac = getattr(self, frac_name)
+            if frac is not None and not (0.0 < frac < 1.0):
+                raise ValueError(f"{frac_name} must be in (0, 1), got {frac}")
+            if frac is not None and getattr(self, count_name) is not None:
+                raise ValueError(
+                    f"{count_name} and {frac_name} are mutually exclusive"
+                )
         return self
 
     @model_validator(mode="after")
