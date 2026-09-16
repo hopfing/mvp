@@ -395,3 +395,62 @@ class TestRecords:
         # ... and a searched arm's PINNED features are its base lines.
         assert f"   base. {MIRROR_SPEC} [match]" in text.split("first_in:")[1]
 
+
+
+class TestParallelLoopAbort:
+    """A candidate that raises must abort the round at once, not after the
+    executor has drained every queued candidate behind it."""
+
+    def test_a_raising_candidate_cancels_the_queue_and_surfaces_at_once(
+        self, tmp_path, monkeypatch, caplog,
+    ):
+        import logging
+        import threading
+        import time
+
+        from mvp.model.engine import MemoryLimitExceeded
+
+        path = _joint_config(tmp_path)
+        cfg = yaml.safe_load(open(path, encoding="utf-8"))
+        cfg["n_parallel_candidates"] = 2
+        with open(path, "w", encoding="utf-8") as fh:
+            yaml.safe_dump(cfg, fh, sort_keys=False)
+        sel = _selector(tmp_path, monkeypatch, path)
+
+        calls: list[tuple] = []
+        lock = threading.Lock()
+
+        def scorer(match_level, point_level, arm=None):
+            with lock:
+                calls.append((arm, list(match_level), list(point_level)))
+                n = len(calls)
+            if n == 1:
+                raise MemoryLimitExceeded("[test] 91% exceeds limit of 90%")
+            # Slow enough that the main thread cancels the queue before a
+            # worker can pull another item off it.
+            time.sleep(0.3)
+            return 0.55, ()
+
+        sel._score_cv_match_grain_detailed = scorer
+        n_pool = sum(
+            len(a["candidate_match_level_features"])
+            + len(a["candidate_point_level_features"])
+            for a in cfg["joint_selection"]["arms"].values()
+        )
+        assert n_pool >= 4
+
+        with caplog.at_level(logging.ERROR, logger="mvp.projection.iid.serve_discovery"):
+            try:
+                sel.run()
+            except MemoryLimitExceeded:
+                pass
+            else:
+                raise AssertionError("the candidate's exception did not propagate")
+
+        # Two workers: the raiser, the one in flight beside it, and at most one
+        # more each pulled before the cancel landed. Never the whole pool.
+        assert len(calls) < n_pool
+        msgs = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
+        assert any(
+            "failed: MemoryLimitExceeded" in m and "cancelled" in m for m in msgs
+        ), msgs

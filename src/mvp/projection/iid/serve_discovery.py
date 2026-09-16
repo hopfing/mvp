@@ -749,7 +749,25 @@ class ServeDiscoverySelector:
                 ):
                     futures = {executor.submit(_score_one, it): it for it in to_score}
                     for future in as_completed(futures):
-                        st, grain, cand, score, shrinks = future.result()
+                        try:
+                            st, grain, cand, score, shrinks = future.result()
+                        except BaseException as exc:
+                            # Surface the failure now and drop the queue. Without
+                            # this the executor's __exit__ waits for EVERY queued
+                            # candidate to run before the exception propagates:
+                            # a memory-guard trip at candidate 4 of 953 looks
+                            # like a hang for hours, with the bar frozen because
+                            # this loop has already been left.
+                            f_st, f_grain, f_cand = futures[future]
+                            n_cancelled = sum(1 for f in futures if f.cancel())
+                            logger.error(
+                                "Candidate %s|%s|%s failed: %s: %s — cancelled %d "
+                                "queued candidates; waiting for %d in flight",
+                                f_st.arm, f_grain, f_cand, type(exc).__name__, exc,
+                                n_cancelled,
+                                len(futures) - n_cancelled - eval_count - 1,
+                            )
+                            raise
                         key = self._score_key(st.arm, grain, cand)
                         self._record_candidate(
                             key, score, shrinks,
