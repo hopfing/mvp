@@ -37,23 +37,41 @@ MLRUNS_DIR = Path("mlruns")
 _week_wiped = False
 
 
-def wipe_stale_evaluations() -> int:
-    """Clear model-evaluation artifacts left over from prior ISO weeks.
+def _entry_written_at(entry: Path) -> float:
+    """When a top-level eval entry was last written: the newest FILE under it.
 
-    model-rank compares runs against the weekly frozen-matches snapshot (see
-    mvp.model.backtest._frozen_matches_path). Runs from an earlier week sit on a
-    different snapshot and aren't comparable, so on the first refresh of the week
-    we delete the pre-Monday contents of the three eval dirs — the reset that was
-    previously done by hand each morning:
+    Not the directory's own mtime, which NTFS leaves alone when a file inside is
+    rewritten in place, so a dir re-evaluated after a re-freeze would still look
+    older than the snapshot and be wiped again by the next process. An entry
+    with no files falls back to its own mtime.
+    """
+    if entry.is_file():
+        return entry.stat().st_mtime
+    times = [f.stat().st_mtime for f in entry.rglob("*") if f.is_file()]
+    return max(times) if times else entry.stat().st_mtime
+
+
+def wipe_stale_evaluations() -> int:
+    """Clear model-evaluation artifacts written before the current snapshot.
+
+    model-rank compares runs that read the same frozen snapshot (matches and
+    odds.parquet; see mvp.model.backtest.classification_snapshot_time). A run
+    written before the snapshot was taken read an older one and isn't
+    comparable, so on the first refresh of a process we delete those entries
+    from the three eval dirs:
 
       - B:/backtests/lead      (ARTIFACT_ROOT; the frozen snapshot is a SIBLING,
                                 B:/backtests/frozen, so it is never touched)
       - B:/model_evaluations   (fingerprint dirs)
       - ./mlruns               (mlflow tracking; gitignored)
 
-    Only the contents are removed; the dirs themselves are kept. Top-level
-    entries whose own mtime is >= this week's Monday are preserved, so runs
-    already produced this week (including earlier today) survive. Memoized: at
+    The cutoff is WHEN the snapshot was taken, not Monday 00:00. The weekly
+    re-freeze makes that the same thing on an ordinary week, and it is also
+    right when a snapshot is rebuilt mid-week: everything from before the
+    rebuild goes, which "written since Monday" could not see. The snapshot is
+    frozen here first, so nothing this process writes can predate it.
+
+    Only the contents are removed; the dirs themselves are kept. Memoized: at
     most one wipe per process, so mid-refresh calls after the first are no-ops.
 
     Returns the number of top-level entries removed.
@@ -63,16 +81,17 @@ def wipe_stale_evaluations() -> int:
         return 0
     _week_wiped = True
 
-    from mvp.model.backtest import ARTIFACT_ROOT
+    from mvp.model import backtest as _bt
 
-    today = _dt.date.today()
-    week_start = today - _dt.timedelta(days=today.weekday())  # Monday of the ISO week
-    cutoff = _dt.datetime(
-        week_start.year, week_start.month, week_start.day
-    ).timestamp()
+    cutoff = _bt.classification_snapshot_time(create=True)
+    if cutoff is None:
+        # No live odds.parquet to freeze: fall back to the matches freeze alone.
+        cutoff = _bt._freeze_time(_bt.FROZEN_MATCHES_MARKER, _bt.FROZEN_MATCHES_PATH)
+    if cutoff is None:
+        return 0
 
     targets = [
-        ARTIFACT_ROOT,
+        _bt.ARTIFACT_ROOT,
         get_artifact_root() / "model_evaluations",
         MLRUNS_DIR,
     ]
@@ -82,7 +101,7 @@ def wipe_stale_evaluations() -> int:
             continue
         for child in root.iterdir():
             try:
-                if child.stat().st_mtime >= cutoff:
+                if _entry_written_at(child) >= cutoff:
                     continue
                 if child.is_dir():
                     shutil.rmtree(child, ignore_errors=True)
@@ -94,8 +113,9 @@ def wipe_stale_evaluations() -> int:
                     "Could not remove stale eval entry %s", child, exc_info=True
                 )
     logger.info(
-        "Weekly eval wipe (week of %s): removed %d stale entr%s from %d dir(s)",
-        week_start, removed, "y" if removed == 1 else "ies", len(targets),
+        "Eval wipe (snapshot taken %s): removed %d stale entr%s from %d dir(s)",
+        _dt.datetime.fromtimestamp(cutoff).isoformat(timespec="minutes"),
+        removed, "y" if removed == 1 else "ies", len(targets),
     )
     return removed
 

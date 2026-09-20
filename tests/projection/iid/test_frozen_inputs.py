@@ -168,3 +168,43 @@ class TestRankHidesStaleRows:
         out = "\n".join(rank.format_rank_table())
         assert "old_run" in out
         assert "No frozen snapshot yet" in out
+
+
+class TestSnapshotCutoffIsTheFreezeTime:
+    """The cutoff evaluations must postdate is when the snapshot was TAKEN, not
+    Monday 00:00: a snapshot rebuilt mid-week makes everything before it stale."""
+
+    @pytest.fixture
+    def frozen_matches(self, tmp_path, monkeypatch):
+        fz = tmp_path / "frozen"
+        fz.mkdir(parents=True, exist_ok=True)
+        path = fz / "matches.parquet"
+        pl.DataFrame({"x": [1]}).write_parquet(path)
+        monkeypatch.setattr(bt, "FROZEN_MATCHES_PATH", path)
+        monkeypatch.setattr(bt, "FROZEN_MATCHES_MARKER", fz / ".matches_frozen")
+        monkeypatch.setattr(bt, "_frozen_matches_cache", None)
+        return path
+
+    def test_is_the_later_of_the_matches_and_odds_freezes(self, frozen_matches, frozen_odds):
+        frozen_odds.mkdir(parents=True, exist_ok=True)
+        bt.FROZEN_MATCHES_MARKER.write_text("x", encoding="utf-8")
+        bt.FROZEN_ODDS_MARKER.write_text("x", encoding="utf-8")
+        early, late = time.time() - 7200, time.time() - 600
+        os.utime(bt.FROZEN_MATCHES_MARKER, (early, early))
+        os.utime(bt.FROZEN_ODDS_MARKER, (late, late))
+        assert bt.frozen_snapshot_mtime(create=False) == pytest.approx(late)
+
+    def test_an_evaluation_from_before_a_midweek_refreeze_is_stale(self, data_root, frozen_matches, frozen_odds):
+        frozen_odds.mkdir(parents=True, exist_ok=True)
+        bt.FROZEN_MATCHES_MARKER.write_text("x", encoding="utf-8")
+        bt.FROZEN_ODDS_MARKER.write_text("x", encoding="utf-8")
+        before = _fp(data_root, "before", age_days=0.2)   # ~5 hours ago, this week
+        after = _fp(data_root, "after", age_days=0)
+        refreeze = time.time() - 3600                      # the odds stage was re-frozen an hour ago
+        os.utime(bt.FROZEN_ODDS_MARKER, (refreeze, refreeze))
+        snapshot = bt.frozen_snapshot_mtime(create=False)
+        assert artifacts.is_stale(before, snapshot) and not artifacts.is_stale(after, snapshot)
+
+    def test_none_without_a_snapshot(self, frozen_matches, frozen_odds):
+        bt.FROZEN_MATCHES_PATH.unlink()
+        assert bt.frozen_snapshot_mtime(create=False) is None

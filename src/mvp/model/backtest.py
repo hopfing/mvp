@@ -55,12 +55,33 @@ BACKTEST_CACHE_DIR = get_local_data_root() / "features" / "backtest_cache"
 # and read from that copy, so every backtest run in the same week sees
 # byte-identical matches — a within-week batch is internally comparable.
 FROZEN_MATCHES_PATH = ARTIFACT_ROOT.parent / "frozen" / "matches.parquet"
+# Written last by each freeze; its mtime is WHEN the snapshot was taken. copy2
+# preserves the source file's own mtime, which says when the live file was last
+# written, not when it was copied.
+FROZEN_MATCHES_MARKER = FROZEN_MATCHES_PATH.parent / ".matches_frozen"
 _frozen_matches_cache: Path | None = None
+
+
+def _freeze_time(marker: Path, frozen_file: Path) -> float | None:
+    """When a frozen component was taken, or None if it does not exist.
+
+    The marker's mtime. A snapshot taken before markers existed has none, and
+    falls back to the frozen file's own mtime (within 15 minutes of the copy for
+    a file the live pipeline rewrites every tick).
+    """
+    if not frozen_file.exists():
+        return None
+    return (marker if marker.exists() else frozen_file).stat().st_mtime
+
+
+def _week_start() -> date:
+    today = date.today()
+    return today - timedelta(days=today.weekday())  # Monday of the ISO week
 
 
 def _frozen_matches_path() -> Path:
     """Return this week's frozen matches snapshot, refreshing it from the live
-    matches.parquet when missing or stale (mtime from before the current week).
+    matches.parquet when missing or stale (frozen before the current week).
 
     Memoized per process: the staleness check + copy happen at most once per
     backtest run, and every matches read in that run resolves to one file.
@@ -68,26 +89,90 @@ def _frozen_matches_path() -> Path:
     global _frozen_matches_cache
     if _frozen_matches_cache is not None:
         return _frozen_matches_cache
-    today = date.today()
-    week_start = today - timedelta(days=today.weekday())  # Monday of the ISO week
-    fresh = FROZEN_MATCHES_PATH.exists() and (
-        datetime.fromtimestamp(FROZEN_MATCHES_PATH.stat().st_mtime).date() >= week_start
-    )
+    week_start = _week_start()
+    frozen_at = _freeze_time(FROZEN_MATCHES_MARKER, FROZEN_MATCHES_PATH)
+    fresh = frozen_at is not None and datetime.fromtimestamp(frozen_at).date() >= week_start
     if fresh:
         logger.info(
             "Using frozen matches snapshot %s (frozen %s)",
-            FROZEN_MATCHES_PATH,
-            datetime.fromtimestamp(FROZEN_MATCHES_PATH.stat().st_mtime),
+            FROZEN_MATCHES_PATH, datetime.fromtimestamp(frozen_at),
         )
     else:
         FROZEN_MATCHES_PATH.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(MATCHES_PATH, FROZEN_MATCHES_PATH)
+        FROZEN_MATCHES_MARKER.write_text(datetime.now().isoformat(), encoding="utf-8")
         logger.info(
             "Froze matches snapshot for week of %s: %s -> %s",
             week_start, MATCHES_PATH, FROZEN_MATCHES_PATH,
         )
     _frozen_matches_cache = FROZEN_MATCHES_PATH
     return FROZEN_MATCHES_PATH
+
+
+# Per-week frozen copy of the cross-book odds the classification ledger prices
+# against. Without it the matches were frozen and the prices were not: two
+# backtests in one snapshot week could read different odds.parquet bytes (the
+# aggregator rewrites it as books update). Same weekly rule as the matches.
+FROZEN_ODDS_PARQUET_PATH = FROZEN_MATCHES_PATH.parent / "odds.parquet"
+FROZEN_ODDS_PARQUET_MARKER = FROZEN_MATCHES_PATH.parent / ".odds_frozen"
+_frozen_odds_parquet_cache: Path | None = None
+
+
+def _frozen_odds_parquet_path() -> Path:
+    """Return this week's frozen odds.parquet, refreshing it from the live file
+    when missing or frozen before the current week. Memoized per process.
+
+    With no live file there is nothing to freeze: any older copy is removed (it
+    would price this week's backtests on last week's odds) and the returned path
+    does not exist, which the bet-row join reports as null odds.
+    """
+    global _frozen_odds_parquet_cache
+    if _frozen_odds_parquet_cache is not None:
+        return _frozen_odds_parquet_cache
+    week_start = _week_start()
+    frozen_at = _freeze_time(FROZEN_ODDS_PARQUET_MARKER, FROZEN_ODDS_PARQUET_PATH)
+    fresh = (
+        frozen_at is not None
+        and FROZEN_ODDS_PARQUET_MARKER.exists()
+        and datetime.fromtimestamp(frozen_at).date() >= week_start
+    )
+    if not fresh:
+        FROZEN_ODDS_PARQUET_PATH.parent.mkdir(parents=True, exist_ok=True)
+        if ODDS_PATH.exists():
+            shutil.copy2(ODDS_PATH, FROZEN_ODDS_PARQUET_PATH)
+            FROZEN_ODDS_PARQUET_MARKER.write_text(datetime.now().isoformat(), encoding="utf-8")
+            logger.info(
+                "Froze odds.parquet for week of %s: %s -> %s",
+                week_start, ODDS_PATH, FROZEN_ODDS_PARQUET_PATH,
+            )
+        else:
+            FROZEN_ODDS_PARQUET_PATH.unlink(missing_ok=True)
+            FROZEN_ODDS_PARQUET_MARKER.unlink(missing_ok=True)
+            logger.warning("No live odds parquet at %s; nothing frozen", ODDS_PATH)
+    _frozen_odds_parquet_cache = FROZEN_ODDS_PARQUET_PATH
+    return FROZEN_ODDS_PARQUET_PATH
+
+
+def _read_backtest_odds() -> pl.DataFrame | None:
+    """The frozen cross-book odds, or None when there are none to read."""
+    path = _frozen_odds_parquet_path()
+    return pl.read_parquet(path) if path.exists() else None
+
+
+def classification_snapshot_time(*, create: bool) -> float | None:
+    """When the snapshot the classification backtest reads was taken: the later
+    of the matches freeze and the odds.parquet freeze. An evaluation written
+    before it read an older snapshot and is not comparable with one written
+    after, whatever day of the week either ran. `create=True` freezes first;
+    False only reads and returns None until both components exist."""
+    if create:
+        _frozen_matches_path()
+        _frozen_odds_parquet_path()
+    times = (
+        _freeze_time(FROZEN_MATCHES_MARKER, FROZEN_MATCHES_PATH),
+        _freeze_time(FROZEN_ODDS_PARQUET_MARKER, FROZEN_ODDS_PARQUET_PATH),
+    )
+    return None if None in times else max(times)
 
 
 # Per-week frozen copy of the OddsPapi stage files the projection ledger reads
@@ -156,21 +241,25 @@ def _frozen_odds_root() -> Path:
 
 
 def frozen_snapshot_mtime(*, create: bool) -> float | None:
-    """The cutoff evaluations must postdate to count as this snapshot's:
-    Monday 00:00 of the current ISO week, the same rule as
-    mvp.model.evaluation.wipe_stale_evaluations, so anything produced this
-    week survives even if it ran before the week's first freeze (every
-    this-week run read this week's frozen matches). `create=True` freezes
-    first (a sweep); False only reads (a rank) and returns None when there is
-    no snapshot."""
+    """The cutoff projection evaluations must postdate to count as this
+    snapshot's: WHEN the snapshot was taken, the later of the matches freeze and
+    the oddspapi-stage freeze. Not Monday 00:00: a snapshot rebuilt mid-week (a
+    re-freeze after new odds are staged) must make everything before it stale,
+    and "written this week" cannot tell the two apart. Every run freezes before
+    it writes, so nothing a run produces predates the snapshot it read.
+    `create=True` freezes first (a sweep), all three components together so one
+    week has one coherent snapshot; False only reads (a rank) and returns None
+    when there is no snapshot."""
     if create:
         _frozen_matches_path()
         _frozen_odds_root()
-    if not (FROZEN_MATCHES_PATH.exists() and FROZEN_ODDS_MARKER.exists()):
+        _frozen_odds_parquet_path()
+    if not FROZEN_ODDS_MARKER.exists():
         return None
-    today = date.today()
-    week_start = today - timedelta(days=today.weekday())
-    return datetime(week_start.year, week_start.month, week_start.day).timestamp()
+    matches_at = _freeze_time(FROZEN_MATCHES_MARKER, FROZEN_MATCHES_PATH)
+    if matches_at is None:
+        return None
+    return max(matches_at, FROZEN_ODDS_MARKER.stat().st_mtime)
 
 
 
@@ -409,8 +498,9 @@ def _build_bet_rows(
     # Join cross-book odds on (match_uid, player_id). best_opening_odds /
     # best_closing_odds are the time-aligned best-across-book prices written by
     # the aggregator (compute_open_close_odds); no per-book first/last skew.
-    if ODDS_PATH.exists():
-        _odds = pl.read_parquet(ODDS_PATH)
+    # The week's FROZEN copy, not the live file: prices are part of the snapshot.
+    _odds = _read_backtest_odds()
+    if _odds is not None:
         _want = ["match_uid", "player_id",
                  "best_opening_odds", "formed_odds", "best_closing_odds"]
         odds = _odds.select([c for c in _want if c in _odds.columns])
@@ -535,12 +625,19 @@ def _resolve_betting_period(
 ) -> tuple[date, date]:
     """Resolve the [start, end] period the backtest scores bets over.
 
-    Starts at BETTING_START_FLOOR (2026-01-01) — the earliest trustworthy odds —
-    and runs to today-7 (so the tail isn't dominated by not-yet-settled matches).
+    Starts at BETTING_START_FLOOR (2026-01-01), the earliest trustworthy odds,
+    and runs to the day before the week's snapshot was frozen. The end follows
+    the SNAPSHOT, not the day the backtest happens to run: it used to be
+    today-7, so two backtests in one snapshot week scored different windows
+    (a run on the 14th ended on the 6th, one on the 20th on the 12th) and their
+    ledgers were not comparable. The freeze happens mid-day, so the snapshot
+    holds only part of its own date; the day before is the last complete one.
     ``--start``/``--end`` override each bound, but an explicit start earlier than
     the floor is clamped: the backtest never uses pre-2026 prices.
     """
-    default_end = date.today() - timedelta(days=7)
+    _frozen_matches_path()
+    frozen_at = _freeze_time(FROZEN_MATCHES_MARKER, FROZEN_MATCHES_PATH)
+    default_end = datetime.fromtimestamp(frozen_at).date() - timedelta(days=1)
     bt_start = start or BETTING_START_FLOOR
     if bt_start < BETTING_START_FLOOR:
         logger.warning(
