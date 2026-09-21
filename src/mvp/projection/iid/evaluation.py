@@ -247,12 +247,13 @@ def _assert_orientation_agrees(
     whatever its id. Measured on the 2026 test set, 11.5% of matches are in that
     state.
 
-    They agree on every currently priceable match, which is exactly why this
-    needs asserting rather than assuming: the day a book quotes one of those
-    matches, every rung on it prices the wrong player's margin against the line
-    and settles with the sign flipped, silently. §7's `corr < 0` criterion cannot
-    see it either, because relabelling and re-signing together leave a
-    correlation unchanged.
+    A book quoting one of those matches prices the wrong player's margin against
+    every rung on it and settles with the sign flipped, silently. §7's `corr < 0`
+    criterion cannot see it either, because relabelling and re-signing together
+    leave a correlation unchanged. It happened on 2026-09-21
+    (2026_9003_SGL_Q1_B19L_SQ80), so `build_ledger` now excludes these matches
+    before pricing (`_drop_misoriented`) and this raise guards any caller that
+    reaches `price` without going through it.
 
     Scoped to the rows that survived the join, because that is the only point
     where both definitions are in scope: asserting earlier -- in the projection,
@@ -287,8 +288,8 @@ def _assert_orientation_agrees(
             f"orientation mismatch on {bad.height} priced match(es): the pmf's "
             f"`a` is not match_uid's lower player_id, so the board and the "
             f"projection disagree about which player each price belongs to. "
-            f"First: {bad['match_uid'][0]}. Fix belongs in "
-            f"_collapse_to_match_rows, not here."
+            f"First: {bad['match_uid'][0]}. build_ledger excludes these via "
+            f"_drop_misoriented; a caller pricing directly must do the same."
         )
 
 
@@ -778,6 +779,36 @@ def add_clv(
     ).drop("p_ref_close_over")
 
 
+def _drop_misoriented(pmf: pl.DataFrame, *, market: str) -> pl.DataFrame:
+    """Leave out of pricing the matches whose `a` is not the board's `a`.
+
+    A match the aggregate carries from ONE perspective only keeps that row
+    whatever its id, so when the kept row is the higher `player_id` the pmf is
+    framed on the other player from the one `match_uid` names. There is no
+    lower-id row to keep instead -- it was never in the aggregate -- so these are
+    excluded rather than re-oriented. Measured on the 2026 tour/chal test set: 6
+    of 11,018 projected matches.
+
+    Pricing only. The pmf frame on disk still carries every projected match,
+    which is what the forward artifact reads (#118).
+
+    A frame missing the column passes through untouched so `price`'s own check
+    raises its explicit error rather than a bare ColumnNotFound from here.
+    """
+    if not market_pmf_spec(market)["oriented"] or "a_is_uid_min" not in pmf.columns:
+        return pmf
+    # Null reads as misoriented, matching `_assert_orientation_agrees`.
+    kept = pmf.filter(pl.col("a_is_uid_min").fill_null(False))
+    dropped = pmf.height - kept.height
+    if dropped:
+        logger.warning(
+            "%s: %d of %d projected match(es) excluded from pricing: the pmf's "
+            "`a` is not match_uid's lower player_id (one-perspective match)",
+            market, dropped, pmf.height,
+        )
+    return kept
+
+
 def _anchor_times(name: str, market: str, match_uids: pl.Series) -> pl.DataFrame:
     """`(match_uid, t)` for one named anchor, scoped to the projected matches.
 
@@ -839,6 +870,7 @@ def build_ledger(
     books = board.entry_books(market)
     if not books:
         raise MarketNotCarried(f"no entry books carry {market}")
+    pmf = _drop_misoriented(pmf, market=market)
     uids = pmf["match_uid"].unique()
     # Settlement covers the SCOREABLE matches only. The pmf carries every match
     # the projection predicted, retirements included (#118); their outcome

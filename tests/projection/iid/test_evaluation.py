@@ -593,6 +593,47 @@ class TestBuildLedger:
         assert led.height == 2      # one surviving rung, two sides
         assert any("no pmf support" in r.message for r in caplog.records)
 
+    def test_a_misoriented_spread_match_is_excluded_not_fatal(
+        self, monkeypatch, caplog
+    ):
+        """A one-perspective match whose kept row is the higher `player_id` has
+        no lower-id row to re-orient to. One of them being quoted must cost that
+        match, not the whole market's ledger."""
+        import logging
+
+        from mvp.oddspapi import board as board_mod
+        from mvp.projection.iid.evaluation import build_ledger
+
+        self._install(monkeypatch, books=("dk",))
+
+        def two_match_board(times, market, *, books=None, **kw):
+            return pl.DataFrame({
+                "match_uid": ["m1", "m2"],
+                "book": ["dk", "dk"],
+                "points": [0.5, 0.5],
+                "over_odds": [2.0, 2.0],
+                "under_odds": [1.9, 1.9],
+                "p_over": [0.5, 0.5],
+                "is_main_line": [True, True],
+                "live_over": [True, True],
+                "live_under": [True, True],
+            })
+
+        monkeypatch.setattr(board_mod, "board_at", two_match_board)
+        pmf = pl.DataFrame({
+            "match_uid": ["m1", "m2"],
+            "spread_offset": [3, 3],
+            "spread_pmf": [[0.0, 0.0, 0.25, 0.5, 0.25, 0.0, 0.0]] * 2,
+            "a_is_uid_min": [True, False],
+            "actual_spread": [1.0, 1.0],
+            "expected_spread": [0.0, 0.0],
+            "scoreable": pl.Series([1, 1], dtype=pl.Int8),
+        })
+        with caplog.at_level(logging.WARNING):
+            led = build_ledger(pmf, market="game_spread", anchor_names=("open",))
+        assert set(led["match_uid"].unique().to_list()) == {"m1"}
+        assert any("excluded from pricing" in r.message for r in caplog.records)
+
 
 class TestCLV:
     """Closing-line value against the reference book's de-vigged close.
