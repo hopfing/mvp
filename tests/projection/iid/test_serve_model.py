@@ -1448,3 +1448,187 @@ class TestBayesServeModelCalibration:
         assert m.calib_intercept == 0.1 and m.calib_slope == 0.8
         keys = {k for k, _ in _IID_SERVE_MODEL_OPTIONAL_KEYS}
         assert {"calib_intercept", "calib_slope"} <= keys
+
+
+_ARM_SPEC = "player_chain_w1_logit(model=src_chain)"
+_ARM_COL = "player_chain_w1_logit_src_chain"
+_ARM_OPP_COL = "opp_chain_w1_logit_src_chain"
+
+
+class TestArmOffset:
+    """`offset_spec`: the arm starts from a calibrated source value, passed
+    as XGBoost's base_margin at fit and at every predict."""
+
+    N = 30
+
+    @staticmethod
+    def _day(i):
+        from datetime import date, timedelta
+
+        return date(2025, 1, 1) + timedelta(days=i)
+
+    def _points(self):
+        rng = np.random.default_rng(3)
+        rows = []
+        for i in range(self.N):
+            level = 0.45 + 0.4 * (i % 5) / 4  # the source value tracks this
+            for j in range(40):
+                rows.append({
+                    "match_uid": f"m{i:03d}",
+                    "server_id": f"p{i * 2:04d}",
+                    "returner_id": f"p{i * 2 + 1:04d}",
+                    "set_num": 1, "game_num": j // 4, "point_num": j,
+                    "point_won_by_server": int(rng.random() < level),
+                    "serve": 1,
+                })
+        return pl.DataFrame(rows)
+
+    def _preload(self, null_for=()):
+        rows = []
+        for i in range(self.N):
+            a, b = f"p{i * 2:04d}", f"p{i * 2 + 1:04d}"
+            level = 0.45 + 0.4 * (i % 5) / 4
+            va = None if f"m{i:03d}" in null_for else math.log(level / (1 - level))
+            vb = 0.0
+            rows.append({"match_uid": f"m{i:03d}", "player_id": a, "opp_id": b,
+                         _ARM_COL: va, _ARM_OPP_COL: vb})
+            rows.append({"match_uid": f"m{i:03d}", "player_id": b, "opp_id": a,
+                         _ARM_COL: vb, _ARM_OPP_COL: va})
+        return pl.DataFrame(rows)
+
+    def _df(self):
+        return pl.DataFrame({
+            "match_uid": [f"m{i:03d}" for i in range(self.N)],
+            "effective_match_date": [self._day(i) for i in range(self.N)],
+            "best_of": [3] * self.N,
+        })
+
+    @pytest.fixture
+    def arm_rows(self, monkeypatch):
+        """The source's arm frame: every server OOF (train end before 2025)."""
+        from datetime import date
+
+        from mvp.model.features import prior
+
+        frame = self._preload().select(
+            "match_uid", pl.col("player_id").alias("server_id"),
+        ).with_columns(pl.lit(date(2024, 12, 31)).alias("arm_train_end"))
+        state = {"frame": frame}
+        monkeypatch.setattr(prior, "arm_frame", lambda m: (None, state["frame"]))
+        return state
+
+    def _model(self, match=(), **kw):
+        return ScoreStateChainServeModel(
+            model_type="xgboost",
+            match_level_features=list(match),
+            point_level_features=[],
+            params={"n_estimators": 5, "learning_rate": 0.0, "n_jobs": 1},
+            offset_spec=_ARM_SPEC,
+            **kw,
+        )
+
+    def _predict_df(self):
+        return self._df().join(
+            self._preload().filter(pl.col("player_id") < pl.col("opp_id")),
+            on="match_uid",
+        )
+
+    def test_the_spec_is_appended_once(self):
+        assert self._model().match_level_features == [_ARM_SPEC]
+        assert self._model(["player_glicko_rd"]).match_level_features == [
+            "player_glicko_rd", _ARM_SPEC,
+        ]
+        assert self._model([_ARM_SPEC]).match_level_features == [_ARM_SPEC]
+
+    def test_null_offset_points_are_dropped_and_counted(self, arm_rows):
+        m = self._model()
+        m.fit(self._df(), preloaded_points=self._points(),
+              preloaded_match_features=self._preload(null_for={"m003"}))
+        assert m.offset_null_dropped == 40
+
+    def test_all_null_raises_with_the_date_range_message(self, arm_rows):
+        every = {f"m{i:03d}" for i in range(self.N)}
+        with pytest.raises(ValueError, match="fix the target's date_range"):
+            self._model().fit(self._df(), preloaded_points=self._points(),
+                              preloaded_match_features=self._preload(null_for=every))
+
+    def test_a_point_on_or_before_the_source_train_end_raises(self, arm_rows):
+        arm_rows["frame"] = arm_rows["frame"].with_columns(
+            pl.when(pl.col("match_uid") == "m005")
+            .then(pl.lit(self._day(5)))
+            .otherwise(pl.col("arm_train_end")).alias("arm_train_end")
+        )
+        with pytest.raises(ValueError, match="violate the OOF rule"):
+            self._model().fit(self._df(), preloaded_points=self._points(),
+                              preloaded_match_features=self._preload())
+
+    def test_a_point_with_no_source_row_raises(self, arm_rows):
+        arm_rows["frame"] = arm_rows["frame"].filter(pl.col("match_uid") != "m007")
+        with pytest.raises(ValueError, match="violate the OOF rule"):
+            self._model().fit(self._df(), preloaded_points=self._points(),
+                              preloaded_match_features=self._preload())
+
+    def test_with_no_learning_the_arm_is_the_calibrated_source(self, arm_rows):
+        from sklearn.linear_model import LogisticRegression
+
+        m = self._model()
+        m.fit(self._df(), preloaded_points=self._points(),
+              preloaded_match_features=self._preload())
+        # Independent calibration: a logistic of the served point on the
+        # server's source value, over the training points.
+        pts = self._points().join(
+            self._preload().select(
+                "match_uid", pl.col("player_id").alias("server_id"), _ARM_COL,
+            ),
+            on=["match_uid", "server_id"],
+        )
+        ref = LogisticRegression(C=1e6, max_iter=1000).fit(
+            pts.select(_ARM_COL).to_numpy(), pts["point_won_by_server"].to_numpy(),
+        )
+        df = self._predict_df()
+        p_a, p_b = m.predict_state_fn(df)
+        neutral = neutral_score_state()
+        np.testing.assert_allclose(
+            p_a(neutral),
+            np.clip(ref.predict_proba(df.select(_ARM_COL).to_numpy())[:, 1],
+                    SERVE_PROB_MIN, SERVE_PROB_MAX),
+            atol=1e-4,
+        )
+        np.testing.assert_allclose(
+            p_b(neutral),
+            np.clip(ref.predict_proba(df.select(_ARM_OPP_COL).to_numpy())[:, 1],
+                    SERVE_PROB_MIN, SERVE_PROB_MAX),
+            atol=1e-4,
+        )
+
+    def test_pickle_round_trip_keeps_the_offset(self, arm_rows):
+        import pickle
+
+        m = self._model()
+        m.fit(self._df(), preloaded_points=self._points(),
+              preloaded_match_features=self._preload())
+        back = pickle.loads(pickle.dumps(m))
+        neutral = neutral_score_state()
+        df = self._predict_df()
+        np.testing.assert_array_equal(
+            back.predict_state_fn(df)[0](neutral), m.predict_state_fn(df)[0](neutral),
+        )
+
+    def test_a_null_source_value_at_predict_raises_naming_the_column(self, arm_rows):
+        m = self._model()
+        m.fit(self._df(), preloaded_points=self._points(),
+              preloaded_match_features=self._preload())
+        df = self._predict_df().with_columns(
+            pl.lit(None).cast(pl.Float64).alias(_ARM_COL)
+        )
+        with pytest.raises(ValueError, match="null/non-finite"):
+            m.predict_state_fn(df)[0](neutral_score_state())
+
+    def test_training_rows_are_the_rows_fit_uses(self, arm_rows):
+        m = self._model()
+        rows = m.training_rows(self._points(), self._preload(null_for={"m003"}))
+        assert rows.height == (self.N - 1) * 40
+        assert rows["server_chain_w1_logit_src_chain"].null_count() == 0
+        assert rows.select("match_uid", "server_id", "point_num").rows() == sorted(
+            rows.select("match_uid", "server_id", "point_num").rows()
+        )

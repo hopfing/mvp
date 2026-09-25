@@ -18,7 +18,9 @@ from pathlib import Path
 
 from mvp.projection.iid.artifacts import (
     FOLD_MATCH_WIN_PARQUET,
+    FOLD_SERVE_ARMS_PARQUET,
     PMF_PARQUET,
+    SERVE_ARMS_PARQUET,
     SERVE_MODEL_JOBLIB,
     find_by_run_tag,
     iid_fingerprint_dir,
@@ -35,8 +37,11 @@ MODEL_DIRS = (Path("models"), Path("models") / "production")
 SNAPSHOT = "config.yaml"
 # What the prior layer reads from a projection evaluation: the walk-forward
 # OOF (`iid-project`), and the forward pmf plus the projector (`iid-backtest`).
-_PROJECT_ARTIFACTS = (FOLD_MATCH_WIN_PARQUET,)
-_BACKTEST_ARTIFACTS = (PMF_PARQUET, SERVE_MODEL_JOBLIB)
+# The per-arm stores (`chain_arm(model=<stem>)`) come from the same two
+# producers, and only a two-level serve model writes them.
+_PROJECT_ARTIFACTS = (FOLD_MATCH_WIN_PARQUET, FOLD_SERVE_ARMS_PARQUET)
+_BACKTEST_ARTIFACTS = (PMF_PARQUET, SERVE_MODEL_JOBLIB, SERVE_ARMS_PARQUET)
+_ARM_ARTIFACTS = (FOLD_SERVE_ARMS_PARQUET, SERVE_ARMS_PARQUET)
 
 
 @dataclass(frozen=True)
@@ -156,9 +161,12 @@ def pin(
             "snapshot predates a fingerprint change; re-run the evaluation."
         )
 
+    from mvp.projection.iid.config import IIDProjectionConfig
+
+    two_level = IIDProjectionConfig.from_file(target).serve_model.type == "two_level"
     missing = tuple(
         n for n in (*_PROJECT_ARTIFACTS, *_BACKTEST_ARTIFACTS)
-        if not (eval_dir / n).exists()
+        if (two_level or n not in _ARM_ARTIFACTS) and not (eval_dir / n).exists()
     )
     logger.info("pinned projection evaluation %s as %s", fp, target)
     return PinResult(

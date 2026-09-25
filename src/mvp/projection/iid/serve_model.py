@@ -11,15 +11,81 @@ import logging
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final, Literal
 
 import numpy as np
 import polars as pl
+from sklearn.linear_model import LogisticRegression
 
+from mvp.model.offset import fit_offset, offset_margin
 from mvp.projection.models import get_regression_model
 
 logger = logging.getLogger(__name__)
+
+
+def match_days(*frames: pl.DataFrame) -> pl.DataFrame:
+    """(match_uid, _day) from the first frame carrying effective_match_date."""
+    for frame in frames:
+        if "effective_match_date" in frame.columns:
+            return frame.select(
+                "match_uid",
+                pl.col("effective_match_date").cast(pl.Date).alias("_day"),
+            ).unique("match_uid")
+    raise ValueError(
+        "an arm offset needs effective_match_date on the training frame for "
+        "its OOF check"
+    )
+
+
+def check_arm_offset_oof(
+    offset_spec: str, pairs: pl.DataFrame, days: pl.DataFrame,
+) -> None:
+    """Refuse to train an arm on a (match, server) its offset's source saw
+    in-sample: each must have a source row whose train end is strictly before
+    the match. The arm's twin of the predictor's residual-stage check. Only a
+    `chain_arm` offset has a source to check against.
+
+    `pairs`: the training rows' (match_uid, server_id); `days`: (match_uid,
+    _day) from `match_days`.
+    """
+    from mvp.model.features import prior as _prior
+    from mvp.model.prior_naming import prior_kind_of
+
+    found = prior_kind_of(offset_spec)
+    if found is None or found[0] != "chain_arm":
+        return
+    _source, frame = _prior.arm_frame(found[1])
+    rows = (
+        pairs.select("match_uid", "server_id").unique()
+        .join(days, on="match_uid", how="left")
+        .join(
+            frame.select(
+                "match_uid", "server_id", pl.col("arm_train_end").cast(pl.Date),
+            ),
+            on=["match_uid", "server_id"], how="left",
+        )
+    )
+    missing = rows.filter(pl.col("arm_train_end").is_null()).height
+    leaked = rows.filter(pl.col("_day") <= pl.col("arm_train_end")).height
+    if missing or leaked:
+        raise ValueError(
+            f"arm offset {offset_spec}: training rows violate the OOF rule -- "
+            f"{leaked} (match, server) pair(s) dated on/before the source's "
+            f"train end, {missing} with an offset value but no source row. An "
+            "arm trains only on its source's out-of-sample output; re-evaluate "
+            "the source or fix the target's date_range."
+        )
+
+
+@dataclass(frozen=True)
+class _ArmOffsetCfg:
+    """What `fit_offset` reads of an `OffsetConfig`: the column for its
+    messages and the logistic's params. An arm offset has no OffsetConfig."""
+
+    feature: str
+    params: dict[str, Any] = field(default_factory=dict)
 
 
 ServeStateFn = Callable[["ScoreState"], np.ndarray]  # type: ignore[name-defined]
@@ -152,6 +218,7 @@ def build_serve_model(cfg: Any, engine: Any = None) -> "ServeWinProbEstimator":
             clip_max=cfg.clip_max,
             gap_shrink=cfg.gap_shrink,
             surface_circuit_offset=dict(cfg.surface_circuit_offset),
+            arm_offset=dict(cfg.arm_offset),
         )
     raise ValueError(f"Unknown serve model type: {cfg.type}")
 
@@ -601,14 +668,30 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
         posterior_draws: int = 200,
         posterior_seed: int = 0,
         serve_branch: int | None = None,
+        offset_spec: str | None = None,
+        prefit_offset: "LogisticRegression | None" = None,
     ) -> None:
+        # The arm offset's column is a match feature of the arm: appended here
+        # so fit resolves it and `required_columns` reports it (see
+        # `serve_model.arm_offset`).
+        match_level_features = list(match_level_features)
+        if offset_spec is not None and offset_spec not in match_level_features:
+            match_level_features.append(offset_spec)
         if not match_level_features and not point_level_features:
             raise ValueError(
                 "ScoreStateChainServeModel requires non-empty match_level_features "
                 "and/or point_level_features"
             )
         self.model_type = model_type
-        self.match_level_features = list(match_level_features)
+        self.offset_spec = offset_spec
+        # A per-fold offset handed in by the serve FS, fitted on the same
+        # `training_rows` this fit uses; None fits one in `fit`.
+        self._prefit_offset = prefit_offset
+        self._offset_model: "LogisticRegression | None" = None
+        self._offset_col: int | None = None
+        # Training points the last fit dropped for a null offset value.
+        self.offset_null_dropped = 0
+        self.match_level_features = match_level_features
         self.point_level_features = list(point_level_features)
         self.params = dict(params or {})
         self.clip_min = clip_min
@@ -736,62 +819,110 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
         """
         return apply_serve_branch(points, self.serve_branch)
 
-    def fit(
+    def _offset_train_col(self) -> str:
+        """The offset's column in the training rows (server perspective)."""
+        assert self.offset_spec is not None
+        cols, _ = resolve_match_feature_cols([self.offset_spec])
+        return cols[0]
+
+    def _drop_null_offset(self, joined: pl.DataFrame) -> pl.DataFrame:
+        """Points whose offset value is null have no starting point. Under the
+        config's `not_null` filter the frame carries no such match, so this
+        normally drops nothing; it is the backstop."""
+        col = self._offset_train_col()
+        kept = joined.filter(pl.col(col).is_not_null())
+        dropped = joined.height - kept.height
+        # Counted on the model, like `offset_clipped_count`: a backstop that
+        # fires should be visible, not only logged.
+        self.offset_null_dropped = dropped
+        if dropped:
+            logger.info(
+                "arm offset %s: dropped %d training point(s) with a null %s",
+                self.offset_spec, dropped, col,
+            )
+        if kept.height == 0:
+            raise ValueError(
+                f"ScoreStateChainServeModel.fit: no training points carry {col}; "
+                "the source has no out-of-fold row for any training match (fix "
+                "the target's date_range, as a residual stage's "
+                "train_date_range is fixed)"
+            )
+        # Deterministic row order: polars does not fix inner-join order and
+        # the offset's lbfgs sums in row order, so the FS's prefit offset and
+        # this fit's own must see the same sequence.
+        order = [c for c in ("set_num", "game_num", "point_num") if c in kept.columns]
+        return kept.sort(["match_uid", "server_id", *order], maintain_order=True)
+
+    def _assert_offset_oof(self, joined: pl.DataFrame, df: pl.DataFrame) -> None:
+        assert self.offset_spec is not None
+        check_arm_offset_oof(
+            self.offset_spec, joined.select("match_uid", "server_id"),
+            match_days(df, joined),
+        )
+
+    def _margin_for(self, X: np.ndarray) -> np.ndarray | None:
+        """The arm offset's log-odds for the rows of `X`, or None without one.
+        The module's only `offset_margin` call: the fit, the state functions
+        and the branch scorer all take the margin from here."""
+        if self._offset_model is None:
+            return None
+        assert self._offset_col is not None
+        return offset_margin(self._offset_model, X, self._offset_col)
+
+    def _margin_kw(self, X: np.ndarray) -> dict[str, np.ndarray]:
+        """`base_margin=` for the inner model's fit/predict, and nothing at all
+        without an offset, so an arm without one calls exactly as before."""
+        margin = self._margin_for(X)
+        return {} if margin is None else {"base_margin": margin}
+
+    def training_rows(
         self,
-        df: pl.DataFrame,
-        *,
+        points: pl.DataFrame,
         preloaded_match_features: "pl.DataFrame | None" = None,
-        preloaded_points: "pl.DataFrame | None" = None,
-    ) -> None:
-        """Train the point-grain classifier on matches present in `df`.
+    ) -> pl.DataFrame:
+        """The point rows `fit` trains on, in the order it trains on them.
 
-        `df` is the IID runner's train split (one row per match_uid). Points
-        are loaded and filtered to these match_uids; match-level features are
-        (re)computed via a cached FeatureEngine call.
-
-        `preloaded_match_features` and `preloaded_points` are optional pre-filtered
-        frames passed by ServeDiscoverySelector to avoid repeated full parquet reads
-        during the FS loop. When provided they must already be filtered to the
-        training match_uids.
+        Everything between loading points and building X: the serve-branch
+        filter, the match features (preloaded or engine), their join and
+        server/returner rename, derived point features, the target filter and,
+        with an arm offset, the drop of points whose offset value is null. The
+        serve FS fits its per-fold prefit offset on these rows so it is the
+        offset the arm would have fitted itself (`serve_discovery`).
         """
+        return self._training_rows(points, preloaded_match_features)[0]
+
+    def _training_rows(
+        self,
+        points: pl.DataFrame,
+        preloaded_match_features: "pl.DataFrame | None",
+        *,
+        matches_path: Path | None = None,
+        cache_dir: Path | None = None,
+        t0: float | None = None,
+        n_matches: int | None = None,
+    ) -> tuple[pl.DataFrame, dict[str, float]]:
         from mvp.common.base_job import get_data_root, get_local_data_root
         from mvp.model.engine import FeatureEngine, build_column_name, parse_feature_spec
         from mvp.projection.iid.score_state_features import (
             DERIVED_POINT_FEATURES,
             add_derived_point_features,
         )
-        from mvp.projection.iid.score_state_model import build_score_state_model
 
-        if "match_uid" not in df.columns:
-            raise ValueError("ScoreStateChainServeModel.fit: df missing match_uid column")
-        train_uids = df["match_uid"].unique().to_list()
-        if not train_uids:
-            raise ValueError("ScoreStateChainServeModel.fit: empty training df")
-
-        points_path = self._points_path or (
-            get_data_root() / "aggregate" / "atptour" / "match_beats_points.parquet"
-        )
-        matches_path = self._matches_path or (
+        matches_path = matches_path or self._matches_path or (
             get_data_root() / "aggregate" / "atptour" / "matches.parquet"
         )
-        cache_dir = self._cache_dir or (
+        cache_dir = cache_dir or self._cache_dir or (
             get_local_data_root() / "features" / "cache"
         )
-
-        t0 = time.perf_counter()
-        if preloaded_points is not None:
-            points = preloaded_points
-        else:
-            points = pl.read_parquet(points_path).filter(
-                pl.col("match_uid").is_in(train_uids)
-            )
+        t0 = time.perf_counter() if t0 is None else t0
         points = self._apply_serve_branch(points)
         if len(points) == 0:
             raise ValueError("no points rows matched the training match_uids")
         load_s = time.perf_counter() - t0
         logger.info(
             "Loaded %d points for %d train matches%s (%.1fs)",
-            len(points), len(train_uids),
+            len(points),
+            n_matches if n_matches is not None else points["match_uid"].n_unique(),
             "" if self.serve_branch is None else f" [serve=={self.serve_branch}]",
             load_s,
         )
@@ -864,11 +995,68 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
                 "Derived %d point features (%.1fs)", len(derived), derive_s,
             )
 
-        t_matrix = time.perf_counter()
         joined = joined.filter(pl.col("point_won_by_server").is_not_null())
         if len(joined) == 0:
             raise ValueError("no valid training points after target filter")
+        if self.offset_spec is not None:
+            joined = self._drop_null_offset(joined)
+        timings = {"load": load_s, "join": join_s, "derive": derive_s}
+        return joined, timings
 
+
+    def fit(
+        self,
+        df: pl.DataFrame,
+        *,
+        preloaded_match_features: "pl.DataFrame | None" = None,
+        preloaded_points: "pl.DataFrame | None" = None,
+    ) -> None:
+        """Train the point-grain classifier on matches present in `df`.
+
+        `df` is the IID runner's train split (one row per match_uid). Points
+        are loaded and filtered to these match_uids; match-level features are
+        (re)computed via a cached FeatureEngine call.
+
+        `preloaded_match_features` and `preloaded_points` are optional pre-filtered
+        frames passed by ServeDiscoverySelector to avoid repeated full parquet reads
+        during the FS loop. When provided they must already be filtered to the
+        training match_uids.
+        """
+        from mvp.common.base_job import get_data_root, get_local_data_root
+        from mvp.projection.iid.score_state_model import build_score_state_model
+
+        if "match_uid" not in df.columns:
+            raise ValueError("ScoreStateChainServeModel.fit: df missing match_uid column")
+        train_uids = df["match_uid"].unique().to_list()
+        if not train_uids:
+            raise ValueError("ScoreStateChainServeModel.fit: empty training df")
+
+        points_path = self._points_path or (
+            get_data_root() / "aggregate" / "atptour" / "match_beats_points.parquet"
+        )
+        matches_path = self._matches_path or (
+            get_data_root() / "aggregate" / "atptour" / "matches.parquet"
+        )
+        cache_dir = self._cache_dir or (
+            get_local_data_root() / "features" / "cache"
+        )
+
+        t0 = time.perf_counter()
+        if preloaded_points is not None:
+            points = preloaded_points
+        else:
+            points = pl.read_parquet(points_path).filter(
+                pl.col("match_uid").is_in(train_uids)
+            )
+        joined, timings = self._training_rows(
+            points, preloaded_match_features,
+            matches_path=matches_path, cache_dir=cache_dir, t0=t0,
+            n_matches=len(train_uids),
+        )
+        if self.offset_spec is not None:
+            self._assert_offset_oof(joined, df)
+
+        t_matrix = time.perf_counter()
         feature_cols = self._match_feature_cols + self.point_level_features
         X = joined.select(feature_cols).to_numpy()
         y = joined["point_won_by_server"].cast(pl.Int64).to_numpy()
@@ -896,13 +1084,18 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
             n_draws=self.posterior_draws,
             seed=self.posterior_seed,
         )
-        self._model.fit(X, y, groups=groups)
+        if self.offset_spec is not None:
+            # Parallel lists: the spec's position in match_level_features is
+            # its column's position in X (the match block comes first).
+            self._offset_col = self.match_level_features.index(self.offset_spec)
+            self._offset_model = self._prefit_offset or fit_offset(
+                X, self._offset_col, y,
+                _ArmOffsetCfg(feature=self._offset_train_col(), params={}),
+            )
+        self._model.fit(X, y, groups=groups, **self._margin_kw(X))
         fit_s = time.perf_counter() - t_fit
         logger.info("Score-state fit complete in %.1fs", fit_s)
-        self.fit_timings = {
-            "load": load_s, "join": join_s, "derive": derive_s,
-            "matrix": matrix_s, "fit": fit_s,
-        }
+        self.fit_timings = {**timings, "matrix": matrix_s, "fit": fit_s}
 
     def score_test_points(
         self,
@@ -955,7 +1148,10 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
         feature_cols = self._match_feature_cols + self.point_level_features
         X = joined.select(feature_cols).to_numpy()
         y = joined["point_won_by_server"].cast(pl.Int64).to_numpy()
-        return compute_metrics(y, self._model.predict_proba(X), full_range=True)
+        return compute_metrics(
+            y, self._model.predict_proba(X, **self._margin_kw(X)),
+            full_range=True,
+        )
 
     def build_test_point_frame(
         self,
@@ -1194,6 +1390,12 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
         # None = train on every point, which is what every artifact written
         # before the two-level work did.
         "serve_branch": None,
+        # No arm offset: every artifact written before `arm_offset` existed.
+        "offset_spec": None,
+        "_prefit_offset": None,
+        "_offset_model": None,
+        "_offset_col": None,
+        "offset_null_dropped": 0,
     }
 
     def __setstate__(self, state: dict[str, Any]) -> None:
@@ -1288,7 +1490,9 @@ class ScoreStateChainServeModel(ServeWinProbEstimator):
         """
         assert self._model is not None
         if draw is None:
-            return self._model.predict_proba(X, groups)
+            return self._model.predict_proba(
+                X, groups, **self._margin_kw(X),
+            )
         predict_draw = getattr(self._model, "predict_proba_draw", None)
         if predict_draw is None:
             raise TypeError(

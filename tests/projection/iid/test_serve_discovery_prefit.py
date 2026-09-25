@@ -556,3 +556,69 @@ class TestFixedArmSpecsOutsideThePool:
         b = wide._score_cv_chain_detailed([MIRROR_SPEC], [])[0]
         assert np.isfinite(a)
         assert a == b
+
+
+class TestArmOffsetPrefit:
+    """The per-fold offset logistic the selector fits once equals the one the
+    arm would fit itself, exactly: both come from the arm's `training_rows`."""
+
+    @pytest.fixture
+    def arm_selector(self, tmp_path, monkeypatch):
+        from mvp.model.features import prior
+        from tests.projection.iid.test_serve_discovery_arm_plumbing import (
+            _W1,
+            _W2,
+            _ArmEngine,
+            _with_arm_offset,
+        )
+
+        rows = [(f"m{i:03d}", s) for i in range(40) for s in (1000 + i, 2000 + i)]
+        frame = pl.DataFrame(
+            {"match_uid": [r[0] for r in rows], "server_id": [r[1] for r in rows]}
+        ).with_columns(pl.lit(date(2023, 12, 31)).alias("arm_train_end"))
+        monkeypatch.setattr(prior, "arm_frame", lambda m: (None, frame))
+        path = _with_arm_offset(
+            _two_level_config(tmp_path, SHAPES["win_second"]),
+            {"win_first": _W1, "win_second": _W2},
+        )
+        return _make_selector(tmp_path, path, engine=_ArmEngine())
+
+    def test_the_prefit_offset_equals_an_in_fit_one_exactly(self, arm_selector):
+        params = arm_selector._scoring_params()
+        for fold_idx, fold in enumerate(arm_selector._chain_folds):
+            model = arm_selector._build_candidate_model([DIFF_SPEC], [], params)
+            arm = model.components()[WIN_SECOND]
+            arm.fit(
+                fold.train_df, preloaded_match_features=fold.feats,
+                preloaded_points=fold.points,
+            )
+            prefit = fold.arm_offsets[WIN_SECOND]
+            assert np.array_equal(arm._offset_model.coef_, prefit.coef_), fold_idx
+            assert np.array_equal(
+                arm._offset_model.intercept_, prefit.intercept_,
+            ), fold_idx
+
+    def test_every_candidate_is_handed_the_prefit_and_scores_as_in_fit(
+        self, arm_selector,
+    ):
+        with_prefit = arm_selector._score_cv_chain_detailed([DIFF_SPEC], [])[0]
+        folds = arm_selector._chain_folds
+        arm_selector._chain_folds = [
+            type(f)(**{**f.__dict__, "arm_offsets": {}}) for f in folds
+        ]
+        try:
+            in_fit = arm_selector._score_cv_chain_detailed([DIFF_SPEC], [])[0]
+        finally:
+            arm_selector._chain_folds = folds
+        assert np.isfinite(with_prefit)
+        assert with_prefit == in_fit
+
+
+def test_margin_for_is_the_only_offset_margin_call_in_serve_model():
+    import inspect
+
+    import mvp.projection.iid.serve_model as sm
+
+    src = inspect.getsource(sm)
+    assert src.count("offset_margin(") == 1
+    assert "return offset_margin(self._offset_model" in src

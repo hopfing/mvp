@@ -40,6 +40,7 @@ from mvp.projection.iid.artifacts import (
     record_run,
     shape_scalars,
     write_pmf_parquet,
+    write_serve_arms,
 )
 from mvp.projection.iid.column_checks import check_required_columns
 from mvp.projection.iid.config import IIDProjectionConfig
@@ -232,6 +233,35 @@ def _train_projector(
 
 
 
+def arm_source_stems(config: IIDProjectionConfig) -> list[str]:
+    """Stems whose per-arm outputs this config trains on: through
+    `serve_model.arm_offset` or a `chain_arm` spec in an arm list or
+    `features.include`. Their values are baked into the fit."""
+    from mvp.model.prior_naming import prior_kind_of
+
+    sm = config.serve_model
+    specs = [*sm.arm_match_specs(), *config.features.include]
+    stems: list[str] = []
+    for spec in specs:
+        found = prior_kind_of(spec)
+        if found is None or found[1] in stems:
+            continue
+        if found[0] == "chain_arm" or spec in sm.arm_offset.values():
+            stems.append(found[1])
+    return stems
+
+
+def arm_source_salts(config: IIDProjectionConfig) -> dict[str, str]:
+    """Stem -> the identity of its per-arm stores (`_chain_arm_salt`, which
+    resolves with arms=True, as the transform does). Stored with a fitted
+    projector and compared on load: the fingerprint carries the source's stem
+    but not its artifacts, so a regenerated source would otherwise be served
+    through an arm calibrated on the old values."""
+    from mvp.model.features import prior as _prior
+
+    return {stem: _prior._chain_arm_salt(stem) for stem in arm_source_stems(config)}
+
+
 def _save_artifact(
     projector: TennisProjector, config: IIDProjectionConfig, config_path: Path,
     n_train: int,
@@ -245,6 +275,7 @@ def _save_artifact(
             "config_yaml": Path(config_path).read_text(encoding="utf-8"),
             "n_train": n_train,
             "trained_at": datetime.now(UTC).isoformat(),
+            "arm_sources": arm_source_salts(config),
         },
         path,
     )
@@ -291,6 +322,15 @@ def _load_artifact(
             path,
         )
         return None
+    stored = artifact.get("arm_sources", {})
+    for stem, salt in arm_source_salts(config).items():
+        if stored.get(stem) != salt:
+            logger.info(
+                "IID artifact at %s was trained on arm source %s's earlier "
+                "per-arm stores — retraining",
+                path, stem,
+            )
+            return None
     return TennisProjector(serve_model=artifact["serve_model"])
 
 
@@ -394,6 +434,26 @@ def build_pmf_frame(test_df: pl.DataFrame, out: ProjectionOutput) -> pl.DataFram
     })
 
 
+def join_serve_arms(
+    test_df: pl.DataFrame, arms: pl.DataFrame, scoreable: Any, name: str,
+) -> pl.DataFrame:
+    """`predict_arms`'s two rows per match, dated from `test_df` and flagged
+    `scoreable`. Shared by the fold and forward stores so the two splice halves
+    are built one way. Every match in `arms` must be in `test_df`."""
+    keyed = test_df.select("match_uid", "effective_match_date").with_columns(
+        pl.Series("scoreable", scoreable).cast(pl.Int8),
+    )
+    out = arms.join(keyed, on="match_uid", how="inner", validate="m:1")
+    if out.height != arms.height:
+        raise ValueError(f"{name}: arms and test_df disagree on match_uid")
+    return out
+
+
+def build_serve_arms_frame(test_df: pl.DataFrame, arms: pl.DataFrame) -> pl.DataFrame:
+    """Forward rows for the serve_arms artifact (no fold)."""
+    return join_serve_arms(test_df, arms, test_df["_scoreable"], "serve_arms")
+
+
 def build_spread_pmf_frame(
     test_df: pl.DataFrame, out: ProjectionOutput
 ) -> pl.DataFrame:
@@ -493,6 +553,11 @@ def run_projection(
         "Wrote per-match game-spread pmf -> %s",
         write_pmf_parquet(fp_dir, spread_pmf, market="game_spread"),
     )
+    if config.serve_model.type == "two_level":
+        arms = build_serve_arms_frame(
+            test_df, projector.serve_model.predict_arms(test_df),
+        )
+        logger.info("Wrote per-arm serve outputs -> %s", write_serve_arms(fp_dir, arms))
 
     return ProjectionRun(
         fp_dir=fp_dir,

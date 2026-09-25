@@ -187,6 +187,33 @@ class TestPin:
         ))
         assert _pin(env, d.name).missing == ()
 
+    def test_two_level_evaluation_missing_the_arm_files_names_both_commands(
+        self, env,
+    ):
+        """A pinned two-level trial may be a `chain_arm` source; its per-arm
+        stores come from the same two producers as the base artifacts."""
+        text = _PROJ_YAML.replace(
+            "serve_model:\n  type: identity\n  window: 90\n",
+            "serve_model:\n  type: two_level\n",
+        )
+        d = _make_eval(env["eval_root"], text=text, artifacts=(
+            "fold_match_win.parquet", "total_games_pmf.parquet", "serve_model.joblib",
+        ))
+        res = _pin(env, d.name)
+        assert res.missing == ("fold_serve_arms.parquet", "serve_arms.parquet")
+        assert res.missing_commands == [
+            "poetry run py -m mvp iid-project parent__d01_t12",
+            "poetry run py -m mvp iid-backtest parent__d01_t12",
+        ]
+
+    def test_single_level_evaluation_is_not_asked_for_arm_files(self, env):
+        """Only a two-level model writes them; asking a single-level pin for
+        them would name files no command can produce."""
+        d = _make_eval(env["eval_root"], artifacts=(
+            "fold_match_win.parquet", "total_games_pmf.parquet", "serve_model.joblib",
+        ))
+        assert _pin(env, d.name).missing == ()
+
     def test_no_snapshot_is_refused(self, env):
         d = _make_eval(env["eval_root"])
         (d / "config.yaml").unlink()

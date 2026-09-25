@@ -344,3 +344,65 @@ class TestFoldMatchWin:
         })
         with pytest.raises(ValueError, match="scoreable"):
             write_fold_match_win(tmp_path, frame)
+
+
+class TestServeArmStores:
+    """The per-arm stores a target chain's `chain_arm` transform reads."""
+
+    @staticmethod
+    def _frame(*, fold: bool):
+        from datetime import date
+
+        cols = {
+            "extra": [1, 1],
+            "match_uid": ["m0", "m0"],
+            "server_id": ["A", "B"],
+            "returner_id": ["B", "A"],
+            "effective_match_date": [date(2025, 1, 1)] * 2,
+            "scoreable": [1, 1],
+            "chain_fi_rate": [0.61, 0.58],
+            "chain_w1_prob": [0.72, 0.69],
+            "chain_w2_prob": [0.52, 0.49],
+        }
+        if fold:
+            cols["fold_idx"] = [1, 1]
+        return pl.DataFrame(cols)
+
+    def test_fold_store_round_trips_the_contract_columns(self, tmp_path):
+        from mvp.projection.iid.artifacts import (
+            FOLD_SERVE_ARMS_PARQUET,
+            write_fold_serve_arms,
+        )
+
+        path = write_fold_serve_arms(tmp_path, self._frame(fold=True))
+        assert path.name == FOLD_SERVE_ARMS_PARQUET
+        out = pl.read_parquet(path)
+        assert out.columns == [
+            "match_uid", "server_id", "returner_id", "effective_match_date",
+            "fold_idx", "scoreable", "chain_fi_rate", "chain_w1_prob",
+            "chain_w2_prob",
+        ]
+        assert out["chain_w1_prob"].to_list() == [0.72, 0.69]
+
+    def test_forward_store_round_trips_without_fold_idx(self, tmp_path):
+        from mvp.projection.iid.artifacts import SERVE_ARMS_PARQUET, write_serve_arms
+
+        path = write_serve_arms(tmp_path, self._frame(fold=False))
+        assert path.name == SERVE_ARMS_PARQUET
+        out = pl.read_parquet(path)
+        assert "fold_idx" not in out.columns
+        assert "extra" not in out.columns
+        assert out["server_id"].to_list() == ["A", "B"]
+
+    def test_fold_store_refuses_missing_columns(self, tmp_path):
+        from mvp.projection.iid.artifacts import write_fold_serve_arms
+
+        msg = r"fold_serve_arms frame missing columns: \['fold_idx'\]"
+        with pytest.raises(ValueError, match=msg):
+            write_fold_serve_arms(tmp_path, self._frame(fold=False))
+
+    def test_forward_store_refuses_missing_columns(self, tmp_path):
+        from mvp.projection.iid.artifacts import write_serve_arms
+
+        with pytest.raises(ValueError, match="serve_arms frame missing columns"):
+            write_serve_arms(tmp_path, self._frame(fold=False).drop("chain_w2_prob"))

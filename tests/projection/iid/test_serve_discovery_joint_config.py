@@ -290,7 +290,8 @@ class TestSubstituteArmLists:
 
 # Captured from `to_iid_projection_config_dict(...)["serve_model"]` on the
 # pre-refactor source (4ffb8cd), one entry per prefit shape. Do not regenerate:
-# a diff here means a component run's promoted model changed.
+# a diff here means a component run's promoted model changed. `arm_offset: {}`
+# was added by hand with that field (empty = no offset, the same model).
 _SEL_MATCH = [MIRROR_SPEC, DIFF_SPEC]
 _SEL_POINT = ["is_break_point"]
 
@@ -314,6 +315,7 @@ SNAPSHOT = {
         "posterior_seed": 0,
         "regressor": {"params": {}, "type": "ridge"},
         "surface_circuit_offset": {},
+        "arm_offset": {},
         "type": "two_level",
         "win_first_match_features": [MIRROR_SPEC],
         "win_first_point_features": [],
@@ -340,6 +342,7 @@ SNAPSHOT = {
         "posterior_seed": 0,
         "regressor": {"params": {}, "type": "ridge"},
         "surface_circuit_offset": {},
+        "arm_offset": {},
         "type": "two_level",
         "win_first_match_features": [MIRROR_SPEC, DIFF_SPEC],
         "win_first_point_features": ["is_break_point"],
@@ -366,6 +369,7 @@ SNAPSHOT = {
         "posterior_seed": 0,
         "regressor": {"params": {}, "type": "ridge"},
         "surface_circuit_offset": {},
+        "arm_offset": {},
         "type": "two_level",
         "win_first_match_features": [MIRROR_SPEC],
         "win_first_point_features": [],
@@ -392,6 +396,7 @@ SNAPSHOT = {
         "posterior_seed": 0,
         "regressor": {"params": {}, "type": "ridge"},
         "surface_circuit_offset": {},
+        "arm_offset": {},
         "type": "two_level",
         "win_first_match_features": ["player_svc_elo_matchup"],
         "win_first_point_features": [],

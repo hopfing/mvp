@@ -48,6 +48,12 @@ import polars as pl
 
 from mvp.common.base_job import get_artifact_root, get_data_root
 from mvp.model.registry import register_transform
+from mvp.common.serve_arms import (
+    FOLD_SERVE_ARM_COLUMNS,
+    FOLD_SERVE_ARMS_PARQUET,
+    FORWARD_SERVE_ARM_COLUMNS,
+    SERVE_ARMS_PARQUET,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -131,6 +137,10 @@ class PriorSource:
     # Projection only: the single-fit cutoff behind the forward (pmf) rows —
     # the config's date_range.end. One fit, one honest train end.
     forward_train_end: date | None = None
+    # Set by `prior_promotion.dependency_order`: reached through an arm offset
+    # or a `chain_arm` spec, so promotion and preflight require the per-arm
+    # stores. Never read by the resolvers.
+    via_arms: bool = False
 
     @property
     def stem(self) -> str:
@@ -151,6 +161,17 @@ class PriorSource:
     @property
     def pmf_parquet(self) -> Path:
         return self.eval_dir / "total_games_pmf.parquet"
+
+    # The per-arm stores `chain_arm` reads (two-level sources only). Not in
+    # `_artifact_paths`: the prior's and chain_shape's salt and readiness do
+    # not depend on them; `_chain_arm_salt` and `serve_arms_ready` do.
+    @property
+    def fold_serve_arms(self) -> Path:
+        return self.eval_dir / FOLD_SERVE_ARMS_PARQUET
+
+    @property
+    def serve_arms_forward(self) -> Path:
+        return self.eval_dir / SERVE_ARMS_PARQUET
 
     @property
     def cutoffs_json(self) -> Path:
@@ -347,7 +368,7 @@ def _tagged_fallback(
 
 def resolve_prior(
     model: str, config_dirs=None, projection_config_dirs=None,
-    *, promoted: bool = True,
+    *, promoted: bool = True, arms: bool = False,
 ) -> PriorSource:
     """Config stem -> its config file -> evaluation fingerprint -> eval dir.
 
@@ -369,6 +390,11 @@ def resolve_prior(
     is not an evaluation of the new one. Promotion itself passes
     `promoted=False` to reach the evaluation dir it regenerates and copies
     FROM.
+
+    `arms=True` is the `chain_arm` readers' resolution: the promoted copy
+    must also carry the per-arm stores (`serve_arms_ready`). A projection
+    promoted before those existed resolves to the evaluation dir for arm
+    readers rather than pinning them on a copy without the files.
     """
     source = _resolve_evaluation(model, config_dirs, projection_config_dirs)
     if not promoted:
@@ -383,7 +409,11 @@ def resolve_prior(
         # regenerates the fingerprint dir -- on a copy only `mvp train` can
         # replace. Not redirected: production's preflight refuses by name,
         # everything else resolves to the evaluation dir as before.
-        if prior_artifacts_ready(candidate) and _forward_artifact_ready(candidate):
+        if (
+            prior_artifacts_ready(candidate)
+            and _forward_artifact_ready(candidate)
+            and (not arms or serve_arms_ready(candidate))
+        ):
             return candidate
         logger.warning(
             "prior %s: promoted copy at %s is incomplete or predates the current "
@@ -538,6 +568,24 @@ def _forward_artifact_ready(source: PriorSource) -> bool:
     return {
         "match_uid", "player_id", "effective_match_date", "model_prob",
     } <= set(cols)
+
+
+def _arm_store_columns(path: Path, source: PriorSource) -> list[str]:
+    if path == source.fold_serve_arms:
+        return list(FOLD_SERVE_ARM_COLUMNS)
+    return list(FORWARD_SERVE_ARM_COLUMNS)
+
+
+def serve_arms_ready(source: PriorSource) -> bool:
+    """Both per-arm stores present with the store columns: what `chain_arm`
+    reads, and what promotion requires of a source consumed through it."""
+    for path in (source.fold_serve_arms, source.serve_arms_forward):
+        if not path.exists():
+            return False
+        cols = set(pl.scan_parquet(path).collect_schema().names())
+        if not set(_arm_store_columns(path, source)) <= cols:
+            return False
+    return True
 
 
 def _base_prior_stem(cfg) -> str | None:
@@ -1199,5 +1247,161 @@ register_transform(
         "The chain projection's distribution moments (dispersion, "
         "decisiveness, serve texture) as features, resolved by config stem "
         "(model=<stem>); null where the projection has no OOF/forward row"
+    ),
+)
+
+
+# ---------------------------------------------------------------------------
+# chain_arm: a two-level chain's PER-ARM outputs, for a target chain's serve
+# arms (an arm offset, `serve_model.arm_offset`, or a plain feature).
+#
+# Keyed by server, not by match: one row per (match, server) in the stores, so
+# the row's player reads its own arm values and `opp_` reads the opponent's.
+# Both sides are transform outputs because the engine never mirrors a
+# transform output; without `opp_` the arm's swap side would read the negated
+# player logit. Same splice honesty as chain_shape; no calibration (the
+# target's arm offset calibrates in its own fit). Win arms are emitted as
+# logits, the first-in value stays a rate.
+# ---------------------------------------------------------------------------
+
+from mvp.common.serve_arms import ARM_STORE_VALUES  # noqa: E402
+from mvp.model.prior_naming import ARM_OUTPUTS as _ARM_OUTPUT_NAMES  # noqa: E402
+from mvp.model.prior_naming import ARM_VALUES  # noqa: E402
+
+_ARM_VALUES = list(ARM_STORE_VALUES)
+_ARM_OUTPUTS = list(_ARM_OUTPUT_NAMES)
+
+
+def _arm_read(path: Path, source: PriorSource, *, forward: bool) -> pl.DataFrame:
+    """Every written row. A missing file or column is a hard refusal: for an
+    offset, a null forward row makes the margin raise at predict, so a warning
+    here would only move the failure."""
+    cmd = (source.forward_regenerate_command if forward
+           else source.regenerate_command)
+    missing: list[str] = []
+    if path.exists():
+        df = pl.read_parquet(path)
+        missing = [c for c in _arm_store_columns(path, source) if c not in df.columns]
+    if not path.exists() or missing:
+        raise FileNotFoundError(
+            f"chain_arm(model={source.model}): no {path.name} at {path} (the "
+            "source was evaluated before per-arm outputs were written, or is "
+            f"not a two-level serve model). Regenerate: {cmd}"
+        )
+    return df
+
+
+def _arm_fold_rows(source: PriorSource) -> pl.DataFrame:
+    df = _arm_read(source.fold_serve_arms, source, forward=False)
+    df = df.with_columns(pl.col("effective_match_date").cast(pl.Date).alias("day"))
+    train_end = df.group_by("fold_idx").agg(
+        (pl.col("day").min() - timedelta(days=1)).alias("arm_train_end")
+    )
+    return df.join(train_end, on="fold_idx").drop("fold_idx")
+
+
+def _arm_forward_rows(source: PriorSource) -> pl.DataFrame:
+    df = _arm_read(source.serve_arms_forward, source, forward=True)
+    return df.with_columns(
+        pl.col("effective_match_date").cast(pl.Date).alias("day"),
+        pl.lit(source.forward_train_end).cast(pl.Date).alias("arm_train_end"),
+    )
+
+
+@lru_cache(maxsize=8)
+def _cached_arm_frame(model: str) -> tuple[PriorSource, pl.DataFrame]:
+    source = resolve_prior(model, arms=True)
+    if source.kind != "projection":
+        raise ValueError(
+            f"chain_arm(model={model}): resolves to a {source.kind} source; "
+            "arm outputs only exist for projection stems"
+        )
+    # The engine never regenerates; the discovery driver decides that first.
+    ensure_prior_artifacts(source, regenerate=False)
+    keep = ["match_uid", "server_id", "day", "arm_train_end", *_ARM_VALUES]
+    fold = _arm_fold_rows(source).select(keep)
+    fwd = _arm_forward_rows(source).select(keep)
+    key = ["match_uid", "server_id"]
+    overlap = fold.join(fwd, on=key, how="inner").height
+    if overlap:
+        raise ValueError(
+            f"chain_arm {source.model}: {overlap} (match, server) rows in both "
+            "the fold OOF and the forward rows; refusing to splice"
+        )
+    df = pl.concat([fold, fwd]).sort(["day", "match_uid", "server_id"])
+    if df.select(key).is_duplicated().any():
+        raise ValueError(
+            f"chain_arm {source.model}: duplicate (match_uid, server_id) rows"
+        )
+    leaked = df.filter(pl.col("day") <= pl.col("arm_train_end")).height
+    if leaked:
+        raise ValueError(
+            f"chain_arm {source.model}: {leaked} rows dated on/before their "
+            "train end"
+        )
+
+    def logit(c: str) -> pl.Expr:
+        p = pl.col(c).clip(_LOGIT_EPS, 1.0 - _LOGIT_EPS)
+        return (p / (1.0 - p)).log()
+
+    df = df.with_columns(
+        logit("chain_w1_prob").alias("chain_w1_logit"),
+        logit("chain_w2_prob").alias("chain_w2_logit"),
+    )
+    return source, df
+
+
+def arm_frame(model: str) -> tuple[PriorSource, pl.DataFrame]:
+    """The source and its spliced per-arm frame: one row per (match_uid,
+    server_id) with `day`, `arm_train_end`, the raw store values and the
+    emitted values. The arm offset's out-of-fold check reads this."""
+    return _cached_arm_frame(str(model))
+
+
+def _chain_arm_transform(df: pl.DataFrame, model: str) -> pl.DataFrame:
+    """Engine transform: the source's arm outputs for the row's player
+    (`player_`) and its opponent (`opp_`). Returns only the keys and the six
+    outputs: `opp_id` in the result would make the engine's compute join emit
+    an `opp_id_right` column. Null where the source has no row."""
+    _, frame = arm_frame(str(model))
+    emitted = list(ARM_VALUES)
+
+    def side(prefix: str, id_col: str) -> pl.DataFrame:
+        return frame.select(
+            "match_uid", pl.col("server_id").alias(id_col),
+            *[pl.col(c).alias(f"{prefix}_{c}") for c in emitted],
+        )
+
+    return (
+        df.select("match_uid", "player_id", "opp_id")
+        .join(side("player", "player_id"), on=["match_uid", "player_id"], how="left")
+        .join(side("opp", "opp_id"), on=["match_uid", "opp_id"], how="left")
+        .select("match_uid", "player_id", *_ARM_OUTPUTS)
+    )
+
+
+def _chain_arm_salt(model: str) -> str:
+    source = resolve_prior(str(model), arms=True)
+    parts = [source.salt()]
+    for p in (source.fold_serve_arms, source.serve_arms_forward):
+        if p.exists():
+            st = p.stat()
+            parts.append(f"{st.st_size}.{int(st.st_mtime)}")
+        else:
+            parts.append("-")
+    return ":".join(parts)
+
+
+register_transform(
+    name="chain_arm",
+    func=_chain_arm_transform,
+    outputs=_ARM_OUTPUTS,
+    params=["model"],
+    cache_salt=_chain_arm_salt,
+    description=(
+        "A two-level chain projection's per-arm outputs (first-in rate, "
+        "win-on-first and win-on-second log-odds at the neutral state) for the "
+        "row's player and opponent, resolved by config stem (model=<stem>); "
+        "null where the projection has no OOF/forward row"
     ),
 )

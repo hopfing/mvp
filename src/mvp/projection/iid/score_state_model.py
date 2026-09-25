@@ -33,18 +33,28 @@ class ScoreStateServeModel(ABC):
     @abstractmethod
     def fit(
         self, X: np.ndarray, y: np.ndarray, *, groups: np.ndarray | None = None,
+        base_margin: np.ndarray | None = None,
     ) -> None:
         """Fit on the point-grain matrix.
 
         `groups` is the server id per row, supplied for models with a
         per-player parameter. Models without one ignore it.
+
+        `base_margin` is an arm offset's per-row log-odds starting point
+        (`serve_model.arm_offset`). Only the XGBoost form takes one; the
+        others refuse it (`_refuse_margin`).
         """
 
     @abstractmethod
     def predict_proba(
         self, X: np.ndarray, groups: np.ndarray | None = None,
+        base_margin: np.ndarray | None = None,
     ) -> np.ndarray:
         """Return P(point_won_by_server) per row (1-D float64, in [0, 1])."""
+
+    def _refuse_margin(self, base_margin: np.ndarray | None) -> None:
+        if base_margin is not None:
+            raise TypeError(f"{type(self).__name__} takes no base_margin")
 
     @abstractmethod
     def coef_summary(self) -> dict[str, Any] | None:
@@ -88,7 +98,9 @@ class LogisticScoreStateModel(ScoreStateServeModel):
 
     def fit(
         self, X: np.ndarray, y: np.ndarray, *, groups: np.ndarray | None = None,
+        base_margin: np.ndarray | None = None,
     ) -> None:
+        self._refuse_margin(base_margin)
         if X.shape[1] != len(self.feature_names):
             raise ValueError(
                 f"X has {X.shape[1]} columns but feature_names has {len(self.feature_names)}"
@@ -109,7 +121,9 @@ class LogisticScoreStateModel(ScoreStateServeModel):
 
     def predict_proba(
         self, X: np.ndarray, groups: np.ndarray | None = None,
+        base_margin: np.ndarray | None = None,
     ) -> np.ndarray:
+        self._refuse_margin(base_margin)
         if self._model is None or self._mean is None or self._std is None:
             raise RuntimeError("LogisticScoreStateModel.predict_proba called before fit")
         X_f = X.astype(np.float64)
@@ -192,7 +206,9 @@ class BayesianLogisticScoreStateModel(LogisticScoreStateModel):
 
     def fit(
         self, X: np.ndarray, y: np.ndarray, *, groups: np.ndarray | None = None,
+        base_margin: np.ndarray | None = None,
     ) -> None:
+        self._refuse_margin(base_margin)
         super().fit(X, y)
         assert self._model is not None and self._mean is not None
         assert self._std is not None
@@ -328,6 +344,7 @@ class XGBoostScoreStateModel(ScoreStateServeModel):
 
     def fit(
         self, X: np.ndarray, y: np.ndarray, *, groups: np.ndarray | None = None,
+        base_margin: np.ndarray | None = None,
     ) -> None:
         if X.shape[1] != len(self.feature_names):
             raise ValueError(
@@ -336,14 +353,35 @@ class XGBoostScoreStateModel(ScoreStateServeModel):
         X_f = X.astype(np.float32)
         y_i = y.astype(np.int64)
         self._model = XGBClassifier(**self._params)
-        self._model.fit(X_f, y_i)
+        margin_kw = {} if base_margin is None else {"base_margin": base_margin}
+        self._model.fit(X_f, y_i, **margin_kw)
+        self._fit_with_base_margin = base_margin is not None
 
     def predict_proba(
         self, X: np.ndarray, groups: np.ndarray | None = None,
+        base_margin: np.ndarray | None = None,
     ) -> np.ndarray:
         if self._model is None:
             raise RuntimeError("XGBoostScoreStateModel.predict_proba called before fit")
-        return self._model.predict_proba(X.astype(np.float32))[:, 1]
+        # The two refusals of `model/models.py`'s classifier, verbatim: a margin
+        # fit scored without its margin (or the reverse) does not fail, it
+        # shifts every probability. getattr default False keeps artifacts
+        # pickled before the attribute existed loadable.
+        fit_with_margin = getattr(self, "_fit_with_base_margin", False)
+        if fit_with_margin and base_margin is None:
+            raise ValueError(
+                "This model was fit with a base_margin offset, so predict_proba "
+                "requires one. Scoring without it does not fail — it shifts every "
+                "probability by the offset — so it is refused here. Supply the "
+                "same offset model's raw margin for these rows."
+            )
+        if not fit_with_margin and base_margin is not None:
+            raise ValueError(
+                "base_margin was passed to predict_proba but this model was fit "
+                "without one; the prediction would be shifted by the offset."
+            )
+        margin_kw = {} if base_margin is None else {"base_margin": base_margin}
+        return self._model.predict_proba(X.astype(np.float32), **margin_kw)[:, 1]
 
     def coef_summary(self) -> dict[str, Any] | None:
         if self._model is None:
@@ -457,7 +495,9 @@ class HierarchicalBoostedScoreStateModel(ScoreStateServeModel):
 
     def fit(
         self, X: np.ndarray, y: np.ndarray, *, groups: np.ndarray | None = None,
+        base_margin: np.ndarray | None = None,
     ) -> None:
+        self._refuse_margin(base_margin)
         if groups is None:
             raise ValueError(
                 "HierarchicalBoostedScoreStateModel requires `groups` (the "
@@ -567,7 +607,9 @@ class HierarchicalBoostedScoreStateModel(ScoreStateServeModel):
 
     def predict_proba(
         self, X: np.ndarray, groups: np.ndarray | None = None,
+        base_margin: np.ndarray | None = None,
     ) -> np.ndarray:
+        self._refuse_margin(base_margin)
         if self._u_mean is None:
             raise RuntimeError(
                 "HierarchicalBoostedScoreStateModel.predict_proba called before fit"

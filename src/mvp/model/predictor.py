@@ -42,9 +42,10 @@ from mvp.model.features._score_helpers import (
     total_games_won as _total_games_won,
 )
 from mvp.model.features import prior as _prior
-from mvp.model.prior_naming import prior_column, prior_model_of
+from mvp.model.prior_naming import prior_column, prior_kind_of, prior_model_of
 from mvp.model.prior_promotion import (
     PreflightError,
+    declared_prior_specs,
     declared_prior_stems,
     dependency_order,
     promote_prior,
@@ -306,42 +307,80 @@ def _serving_uid_set(
 
 def _projection_priors_of(
     config: Any, resolved_specs: list[str] | None = None,
-) -> list[str]:
-    """Projection-kind prior stems a config declares and does NOT offset on.
-
-    The offset's column is filled from the upstream model's live probability
-    (`_fill_prior_logit`); every other declared prior is left to the transform,
-    which for a projection kind produces null on every pending match. Those are
-    the ones that need serving.
+) -> dict[str, set[str]]:
+    """Projection stems a config declares, each with the kinds of column it
+    reads from them ("prior", "chain_arm", "chain_shape"), in declaration
+    order. Every one is null on a pending match by construction (the
+    projection's artifacts come from target-resolving paths), so each needs
+    serving.
 
     Reads the same spec sites as `declared_prior_specs` (include, compute_only,
-    filter keys, offset, the ensemble union in `resolved_specs`) but keeps only
-    `player_prior_logit` declarations: `chain_shape(model=X)` names a
-    projection too, but its columns are shape scalars this serving path does
-    not produce, so serving X's match-win logit for it would fill a column the
-    config never reads.
+    filter keys, offset, the ensemble union in `resolved_specs`), in every
+    spelling `prior_kind_of` knows. The offset's own prior column is filled
+    from the upstream model's live probability (`_fill_prior_logit`), so only
+    that kind of the offset's stem is skipped: a residual stage that offsets on
+    T and also lists T's arm or shape columns still gets those filled.
     """
     from mvp.model.features.prior import resolve_prior
     from mvp.model.prior_promotion import declared_prior_specs
 
     offset_model = prior_model_of(config.offset.feature) if config.offset else None
-    out: list[str] = []
+    out: dict[str, set[str]] = {}
     for spec in declared_prior_specs(config, resolved_specs):
-        model = prior_model_of(spec)
-        if model is None or model == offset_model or model in out:
+        found = prior_kind_of(spec)
+        if found is None:
+            continue
+        kind, model = found
+        if kind == "prior" and model == offset_model:
+            continue
+        if model in out:
+            out[model].add(kind)
             continue
         # Deliberately NOT swallowed. A dropped stem means no fill and a silent
         # return to the NaN defect. Loud beats a column the model reads as
         # missing on every live row.
         try:
             if resolve_prior(model).kind == "projection":
-                out.append(model)
+                out[model] = {kind}
         except Exception as e:
             raise RuntimeError(
                 f"cannot resolve declared prior {model!r}: {e}. Its column "
                 f"would silently reach the model as null on every row."
             ) from e
     return out
+
+
+def _fill_projection_columns(
+    df: pl.DataFrame, proj: dict[str, set[str]], uids: list[str],
+) -> pl.DataFrame:
+    """Serve every projection column an entry declares for the pending `uids`.
+
+    One projection per stem, shared by the match-win prior and the shape
+    columns; arm values come from the source's `predict_arms`, which needs no
+    projection. Every fill is existing-wins (`_fill_prior_column`), so a
+    settled row keeps the transform's honest value.
+    """
+    from mvp.model import projection_serving as ps
+
+    for stem, kinds in proj.items():
+        if kinds & {"prior", "chain_shape"}:
+            projection = ps._pending_projection(stem, uids, df)
+            if "prior" in kinds:
+                df = _fill_prior_column(
+                    df, ps.match_win_logits_from(stem, projection),
+                    prior_column(stem),
+                )
+            if "chain_shape" in kinds:
+                for bare, values in ps.chain_shape_values_from(projection).items():
+                    col = f"{bare}_{stem}"
+                    if col in df.columns:
+                        df = _fill_prior_column(df, values, col)
+        if "chain_arm" in kinds:
+            df = ps.inject_arm_columns(
+                df, stem, ps.pending_arm_values(stem, uids, df),
+                injected_wins=False,
+            )
+    return df
 
 
 def _shares_lead_domain(
@@ -1748,6 +1787,24 @@ class ProductionPredictor:
                     out.append(stem)
         return out
 
+    def prior_arm_dependencies(self) -> set[str]:
+        """The stems any entry consumes through their per-arm outputs (a
+        `chain_arm` column): promotion and preflight require those stems'
+        per-arm stores, which a prior-only consumer does not need."""
+        out: set[str] = set()
+        for entry in self._entries():
+            cfg, resolved, _base = self._resolve_entry_features(entry)
+            for spec in declared_prior_specs(cfg, resolved, entry.get("filters")):
+                found = prior_kind_of(spec)
+                if found is not None and found[0] == "chain_arm":
+                    out.add(found[1])
+        return out
+
+    def _dependency_sources(self) -> list:
+        return dependency_order(
+            self.prior_dependencies(), via_arms=self.prior_arm_dependencies(),
+        )
+
     def _refuse_offset_on_active(self) -> None:
         """An `active` entry that offsets on a prior can never serve: the
         offset column is filled live from the UPSTREAM model's probability,
@@ -1774,10 +1831,10 @@ class ProductionPredictor:
         """
         self._refuse_offset_on_active()
         promoted: list[str] = []
-        for source in dependency_order(self.prior_dependencies()):
+        for source in self._dependency_sources():
             logger.info("Promoting prior %s (%s kind)", source.model, source.kind)
             regenerate_prior(source)
-            promote_prior(source.model)
+            promote_prior(source.model, require_arms=source.via_arms)
             promoted.append(source.model)
         return promoted
 
@@ -1786,10 +1843,10 @@ class ProductionPredictor:
         loadable. Never regenerates -- the tick calls this before scoring,
         and `mvp train` calls it last as a self-check. Returns the stems."""
         self._refuse_offset_on_active()
-        stems = [s.model for s in dependency_order(self.prior_dependencies())]
-        for stem in stems:
-            verify_promoted(stem)
-        return stems
+        sources = self._dependency_sources()
+        for source in sources:
+            verify_promoted(source.model, require_arms=source.via_arms)
+        return [s.model for s in sources]
 
     def load(self) -> dict[str, Any]:
         """Load the trained production model.
@@ -1885,17 +1942,10 @@ class ProductionPredictor:
             if binding is not None:
                 df = _fill_prior_logit(df, fill_prior_logit, binding)
         if proj_stems:
-            from mvp.model.projection_serving import pending_match_win_logits
-
             _pending_uids = _serving_uid_set(
                 df, include_settled=include_settled, match_uids=match_uids,
             )
-            for _stem in proj_stems:
-                df = _fill_prior_column(
-                    df,
-                    pending_match_win_logits(_stem, _pending_uids, df),
-                    prior_column(_stem),
-                )
+            df = _fill_projection_columns(df, proj_stems, _pending_uids)
 
         # Determine in-scope match UIDs for scoped voters
         in_scope_uids: set[str] | None = None
@@ -2182,18 +2232,11 @@ class ProductionPredictor:
 
         df = engine.compute(all_specs, extra_columns=lead_extra_cols)
         if lead_proj_stems:
-            from mvp.model.projection_serving import pending_match_win_logits
-
             _uids = _serving_uid_set(
                 df, include_settled=include_settled,
                 date_window=date_window, tournament_keys=tournament_keys,
             )
-            for _stem in lead_proj_stems:
-                df = _fill_prior_column(
-                    df,
-                    pending_match_win_logits(_stem, _uids, df),
-                    prior_column(_stem),
-                )
+            df = _fill_projection_columns(df, lead_proj_stems, _uids)
 
         # Apply non-date filters (same as training, minus date range)
         if self.config["active"].get("filters"):

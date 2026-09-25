@@ -148,7 +148,7 @@ class TestProjectionPriorDetection:
         )
         # The offset is filled from the upstream model's live probability, so it
         # must not also be served here.
-        assert _projection_priors_of(cfg) == ["proj"]
+        assert _projection_priors_of(cfg) == {"proj": {"prior"}}
 
     def test_model_kind_priors_are_excluded(self, monkeypatch):
         from types import SimpleNamespace
@@ -164,7 +164,7 @@ class TestProjectionPriorDetection:
                 include=["player_prior_logit(model=other)"], compute_only=None,
             ),
         )
-        assert _projection_priors_of(cfg) == []
+        assert _projection_priors_of(cfg) == {}
 
     def test_no_priors_declared(self):
         from types import SimpleNamespace
@@ -173,7 +173,7 @@ class TestProjectionPriorDetection:
             data=SimpleNamespace(filters=None), offset=None,
             features=SimpleNamespace(include=["player_melo_diff"], compute_only=None),
         )
-        assert _projection_priors_of(cfg) == []
+        assert _projection_priors_of(cfg) == {}
 
 
 class TestCheckServedProjector:
@@ -313,20 +313,45 @@ class TestProjectionPriorDetectionSites:
         )
         assert _projection_priors_of(
             cfg, ["player_prior_logit(model=c)"],
-        ) == ["a", "b", "c"]
+        ) == {"a": {"prior"}, "b": {"prior"}, "c": {"prior"}}
 
-    def test_chain_shape_is_not_a_served_prior(self, monkeypatch):
+    def test_chain_outputs_are_served_from_their_output_spellings(self, monkeypatch):
         from types import SimpleNamespace
 
-        self._patch(monkeypatch, {"a": "projection"})
+        self._patch(monkeypatch, {"a": "projection", "b": "projection"})
         cfg = SimpleNamespace(
             data=SimpleNamespace(filters=None), offset=None,
             features=SimpleNamespace(
-                include=["chain_shape(model=a)"], compute_only=None,
+                include=[
+                    "player_chain_egames(model=a)",
+                    "player_chain_w1_logit(model=b)",
+                    "opp_chain_w1_logit(model=b)",
+                    "chain_shape(model=b)",
+                ],
+                compute_only=None,
             ),
         )
-        # Its columns are shape scalars this path does not produce.
-        assert _projection_priors_of(cfg) == []
+        assert _projection_priors_of(cfg) == {
+            "a": {"chain_shape"}, "b": {"chain_arm", "chain_shape"},
+        }
+
+    def test_an_offset_stem_still_gets_its_arm_and_shape_fills(self, monkeypatch):
+        from types import SimpleNamespace
+
+        self._patch(monkeypatch, {"t": "projection"})
+        cfg = SimpleNamespace(
+            data=SimpleNamespace(filters=None),
+            offset=SimpleNamespace(feature="player_prior_logit(model=t)"),
+            features=SimpleNamespace(
+                include=[
+                    "player_prior_logit(model=t)",
+                    "player_chain_egames(model=t)",
+                    "player_chain_fi_rate(model=t)",
+                ],
+                compute_only=None,
+            ),
+        )
+        assert _projection_priors_of(cfg) == {"t": {"chain_shape", "chain_arm"}}
 
     def test_unresolvable_prior_is_loud(self, monkeypatch):
         from types import SimpleNamespace
@@ -340,3 +365,341 @@ class TestProjectionPriorDetectionSites:
         )
         with pytest.raises(RuntimeError, match="cannot resolve declared prior 'ghost'"):
             _projection_priors_of(cfg)
+
+
+# --- chain into chain: serving arm values for pending matches ------------------
+
+import math  # noqa: E402
+from types import SimpleNamespace  # noqa: E402
+
+import numpy as np  # noqa: E402
+
+
+def _chain_cfg(arm_offset=None, include=(), filters=None):
+    from mvp.projection.iid.config import IIDProjectionConfig
+
+    return IIDProjectionConfig.model_validate({
+        "data": {
+            "date_range": {"start": "2024-01-01", "end": "2025-12-31"},
+            "filters": filters or {},
+        },
+        "features": {"include": ["pts_service_won_pct(days=90)", *include]},
+        "serve_model": {
+            "type": "two_level", "model_type": "xgboost",
+            "arm_offset": arm_offset or {},
+        },
+    })
+
+
+def _pending_df():
+    """Two pending matches, both perspectives; ids sort `a` < `b`."""
+    return pl.DataFrame({
+        "match_uid": ["m1", "m1", "m2", "m2", "old", "old"],
+        "player_id": ["a1", "b1", "a2", "b2", "a3", "b3"],
+        "opp_id": ["b1", "a1", "b2", "a2", "b3", "a3"],
+        "best_of": [3] * 6,
+        "won": [None, None, None, None, True, False],
+    })
+
+
+class _ArmsModel:
+    """predict_arms with per-server values; optionally a function of an input
+    column, so a test can see that column was filled before prediction."""
+
+    parity_columns: list[str] = []
+
+    def __init__(self, base: float, reads: str | None = None):
+        self.base, self.reads = base, reads
+        self.seen: list[pl.DataFrame] = []
+
+    def predict_arms(self, pending):
+        self.seen.append(pending)
+        bump = pending[self.reads].to_numpy() if self.reads else np.zeros(len(pending))
+
+        def side(server, returner, extra):
+            return pending.select(
+                "match_uid", pl.col(server).alias("server_id"),
+                pl.col(returner).alias("returner_id"),
+            ).with_columns(
+                chain_fi_rate=pl.Series(self.base + extra + bump),
+                chain_w1_prob=pl.Series(np.full(len(pending), 0.7) + extra),
+                chain_w2_prob=pl.Series(np.full(len(pending), 0.5) + extra),
+            )
+
+        return pl.concat([
+            side("player_id", "opp_id", 0.0), side("opp_id", "player_id", 0.05),
+        ])
+
+
+def _install(monkeypatch, configs: dict, models: dict):
+    import mvp.model.projection_serving as ps
+
+    monkeypatch.setattr(ps, "_config_of", lambda stem: configs[stem])
+    monkeypatch.setattr(
+        ps, "_load_source",
+        lambda stem: (configs[stem], SimpleNamespace(serve_model=models[stem])),
+    )
+    return ps
+
+
+class TestPendingArmValues:
+    def test_both_servers_per_pending_match_in_the_transforms_units(self, monkeypatch):
+        ps = _install(monkeypatch, {"src": _chain_cfg()}, {"src": _ArmsModel(0.6)})
+        vals = ps.pending_arm_values("src", ["m1", "m2"], _pending_df())
+        assert set(vals) == {("m1", "a1"), ("m1", "b1"), ("m2", "a2"), ("m2", "b2")}
+        fi, w1, w2 = vals[("m1", "b1")]
+        assert fi == pytest.approx(0.65)
+        assert w1 == pytest.approx(math.log(0.75 / 0.25))
+        assert w2 == pytest.approx(math.log(0.55 / 0.45))
+
+    def test_no_uids_loads_nothing(self, monkeypatch):
+        import mvp.model.projection_serving as ps
+
+        monkeypatch.setattr(
+            ps, "_load_source",
+            lambda s: (_ for _ in ()).throw(AssertionError("loaded")),
+        )
+        assert ps.pending_arm_values("src", [], _pending_df()) == {}
+
+
+class TestFillPendingArms:
+    _S_COL = "player_chain_fi_rate_src"
+
+    def _chain(self, monkeypatch):
+        """S -> T (arm offset on S's first-in) -> U (arm offset on T's)."""
+        configs = {
+            "src": _chain_cfg(),
+            "tgt": _chain_cfg({"first_in": "player_chain_fi_rate(model=src)"}),
+            "top": _chain_cfg({"first_in": "player_chain_fi_rate(model=tgt)"}),
+        }
+        models = {
+            "src": _ArmsModel(0.6),
+            # T's arms read S's filled column: null there would propagate.
+            "tgt": _ArmsModel(0.0, reads=self._S_COL),
+            "top": _ArmsModel(0.9),
+        }
+        return _install(monkeypatch, configs, models), models
+
+    def _df(self):
+        null = pl.lit(None, dtype=pl.Float64)
+        return _pending_df().with_columns(
+            null.alias(self._S_COL), null.alias("opp_chain_fi_rate_src"),
+            null.alias("player_chain_fi_rate_tgt"),
+            null.alias("opp_chain_fi_rate_tgt"),
+        )
+
+    def test_a_chain_of_three_fills_the_sources_inputs_before_it_predicts(
+        self, monkeypatch,
+    ):
+        ps, models = self._chain(monkeypatch)
+        out = ps.fill_pending_arms("top", ["m1", "m2"], self._df())
+        # T predicted on a frame whose S column was filled (0.6 on the a side).
+        assert models["tgt"].seen[0][self._S_COL].to_list() == [0.6, 0.6]
+        row = out.filter(pl.col("player_id") == "a1").row(0, named=True)
+        assert row["player_chain_fi_rate_tgt"] == pytest.approx(0.6)
+
+    def test_the_opp_pass_keys_on_the_opponent(self, monkeypatch):
+        ps, _ = self._chain(monkeypatch)
+        out = ps.fill_pending_arms("tgt", ["m1"], self._df())
+        a = out.filter(pl.col("player_id") == "a1").row(0, named=True)
+        b = out.filter(pl.col("player_id") == "b1").row(0, named=True)
+        assert a[self._S_COL] == pytest.approx(0.6)
+        assert a["opp_chain_fi_rate_src"] == pytest.approx(0.65)
+        assert b[self._S_COL] == pytest.approx(0.65)
+        assert b["opp_chain_fi_rate_src"] == pytest.approx(0.6)
+
+    def test_settled_rows_are_untouched(self, monkeypatch):
+        ps, _ = self._chain(monkeypatch)
+        out = ps.fill_pending_arms("tgt", ["m1"], self._df())
+        assert out.filter(pl.col("match_uid") == "old")[self._S_COL].null_count() == 2
+
+    def test_an_offset_source_is_injected_wins(self, monkeypatch):
+        ps, _ = self._chain(monkeypatch)
+        df = self._df().with_columns(pl.lit(0.1).alias(self._S_COL))
+        out = ps.fill_pending_arms("tgt", ["m1"], df)
+        a1 = out.filter(pl.col("player_id") == "a1")
+        assert a1[self._S_COL][0] == pytest.approx(0.6)
+
+    def test_a_plain_chain_arm_source_is_existing_wins(self, monkeypatch):
+        configs = {
+            "src": _chain_cfg(),
+            "tgt": _chain_cfg(include=["player_chain_fi_rate(model=src)"]),
+        }
+        ps = _install(
+            monkeypatch, configs,
+            {"src": _ArmsModel(0.6), "tgt": _ArmsModel(0.0)},
+        )
+        df = self._df().with_columns(
+            pl.when(pl.col("player_id") == "a1").then(0.1).otherwise(None)
+            .alias(self._S_COL)
+        )
+        out = ps.fill_pending_arms("tgt", ["m1"], df)
+        assert out.filter(pl.col("player_id") == "a1")[self._S_COL][0] == 0.1
+        b1 = out.filter(pl.col("player_id") == "b1")
+        assert b1[self._S_COL][0] == pytest.approx(0.65)
+
+
+class TestServingRequirementsChain:
+    def test_a_chain_of_three_unions_every_projections_specs(self, monkeypatch):
+        configs = {
+            "src": _chain_cfg(include=["player_glicko_rd"]),
+            "tgt": _chain_cfg(
+                {"first_in": "player_chain_fi_rate(model=src)"},
+                include=["player_elo"],
+            ),
+            "top": _chain_cfg({"win_first": "player_chain_w1_logit(model=tgt)"}),
+        }
+        ps = _install(monkeypatch, configs, {})
+        specs, _cols = ps.serving_requirements("top")
+        for spec in (
+            "player_glicko_rd", "player_elo",
+            "player_chain_fi_rate(model=src)", "player_chain_w1_logit(model=tgt)",
+        ):
+            assert spec in specs, spec
+
+    def test_a_projection_without_arm_sources_is_its_own(self, monkeypatch):
+        ps = _install(monkeypatch, {"src": _chain_cfg(include=["player_elo"])}, {})
+        specs, _ = ps.serving_requirements("src")
+        assert specs == ["pts_service_won_pct(days=90)", "player_elo"]
+
+
+class TestPendingMatchWinLogitsFillsFirst:
+    def test_a_row_with_a_null_arm_input_survives_the_not_null_filter(
+        self, monkeypatch,
+    ):
+        import mvp.model.projection_serving as ps
+
+        col = "player_chain_fi_rate_src"
+        configs = {
+            "src": _chain_cfg(),
+            "tgt": _chain_cfg({"first_in": "player_chain_fi_rate(model=src)"}),
+        }
+        projected: list[pl.DataFrame] = []
+
+        class _Projector:
+            serve_model = _ArmsModel(0.0)
+
+            def project(self, pending):
+                projected.append(pending)
+                return SimpleNamespace(
+                    distribution=SimpleNamespace(
+                        p_match_win_a=np.full(len(pending), 0.6),
+                    ),
+                )
+
+        monkeypatch.setattr(ps, "_config_of", lambda stem: configs[stem])
+        monkeypatch.setattr(
+            ps, "_load_source",
+            lambda stem: (
+                configs[stem],
+                _Projector() if stem == "tgt"
+                else SimpleNamespace(serve_model=_ArmsModel(0.6)),
+            ),
+        )
+        monkeypatch.setattr(
+            ps, "_forward_calibrator",
+            lambda stem: SimpleNamespace(transform=lambda p: p),
+        )
+        df = _pending_df().with_columns(
+            pl.lit(None, dtype=pl.Float64).alias(col),
+            pl.lit(None, dtype=pl.Float64).alias("opp_chain_fi_rate_src"),
+        )
+        fill = ps.pending_match_win_logits("tgt", ["m1", "m2"], df)
+        assert set(k[0] for k in fill) == {"m1", "m2"}
+        assert projected[0][col].to_list() == [0.6, 0.6]
+
+
+class TestFillProjectionColumns:
+    """Both fill sites serve every projection column an entry declares, one
+    projection per stem, existing-wins."""
+
+    def _df(self):
+        null = pl.lit(None, dtype=pl.Float64)
+        return pl.DataFrame({
+            "match_uid": ["m1", "m1", "m2", "m2", "old", "old"],
+            "player_id": ["a1", "b1", "a2", "b2", "a3", "b3"],
+            "opp_id": ["b1", "a1", "b2", "a2", "b3", "a3"],
+            "best_of": [3] * 6,
+        }).with_columns(
+            null.alias("player_prior_logit_t"),
+            pl.when(pl.col("match_uid") == "old").then(9.0).otherwise(None)
+            .alias("player_chain_egames_t"),
+            null.alias("player_chain_hold_asym_t"),
+            null.alias("player_chain_fi_rate_t"),
+            null.alias("opp_chain_fi_rate_t"),
+        )
+
+    def _patch(self, monkeypatch):
+        import mvp.model.projection_serving as ps
+        from tests.model.features.test_chain_shape import _fake_out
+
+        calls = {"projections": 0}
+        pending = pl.DataFrame({
+            "match_uid": ["m1", "m2"], "player_id": ["a1", "a2"],
+            "opp_id": ["b1", "b2"],
+        })
+
+        def projection(stem, uids, df):
+            calls["projections"] += 1
+            return pending, _fake_out()
+
+        monkeypatch.setattr(ps, "_pending_projection", projection)
+        monkeypatch.setattr(
+            ps, "_forward_calibrator",
+            lambda stem: SimpleNamespace(transform=lambda p: p),
+        )
+        monkeypatch.setattr(
+            ps, "pending_arm_values",
+            lambda stem, uids, df: {
+                ("m1", "a1"): (0.61, 0.0, 0.0), ("m1", "b1"): (0.58, 0.0, 0.0),
+            },
+        )
+        return calls
+
+    def test_prior_shape_and_arm_columns_from_one_projection(self, monkeypatch):
+        from mvp.model.predictor import _fill_projection_columns
+
+        calls = self._patch(monkeypatch)
+        out = _fill_projection_columns(
+            self._df(), {"t": {"prior", "chain_shape", "chain_arm"}}, ["m1", "m2"],
+        )
+        assert calls["projections"] == 1
+        a1 = out.filter(pl.col("player_id") == "a1").row(0, named=True)
+        b1 = out.filter(pl.col("player_id") == "b1").row(0, named=True)
+        assert a1["player_prior_logit_t"] == pytest.approx(-b1["player_prior_logit_t"])
+        assert a1["player_chain_egames_t"] == pytest.approx(2.0)
+        assert b1["player_chain_egames_t"] == pytest.approx(2.0)
+        # Antisymmetric: negated on the mirror row.
+        assert a1["player_chain_hold_asym_t"] == pytest.approx(0.3)
+        assert b1["player_chain_hold_asym_t"] == pytest.approx(-0.3)
+        # Arm columns: player_ on the row's player, opp_ on the opponent.
+        assert a1["player_chain_fi_rate_t"] == pytest.approx(0.61)
+        assert a1["opp_chain_fi_rate_t"] == pytest.approx(0.58)
+        assert b1["player_chain_fi_rate_t"] == pytest.approx(0.58)
+
+    def test_a_settled_row_keeps_the_transforms_value(self, monkeypatch):
+        from mvp.model.predictor import _fill_projection_columns
+
+        self._patch(monkeypatch)
+        out = _fill_projection_columns(
+            self._df(), {"t": {"chain_shape"}}, ["m1", "m2"],
+        )
+        assert out.filter(pl.col("match_uid") == "old")[
+            "player_chain_egames_t"
+        ].to_list() == [9.0, 9.0]
+
+    def test_an_arm_only_stem_projects_nothing(self, monkeypatch):
+        from mvp.model.predictor import _fill_projection_columns
+
+        calls = self._patch(monkeypatch)
+        _fill_projection_columns(self._df(), {"t": {"chain_arm"}}, ["m1"])
+        assert calls["projections"] == 0
+
+    def test_both_fill_sites_use_it(self):
+        import inspect
+
+        import mvp.model.predictor as pred
+
+        src = inspect.getsource(pred)
+        assert src.count("_fill_projection_columns(") == 3  # def + two sites
+        assert "pending_match_win_logits(" not in src

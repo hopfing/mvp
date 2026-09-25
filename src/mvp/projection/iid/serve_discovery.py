@@ -17,7 +17,7 @@ import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -72,9 +72,11 @@ from mvp.projection.iid.score_state_features import (
 from mvp.projection.iid.score_state_model import build_score_state_model
 from mvp.projection.iid.serve_model import (
     ScoreStateChainServeModel,
+    _ArmOffsetCfg,
     swap_side_partner_specs,
 )
 from mvp.projection.iid.two_level_serve_model import (
+    _SERVE_BRANCH,
     FIRST_IN,
     TwoLevelServeModel,
     _ConstantBranch,
@@ -284,6 +286,11 @@ class _ChainFold:
     # exactly (pl.len() denominator, no target filter).
     test_points: pl.DataFrame | None = None
     test_first_in: pl.DataFrame | None = None
+    # Per win arm named in `serve_model.arm_offset`: the offset logistic fitted
+    # once on this fold's training rows (the arm's own `training_rows`), handed
+    # to every candidate's arm instead of refitting it per candidate. The
+    # classification FS's fold margins, for the same reason.
+    arm_offsets: dict[str, Any] = field(default_factory=dict)
 
 
 def _subsample_train_splits(
@@ -383,6 +390,9 @@ class ServeDiscoverySelector:
         self._engine: FeatureEngine | None = None
 
     def run(self) -> DiscoveryResult:
+        # Before precompute: caching a `chain_arm` spec runs the transform,
+        # which refuses a source without its per-arm store.
+        self._ensure_arm_sources()
         joint_arms = self.config.joint_arms()
         joint = bool(joint_arms)
         # One state per searched arm, in config order — and a component run is
@@ -1767,6 +1777,66 @@ class ServeDiscoverySelector:
             fold_scores.append(metrics[self.config.metric])
         return float(np.mean(fold_scores))
 
+    def _arm_offset_specs(self) -> list[str]:
+        serve_model = self.config.serve_model
+        if serve_model is None:
+            return []
+        return list(dict.fromkeys(serve_model.arm_offset.values()))
+
+    def _arm_source_stems(self) -> list[str]:
+        """Stems of every chain whose per-arm outputs this run reads: through
+        `arm_offset`, or a `chain_arm` spec in an arm list or a pool."""
+        from mvp.model.prior_naming import prior_kind_of
+
+        feats = self.config.features
+        specs = feats.base_match_level_features + feats.candidate_match_level_features
+        serve_model = self.config.serve_model
+        if serve_model is not None:
+            specs += serve_model.arm_match_specs()
+        if self.config.joint_selection is not None:
+            for arm_cfg in self.config.joint_selection.arms.values():
+                specs += arm_cfg.candidate_match_level_features
+        stems: list[str] = []
+        for spec in specs:
+            found = prior_kind_of(spec)
+            if found is not None and found[0] == "chain_arm" and found[1] not in stems:
+                stems.append(found[1])
+        return stems
+
+    def _ensure_arm_sources(self) -> None:
+        """Regenerate every arm source whose stores are missing or stale, base
+        first (a source with its own arm source comes after it). The discovery
+        driver is the one place that regenerates; the engine and every other
+        reader refuse with the command, as for the classification prior."""
+        stems = self._arm_source_stems()
+        if not stems:
+            return
+        from mvp.model import prior_promotion
+        from mvp.model.features import prior as _prior
+
+        # Every stem this run names is consumed through its arms. A base
+        # reached only through `prior` or `chain_shape` is not tagged, and is
+        # not asked for arm files: a single-level base never writes them, and
+        # would otherwise be regenerated on every run.
+        for source in prior_promotion.dependency_order(stems, via_arms=stems):
+            if source.kind != "projection":
+                continue
+            resolved = _prior.resolve_prior(source.model, arms=source.via_arms)
+            ready = _prior._ready_possibly_relocated(
+                resolved, _prior.prior_artifacts_ready,
+            ) and (
+                not source.via_arms
+                or _prior._ready_possibly_relocated(resolved, _prior.serve_arms_ready)
+            )
+            if ready:
+                continue
+            logger.warning(
+                "arm source %s: per-arm store missing or stale; regenerating",
+                source.model,
+            )
+            prior_promotion.regenerate_prior(source)
+            prior_promotion._clear_prior_caches()
+
     def _prepare_match_data(
         self,
         *,
@@ -1809,6 +1879,12 @@ class ServeDiscoverySelector:
         filter_specs = get_filter_feature_specs(self.config.data.filters)
         if filter_specs:
             df = engine.load_features_numpy(filter_specs, df, cache_key)
+        # The arm offset's `not_null` filter key is a transform output, which
+        # `get_filter_feature_specs` never returns; load it the same way so the
+        # match frame (and so every fold) holds only matches the source scored.
+        offset_specs = self._arm_offset_specs()
+        if offset_specs:
+            df = engine.load_features_numpy(offset_specs, df, cache_key)
 
         df = apply_filters(df, self.config.data.filters)
 
@@ -2022,6 +2098,11 @@ class ServeDiscoverySelector:
             self._match_df.estimated_size()
             + self._match_features_both_sides.estimated_size()
         )
+        folds = [
+            replace(fold, arm_offsets=self._fit_fold_arm_offsets(fold))
+            for fold in folds
+        ] if self._arm_offset_specs() else folds
+        self._chain_folds = folds
         # Nothing reads _preloaded_points after this point — the per-fold slices
         # above are its only consumers — so drop it rather than carry the full
         # unfiltered frame for the rest of the run. _match_features_both_sides is
@@ -2048,6 +2129,35 @@ class ServeDiscoverySelector:
         # Up front, before any candidate thread exists — never lazily from a
         # worker (the folds above are shared across threads by design).
         self._build_prefit_fixed()
+
+    def _fit_fold_arm_offsets(self, fold: _ChainFold) -> dict[str, Any]:
+        """The offset logistic for each win arm named in `arm_offset`, fitted
+        on this fold's training rows through the arm's own `training_rows`, so
+        it is exactly the offset the arm would fit itself. first_in's offset
+        is a match-grain linear fit inside its own (cheap) fit, not prefit."""
+        from mvp.model.offset import fit_offset
+
+        serve_model = self.config.serve_model
+        assert serve_model is not None
+        out: dict[str, Any] = {}
+        for arm, spec in serve_model.arm_offset.items():
+            if arm == FIRST_IN:
+                continue
+            probe = ScoreStateChainServeModel(
+                model_type=self.config.scoring_model.type,
+                match_level_features=[], point_level_features=[],
+                serve_branch=_SERVE_BRANCH[arm], offset_spec=spec,
+                points_path=self.points_path, matches_path=self.matches_path,
+                cache_dir=self.cache_dir, engine=self._engine,
+            )
+            rows = probe.training_rows(fold.points, fold.feats)
+            col = probe._offset_train_col()
+            out[arm] = fit_offset(
+                rows.select(col).to_numpy(), 0,
+                rows["point_won_by_server"].cast(pl.Int64).to_numpy(),
+                _ArmOffsetCfg(feature=col),
+            )
+        return out
 
     def _scoring_params(self) -> dict[str, Any]:
         """The scorer params every CHAIN-PATH candidate model is built with
@@ -2145,8 +2255,24 @@ class ServeDiscoverySelector:
 
         No-op for single-level runs, and for an arm this run did not prefit —
         the candidate then fits all three components itself, which is slower
-        but still the same model."""
-        if self._prefit_fixed is None or not isinstance(model, TwoLevelServeModel):
+        but still the same model.
+
+        Also hands the searched arm its fold's prefit offset, when it has one
+        (`_ChainFold.arm_offsets`), whether or not the fixed components are
+        cached."""
+        if not isinstance(model, TwoLevelServeModel):
+            return
+        searched = arm if arm is not None else self.config.serve_component
+        if self._chain_folds is not None and searched is not None:
+            prefit_offset = self._chain_folds[fold_idx].arm_offsets.get(searched)
+            branch = model.components()[searched]
+            if (
+                prefit_offset is not None
+                and isinstance(branch, ScoreStateChainServeModel)
+                and branch.offset_spec is not None
+            ):
+                branch._prefit_offset = prefit_offset
+        if self._prefit_fixed is None:
             return
         by_fold = self._prefit_fixed.get(
             arm if arm is not None else self.config.serve_component
@@ -2553,14 +2679,9 @@ class ServeDiscoverySelector:
         specs: list[str] = list(self.config.features.base_match_level_features)
         serve_model = self.config.serve_model
         if serve_model is not None:
-            for component in (
-                serve_model.first_in_match_features,
-                serve_model.win_first_match_features,
-                serve_model.win_second_match_features,
-            ):
-                for spec in component:
-                    if spec not in specs:
-                        specs.append(spec)
+            for spec in serve_model.arm_match_specs():
+                if spec not in specs:
+                    specs.append(spec)
         return specs
 
     def _pre_cache_all(
@@ -2669,9 +2790,15 @@ class ServeDiscoverySelector:
 
         # Apply remaining (non-computed) domain filters at point grain.
         # Computed-feature filters were already applied at match grain above.
+        # The arm offset's `not_null` key is excluded too: its column is a
+        # transform output this frame never loads. The matrix is scored only by
+        # the non-chain metrics, whose candidate model carries no offset.
+        from mvp.projection.iid.config import arm_offset_column
+
+        offset_keys = {arm_offset_column(s) for s in self._arm_offset_specs()}
         point_grain_filters = {
             k: v for k, v in self.config.data.filters.items()
-            if k not in computed_filter_keys
+            if k not in computed_filter_keys and k not in offset_keys
         }
         joined = apply_filters(joined, point_grain_filters)
         joined = joined.filter(pl.col("point_won_by_server").is_not_null())

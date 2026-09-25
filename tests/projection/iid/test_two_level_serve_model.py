@@ -248,6 +248,30 @@ class TestFingerprint:
     def test_identical_configs_agree(self):
         assert self._fp(_cfg()) == self._fp(_cfg())
 
+    def test_arm_offset_reaches_the_hash(self):
+        # The canonicaliser lists serve-model keys explicitly; without this
+        # entry two configs differing only in the offset would share a dir.
+        # Both configs carry the pinned include entries and filter, so the
+        # offset key itself is the only difference.
+        from mvp.projection.iid.config import IIDProjectionConfig
+
+        spec = "player_chain_w1_logit(model=src_chain)"
+
+        def fp(arm_offset):
+            full = IIDProjectionConfig(
+                data={
+                    "date_range": {"start": "2023-01-01", "end": "2026-01-01"},
+                    "filters": {"player_chain_w1_logit_src_chain": "not_null"},
+                },
+                features={"include": [
+                    "player_age_diff", spec, "opp_chain_w1_logit(model=src_chain)",
+                ]},
+                serve_model=_cfg(model_type="xgboost", arm_offset=arm_offset),
+            )
+            return compute_iid_fingerprint(full, config_path=None)
+
+        assert fp({}) != fp({"win_first": spec})
+
 
 class TestPromotedConfig:
     """FS must promote the model it selected against, not a single-level one."""
@@ -467,6 +491,29 @@ class TestPromotedConfigIncludeList:
                      "player_vs_opp_style_resid_flat_diff"):
             inc = self._emit([spec])["features"]["include"]
             assert inc == [spec], inc
+
+    def test_arm_offset_spec_and_partner_are_included_when_not_picked(self):
+        """The promoted config must compute the offset column whether or not
+        the FS also picked it as a feature."""
+        spec = "player_chain_w1_logit(model=src_chain)"
+        cfg = ServeDiscoveryConfig(
+            data={"date_range": {"start": "2023-01-01", "end": "2026-01-01"}},
+            metric="iid_crps_spread",
+            serve_component="win_second",
+            serve_model=ServeModelConfig(
+                type="two_level", model_type="xgboost",
+                arm_offset={"win_first": spec},
+            ),
+            scoring_model={"type": "xgboost"},
+        )
+        out = cfg.to_iid_projection_config_dict(
+            selected_match_level=["player_glicko_rd"],
+            selected_point_level=[], model_type="xgboost",
+        )
+        inc = out["features"]["include"]
+        assert spec in inc
+        assert "opp_chain_w1_logit(model=src_chain)" in inc
+        assert out["serve_model"]["arm_offset"] == {"win_first": spec}
 
 
 class TestConstantBranchFit:
@@ -782,3 +829,239 @@ class TestFirstInPerspectiveSwap:
         a, b = est._first_in_for(df)
         assert a[0] == pytest.approx(0.80)
         assert b[0] == pytest.approx(0.40)
+
+
+class TestPredictArms:
+    """`predict_arms` writes each server's raw neutral-state arm outputs — the
+    values a target chain's arm offset starts from."""
+
+    class _StateBranch:
+        """Win branch whose output depends on the state, so a test can tell
+        the neutral state from any other."""
+
+        def __init__(self, a, b):
+            self._a, self._b = np.asarray(a), np.asarray(b)
+
+        def predict_state_fn(self, df):
+            from mvp.projection.iid.serve_model import neutral_score_state
+
+            neutral = neutral_score_state()
+
+            def side(vals):
+                return lambda state: vals if state == neutral else vals * 0.0
+
+            return side(self._a), side(self._b)
+
+    @staticmethod
+    def _df():
+        return pl.DataFrame({
+            "match_uid": ["m1", "m2"],
+            "player_id": ["p1", "p3"],
+            "opp_id": ["p2", "p4"],
+        })
+
+    def _model(self):
+        est = build_serve_model(ServeModelConfig(type="two_level"))
+        est._first_in._base_rate = 0.6
+        est._win_first = self._StateBranch([0.71, 0.72], [0.73, 0.74])
+        est._win_second = self._StateBranch([0.51, 0.52], [0.53, 0.54])
+        return est
+
+    def test_two_rows_per_match_with_the_ids_swapped(self):
+        out = self._model().predict_arms(self._df())
+        assert out.columns == [
+            "match_uid", "server_id", "returner_id",
+            "chain_fi_rate", "chain_w1_prob", "chain_w2_prob",
+        ]
+        rows = {(r["match_uid"], r["server_id"]): r["returner_id"]
+                for r in out.iter_rows(named=True)}
+        assert rows == {
+            ("m1", "p1"): "p2", ("m1", "p2"): "p1",
+            ("m2", "p3"): "p4", ("m2", "p4"): "p3",
+        }
+
+    def test_values_are_each_sides_neutral_branch_outputs(self):
+        out = self._model().predict_arms(self._df())
+        got = {
+            r["server_id"]: (r["chain_fi_rate"], r["chain_w1_prob"], r["chain_w2_prob"])
+            for r in out.iter_rows(named=True)
+        }
+        assert got["p1"] == pytest.approx((0.6, 0.71, 0.51))
+        assert got["p3"] == pytest.approx((0.6, 0.72, 0.52))
+        assert got["p2"] == pytest.approx((0.6, 0.73, 0.53))
+        assert got["p4"] == pytest.approx((0.6, 0.74, 0.54))
+
+    def test_raw_outputs_ignore_gap_shrink_and_the_offset(self):
+        est = self._model()
+        est.gap_shrink = 0.5
+        est.surface_circuit_offset = {"Hard/tour": 0.05}
+        df = self._df().with_columns(surface=pl.lit("Hard"), circuit=pl.lit("tour"))
+        out = est.predict_arms(df)
+        p1 = out.filter(pl.col("server_id") == "p1")
+        assert p1["chain_w1_prob"][0] == pytest.approx(0.71)
+
+    def test_a_degenerate_branch_writes_its_base_rate(self):
+        est = build_serve_model(ServeModelConfig(type="two_level"))
+        est._first_in._base_rate = 0.6
+        est._win_first._rate = 0.7
+        est._win_second._rate = 0.5
+        out = est.predict_arms(self._df())
+        assert out["chain_w1_prob"].to_list() == pytest.approx([0.7] * 4)
+        assert out["chain_w2_prob"].to_list() == pytest.approx([0.5] * 4)
+        assert out["chain_fi_rate"].to_list() == pytest.approx([0.6] * 4)
+
+    def test_missing_ids_raise(self):
+        with pytest.raises(ValueError, match="df missing player_id/opp_id"):
+            self._model().predict_arms(self._df().drop("opp_id"))
+
+
+_FI_SPEC = "player_chain_fi_rate(model=src_chain)"
+_FI_COL = "player_chain_fi_rate_src_chain"
+_W1_SPEC = "player_chain_w1_logit(model=src_chain)"
+
+
+class TestArmOffsetWiring:
+    def test_an_empty_arm_with_an_offset_is_a_fitted_arm_on_the_offset(self):
+        """Round 0 of an FS on that arm: the offset column alone, not the
+        branch base rate."""
+        est = build_serve_model(ServeModelConfig(
+            type="two_level", model_type="xgboost",
+            arm_offset={"win_first": _W1_SPEC},
+        ))
+        assert isinstance(est._win_first, ScoreStateChainServeModel)
+        assert est._win_first.match_level_features == [_W1_SPEC]
+        assert est._win_first.offset_spec == _W1_SPEC
+        assert not isinstance(est._win_second, ScoreStateChainServeModel)
+
+    def test_the_offset_is_appended_to_the_arms_own_list(self):
+        est = build_serve_model(ServeModelConfig(
+            type="two_level", model_type="xgboost",
+            win_second_match_features=["player_glicko_rd"],
+            arm_offset={"win_second": _W1_SPEC, "first_in": _FI_SPEC},
+        ))
+        assert est._win_second.match_level_features == ["player_glicko_rd", _W1_SPEC]
+        assert est._first_in.match_level_features == [_FI_SPEC]
+        assert est._first_in.offset_spec == _FI_SPEC
+
+    def test_the_offset_survives_a_pickle(self):
+        est = build_serve_model(ServeModelConfig(
+            type="two_level", model_type="xgboost",
+            arm_offset={"win_first": _W1_SPEC},
+        ))
+        est._win_first._engine = None
+        est._first_in._engine = None
+        back = pickle.loads(pickle.dumps(est))
+        assert back.arm_offset == {"win_first": _W1_SPEC}
+
+
+class TestFirstInOffset:
+    """The first_in arm's offset: a weighted linear fit of the rate on the
+    source's first-in rate, as XGBRegressor's base_margin (identity link)."""
+
+    N = 20
+
+    def _level(self, i):
+        return 0.5 + 0.02 * (i % 10)
+
+    def _points(self):
+        rng = np.random.default_rng(4)
+        rows = []
+        for i in range(self.N):
+            for server in (f"a{i}", f"b{i}"):
+                n = 30 + 5 * (i % 3)
+                for j in range(n):
+                    rows.append({
+                        "match_uid": f"m{i:02d}", "server_id": server,
+                        "serve": 1 if rng.random() < self._level(i) else 2,
+                    })
+        return pl.DataFrame(rows)
+
+    def _preload(self, null_for=()):
+        rows = []
+        for i in range(self.N):
+            a, b = f"a{i}", f"b{i}"
+            va = None if f"m{i:02d}" in null_for else self._level(i)
+            vb = self._level(i) - 0.03
+            rows.append({"match_uid": f"m{i:02d}", "player_id": a, "opp_id": b,
+                         _FI_COL: va, "opp_chain_fi_rate_src_chain": vb})
+            rows.append({"match_uid": f"m{i:02d}", "player_id": b, "opp_id": a,
+                         _FI_COL: vb, "opp_chain_fi_rate_src_chain": va})
+        return pl.DataFrame(rows)
+
+    def _df(self):
+        from datetime import date, timedelta
+
+        return pl.DataFrame({
+            "match_uid": [f"m{i:02d}" for i in range(self.N)],
+            "effective_match_date": [
+                date(2025, 1, 1) + timedelta(days=i) for i in range(self.N)
+            ],
+        })
+
+    @pytest.fixture
+    def arm_rows(self, monkeypatch):
+        from datetime import date
+
+        from mvp.model.features import prior
+
+        frame = self._preload().select(
+            "match_uid", pl.col("player_id").alias("server_id"),
+        ).with_columns(pl.lit(date(2024, 12, 31)).alias("arm_train_end"))
+        state = {"frame": frame}
+        monkeypatch.setattr(prior, "arm_frame", lambda m: (None, state["frame"]))
+        return state
+
+    def _model(self):
+        from mvp.projection.iid.two_level_serve_model import FirstServeInModel
+
+        return FirstServeInModel(
+            "xgboost", [], {"n_estimators": 5, "learning_rate": 0.0},
+            offset_spec=_FI_SPEC,
+        )
+
+    def test_with_no_learning_each_side_is_the_weighted_linear_calibration(
+        self, arm_rows,
+    ):
+        from sklearn.linear_model import LinearRegression
+
+        fi = self._model()
+        fi.fit(self._df(), preloaded_points=self._points(),
+               preloaded_match_features=self._preload())
+        agg = self._points().group_by("match_uid", "server_id").agg(
+            pl.len().alias("n"), (pl.col("serve") == 1).sum().alias("k"),
+        ).join(
+            self._preload().select(
+                "match_uid", pl.col("player_id").alias("server_id"), _FI_COL,
+            ), on=["match_uid", "server_id"],
+        )
+        ref = LinearRegression().fit(
+            agg.select(_FI_COL).to_numpy(), (agg["k"] / agg["n"]).to_numpy(),
+            sample_weight=agg["n"].to_numpy(),
+        )
+        est = TwoLevelServeModel.__new__(TwoLevelServeModel)
+        est._first_in = fi
+        df = self._preload().filter(pl.col("player_id").str.starts_with("a"))
+        a, b = est._first_in_for(df)
+        np.testing.assert_allclose(
+            a, ref.predict(df.select(_FI_COL).to_numpy()), atol=1e-5,
+        )
+        np.testing.assert_allclose(
+            b, ref.predict(df.select("opp_chain_fi_rate_src_chain").to_numpy()),
+            atol=1e-5,
+        )
+
+    def test_null_offset_rows_are_dropped(self, arm_rows):
+        fi = self._model()
+        fi.fit(self._df(), preloaded_points=self._points(),
+               preloaded_match_features=self._preload(null_for={"m03"}))
+        assert fi.offset_null_dropped == 1
+
+    def test_a_row_on_or_before_the_source_train_end_raises(self, arm_rows):
+        from datetime import date
+
+        arm_rows["frame"] = arm_rows["frame"].with_columns(
+            pl.lit(date(2025, 6, 1)).alias("arm_train_end")
+        )
+        with pytest.raises(ValueError, match="violate the OOF rule"):
+            self._model().fit(self._df(), preloaded_points=self._points(),
+                              preloaded_match_features=self._preload())

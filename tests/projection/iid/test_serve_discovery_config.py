@@ -9,6 +9,7 @@ from mvp.projection.iid.config import (
     IIDProjectionConfig,
     ServeDiscoveryConfig,
     ServeDiscoveryFeaturesConfig,
+    ServeModelConfig,
 )
 
 
@@ -386,3 +387,79 @@ class TestResumeAfterAPoolTrim:
 
     def test_trimming_everything_leaves_nothing_restored(self):
         assert self._live(self.RESTORED, [], []) == {}
+
+
+_W1 = "player_chain_w1_logit(model=src_chain)"
+_W1_OPP = "opp_chain_w1_logit(model=src_chain)"
+_W1_COL = "player_chain_w1_logit_src_chain"
+
+
+class TestArmOffset:
+    """`serve_model.arm_offset`: a per-arm starting point from another chain.
+    Two-level XGBoost only; the config pins the column and filters to the
+    matches the source scored, as the classification offset sugar does."""
+
+    @staticmethod
+    def _serve(**over):
+        base = dict(type="two_level", model_type="xgboost",
+                    arm_offset={"win_first": _W1})
+        base.update(over)
+        return ServeModelConfig(**base)
+
+    def test_accepted_on_two_level_xgboost(self):
+        assert self._serve().arm_offset == {"win_first": _W1}
+
+    def test_refused_on_single_level(self):
+        with pytest.raises(ValueError, match="requires serve_model.type='two_level'"):
+            self._serve(type="score_state")
+
+    def test_refused_on_a_non_xgboost_arm(self):
+        with pytest.raises(ValueError, match="requires model_type='xgboost'"):
+            self._serve(model_type="logistic")
+
+    def test_an_unknown_arm_is_refused(self):
+        with pytest.raises(ValueError):
+            self._serve(arm_offset={"win_third": _W1})
+
+    def test_projection_config_pins_the_spec_partner_and_filter(self):
+        cfg = IIDProjectionConfig.model_validate({
+            "data": {"date_range": {"start": "2024-01-01", "end": "2025-12-31"},
+                     "filters": {"draw_type": "singles"}},
+            "features": {"include": ["player_age_diff"]},
+            "serve_model": {"type": "two_level", "model_type": "xgboost",
+                            "arm_offset": {"win_first": _W1}},
+        })
+        assert cfg.features.include == ["player_age_diff", _W1, _W1_OPP]
+        assert cfg.data.filters == {"draw_type": "singles", _W1_COL: "not_null"}
+
+    def test_pinning_is_idempotent(self):
+        cfg = IIDProjectionConfig.model_validate({
+            "data": {"date_range": {"start": "2024-01-01", "end": "2025-12-31"}},
+            "features": {"include": [_W1, _W1_OPP]},
+            "serve_model": {"type": "two_level", "model_type": "xgboost",
+                            "arm_offset": {"win_first": _W1, "win_second": _W1}},
+        })
+        again = IIDProjectionConfig.model_validate(cfg.model_dump())
+        assert again.features.include == [_W1, _W1_OPP]
+        assert again.data.filters == {_W1_COL: "not_null"}
+
+    def test_discovery_config_adds_the_filter(self):
+        cfg = ServeDiscoveryConfig.model_validate({
+            "data": {"date_range": {"start": "2024-01-01", "end": "2025-12-31"}},
+            "serve_component": "win_second",
+            "serve_model": {"type": "two_level", "model_type": "xgboost",
+                            "arm_offset": {"win_first": _W1}},
+            "scoring_model": {"type": "xgboost"},
+        })
+        assert cfg.data.filters == {_W1_COL: "not_null"}
+
+    def test_discovery_refuses_a_non_xgboost_scorer(self):
+        """FS candidates are built with `scoring_model.type`, not the serve
+        model's own `model_type`; a logistic scorer takes no base_margin."""
+        with pytest.raises(ValueError, match="scoring_model.type='xgboost'"):
+            ServeDiscoveryConfig.model_validate({
+                "data": {"date_range": {"start": "2024-01-01", "end": "2025-12-31"}},
+                "serve_component": "win_second",
+                "serve_model": {"type": "two_level", "model_type": "xgboost",
+                                "arm_offset": {"win_first": _W1}},
+            })

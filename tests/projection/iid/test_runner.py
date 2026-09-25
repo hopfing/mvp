@@ -362,6 +362,24 @@ class TestPreloadMatchSpecs:
         )
         assert preload_match_specs(cfg) == ["player_glicko_rd"]
 
+    def test_arm_offset_specs_are_preloaded_after_the_component_lists(self):
+        from mvp.projection.iid.runner import preload_match_specs
+
+        spec = "player_chain_w1_logit(model=src_chain)"
+        cfg = self._cfg(
+            type="two_level", model_type="xgboost",
+            win_first_match_features=["player_glicko_rd", spec],
+            win_second_match_features=["player_a"],
+            arm_offset={"win_first": spec, "win_second": spec},
+        )
+        assert preload_match_specs(cfg) == ["player_glicko_rd", spec, "player_a"]
+        cfg = self._cfg(
+            type="two_level", model_type="xgboost",
+            win_second_match_features=["player_a"],
+            arm_offset={"win_second": spec},
+        )
+        assert preload_match_specs(cfg) == ["player_a", spec]
+
     def test_a_two_level_config_with_no_features_preloads_nothing(self):
         from mvp.projection.iid.runner import preload_match_specs
 
@@ -543,3 +561,174 @@ class TestRunWritesEveryMatch:
             assert with_ret["metrics"][k] == pytest.approx(
                 without["metrics"][k], nan_ok=True
             ), k
+
+
+def _e2e_points(frame: pl.DataFrame) -> pl.DataFrame:
+    """Four points per server per match: two first serves in, one out then a
+    second serve, so both win branches and the first-in rate have rows."""
+    rows = []
+    for uid, pid in frame.select("match_uid", "player_id").iter_rows():
+        pattern = [(1, True), (1, False), (2, True), (2, False)]
+        for n, (serve, won) in enumerate(pattern):
+            rows.append({
+                "match_uid": uid, "server_id": pid, "point_number": n,
+                "serve": serve, "point_won_by_server": won,
+            })
+    return pl.DataFrame(rows)
+
+
+class TestFoldServeArms:
+    """A two-level run persists each server's per-arm outputs beside the
+    match-level OOF store, in the same folds."""
+
+    def _run(self, tmp_path, monkeypatch, serve_block: str):
+        from mvp.projection.iid.artifacts import fp_dir_for
+
+        frame = _e2e_frame(with_ret=True)
+        data_root = tmp_path / "data"
+        (data_root / "aggregate" / "atptour").mkdir(parents=True)
+        _e2e_points(frame).write_parquet(
+            data_root / "aggregate" / "atptour" / "match_beats_points.parquet"
+        )
+        monkeypatch.setenv("MVP_DATA_ROOT", str(data_root))
+        monkeypatch.setenv("MVP_ARTIFACT_ROOT", str(tmp_path / "artifacts"))
+        config_path = tmp_path / "e2e.yaml"
+        config_path.write_text(
+            _E2E_YAML.replace(
+                "serve_model:\n  type: identity\n  window: 90\n", serve_block,
+            ),
+            encoding="utf-8",
+        )
+        runner = IIDProjectionRunner(
+            config_path=config_path,
+            matches_path=tmp_path / "matches.parquet",
+            cache_dir=tmp_path / "cache",
+            log_to_mlflow=False,
+        )
+        runner.engine = _StubEngine(frame)
+        runner.run()
+        return fp_dir_for(runner.config, config_path)
+
+    def test_two_level_writes_one_row_per_fold_match_and_server(
+        self, tmp_path, monkeypatch
+    ):
+        fp_dir = self._run(
+            tmp_path, monkeypatch, "serve_model:\n  type: two_level\n",
+        )
+        arms = pl.read_parquet(fp_dir / "fold_serve_arms.parquet")
+        match = pl.read_parquet(fp_dir / "fold_match_win.parquet")
+        assert arms.height == 2 * match.height
+        assert arms.select("fold_idx", "match_uid", "server_id").is_unique().all()
+        per_match = arms.group_by("match_uid").agg(
+            pl.col("fold_idx").unique().alias("folds"),
+            pl.col("server_id").sort().alias("servers"),
+        )
+        joined = per_match.join(match, on="match_uid", validate="1:1")
+        for r in joined.iter_rows(named=True):
+            assert r["folds"] == [r["fold_idx"]]
+            assert r["servers"] == sorted([r["player_id"], r["opp_id"]])
+        ret = arms.filter(pl.col("match_uid") == _RET_UID)
+        assert ret["scoreable"].to_list() == [0, 0]
+        assert arms["chain_w1_prob"].is_between(0.0, 1.0).all()
+
+    def test_single_level_writes_none(self, tmp_path, monkeypatch):
+        fp_dir = self._run(
+            tmp_path, monkeypatch,
+            "serve_model:\n  type: identity\n  window: 90\n",
+        )
+        assert (fp_dir / "fold_match_win.parquet").exists()
+        assert not (fp_dir / "fold_serve_arms.parquet").exists()
+
+
+class TestBuildFoldServeArmsFrame:
+    def test_a_lost_match_raises(self):
+        from mvp.projection.iid.runner import build_fold_serve_arms_frame
+
+        test_df = pl.DataFrame({
+            "match_uid": ["m1"], "effective_match_date": [date(2024, 1, 1)],
+        })
+        arms = pl.DataFrame({
+            "match_uid": ["m1", "m1", "m2", "m2"],
+            "server_id": ["a", "b", "c", "d"], "returner_id": ["b", "a", "d", "c"],
+            "chain_fi_rate": [0.6] * 4, "chain_w1_prob": [0.7] * 4,
+            "chain_w2_prob": [0.5] * 4,
+        })
+        with pytest.raises(ValueError, match="arms and test_df disagree on match_uid"):
+            build_fold_serve_arms_frame(test_df, arms, 1, np.array([True]))
+
+
+class TestArmOffsetRun:
+    """A two-level run with an arm offset: the config sugar filters the frame
+    to matches the source scored, so an uncovered match is in no fold."""
+
+    _UNCOVERED = "m045"
+    _COL = "player_chain_w1_logit_src_chain"
+
+    def _frame(self):
+        frame = _e2e_frame(with_ret=False)
+        value = (
+            pl.when(pl.col("match_uid") == self._UNCOVERED).then(None)
+            .otherwise(pl.col("player_pts_service_won_pct_90d") - 0.5)
+        )
+        return frame.with_columns(
+            value.alias(self._COL),
+            pl.when(pl.col("match_uid") == self._UNCOVERED).then(None)
+            .otherwise(pl.col("opp_pts_service_won_pct_90d") - 0.5)
+            .alias("opp_chain_w1_logit_src_chain"),
+        )
+
+    def test_an_uncovered_match_is_in_no_fold(self, tmp_path, monkeypatch):
+        from mvp.model.features import prior
+        from mvp.projection.iid.artifacts import fp_dir_for
+
+        frame = self._frame()
+        arm = pl.concat([
+            frame.select("match_uid", pl.col("player_id").alias("server_id")),
+        ]).unique().with_columns(pl.lit(date(2023, 12, 31)).alias("arm_train_end"))
+        monkeypatch.setattr(prior, "arm_frame", lambda m: (None, arm))
+
+        data_root = tmp_path / "data"
+        (data_root / "aggregate" / "atptour").mkdir(parents=True)
+        # Win arms join points to features on (match, server, returner).
+        _e2e_points(frame).join(
+            frame.select(
+                "match_uid", pl.col("player_id").alias("server_id"),
+                pl.col("opp_id").alias("returner_id"),
+            ),
+            on=["match_uid", "server_id"],
+        ).rename({"point_number": "point_num"}).write_parquet(
+            data_root / "aggregate" / "atptour" / "match_beats_points.parquet"
+        )
+        # Filter-key resolution reads the raw schema; the offset column is
+        # not a raw column.
+        frame.drop(self._COL, "opp_chain_w1_logit_src_chain").write_parquet(
+            data_root / "aggregate" / "atptour" / "matches.parquet"
+        )
+        monkeypatch.setenv("MVP_DATA_ROOT", str(data_root))
+        monkeypatch.setenv("MVP_ARTIFACT_ROOT", str(tmp_path / "artifacts"))
+        config_path = tmp_path / "e2e.yaml"
+        config_path.write_text(
+            _E2E_YAML.replace(
+                "serve_model:\n  type: identity\n  window: 90\n",
+                "serve_model:\n  type: two_level\n  model_type: xgboost\n"
+                "  params: {n_estimators: 3, n_jobs: 1}\n"
+                "  arm_offset:\n"
+                "    win_first: player_chain_w1_logit(model=src_chain)\n",
+            ),
+            encoding="utf-8",
+        )
+        runner = IIDProjectionRunner(
+            config_path=config_path,
+            matches_path=tmp_path / "matches.parquet",
+            cache_dir=tmp_path / "cache",
+            log_to_mlflow=False,
+        )
+        runner.engine = _StubEngine(frame)
+        assert runner.config.data.filters == {self._COL: "not_null"}
+        runner.run()
+        fp_dir = fp_dir_for(runner.config, config_path)
+        match = pl.read_parquet(fp_dir / "fold_match_win.parquet")
+        arms = pl.read_parquet(fp_dir / "fold_serve_arms.parquet")
+        assert match.height > 0
+        assert self._UNCOVERED not in match["match_uid"].to_list()
+        assert self._UNCOVERED not in arms["match_uid"].to_list()

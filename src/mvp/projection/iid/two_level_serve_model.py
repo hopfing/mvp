@@ -110,12 +110,21 @@ class FirstServeInModel:
     problem that point-row replication was falsely solving.
     """
 
+    # Arm offset state. Class-level defaults so artifacts pickled before the
+    # offset existed load as offset-free.
+    offset_spec: str | None = None
+    _offset_model: Any = None
+    _offset_col: int | None = None
+    # Training rows the last fit dropped for a null offset value.
+    offset_null_dropped: int = 0
+
     def __init__(
         self,
         model_type: str,
         match_level_features: list[str],
         params: dict[str, Any] | None = None,
         *,
+        offset_spec: str | None = None,
         point_level_features: list[str] | None = None,
         points_path: Path | str | None = None,
         matches_path: Path | str | None = None,
@@ -126,6 +135,12 @@ class FirstServeInModel:
     ) -> None:
         self.model_type = model_type
         self.match_level_features = list(match_level_features)
+        # The arm offset's column is a match feature of the arm (see
+        # `serve_model.arm_offset`); its fitted rate is XGBRegressor's
+        # base_margin, additive under the squared-error objective.
+        self.offset_spec = offset_spec
+        if offset_spec is not None and offset_spec not in self.match_level_features:
+            self.match_level_features.append(offset_spec)
         # Point-pool features that are MATCH-CONSTANT (the surface one-hots).
         # Legitimate here despite the absence of a ScoreState: they do not vary
         # by state, they are the only route to surface (no registered
@@ -287,6 +302,8 @@ class FirstServeInModel:
                 feats, left_on=["match_uid", "server_id"],
                 right_on=["match_uid", "player_id"], how="inner",
             )
+            if self.offset_spec is not None:
+                train = self._offset_rows(train, df)
         else:
             # Point-only arm: the aggregate already carries every design column.
             train = agg
@@ -313,7 +330,16 @@ class FirstServeInModel:
         y = (train["_n_first_in"] / train["_n_serve_pts"]).to_numpy()
         w = train["_n_serve_pts"].to_numpy().astype(np.float64)
         self._model = _build_rate_regressor(self.model_type, self.params)
-        self._model.fit(X, y, sample_weight=w)
+        margin_kw: dict[str, np.ndarray] = {}
+        if self.offset_spec is not None:
+            from sklearn.linear_model import LinearRegression
+
+            self._offset_col = self.match_level_features.index(self.offset_spec)
+            self._offset_model = LinearRegression().fit(
+                X[:, [self._offset_col]], y, sample_weight=w,
+            )
+            margin_kw = {"base_margin": self.margin_for(X)}
+        self._model.fit(X, y, sample_weight=w, **margin_kw)
         self.fit_timings = {"fit": time.perf_counter() - t0}
         logger.info(
             "FirstServeInModel fit at match grain: %d rows, %d features "
@@ -374,13 +400,60 @@ class FirstServeInModel:
                 rename[raw] = col
         return out.select(["match_uid", "player_id", *rename.keys()]).rename(rename)
 
+    def _offset_rows(self, train: pl.DataFrame, df: pl.DataFrame) -> pl.DataFrame:
+        """Drop rows with no offset value, then refuse any the source saw
+        in-sample (`check_arm_offset_oof`)."""
+        from mvp.projection.iid.serve_model import check_arm_offset_oof, match_days
+
+        assert self.offset_spec is not None
+        col = self._resolve_cols()[0][self.match_level_features.index(self.offset_spec)]
+        kept = train.filter(pl.col(col).is_not_null())
+        dropped = train.height - kept.height
+        self.offset_null_dropped = dropped
+        if dropped:
+            logger.info(
+                "arm offset %s: dropped %d training row(s) with a null %s",
+                self.offset_spec, dropped, col,
+            )
+        if kept.height == 0:
+            raise ValueError(
+                f"FirstServeInModel.fit: no training rows carry {col}; the "
+                "source has no out-of-fold row for any training match (fix the "
+                "target's date_range, as a residual stage's train_date_range is "
+                "fixed)"
+            )
+        check_arm_offset_oof(
+            self.offset_spec, kept.select("match_uid", "server_id"), match_days(df),
+        )
+        return kept.sort(["match_uid", "server_id"])
+
     # -- predict -------------------------------------------------------
-    def predict_rate(self, X: np.ndarray | None) -> np.ndarray:
+    def margin_for(self, X: np.ndarray | None) -> np.ndarray | None:
+        """The offset's fitted rate for the rows of a design matrix, or None
+        without an offset. Taken from X's own offset column, so each side of
+        `_first_in_for` gets its own server's value."""
+        if self._offset_model is None or X is None or X.size == 0:
+            return None
+        assert self._offset_col is not None
+        col = np.asarray(X[:, [self._offset_col]], dtype=np.float64)
+        bad = int((~np.isfinite(col)).sum())
+        if bad:
+            raise ValueError(
+                f"offset feature {self.offset_spec!r} is null/non-finite on {bad} "
+                f"of {col.shape[0]} rows being scored; every scored row needs "
+                "the source's value"
+            )
+        return self._offset_model.predict(col)
+
+    def predict_rate(
+        self, X: np.ndarray | None, base_margin: np.ndarray | None = None,
+    ) -> np.ndarray:
         """P(1st in) for a prepared feature matrix, or the base rate if none."""
         if self._model is None or X is None or X.size == 0:
             n = 0 if X is None else len(X)
             return np.full(n, self._base_rate, dtype=np.float64)
-        out = np.asarray(self._model.predict(X), dtype=np.float64)
+        margin_kw = {} if base_margin is None else {"base_margin": base_margin}
+        out = np.asarray(self._model.predict(X, **margin_kw), dtype=np.float64)
         out = np.where(np.isfinite(out), out, self._base_rate)
         return np.clip(out, self.clip_min, self.clip_max)
 
@@ -502,8 +575,12 @@ class TwoLevelServeModel(ServeWinProbEstimator):
         clip_max: float = 0.90,
         gap_shrink: float = 1.0,
         surface_circuit_offset: dict[str, float] | None = None,
+        arm_offset: dict[str, str] | None = None,
     ) -> None:
         self.model_type = model_type
+        # Per-arm offset spec (`serve_model.arm_offset`), appended to that
+        # arm's match list by `_branch` / FirstServeInModel.
+        self.arm_offset = dict(arm_offset or {})
         self.first_in_match_features = list(first_in_match_features)
         self.first_in_point_features = list(first_in_point_features or [])
         self.win_first_match_features = list(win_first_match_features)
@@ -535,6 +612,12 @@ class TwoLevelServeModel(ServeWinProbEstimator):
         # them per branch would compress each one and then compose the
         # compressed pair, which is not the same transform.
         def _branch(component: str, match: list[str], point: list[str]):
+            # The offset is appended FIRST, so an arm with an empty list and an
+            # offset is a fitted arm on the offset column alone (round 0 of an
+            # FS on that arm), not a constant.
+            spec = self.arm_offset.get(component)
+            if spec is not None and spec not in match:
+                match = [*match, spec]
             # Empty -> the branch's training win rate, matching FirstServeInModel's
             # treatment of an empty set. See _ConstantBranch.
             if not match and not point:
@@ -546,7 +629,8 @@ class TwoLevelServeModel(ServeWinProbEstimator):
                 match_level_features=match,
                 point_level_features=point,
                 params=self.params, clip_min=0.0, clip_max=1.0,
-                gap_shrink=1.0, serve_branch=_SERVE_BRANCH[component], **shared,
+                gap_shrink=1.0, serve_branch=_SERVE_BRANCH[component],
+                offset_spec=spec, **shared,
             )
 
         self._win_first = _branch(
@@ -559,7 +643,8 @@ class TwoLevelServeModel(ServeWinProbEstimator):
             model_type=model_type,
             match_level_features=self.first_in_match_features,
             point_level_features=self.first_in_point_features,
-            params=self.first_in_params, **shared,
+            params=self.first_in_params,
+            offset_spec=self.arm_offset.get(FIRST_IN), **shared,
         )
 
     # -- interface -----------------------------------------------------
@@ -617,6 +702,7 @@ class TwoLevelServeModel(ServeWinProbEstimator):
         "_prefit": set(),
         "fit_timings": {},
         "offset_clipped_count": 0,
+        "arm_offset": {},
     }
 
     def __setstate__(self, state: dict[str, Any]) -> None:
@@ -696,7 +782,11 @@ class TwoLevelServeModel(ServeWinProbEstimator):
             X_pt = frame.select(point_cols).to_numpy().astype(np.float64)
             X_a = np.hstack([X_a, X_pt])
             X_b = np.hstack([X_b, X_pt])  # perspective-invariant
-        return self._first_in.predict_rate(X_a), self._first_in.predict_rate(X_b)
+        fi = self._first_in
+        return (
+            fi.predict_rate(X_a, base_margin=fi.margin_for(X_a)),
+            fi.predict_rate(X_b, base_margin=fi.margin_for(X_b)),
+        )
 
     @staticmethod
     def _compose_raw(
@@ -754,6 +844,36 @@ class TwoLevelServeModel(ServeWinProbEstimator):
         p_a_fn, p_b_fn = self.predict_state_fn(df)
         neutral = neutral_score_state()
         return p_a_fn(neutral), p_b_fn(neutral)
+
+    def predict_arms(self, df: pl.DataFrame) -> pl.DataFrame:
+        """Neutral-state per-arm outputs, two rows per match (each player serving).
+
+        Columns: match_uid, server_id, returner_id, chain_fi_rate, chain_w1_prob,
+        chain_w2_prob. Raw branch outputs: no gap_shrink, no surface_circuit_offset,
+        no composition — those apply to the composed p (`predict_state_fn`); the
+        source of an arm offset is the arm's own quantity, not the composed one.
+        """
+        if "player_id" not in df.columns or "opp_id" not in df.columns:
+            raise ValueError("predict_arms: df missing player_id/opp_id")
+        fi_a, fi_b = self._first_in_for(df)
+        w1_a_fn, w1_b_fn = self._win_first.predict_state_fn(df)
+        w2_a_fn, w2_b_fn = self._win_second.predict_state_fn(df)
+        neutral = neutral_score_state()
+
+        def side(server: str, returner: str, fi, w1, w2) -> pl.DataFrame:
+            return pl.DataFrame({
+                "match_uid": df["match_uid"],
+                "server_id": df[server],
+                "returner_id": df[returner],
+                "chain_fi_rate": np.asarray(fi, dtype=np.float64),
+                "chain_w1_prob": np.asarray(w1, dtype=np.float64),
+                "chain_w2_prob": np.asarray(w2, dtype=np.float64),
+            })
+
+        return pl.concat([
+            side("player_id", "opp_id", fi_a, w1_a_fn(neutral), w2_a_fn(neutral)),
+            side("opp_id", "player_id", fi_b, w1_b_fn(neutral), w2_b_fn(neutral)),
+        ])
 
     def predict_state_fn(
         self, df: pl.DataFrame,

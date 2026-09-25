@@ -32,6 +32,7 @@ column than training put there, which is the failure this module exists to fix.
 from __future__ import annotations
 
 import logging
+import math
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -53,26 +54,64 @@ def serving_requirements(stem: str) -> tuple[list[str], list[str]]:
     a raised limit. It would also ignore whatever `matches_path` / `cache_dir`
     the caller was constructed with.
 
-    Mirrors `projection_run.compute_features`' spec set exactly.
+    Mirrors `projection_run.compute_features`' spec set exactly, unioned
+    recursively with every projection `stem` starts its arms from (an arm
+    offset or a `chain_arm` spec): those projectors run on the same pending
+    frame (`fill_pending_arms`), so the one engine pass carries their inputs.
     """
     from mvp.model.config import get_filter_feature_specs
-    from mvp.model.features.prior import resolve_prior
-    from mvp.projection.iid.config import IIDProjectionConfig
-    from mvp.projection.iid.projection_run import _RUNNER_COLUMNS
+    from mvp.projection.iid.projection_run import _RUNNER_COLUMNS, arm_source_stems
 
-    config = IIDProjectionConfig.from_file(str(resolve_prior(stem).config_path))
-    specs = list(config.features.include)
-    extra = (config.features.compute_only or []) + get_filter_feature_specs(
-        config.data.filters
-    )
-    specs += [s for s in extra if s not in specs]
-
+    specs: list[str] = []
     columns = list(_RUNNER_COLUMNS)
-    if config.data.filters:
-        for col in config.data.filters:
+    seen: set[str] = set()
+
+    def visit(s: str) -> None:
+        if s in seen:
+            return
+        seen.add(s)
+        config = _config_of(s)
+        own = list(config.features.include)
+        own += (config.features.compute_only or []) + get_filter_feature_specs(
+            config.data.filters
+        )
+        specs.extend(x for x in own if x not in specs)
+        for col in config.data.filters or {}:
             if col not in columns:
                 columns.append(col)
+        for source in arm_source_stems(config):
+            visit(source)
+
+    visit(stem)
     return specs, columns
+
+
+def _config_of(stem: str) -> Any:
+    """The projection config `stem` resolves to."""
+    from mvp.model.features.prior import resolve_prior
+    from mvp.projection.iid.config import IIDProjectionConfig
+
+    return IIDProjectionConfig.from_file(str(resolve_prior(stem).config_path))
+
+
+def _load_source(stem: str) -> tuple[Any, Any]:
+    """(config, trained projector) for `stem`, load-only: a fit inside the
+    15-minute tick is not an option, so a missing or stale projector raises."""
+    from mvp.model.features.prior import resolve_prior
+    from mvp.projection.iid.projection_run import _load_artifact
+
+    config_path = Path(resolve_prior(stem).config_path)
+    config = _config_of(stem)
+    path = _projector_path(stem)
+    projector = _load_artifact(config, config_path, path)
+    if projector is None:
+        raise FileNotFoundError(
+            f"projection {stem}: no trained projector at "
+            f"{path} (missing, or trained from "
+            f"different config text). It and the pmf the trained prior reads "
+            f"are produced together by promotion: poetry run py -m mvp train"
+        )
+    return config, projector
 
 
 def _pending_frame(
@@ -206,59 +245,54 @@ def check_served_projector(stem: str, path: Path | None = None) -> Path:
     return path
 
 
-def pending_match_win_logits(
+def _pending_projection(
     stem: str, uids: list[str], df: pl.DataFrame,
-) -> dict[tuple[str, str], float]:
-    """(match_uid, player_id) -> calibrated match-win logit for pending matches.
+) -> tuple[pl.DataFrame, Any] | None:
+    """(pending frame, ProjectionOutput) for `stem` on the pending `uids`, or
+    None when there is nothing to project.
 
-    `df` is the CALLER's already-computed frame, widened by
-    `serving_requirements` -- see there for why this does not build its own.
-
-    Load-only: `_load_artifact` returns None for a missing or config-stale
-    artifact and this raises, because a fit inside the 15-minute tick is not an
-    option and silently returning nothing would leave the column NaN — the exact
-    failure being fixed.
-
-    Both orientations are returned. `_both_orientations` gives B `1 - p`, and
-    `logit(1 - p) == -logit(p)`, so the negation below is that mirror exactly.
+    `df` is subset to `uids` first, then the arm inputs `stem` reads from other
+    projections are filled (`fill_pending_arms`), then the projection's own
+    filters run on the filled rows, the classification order (fill, then
+    filters): a `not_null` filter on an arm offset column must see the filled
+    value. One projection serves the match-win prior and the chain-shape
+    columns alike, so the fill sites call this once per stem.
     """
-    from mvp.model.features.prior import resolve_prior
-    from mvp.projection.iid.config import IIDProjectionConfig
-    from mvp.projection.iid.projection_run import _load_artifact
-
     # Before anything is loaded. A caller with nothing to serve must not pay a
     # joblib read per fold, and must not be able to raise on an artifact it does
     # not need -- `predict()` and `predict_voters` have no degrade path, so that
-    # raise would sink a whole backtest fold. Guarded here rather than at each
-    # call site, because there are two and they have already diverged once.
+    # raise would sink a whole backtest fold.
     if not uids:
-        return {}
-
-    config_path = Path(resolve_prior(stem).config_path)
-    config = IIDProjectionConfig.from_file(str(config_path))
-    path = _projector_path(stem)
-    projector = _load_artifact(config, config_path, path)
-    if projector is None:
-        raise FileNotFoundError(
-            f"projection {stem}: no trained projector at "
-            f"{path} (missing, or trained from "
-            f"different config text). It and the pmf the trained prior reads "
-            f"are produced together by promotion: poetry run py -m mvp train"
-        )
-
+        return None
+    subset = fill_pending_arms(
+        stem, list(uids), df.filter(pl.col("match_uid").is_in(list(uids))),
+    )
+    config, projector = _load_source(stem)
     # Live/train parity on the estimator's declared inputs runs inside
     # `_pending_frame`, ahead of the config's not_null filters: a column that
     # was present in training and is null on every pending row is the 09-02
     # defect class, and it raises there (stage degrades, run report carries
     # it) rather than projecting a frame the model never saw.
     pending = _pending_frame(
-        config, df, list(uids),
+        config, subset, list(uids),
         parity_columns=list(projector.serve_model.parity_columns), stem=stem,
     )
     if len(pending) == 0:
-        return {}
+        return None
+    return pending, projector.project(pending)
 
-    out = projector.project(pending)
+
+def match_win_logits_from(
+    stem: str, projection: tuple[pl.DataFrame, Any] | None,
+) -> dict[tuple[str, str], float]:
+    """(match_uid, player_id) -> calibrated match-win logit, both orientations.
+
+    `_both_orientations` gives B `1 - p`, and `logit(1 - p) == -logit(p)`, so
+    the negation below is that mirror exactly.
+    """
+    if projection is None:
+        return {}
+    pending, out = projection
     raw = np.asarray(out.distribution.p_match_win_a, dtype=np.float64)
     p = np.clip(
         np.asarray(_forward_calibrator(stem).transform(raw), dtype=np.float64),
@@ -276,3 +310,177 @@ def pending_match_win_logits(
         "projection %s: served %d pending match(es)", stem, len(pending),
     )
     return fill
+
+
+def pending_match_win_logits(
+    stem: str, uids: list[str], df: pl.DataFrame,
+) -> dict[tuple[str, str], float]:
+    """(match_uid, player_id) -> calibrated match-win logit for pending matches.
+
+    `df` is the CALLER's already-computed frame, widened by
+    `serving_requirements` -- see there for why this does not build its own.
+    Load-only (`_load_source`).
+    """
+    return match_win_logits_from(stem, _pending_projection(stem, uids, df))
+
+
+def chain_shape_values_from(
+    projection: tuple[pl.DataFrame, Any] | None,
+) -> dict[str, dict[tuple[str, str], float]]:
+    """Shape column (bare `player_<scalar>`) -> (match_uid, player_id) ->
+    value, both orientations: the pending row's player reads the A-oriented
+    scalars, the mirror row reads symmetric ones as-is and antisymmetric ones
+    negated -- the `chain_shape` transform's own rule. Valid because
+    `_pending_frame` collapses to the lower `player_id`, the orientation the
+    stores are written in. Uncalibrated, as the trained column is."""
+    from mvp.common.chain_shape import SHAPE_ANTISYMMETRIC, shape_scalars
+
+    if projection is None:
+        return {}
+    pending, out = projection
+    uids = pending["match_uid"].to_list()
+    a_ids = pending["player_id"].to_list()
+    b_ids = pending["opp_id"].to_list()
+    values: dict[str, dict[tuple[str, str], float]] = {}
+    for name, arr in shape_scalars(out).items():
+        sign = -1.0 if name in SHAPE_ANTISYMMETRIC else 1.0
+        col: dict[tuple[str, str], float] = {}
+        for uid, a, b, v in zip(uids, a_ids, b_ids, arr, strict=True):
+            col[(uid, a)] = float(v)
+            col[(uid, b)] = sign * float(v)
+        values[f"player_{name}"] = col
+    return values
+
+
+def pending_chain_shape_values(
+    stem: str, uids: list[str], df: pl.DataFrame,
+) -> dict[str, dict[tuple[str, str], float]]:
+    """`chain_shape_values_from` on a fresh projection of `stem`."""
+    return chain_shape_values_from(_pending_projection(stem, uids, df))
+
+
+# ---------------------------------------------------------------------------
+# chain_arm: a source projection's per-arm outputs for pending matches
+# ---------------------------------------------------------------------------
+
+from mvp.model.prior_naming import ARM_VALUES as _ARM_BARE  # noqa: E402
+
+
+def pending_arm_values(
+    stem: str, uids: list[str], df: pl.DataFrame,
+) -> dict[tuple[str, str], tuple[float, float, float]]:
+    """(match_uid, server_id) -> (first-in rate, win-on-first logit,
+    win-on-second logit): `stem`'s neutral-state arm outputs for the pending
+    `uids`, both servers, in the `chain_arm` transform's units.
+
+    No calibration: the consuming arm calibrates the value in its own fit and
+    applies the same logistic at predict, the offset's contract, so the raw
+    value is what the trained column holds. `stem`'s own arm inputs are filled
+    first (`_pending_projection`'s order), so a source with a source works.
+    """
+    from mvp.model.features.prior import _LOGIT_EPS
+
+    if not uids:
+        return {}
+    subset = fill_pending_arms(
+        stem, list(uids), df.filter(pl.col("match_uid").is_in(list(uids))),
+    )
+    config, projector = _load_source(stem)
+    pending = _pending_frame(
+        config, subset, list(uids),
+        parity_columns=list(projector.serve_model.parity_columns), stem=stem,
+    )
+    if len(pending) == 0:
+        return {}
+    arms = projector.serve_model.predict_arms(pending)
+
+    def logit(p: float) -> float:
+        p = min(max(p, _LOGIT_EPS), 1.0 - _LOGIT_EPS)
+        return math.log(p / (1.0 - p))
+
+    return {
+        (uid, server): (float(fi), logit(w1), logit(w2))
+        for uid, server, fi, w1, w2 in arms.select(
+            "match_uid", "server_id", "chain_fi_rate", "chain_w1_prob",
+            "chain_w2_prob",
+        ).iter_rows()
+    }
+
+
+def inject_arm_columns(
+    df: pl.DataFrame, stem: str,
+    values: dict[tuple[str, str], tuple[float, float, float]],
+    *, injected_wins: bool,
+) -> pl.DataFrame:
+    """Write `stem`'s arm values into the frame's `chain_arm` columns, in two
+    passes: the `player_` columns keyed (match_uid, player_id = server) and
+    the `opp_` columns keyed (match_uid, opp_id = server). Only columns the
+    frame carries are written.
+
+    `injected_wins` for a source named in an arm offset (the offset's
+    contract, `_fill_prior_logit`); existing-wins for a plain `chain_arm`
+    feature (`_fill_prior_column`), so a settled row keeps its OOF value.
+    """
+    if not values:
+        return df
+    inj = pl.DataFrame({
+        "match_uid": [k[0] for k in values],
+        "_server": [k[1] for k in values],
+        **{
+            f"_inj_{bare}": [v[i] for v in values.values()]
+            for i, bare in enumerate(_ARM_BARE)
+        },
+    })
+    for side, key in (("player", "player_id"), ("opp", "opp_id")):
+        cols = {
+            bare: f"{side}_{bare}_{stem}" for bare in _ARM_BARE
+            if f"{side}_{bare}_{stem}" in df.columns
+        }
+        if not cols:
+            continue
+        joined = df.join(
+            inj.rename({"_server": key}).with_columns(
+                pl.col(key).cast(df.schema[key])
+            ),
+            on=["match_uid", key], how="left",
+        )
+        joined = joined.with_columns([
+            (
+                pl.coalesce(pl.col(f"_inj_{bare}"), pl.col(col)) if injected_wins
+                else pl.coalesce(pl.col(col), pl.col(f"_inj_{bare}"))
+            ).alias(col)
+            for bare, col in cols.items()
+        ])
+        df = joined.drop([f"_inj_{bare}" for bare in _ARM_BARE])
+    return df
+
+
+def fill_pending_arms(
+    stem: str, uids: list[str], df: pl.DataFrame,
+) -> pl.DataFrame:
+    """Fill the arm columns of every projection `stem` starts its arms from
+    (`arm_source_stems`), for the pending `uids`, and return the frame.
+
+    The transform leaves a pending match null (both stores come from
+    target-resolving paths); the source's live arm values stand in, exactly
+    as the source's live match-win probability does for a prior. `df` is the
+    caller's frame already subset to `uids` where it can be: filling the
+    full-corpus frame would cost full-width joins per source and side.
+    Recursion ends at a projection naming no arm source.
+    """
+    if not uids:
+        return df
+    from mvp.model.prior_naming import prior_kind_of
+    from mvp.projection.iid.projection_run import arm_source_stems
+
+    config = _config_of(stem)
+    offset_stems = {
+        found[1] for spec in config.serve_model.arm_offset.values()
+        if (found := prior_kind_of(spec)) is not None
+    }
+    for source in arm_source_stems(config):
+        df = inject_arm_columns(
+            df, source, pending_arm_values(source, uids, df),
+            injected_wins=source in offset_stems,
+        )
+    return df

@@ -554,3 +554,137 @@ class TestBuildTestSet:
         assert test["match_uid"].to_list() == ["m0", "m1"]
         assert test["_scoreable"].to_list() == [True, False]
         assert test["_target_games_a"][1] is None
+
+
+class TestForwardServeArms:
+    """`run_projection` writes `serve_arms.parquet` for a two-level source, the
+    forward half of the `chain_arm` store."""
+
+    class _Arms:
+        def predict_arms(self, df):
+            return pl.concat([
+                df.select(
+                    "match_uid", pl.col("player_id").alias("server_id"),
+                    pl.col("opp_id").alias("returner_id"),
+                ),
+                df.select(
+                    "match_uid", pl.col("opp_id").alias("server_id"),
+                    pl.col("player_id").alias("returner_id"),
+                ),
+            ]).with_columns(
+                chain_fi_rate=pl.lit(0.6), chain_w1_prob=pl.lit(0.7),
+                chain_w2_prob=pl.lit(0.5),
+            )
+
+    def _run(self, tmp_path, monkeypatch, serve_block: str):
+        from mvp.projection.iid import projection_run
+
+        monkeypatch.setenv("MVP_ARTIFACT_ROOT", str(tmp_path / "artifacts"))
+        path = tmp_path / "cfg.yaml"
+        path.write_text(
+            TestLoadArtifact._YAML.replace(
+                "serve_model:\n  type: identity\n  window: 90\n", serve_block,
+            ),
+            encoding="utf-8",
+        )
+        # The spread frame reads min(player_id, opp_id) off the uid's 5th part.
+        uids = ["2026_t_1_r_AA00_ZZ00", "2026_t_1_r_AA01_ZZ01"]
+        test_df = _test_df(uids, scoreable=[True, False])
+
+        class _Projector:
+            serve_model = self._Arms()
+
+            def project(self, df):
+                return _output_for(uids)
+
+        monkeypatch.setattr(
+            projection_run, "compute_features", lambda cfg, **kw: (test_df, None),
+        )
+        monkeypatch.setattr(
+            projection_run, "train_or_load", lambda *a, **kw: _Projector(),
+        )
+        monkeypatch.setattr(
+            projection_run, "build_test_set", lambda cfg, df: test_df,
+        )
+        return projection_run.run_projection(path).fp_dir
+
+    def test_two_level_writes_both_servers_per_match(self, tmp_path, monkeypatch):
+        fp_dir = self._run(tmp_path, monkeypatch, "serve_model:\n  type: two_level\n")
+        arms = pl.read_parquet(fp_dir / "serve_arms.parquet")
+        assert "fold_idx" not in arms.columns
+        assert arms.height == 4
+        assert sorted(arms["server_id"].to_list()) == ["AA00", "AA01", "ZZ00", "ZZ01"]
+        m2 = arms.filter(pl.col("match_uid") == "2026_t_1_r_AA01_ZZ01")
+        assert m2["scoreable"].to_list() == [0, 0]
+        assert m2["effective_match_date"].to_list() == [date(2026, 1, 3)] * 2
+
+    def test_single_level_writes_none(self, tmp_path, monkeypatch):
+        fp_dir = self._run(
+            tmp_path, monkeypatch, "serve_model:\n  type: identity\n  window: 90\n",
+        )
+        assert (fp_dir / "total_games_pmf.parquet").exists()
+        assert not (fp_dir / "serve_arms.parquet").exists()
+
+
+class TestArmSourceSalts:
+    """A target trained on a source's arm outputs is retrained when the
+    source's arm stores change, even though its own config text did not."""
+
+    _YAML = TestLoadArtifact._YAML.replace(
+        "serve_model:\n  type: identity\n  window: 90\n",
+        "serve_model:\n  type: two_level\n  model_type: xgboost\n"
+        "  arm_offset:\n    win_first: player_chain_w1_logit(model=src_chain)\n",
+    )
+
+    def _artifact(self, tmp_path, monkeypatch, salts):
+        from mvp.model.features import prior
+        from mvp.projection.iid import projection_run
+        from mvp.projection.iid.config import IIDProjectionConfig
+        from mvp.projection.iid.serve_model import IdentityServeModel
+
+        path = tmp_path / "cfg.yaml"
+        path.write_text(self._YAML, encoding="utf-8")
+        config = IIDProjectionConfig.from_file(str(path))
+        artifact = tmp_path / "serve_model.joblib"
+        joblib.dump(
+            {
+                "serve_model": IdentityServeModel(window=90),
+                "config_path": str(path),
+                "config_yaml": self._YAML,
+                "n_train": 10,
+                "arm_sources": salts,
+            },
+            artifact,
+        )
+        monkeypatch.setattr(
+            projection_run, "artifact_path", lambda cfg, cfg_path: artifact
+        )
+        monkeypatch.setattr(prior, "_chain_arm_salt", lambda m: f"salt-of-{m}")
+        return projection_run, config, path
+
+    def test_a_changed_source_salt_returns_none(self, tmp_path, monkeypatch):
+        projection_run, config, path = self._artifact(
+            tmp_path, monkeypatch, {"src_chain": "old-salt"},
+        )
+        assert projection_run._load_artifact(config, path) is None
+
+    def test_an_unchanged_source_salt_loads(self, tmp_path, monkeypatch):
+        projection_run, config, path = self._artifact(
+            tmp_path, monkeypatch, {"src_chain": "salt-of-src_chain"},
+        )
+        assert projection_run._load_artifact(config, path) is not None
+
+    def test_the_salts_written_at_fit_are_every_arm_source(self, tmp_path, monkeypatch):
+        projection_run, config, _path = self._artifact(tmp_path, monkeypatch, {})
+        assert projection_run.arm_source_salts(config) == {
+            "src_chain": "salt-of-src_chain",
+        }
+
+    def test_a_config_without_arm_sources_has_no_salts(self, tmp_path):
+        from mvp.projection.iid import projection_run
+        from mvp.projection.iid.config import IIDProjectionConfig
+
+        path = tmp_path / "plain.yaml"
+        path.write_text(TestLoadArtifact._YAML, encoding="utf-8")
+        config = IIDProjectionConfig.from_file(str(path))
+        assert projection_run.arm_source_salts(config) == {}

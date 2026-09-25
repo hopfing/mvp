@@ -47,8 +47,8 @@ from __future__ import annotations
 import json
 import logging
 import os
-import re
 import shutil
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -57,6 +57,7 @@ from mvp.model.features.prior import (
     PROMOTED_MANIFEST,
     PriorSource,
     _backtest_cutoffs,
+    _cached_arm_frame,
     _cached_frame,
     _cached_shape_frame,
     _forward_artifact_ready,
@@ -66,12 +67,12 @@ from mvp.model.features.prior import (
     promoted_dir,
     promoted_fingerprint,
     resolve_prior,
+    serve_arms_ready,
 )
-from mvp.model.prior_naming import prior_model_of
+from mvp.common.serve_arms import ARM_STORE_FILES
+from mvp.model.prior_naming import prior_kind_of, prior_stem_of  # noqa: F401
 
 logger = logging.getLogger(__name__)
-
-_CHAIN_SHAPE_RE = re.compile(r"^chain_shape\(model=([^)]+)\)$")
 
 # What a promoted copy carries, by kind. `_REQUIRED` must exist and pass the
 # readers' own schema checks before anything is copied; `_OPTIONAL` ride along
@@ -84,6 +85,9 @@ _REQUIRED = {
     ),
 }
 _OPTIONAL = ("source.txt", "config.yaml")
+# A two-level projection's per-arm stores (`chain_arm`). Required of a source
+# consumed through arms (`PriorSource.via_arms`); otherwise copied when present.
+_ARM_FILES = ARM_STORE_FILES
 CUTOFFS_JSON = "cutoffs.json"
 MANIFEST = PROMOTED_MANIFEST
 TRAIN_COMMAND = "poetry run py -m mvp train"
@@ -102,22 +106,13 @@ def _clear_prior_caches() -> None:
 
     _cached_frame.cache_clear()
     _cached_shape_frame.cache_clear()
+    _cached_arm_frame.cache_clear()
     _forward_calibrator.cache_clear()
 
 
 # ---------------------------------------------------------------------------
 # What a config depends on
 # ---------------------------------------------------------------------------
-
-
-def prior_stem_of(spec: str) -> str | None:
-    """The stem a prior-bearing spec or column names: `player_prior_logit(model=X)`,
-    the engine column `player_prior_logit_X`, or `chain_shape(model=X)`."""
-    stem = prior_model_of(spec)
-    if stem is not None:
-        return stem
-    m = _CHAIN_SHAPE_RE.match(spec.strip())
-    return m.group(1).strip().strip("'\"") if m else None
 
 
 def declared_prior_specs(
@@ -165,12 +160,16 @@ def declared_prior_stems(
     return out
 
 
-def _config_prior_stems(config_path: Path) -> list[str]:
+def _config_prior_stems(config_path: Path) -> list[tuple[str, bool]]:
     """Prior stems a MODEL config declares, including through an ensemble's
     base configs: an ensemble's design matrix is the union of its bases'
     `features.include` (plus `meta_features`), and its own `features` block is
     typically absent, so scanning the ensemble file alone misses every prior
     a base declares. Mirrors `ProductionPredictor._resolve_entry_features`.
+
+    Each stem comes with whether any spelling of it is a `chain_arm` column,
+    as `_projection_prior_stems` reports it, so the `via_arms` tag survives a
+    model-kind hop in `dependency_order`.
     """
     from mvp.model.config import EnsembleParams
 
@@ -183,24 +182,64 @@ def _config_prior_stems(config_path: Path) -> list[str]:
             if base.features is not None:
                 resolved += list(base.features.include or [])
         resolved += list(params.meta_features or [])
-    return declared_prior_stems(config, resolved)
+    out: dict[str, bool] = {}
+    for spec in declared_prior_specs(config, resolved):
+        found = prior_kind_of(spec)
+        if found is None:
+            continue
+        kind, stem = found
+        out[stem] = out.get(stem, False) or kind == "chain_arm"
+    return list(out.items())
 
 
-def dependency_order(stems: list[str]) -> list[PriorSource]:
+def _projection_prior_stems(config_path: Path) -> list[tuple[str, bool]]:
+    """Stems a PROJECTION config consumes, each with whether it is consumed
+    through its arm outputs (an arm offset or a `chain_arm` spec) rather than
+    only through `chain_shape` or `prior`. Read from `serve_model.arm_offset`,
+    the three arm lists and `features.include`."""
+    from mvp.projection.iid.config import IIDProjectionConfig
+
+    cfg = IIDProjectionConfig.from_file(config_path)
+    sm = cfg.serve_model
+    offsets = set(sm.arm_offset.values())
+    out: dict[str, bool] = {}
+    for spec in [*sm.arm_match_specs(), *cfg.features.include]:
+        found = prior_kind_of(spec)
+        if found is None:
+            continue
+        kind, stem = found
+        out[stem] = out.get(stem, False) or spec in offsets or kind == "chain_arm"
+    return list(out.items())
+
+
+def dependency_order(
+    stems: list[str], *, via_arms: Any = (),
+) -> list[PriorSource]:
     """Resolve `stems` and everything THEY depend on, base-first, each once.
 
     A model-kind prior's own config may declare priors (a stage used as a
-    prior offsets on the lead; an ensemble's bases may declare one). Those
-    come first: regenerating the dependent runs its predictor, which reads
-    them. A projection config declares none. Resolves the EVALUATION side
-    (`promoted=False`); only `kind` and `config_path` are read here, and an
-    unpromoted stem must still order.
+    prior offsets on the lead; an ensemble's bases may declare one). A
+    projection config may consume another projection's outputs (an arm
+    offset, `chain_arm`, `chain_shape`). Either way those come first:
+    regenerating the dependent runs it, and it reads them. Resolves the
+    EVALUATION side (`promoted=False`); only `kind` and `config_path` are
+    read here, and an unpromoted stem must still order.
+
+    Each source is tagged `via_arms` when any path reaches it through its arm
+    outputs; `via_arms` names the top-level stems a caller consumes that way.
     """
     ordered: list[PriorSource] = []
     seen: set[str] = set()
+    top_arms = set(via_arms)
 
-    def visit(stem: str, chain: tuple[str, ...]) -> None:
+    def visit(stem: str, chain: tuple[str, ...], arms: bool) -> None:
         if stem in seen:
+            if arms:
+                # The tag is OR-ed across every path that reaches the stem.
+                ordered[:] = [
+                    replace(s, via_arms=True) if s.model == stem else s
+                    for s in ordered
+                ]
             return
         if stem in chain:
             raise ValueError(
@@ -208,13 +247,16 @@ def dependency_order(stems: list[str]) -> list[PriorSource]:
             )
         source = resolve_prior(stem, promoted=False)
         if source.kind == "model":
-            for base in _config_prior_stems(source.config_path):
-                visit(base, chain + (stem,))
+            for base, base_arms in _config_prior_stems(source.config_path):
+                visit(base, chain + (stem,), base_arms)
+        else:
+            for base, base_arms in _projection_prior_stems(source.config_path):
+                visit(base, chain + (stem,), base_arms)
         seen.add(stem)
-        ordered.append(source)
+        ordered.append(replace(source, via_arms=arms))
 
     for stem in stems:
-        visit(stem, ())
+        visit(stem, (), stem in top_arms)
     return ordered
 
 
@@ -319,8 +361,14 @@ def check_unambiguous_config(source: PriorSource) -> None:
         )
 
 
-def _check_complete(source: PriorSource) -> None:
+def _check_complete(source: PriorSource, require_arms: bool = False) -> None:
     """The readers' own readiness checks, raised instead of returned."""
+    if require_arms and not serve_arms_ready(source):
+        raise PreflightError(
+            f"prior {source.model}: per-arm store missing or incomplete at "
+            f"{source.eval_dir}; the source is consumed through an arm offset "
+            "or chain_arm"
+        )
     if not prior_artifacts_ready(source):
         raise PreflightError(
             f"prior {source.model}: fold OOF missing or incomplete at "
@@ -354,7 +402,7 @@ def _replace_write(dst: Path, text: str) -> None:
     os.replace(tmp, dst)
 
 
-def promote_prior(stem: str) -> Path:
+def promote_prior(stem: str, *, require_arms: bool = False) -> Path:
     """Copy `stem`'s regenerated artifacts into the promoted store.
 
     Reads the EVALUATION dir (`promoted=False`); the promoted copy, if one
@@ -370,7 +418,7 @@ def promote_prior(stem: str) -> Path:
     """
     source = resolve_prior(stem, promoted=False)
     check_unambiguous_config(source)
-    _check_complete(source)
+    _check_complete(source, require_arms)
     dst = promoted_dir(stem)
     dst.mkdir(parents=True, exist_ok=True)
     # Invalidate the PREVIOUS promotion before touching any file. Its manifest
@@ -384,6 +432,8 @@ def promote_prior(stem: str) -> Path:
     files = list(_REQUIRED[source.kind]) + [
         n for n in _OPTIONAL if (source.eval_dir / n).exists()
     ]
+    if require_arms or all((source.eval_dir / n).exists() for n in _ARM_FILES):
+        files += list(_ARM_FILES)
     for name in files:
         _replace_copy(source.eval_dir / name, dst / name)
     if source.kind == "model":
@@ -424,7 +474,7 @@ def promote_prior(stem: str) -> Path:
 # ---------------------------------------------------------------------------
 
 
-def verify_promoted(stem: str) -> PriorSource:
+def verify_promoted(stem: str, *, require_arms: bool = False) -> PriorSource:
     """The promoted source for `stem`, complete and loadable, or PreflightError.
 
     Checks that resolution lands on the promoted dir at all (production must
@@ -457,7 +507,7 @@ def verify_promoted(stem: str) -> PriorSource:
             f"predates the current artifact schema, so resolution fell through "
             f"to evaluation scratch. Run: {TRAIN_COMMAND}"
         )
-    _check_complete(source)
+    _check_complete(source, require_arms)
     if source.kind == "model" and not source.cutoffs_json.exists():
         raise PreflightError(
             f"prior {stem}: promoted copy at {pdir} has no {CUTOFFS_JSON}; "

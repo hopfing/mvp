@@ -41,6 +41,12 @@ from mvp.common.chain_shape import (
     shape_scalars,  # noqa: F401 — re-export
 )
 
+from mvp.common.serve_arms import (  # noqa: F401 — re-export the filenames
+    FOLD_SERVE_ARM_COLUMNS,
+    FOLD_SERVE_ARMS_PARQUET,
+    FORWARD_SERVE_ARM_COLUMNS,
+    SERVE_ARMS_PARQUET,
+)
 from mvp.common.config_hash import (
     PROJECTION_EVAL_ROOT,
     append_source,
@@ -252,6 +258,39 @@ def write_fold_match_win(fp_dir: Path, frame: pl.DataFrame) -> Path:
     path = fp_dir / FOLD_MATCH_WIN_PARQUET
     frame.select(_FOLD_MATCH_WIN_COLUMNS).write_parquet(path)
     return path
+
+
+
+
+def _write_serve_arms(
+    fp_dir: Path, frame: pl.DataFrame, name: str, filename: str, columns: list[str],
+) -> Path:
+    missing = [c for c in columns if c not in frame.columns]
+    if missing:
+        raise ValueError(f"{name} frame missing columns: {missing}")
+    fp_dir.mkdir(parents=True, exist_ok=True)
+    path = fp_dir / filename
+    frame.select(columns).write_parquet(path)
+    return path
+
+
+def write_fold_serve_arms(fp_dir: Path, frame: pl.DataFrame) -> Path:
+    """Persist the walk-forward per-arm outputs: one row per (fold, match,
+    server) with the two-level model's neutral-state first-in rate, win-on-first
+    and win-on-second probabilities for that server. The store the `chain_arm`
+    transform reads, so a target chain's arm can start from this one's."""
+    return _write_serve_arms(
+        fp_dir, frame, "fold_serve_arms", FOLD_SERVE_ARMS_PARQUET,
+        FOLD_SERVE_ARM_COLUMNS,
+    )
+
+
+def write_serve_arms(fp_dir: Path, frame: pl.DataFrame) -> Path:
+    """The forward twin of `write_fold_serve_arms`, written by `run_projection`
+    for the rows after the evaluation window; the same columns minus fold_idx."""
+    return _write_serve_arms(
+        fp_dir, frame, "serve_arms", SERVE_ARMS_PARQUET, FORWARD_SERVE_ARM_COLUMNS,
+    )
 
 
 def evaluation_mtime(fp_dir: Path) -> float | None:

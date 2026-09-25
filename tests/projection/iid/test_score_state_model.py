@@ -6,6 +6,7 @@ import pytest
 from mvp.projection.iid.score_state_model import (
     BayesianLogisticScoreStateModel,
     LogisticScoreStateModel,
+    XGBoostScoreStateModel,
     build_score_state_model,
 )
 
@@ -300,3 +301,57 @@ class TestLogisticScoreStateModel:
     def test_builder_unknown_type(self):
         with pytest.raises(ValueError, match="unknown"):
             build_score_state_model(type_="not-a-type", feature_names=["a"])
+
+
+class TestBaseMargin:
+    """An arm offset enters the XGBoost arm as `base_margin`, at fit and at
+    every predict; the other forms refuse it."""
+
+    @staticmethod
+    def _data():
+        rng = np.random.default_rng(3)
+        X, y = _synthetic(400, rng)
+        margin = rng.normal(0.3, 0.5, size=len(y))
+        return X, y, margin
+
+    def test_zero_learning_rate_predicts_the_margins_sigmoid(self):
+        X, y, margin = self._data()
+        m = XGBoostScoreStateModel(
+            ["a", "b", "c"], params={"learning_rate": 0.0, "n_estimators": 5},
+        )
+        m.fit(X, y, base_margin=margin)
+        np.testing.assert_allclose(
+            m.predict_proba(X, base_margin=margin),
+            1.0 / (1.0 + np.exp(-margin)), atol=1e-6,
+        )
+
+    def test_predict_without_the_margin_after_a_margin_fit_raises(self):
+        X, y, margin = self._data()
+        m = XGBoostScoreStateModel(["a", "b", "c"], params={"n_estimators": 5})
+        m.fit(X, y, base_margin=margin)
+        with pytest.raises(ValueError, match="requires one"):
+            m.predict_proba(X)
+
+    def test_margin_on_a_fit_without_one_raises(self):
+        X, y, margin = self._data()
+        m = XGBoostScoreStateModel(["a", "b", "c"], params={"n_estimators": 5})
+        m.fit(X, y)
+        with pytest.raises(ValueError, match="fit without one"):
+            m.predict_proba(X, base_margin=margin)
+
+    def test_an_old_pickle_without_the_flag_predicts_without_a_margin(self):
+        X, y, _ = self._data()
+        m = XGBoostScoreStateModel(["a", "b", "c"], params={"n_estimators": 5})
+        m.fit(X, y)
+        del m.__dict__["_fit_with_base_margin"]
+        assert m.predict_proba(X).shape == (len(y),)
+
+    def test_the_logistic_form_refuses_a_margin(self):
+        X, y, margin = self._data()
+        m = LogisticScoreStateModel(["a", "b", "c"])
+        msg = "LogisticScoreStateModel takes no base_margin"
+        with pytest.raises(TypeError, match=msg):
+            m.fit(X, y, base_margin=margin)
+        m.fit(X, y)
+        with pytest.raises(TypeError, match="takes no base_margin"):
+            m.predict_proba(X, base_margin=margin)

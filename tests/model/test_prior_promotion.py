@@ -469,6 +469,17 @@ class TestPromoteProjectionKind:
         assert check_served_projector("proj") == dst / "serve_model.joblib"
         assert pp.verify_promoted("proj").eval_dir == dst
 
+    def test_arm_readers_fall_through_a_copy_without_arm_files(self, roots, caplog):
+        """A projection promoted before per-arm stores existed still serves
+        prior readers; arm readers resolve to the evaluation dir instead of
+        being pinned on a copy without the files."""
+        src = _projection_evaluation(roots, "proj")
+        dst = pp.promote_prior("proj")
+        assert prior.resolve_prior("proj").eval_dir == dst
+        with caplog.at_level("WARNING"):
+            assert prior.resolve_prior("proj", arms=True).eval_dir == src.eval_dir
+        assert "resolving to the evaluation dir" in caplog.text
+
     def test_refuses_a_projector_from_different_config_text(self, roots):
         """The projector and the pmf must come from the same evaluation. A
         projector whose stored config text differs is not that."""
@@ -640,7 +651,7 @@ class TestPredictorHooks:
         monkeypatch.setattr(
             pred,
             "promote_prior",
-            lambda stem: calls.append(("promote", stem)),
+            lambda stem, **kw: calls.append(("promote", stem)),
         )
         promoted = _predictor(prod, roots).promote_priors()
         assert promoted == ["lead", "stage1"]
@@ -658,7 +669,9 @@ class TestPredictorHooks:
         _write(roots / "models", "stage1", _stage_cfg("lead"))
         prod = _production(roots, active="lead", stages=["stage1"])
         checked: list[str] = []
-        monkeypatch.setattr(pred, "verify_promoted", lambda stem: checked.append(stem))
+        monkeypatch.setattr(
+            pred, "verify_promoted", lambda stem, **kw: checked.append(stem),
+        )
         assert _predictor(prod, roots).preflight() == ["lead"]
         assert checked == ["lead"]
 
@@ -693,6 +706,74 @@ class TestPredictorHooks:
         p = _predictor(prod, roots)
         assert p.promote_priors() == []
         assert p.preflight() == []
+
+
+class TestPredictorChainDependencies:
+    """A production entry consuming a chain that starts its arms from another
+    chain: the source is promoted and preflighted WITH its per-arm stores."""
+
+    def _setup(self, roots, stage_features=()):
+        _write(roots / "projections", "src", _chain_yaml())
+        _write(
+            roots / "projections", "tgt",
+            _chain_yaml({"win_first": "player_chain_w1_logit(model=src)"}),
+        )
+        _write(roots / "models", "lead", _LEAD_CFG)
+        stage = _stage_cfg("tgt")
+        stage["features"]["include"] += list(stage_features)
+        _write(roots / "models", "stage1", stage)
+        return _production(roots, active="lead", stages=["stage1"])
+
+    def test_the_walk_reaches_the_chain_and_its_source(self, roots):
+        # `lead` is the fixture's stage filter on the active entry's prior.
+        p = _predictor(self._setup(roots), roots)
+        assert p.prior_dependencies() == ["tgt", "lead"]
+        order = pp.dependency_order(p.prior_dependencies())
+        assert [s.model for s in order] == ["src", "tgt", "lead"]
+
+    def test_promotion_and_preflight_require_arms_of_the_source_only(
+        self, roots, monkeypatch,
+    ):
+        import mvp.model.predictor as pred
+
+        calls: list[tuple[str, str, bool]] = []
+        monkeypatch.setattr(pred, "regenerate_prior", lambda s: None)
+        monkeypatch.setattr(
+            pred, "promote_prior",
+            lambda stem, require_arms=False: calls.append(
+                ("promote", stem, require_arms)
+            ),
+        )
+        monkeypatch.setattr(
+            pred, "verify_promoted",
+            lambda stem, require_arms=False: calls.append(
+                ("verify", stem, require_arms)
+            ),
+        )
+        p = _predictor(self._setup(roots), roots)
+        assert p.promote_priors() == ["src", "tgt", "lead"]
+        assert p.preflight() == ["src", "tgt", "lead"]
+        assert calls == [
+            ("promote", "src", True), ("promote", "tgt", False),
+            ("promote", "lead", False),
+            ("verify", "src", True), ("verify", "tgt", False),
+            ("verify", "lead", False),
+        ]
+
+    def test_an_entry_listing_a_chain_arm_column_requires_that_stems_arms(
+        self, roots, monkeypatch,
+    ):
+        import mvp.model.predictor as pred
+
+        calls: list[tuple[str, bool]] = []
+        monkeypatch.setattr(pred, "regenerate_prior", lambda s: None)
+        monkeypatch.setattr(
+            pred, "promote_prior",
+            lambda stem, require_arms=False: calls.append((stem, require_arms)),
+        )
+        prod = self._setup(roots, ["player_chain_w2_logit(model=tgt)"])
+        _predictor(prod, roots).promote_priors()
+        assert calls == [("src", True), ("tgt", True), ("lead", False)]
 
 
 class TestSharesLeadDomain:
@@ -778,3 +859,177 @@ class TestStageScoringNothing:
         monkeypatch.setattr(p, "_predict_raw", lambda *a, **k: {})
         p._apply_stages(self._predictions(), p.config["stages"], None)
         assert p._stage_errors == ["stage stage1: scored 0/2 matches"]
+
+
+# --- chain into chain: arm sources -------------------------------------------
+
+
+def _chain_yaml(arm_offset: dict[str, str] | None = None, include=()) -> str:
+    """A two-level projection config, optionally starting its arms from
+    another chain's arm outputs."""
+    lines = [
+        "data:",
+        "  date_range:",
+        '    start: "2024-01-01"',
+        '    end: "2025-12-31"',
+        "  filters:",
+        "    draw_type: singles",
+        "features:",
+        "  include:",
+        "    - pts_service_won_pct(days=90)",
+        *[f"    - {s}" for s in include],
+        "serve_model:",
+        "  type: two_level",
+        "  model_type: xgboost",
+    ]
+    if arm_offset:
+        lines.append("  arm_offset:")
+        lines += [f"    {arm}: {spec}" for arm, spec in arm_offset.items()]
+    return "\n".join(lines) + "\n"
+
+
+def _serve_arms(eval_dir: Path, *, forward: bool) -> None:
+    frame = pl.DataFrame({
+        "match_uid": ["F0" if forward else "M0"] * 2,
+        "server_id": ["A0", "B0"], "returner_id": ["B0", "A0"],
+        "effective_match_date": [date(2026, 2, 1) if forward else date(2025, 1, 5)] * 2,
+        "scoreable": pl.Series([1, 1], dtype=pl.Int8),
+        "chain_fi_rate": [0.6, 0.6], "chain_w1_prob": [0.7, 0.7],
+        "chain_w2_prob": [0.5, 0.5],
+    })
+    if forward:
+        frame.write_parquet(eval_dir / "serve_arms.parquet")
+    else:
+        frame.with_columns(pl.lit(1, dtype=pl.Int32).alias("fold_idx")).write_parquet(
+            eval_dir / "fold_serve_arms.parquet"
+        )
+
+
+class TestChainDependencies:
+    """A projection that consumes another projection's arm outputs depends on
+    it: regenerated and promoted base-first, tagged when consumed through arms."""
+
+    def test_stage_on_target_on_source_orders_base_first_with_tags(self, roots):
+        _write(roots / "projections", "src", _chain_yaml())
+        _write(
+            roots / "projections", "tgt",
+            _chain_yaml({"win_first": "player_chain_w1_logit(model=src)"}),
+        )
+        _write(roots / "models", "stage", _stage_cfg("tgt"))
+        order = pp.dependency_order(["stage"])
+        assert [s.model for s in order] == ["src", "tgt", "stage"]
+        tags = {s.model: s.via_arms for s in order}
+        assert tags == {"src": True, "tgt": False, "stage": False}
+
+    def test_a_target_to_source_cycle_is_refused(self, roots):
+        _write(
+            roots / "projections", "a",
+            _chain_yaml({"win_first": "player_chain_w1_logit(model=b)"}),
+        )
+        _write(
+            roots / "projections", "b",
+            _chain_yaml({"win_second": "player_chain_w2_logit(model=a)"}),
+        )
+        with pytest.raises(ValueError, match="cycle"):
+            pp.dependency_order(["a"])
+
+    def test_a_stem_reached_as_a_prior_then_through_arms_is_tagged(self, roots):
+        _write(roots / "projections", "src", _chain_yaml())
+        _write(
+            roots / "projections", "tgt",
+            _chain_yaml({"win_first": "player_chain_w1_logit(model=src)"}),
+        )
+        order = pp.dependency_order(["src", "tgt"])
+        assert [(s.model, s.via_arms) for s in order] == [
+            ("src", True), ("tgt", False),
+        ]
+
+    def test_the_tag_survives_a_model_kind_hop(self, roots):
+        """A stage used as a prior lists T's chain_arm column: T is consumed
+        through its arms, so it is tagged though a model sits in between."""
+        _write(roots / "projections", "tgt", _chain_yaml())
+        _write(roots / "models", "lead", _LEAD_CFG)
+        stage = _stage_cfg("lead")
+        stage["features"]["include"].append("player_chain_w1_logit(model=tgt)")
+        _write(roots / "models", "stage1", stage)
+        order = {s.model: s.via_arms for s in pp.dependency_order(["stage1"])}
+        assert order == {"lead": False, "tgt": True, "stage1": False}
+
+    def test_a_top_level_stem_named_through_chain_arm_is_tagged(self, roots):
+        _write(roots / "projections", "src", _chain_yaml())
+        order = pp.dependency_order(["src"], via_arms={"src"})
+        assert order[0].via_arms is True
+
+    def test_shape_and_plain_chain_arm_features_are_dependencies_too(self, roots):
+        _write(roots / "projections", "shape_src", _chain_yaml())
+        _write(roots / "projections", "arm_src", _chain_yaml())
+        _write(
+            roots / "projections", "tgt",
+            _chain_yaml(include=[
+                "player_chain_egames(model=shape_src)",
+                "player_chain_fi_rate(model=arm_src)",
+            ]),
+        )
+        order = {s.model: s.via_arms for s in pp.dependency_order(["tgt"])}
+        assert order == {"shape_src": False, "arm_src": True, "tgt": False}
+
+    def test_a_config_naming_a_stem_only_through_a_shape_output_declares_it(self):
+        cfg = SimpleNamespace(
+            features=SimpleNamespace(
+                include=["player_chain_egames(model=x)"], compute_only=None,
+            ),
+            data=SimpleNamespace(filters=None),
+            offset=None,
+        )
+        assert pp.declared_prior_stems(cfg) == ["x"]
+
+
+class TestPromoteArmFiles:
+    def _source(self, roots, stem="proj", *, arms: bool):
+        _projection_evaluation(roots, stem)
+        src = prior.resolve_prior(stem, promoted=False)
+        if arms:
+            _serve_arms(src.eval_dir, forward=False)
+            _serve_arms(src.eval_dir, forward=True)
+        return src
+
+    def test_a_via_arms_source_is_promoted_with_both_arm_files(self, roots):
+        self._source(roots, arms=True)
+        dst = pp.promote_prior("proj", require_arms=True)
+        assert (dst / "fold_serve_arms.parquet").exists()
+        assert (dst / "serve_arms.parquet").exists()
+        assert pp.verify_promoted("proj", require_arms=True).eval_dir == dst
+
+    def test_a_via_arms_source_without_arm_files_is_refused(self, roots):
+        self._source(roots, arms=False)
+        with pytest.raises(pp.PreflightError, match="per-arm store"):
+            pp.promote_prior("proj", require_arms=True)
+
+    def test_preflight_refuses_a_promoted_copy_without_arm_files(self, roots):
+        self._source(roots, arms=True)
+        dst = pp.promote_prior("proj", require_arms=True)
+        (dst / "serve_arms.parquet").unlink()
+        with pytest.raises(pp.PreflightError, match="per-arm store"):
+            pp.verify_promoted("proj", require_arms=True)
+        # A prior-only consumer does not need them.
+        assert pp.verify_promoted("proj").eval_dir == dst
+
+    def test_a_prior_only_source_is_promoted_as_before(self, roots):
+        self._source(roots, arms=False)
+        dst = pp.promote_prior("proj")
+        assert not (dst / "fold_serve_arms.parquet").exists()
+        assert pp.verify_promoted("proj").eval_dir == dst
+
+    def test_arm_files_ride_along_when_present(self, roots):
+        self._source(roots, arms=True)
+        dst = pp.promote_prior("proj")
+        assert (dst / "serve_arms.parquet").exists()
+
+
+def test_clear_prior_caches_clears_the_arm_frame(monkeypatch):
+    cleared = []
+    monkeypatch.setattr(
+        pp._cached_arm_frame, "cache_clear", lambda: cleared.append(True),
+    )
+    pp._clear_prior_caches()
+    assert cleared == [True]

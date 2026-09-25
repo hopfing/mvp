@@ -278,6 +278,8 @@ _IID_SERVE_MODEL_OPTIONAL_KEYS: tuple[tuple[str, object], ...] = (
     ("win_first_point_features", []),
     ("win_second_match_features", []),
     ("win_second_point_features", []),
+    # Per-arm offset specs (a dict, sorted by the loop like the others).
+    ("arm_offset", {}),
 )
 
 

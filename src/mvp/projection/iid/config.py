@@ -46,6 +46,12 @@ class ServeModelConfig(BaseModel):
     # value where gap_shrink is off (the default) and a compressed value where
     # it is on, making the correction's magnitude depend on an unrelated knob.
     surface_circuit_offset: dict[str, float] = {}
+    # Per-arm starting point: one match-level spec, normally the source chain's
+    # output for this arm (`player_chain_w1_logit(model=<stem>)`). The arm appends
+    # it to its match list, drops training points where it is null, fits a logistic
+    # of its target on it over the training points and uses the log-odds as
+    # base_margin; the column stays a feature. Two-level + model_type xgboost only.
+    arm_offset: dict[Literal["first_in", "win_first", "win_second"], str] = {}
     # Used only when type == "matchup"
     feature_columns: list[str] = []
     match_level_columns: list[str] = []
@@ -88,6 +94,69 @@ class ServeModelConfig(BaseModel):
     win_first_point_features: list[str] = []
     win_second_match_features: list[str] = []
     win_second_point_features: list[str] = []
+
+    def arm_match_specs(self) -> list[str]:
+        """Every match-level spec the two-level arms read, deduplicated in fit
+        order: the three arm lists, then the arm offset specs (each arm
+        appends its own at construction). The one list the preload, the
+        selector, the promoted include list and the dependency walks share."""
+        specs = (
+            self.first_in_match_features + self.win_first_match_features
+            + self.win_second_match_features + list(self.arm_offset.values())
+        )
+        return list(dict.fromkeys(specs))
+
+    @model_validator(mode="after")
+    def validate_arm_offset(self) -> "ServeModelConfig":
+        if not self.arm_offset:
+            return self
+        if self.type != "two_level":
+            raise ValueError("arm_offset requires serve_model.type='two_level'")
+        # The margin must come from the same X the fit and predict receive
+        # (`model/offset.py`): true of the XGBoost arm, which is unscaled at
+        # both, and not of the logistic arm, which scales X.
+        if self.model_type != "xgboost":
+            raise ValueError(
+                "arm_offset requires model_type='xgboost' (base_margin is an "
+                "XGBoost fit-time input)"
+            )
+        return self
+
+
+def arm_offset_column(spec: str) -> str:
+    """The engine column an `arm_offset` spec resolves to: the `player_` side,
+    which is the arm's own server (the store writes both servers of a match, so
+    a null there is a match the source never scored)."""
+    from mvp.model.engine import build_column_name, parse_feature_spec
+
+    _prefix, _base, full_name, params = parse_feature_spec(spec)
+    return build_column_name(full_name, params)
+
+
+def pin_arm_offsets(
+    serve_model: ServeModelConfig | None,
+    data: DataConfig,
+    include: list[str] | None,
+) -> None:
+    """The classification offset sugar, for `arm_offset`: pin each spec and its
+    swap-side partner into `include` (when the config has one), then restrict
+    the frame to the matches the source scored with a `not_null` filter on the
+    offset column. The pin is what makes the filter computable: the column is
+    a transform output, not a registered feature, so it reaches the frame only
+    through the include list. Idempotent."""
+    if serve_model is None or not serve_model.arm_offset:
+        return
+    from mvp.projection.iid.serve_model import swap_side_partner_specs
+
+    specs = list(dict.fromkeys(serve_model.arm_offset.values()))
+    if include is not None:
+        for spec in [*specs, *swap_side_partner_specs(specs)]:
+            if spec not in include:
+                include.append(spec)
+    filters = dict(data.filters or {})
+    for spec in specs:
+        filters.setdefault(arm_offset_column(spec), "not_null")
+    data.filters = filters
 
 
 def _as_metric_list(v: Any) -> Any:
@@ -152,6 +221,11 @@ class IIDProjectionConfig(BaseModel):
     serve_model: ServeModelConfig = ServeModelConfig()
     validation: ValidationConfig = ValidationConfig()
     metrics: IIDMetricsConfig = IIDMetricsConfig()
+
+    @model_validator(mode="after")
+    def _pin_arm_offsets(self) -> "IIDProjectionConfig":
+        pin_arm_offsets(self.serve_model, self.data, self.features.include)
+        return self
 
     @classmethod
     def from_yaml(cls, yaml_str: str) -> "IIDProjectionConfig":
@@ -527,6 +601,25 @@ class ServeDiscoveryConfig(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def _pin_arm_offsets(self) -> "ServeDiscoveryConfig":
+        # No include list here: the selector loads the offset specs itself
+        # (`_fixed_arm_match_specs`); the filter restricts its match frame.
+        pin_arm_offsets(self.serve_model, self.data, None)
+        # FS candidates are built with the scorer's model type, not
+        # `serve_model.model_type` (`_build_candidate_model`), so the
+        # serve-model validator's xgboost check does not cover them.
+        if (
+            self.serve_model is not None and self.serve_model.arm_offset
+            and self.scoring_model.type != "xgboost"
+        ):
+            raise ValueError(
+                "arm_offset requires scoring_model.type='xgboost' (FS candidates "
+                "are built with the scorer's model type, and base_margin is an "
+                "XGBoost fit-time input)"
+            )
+        return self
+
+    @model_validator(mode="after")
     def _validate_parallelism(self) -> "ServeDiscoveryConfig":
         import os
         n_jobs = self.scoring_model.params.get("n_jobs", 1)
@@ -645,11 +738,12 @@ class ServeDiscoveryConfig(BaseModel):
             # config that loads, then fails at predict on a missing column.
             from mvp.model.engine import parse_feature_spec as _parse
 
-            component_specs = (
-                serve_block["first_in_match_features"]
-                + serve_block["win_first_match_features"]
-                + serve_block["win_second_match_features"]
-            )
+            # Includes the arm offset specs: the offset column (and its
+            # partner, via the partner loop below) must be computed whether or
+            # not the FS also picked it as a feature.
+            component_specs = ServeModelConfig.model_validate(
+                serve_block
+            ).arm_match_specs()
             for spec in component_specs:
                 _prefix, _base, full_name, params = _parse(spec)
                 if params:

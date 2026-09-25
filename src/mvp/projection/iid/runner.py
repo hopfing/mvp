@@ -42,7 +42,7 @@ from mvp.projection.iid.metrics import (
     compute_set_score_diagnostics,
     compute_tiebreak_diagnostics,
 )
-from mvp.projection.iid.projection_run import resolve_targets
+from mvp.projection.iid.projection_run import join_serve_arms, resolve_targets
 from mvp.projection.iid.projector import TennisProjector, slice_output
 from mvp.projection.iid.serve_model import (
     ScoreStateChainServeModel,
@@ -178,11 +178,9 @@ def preload_match_specs(serve_model_config) -> list[str]:
     of the same config.
     """
     if serve_model_config.type == "two_level":
-        specs = (
-            list(serve_model_config.first_in_match_features)
-            + list(serve_model_config.win_first_match_features)
-            + list(serve_model_config.win_second_match_features)
-        )
+        # Includes the arm offset specs: each arm appends its own at
+        # construction, and fit requires it in the preload.
+        specs = serve_model_config.arm_match_specs()
     else:
         specs = list(serve_model_config.match_level_features)
     seen: set[str] = set()
@@ -227,6 +225,17 @@ def build_fold_match_frame(
         # p_match_win_a.
         **shape_scalars(out),
     })
+
+
+def build_fold_serve_arms_frame(
+    test_df: pl.DataFrame, arms: pl.DataFrame, fold_idx: int,
+    scoreable: np.ndarray | pl.Series,
+) -> pl.DataFrame:
+    """One fold's rows for the fold_serve_arms artifact: `predict_arms`'s two
+    rows per test match, dated and flagged from `test_df`. Every test match is
+    written, scoreable or not, for the reason `build_fold_match_frame` gives."""
+    out = join_serve_arms(test_df, arms, scoreable, "fold_serve_arms")
+    return out.with_columns(pl.lit(fold_idx, dtype=pl.Int32).alias("fold_idx"))
 
 
 class IIDProjectionRunner:
@@ -399,6 +408,9 @@ class IIDProjectionRunner:
         # columns per test row, accumulated here and written once after the
         # loop (the winner-side prior's OOF store).
         fold_match_rows: list[pl.DataFrame] = []
+        # Per-fold per-arm rows (two-level only): the `chain_arm` transform's
+        # OOF store, written beside fold_match_win.
+        fold_arm_rows: list[pl.DataFrame] = []
 
         # Materialize points and match-level features once and reuse across
         # folds. This avoids re-reading match_beats_points.parquet on every fold
@@ -503,6 +515,11 @@ class IIDProjectionRunner:
                     projector.fit(train_df)
 
                 out = projector.project(test_df)
+                if self.config.serve_model.type == "two_level":
+                    fold_arm_rows.append(build_fold_serve_arms_frame(
+                        test_df, serve_model.predict_arms(test_df), fold_idx + 1,
+                        test_df["_scoreable"],
+                    ))
                 # Everything below scores: it reads the scoreable slice of the
                 # frame and the ALIGNED slice of the output. `out` itself stays
                 # whole -- the artifact is written from it.
@@ -651,6 +668,10 @@ class IIDProjectionRunner:
                 from mvp.projection.iid.artifacts import write_fold_match_win
 
                 write_fold_match_win(fp_dir, pl.concat(fold_match_rows))
+            if fold_arm_rows:
+                from mvp.projection.iid.artifacts import write_fold_serve_arms
+
+                write_fold_serve_arms(fp_dir, pl.concat(fold_arm_rows))
             run_logger.info("Wrote projection metrics -> %s", fp_dir)
 
         return result
