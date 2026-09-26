@@ -22,6 +22,8 @@ ROUND_NORMALIZATION: dict[str, Round] = {
     "Round of 64": Round.R64,
     "Round of 128": Round.R128,
     "Round Robin": Round.RR,
+    "RR2": Round.RR,  # Laver Cup schedule labels day 2 "RR2"
+    "RR3": Round.RR,
     "1st Round Qualifying": Round.Q1,
     "2nd Round Qualifying": Round.Q2,
     "3rd Round Qualifying": Round.Q3,

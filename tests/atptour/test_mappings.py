@@ -53,6 +53,10 @@ class TestNormalizeRound:
         assert normalize_round("Round Robin Day 2") == Round.RR
         assert normalize_round("Round Robin Day 3") == Round.RR
 
+    def test_laver_cup_day_numbered_round_robin(self):
+        assert normalize_round("RR2") == Round.RR
+        assert normalize_round("RR3") == Round.RR
+
     def test_qualifying_rounds(self):
         assert normalize_round("1st Round Qualifying") == Round.Q1
         assert normalize_round("2nd Round Qualifying") == Round.Q2
