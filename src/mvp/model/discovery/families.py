@@ -110,6 +110,8 @@ MANUAL_FAMILIES: dict[str, str] = {
     # match-level IID projections
     "iid_expected_games_per_set": "iid_match_level",
     "iid_tiebreak_prob": "iid_match_level",
+    # court pace index: the value, its surface-offset form, and its support
+    **{s: "court_pace" for s in ("court_pace", "court_pace_full", "court_pace_n")},
     # prefixed glicko level x uncertainty interactions -> primary component
     "glicko_mu_diff_x_opp_formvol": "glicko_mu",
     "glicko_mu_diff_x_player_formvol": "glicko_mu",

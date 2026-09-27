@@ -30,6 +30,7 @@ class TestFamilyRule:
         assert family_of("glicko_rd_ratio") == "glicko_uncertainty"
         assert family_of("player_glicko_mu_diff_x_opp_rd") == "glicko_mu"
         assert family_of("match_count_max(days=365)") == "match_count"
+        assert family_of("court_pace_full") == "court_pace"
 
     def test_unknown_shapes_are_unassigned_not_guessed(self):
         assert family_of("some_new_symmetric_thing") is None
@@ -52,3 +53,12 @@ class TestFamilyRule:
         ])
         assert fams == {"hold_pct": ["player_hold_pct", "opp_hold_pct(days=30)"]}
         assert unassigned == ["mystery_column"]
+
+    def test_registered_pool_has_no_residue(self):
+        # A new registered feature the rule and overlay don't cover would make
+        # family-mode FS raise (discover.py); catch it here instead.
+        import mvp.model.features  # noqa: F401
+        from mvp.model.discovery.discover import get_all_feature_specs
+
+        _, unassigned = group_candidates(get_all_feature_specs())
+        assert unassigned == []
