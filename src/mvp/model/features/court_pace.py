@@ -24,6 +24,13 @@ Outputs, all match-level (the same on both orientation rows of a match):
 Null outside scope: doubles, ITF, before the rating starts (2015), or with no
 tournament id, year or round order. Plan and measurements:
 mvp-docs/plans/2026-09-27-court-pace-index.md.
+
+A second transform, ``court_pace_serve``, crosses ``court_pace`` and
+``court_pace_full`` with four measures of serve power (the style serve axis,
+the rating's ace skill, its serve-minus-return skill, first-serve speed), each
+centred on its prior 730-day field mean, as ``player_``, ``opp_`` and
+``player_..._diff`` columns: 8 stems, 24 outputs. Plan:
+mvp-docs/plans/2026-09-27-court-pace-serve-interactions.md.
 """
 
 from __future__ import annotations
@@ -57,6 +64,39 @@ _RAW = [
     "svc_second_serve_pts_played",
     "player_bsr_pserve_logit",
 ]
+FIELD_DAYS = 730
+_SERVE_PACES = ["court_pace", "court_pace_full"]
+_SERVE_ATTRS: dict[str, tuple[pl.Expr, pl.Expr]] = {
+    "style_serve": (pl.col("player_style_axis_serve"), pl.col("opp_style_axis_serve")),
+    "bsr_ace": (pl.col("player_bsr_ace_mu"), pl.col("opp_bsr_ace_mu")),
+    "bsr_balance": (
+        pl.col("player_bsr_serve_mu") - pl.col("player_bsr_return_mu"),
+        pl.col("opp_bsr_serve_mu") - pl.col("opp_bsr_return_mu"),
+    ),
+    "serve_speed": (
+        pl.col("player_style_avg_1st_serve_speed"),
+        pl.col("opp_style_avg_1st_serve_speed"),
+    ),
+}
+_SERVE_STEMS = [f"{p}_{k}" for k in _SERVE_ATTRS for p in _SERVE_PACES]
+_SERVE_OUTPUTS = [f"{side}_{s}" for s in _SERVE_STEMS for side in ("player", "opp")] + [
+    f"player_{s}_diff" for s in _SERVE_STEMS
+]
+_SERVE_RAW = list(
+    dict.fromkeys(
+        _RAW
+        + [
+            "effective_match_date",
+            "player_bsr_ace_mu",
+            "opp_bsr_ace_mu",
+            "player_bsr_serve_mu",
+            "opp_bsr_serve_mu",
+            "player_bsr_return_mu",
+            "opp_bsr_return_mu",
+        ]
+    )
+)
+
 _KEY = ["tournament_id", "s3", "ind"]
 _CELL = ["s3", "circuit", "ind"]
 
@@ -305,5 +345,86 @@ register_transform(
         "Court pace per tournament edition: serve points won above the serve-return "
         "rating's expectation, net of qualifying, from earlier editions (half-life "
         "1 year) and lower rounds of the same edition, shrunk to the cell mean"
+    ),
+)
+
+
+def _court_pace_serve_transform(df: pl.DataFrame) -> pl.DataFrame:
+    """Engine transform: court pace times centred serve power, player/opp/diff."""
+    n = df.select("match_uid", "player_id").is_duplicated().sum()
+    if n:
+        raise ValueError(f"court_pace_serve: {n} duplicate (match_uid, player_id) rows")
+    pace = (
+        _court_pace_transform(df)
+        .select("match_uid", "player_id", *_SERVE_PACES)
+        .filter(pl.col("court_pace_full").is_not_null())
+    )
+    # effective_match_date carries times of day on live rows; the field keys on
+    # the calendar day so same-day rows never see each other.
+    rows = df.select(
+        "match_uid",
+        "player_id",
+        pl.col("effective_match_date").dt.date().alias("day"),
+        *[p.cast(pl.Float64).alias(f"a_{k}") for k, (p, _) in _SERVE_ATTRS.items()],
+        *[o.cast(pl.Float64).alias(f"o_{k}") for k, (_, o) in _SERVE_ATTRS.items()],
+    ).join(pace, on=["match_uid", "player_id"], how="inner")
+
+    # Field mean of each attribute over in-scope rows in [day - FIELD_DAYS, day).
+    for k in _SERVE_ATTRS:
+        daily = (
+            rows.filter(pl.col(f"a_{k}").is_not_null())
+            .group_by("day")
+            .agg(
+                pl.col(f"a_{k}").sum().alias("s"), pl.len().cast(pl.Float64).alias("n")
+            )
+            .sort("day")
+            .with_columns(
+                pl.col("s").rolling_sum_by(
+                    "day", window_size=f"{FIELD_DAYS}d", closed="left"
+                ),
+                pl.col("n").rolling_sum_by(
+                    "day", window_size=f"{FIELD_DAYS}d", closed="left"
+                ),
+            )
+            .select("day", (pl.col("s") / pl.col("n")).alias(f"c_{k}"))
+        )
+        rows = rows.join(daily, on="day", how="left")
+
+    for k in _SERVE_ATTRS:
+        for p in _SERVE_PACES:
+            rows = rows.with_columns(
+                (pl.col(p) * (pl.col(f"a_{k}") - pl.col(f"c_{k}"))).alias(
+                    f"player_{p}_{k}"
+                ),
+                (pl.col(p) * (pl.col(f"o_{k}") - pl.col(f"c_{k}"))).alias(
+                    f"opp_{p}_{k}"
+                ),
+            ).with_columns(
+                (pl.col(f"player_{p}_{k}") - pl.col(f"opp_{p}_{k}")).alias(
+                    f"player_{p}_{k}_diff"
+                )
+            )
+    return (
+        df.select("match_uid", "player_id")
+        .join(
+            rows.select("match_uid", "player_id", *_SERVE_OUTPUTS),
+            on=["match_uid", "player_id"],
+            how="left",
+        )
+        .select("match_uid", "player_id", *_SERVE_OUTPUTS)
+    )
+
+
+register_transform(
+    name="court_pace_serve",
+    func=_court_pace_serve_transform,
+    outputs=_SERVE_OUTPUTS,
+    depends_on=["style_axis_serve", "style_avg_1st_serve_speed"],
+    raw_columns=_SERVE_RAW,
+    description=(
+        "Court pace, within surface and surface included, times serve power "
+        "(style serve axis, rating ace skill, rating serve-minus-return skill, "
+        "first-serve speed), each centred on its prior 730-day field mean; "
+        "player, opponent and diff"
     ),
 )
