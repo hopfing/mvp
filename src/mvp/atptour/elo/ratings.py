@@ -35,6 +35,22 @@ from mvp.atptour.elo.constants import (
 )
 
 
+def match_axes(surface: str | None, indoor: bool | None) -> tuple[str, ...]:
+    """Which adjustment axes a match's conditions engage.
+
+    A surface the base ratings do not model (Carpet) contributes to none,
+    matching get_surface_adj's own map. Indoor rides alongside the surface
+    axis rather than replacing it, so an indoor hard match trains both; indoor
+    clay and indoor grass are too rare to support their own axis.
+    """
+    axes = []
+    if surface in ("Hard", "Clay", "Grass"):
+        axes.append(surface.lower())
+    if indoor and surface == "Hard":
+        axes.append("indoor")
+    return tuple(axes)
+
+
 @dataclass
 class PlayerRating:
     """Holds multi-dimensional Elo rating state for a player."""
@@ -115,18 +131,8 @@ class PlayerRating:
     last_ret_indoor_date: date | None = None
 
     def serve_axes(self, surface: str, indoor: bool) -> tuple[str, ...]:
-        """Which adjustment axes this match updates.
-
-        A surface the base ratings do not model (Carpet) contributes to neither,
-        matching get_surface_adj's own map. Indoor rides alongside the surface
-        axis rather than replacing it, so an indoor hard match trains both.
-        """
-        axes = []
-        if surface in ("Hard", "Clay", "Grass"):
-            axes.append(surface.lower())
-        if indoor and surface == "Hard":
-            axes.append("indoor")
-        return tuple(axes)
+        """Which adjustment axes this match updates (see `match_axes`)."""
+        return match_axes(surface, indoor)
 
     def effective_serve_elo(self, surface: str, indoor: bool = False) -> float:
         """Serve rating plus every adjustment this match's conditions engage."""

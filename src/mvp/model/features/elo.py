@@ -103,6 +103,30 @@ def melo() -> pl.Expr:
 
 
 @feature(
+    name="celo_si",
+    description="Coherent surface-indoor Elo: base plus the engaged "
+                "hard/clay/grass and indoor-hard adjustments, one expectation, "
+                "per-axis rd and gated reversion "
+                "(plan 2026-09-28-surface-indoor-mov-elo)",
+    mirror=True,
+)
+def celo_si() -> pl.Expr:
+    return pl.col("player_celo_si")
+
+
+@feature(
+    name="melo_si",
+    description="Surface-indoor margin-of-victory Elo: games-share outcome, "
+                "base plus the engaged hard/clay/grass and indoor-hard "
+                "adjustments, one expectation, per-axis rd and gated reversion "
+                "(plan 2026-09-28-surface-indoor-mov-elo)",
+    mirror=True,
+)
+def melo_si() -> pl.Expr:
+    return pl.col("player_melo_si")
+
+
+@feature(
     name="serve_elo",
     description="Serve Elo rating",
     mirror=True,
@@ -384,6 +408,29 @@ def elo_diff() -> pl.Expr:
 )
 def melo_diff() -> pl.Expr:
     return pl.col("player_melo") - pl.col("opp_melo")
+
+
+@feature(
+    name="celo_si_diff",
+    params=[],
+    description="Coherent surface-indoor Elo difference (player - opponent)",
+    mirror=False,
+    impute=None,
+)
+def celo_si_diff() -> pl.Expr:
+    return pl.col("player_celo_si") - pl.col("opp_celo_si")
+
+
+@feature(
+    name="melo_si_diff",
+    params=[],
+    description="Coherent surface-indoor margin-of-victory Elo difference "
+                "(player - opponent)",
+    mirror=False,
+    impute=None,
+)
+def melo_si_diff() -> pl.Expr:
+    return pl.col("player_melo_si") - pl.col("opp_melo_si")
 
 
 @feature(

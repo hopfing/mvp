@@ -8,6 +8,7 @@ from pathlib import Path
 import polars as pl
 
 from mvp.atptour.bsr import BsrTracker, bsr_input_columns
+from mvp.atptour.elo.composite import CompositeEloTracker
 from mvp.atptour.elo.mov import MovTracker
 from mvp.atptour.ratings import compute_all_ratings
 from mvp.atptour.ratings.compute import RATINGS_ROW_INDEX
@@ -891,6 +892,9 @@ class MatchesAggregator(BaseJob):
                 singles_slim,
                 mov_tracker=MovTracker(variants=("melo",)),
                 bsr_tracker=bsr_tracker,
+                # Coherent surface-indoor Elo on the binary and margin
+                # outcomes (plan 2026-09-28-surface-indoor-mov-elo).
+                composite_tracker=CompositeEloTracker(),
             )
             # Scatter each rating column back to its row in `combined`.
             # `pl.repeat(None, ...)` fixes the dtype first, so an Int64 column

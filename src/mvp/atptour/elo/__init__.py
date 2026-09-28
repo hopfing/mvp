@@ -1,3 +1,4 @@
+from mvp.atptour.elo.composite import CompositeEloTracker
 from mvp.atptour.elo.ratings import (
     PlayerRating,
     apply_inactivity_rd,
@@ -12,6 +13,7 @@ from mvp.atptour.elo.ratings import (
 )
 
 __all__ = [
+    "CompositeEloTracker",
     "PlayerRating",
     "apply_inactivity_rd",
     "expected_score",

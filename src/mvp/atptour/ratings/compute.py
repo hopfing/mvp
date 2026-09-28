@@ -20,6 +20,7 @@ from mvp.atptour.elo.constants import (
     SURFACE_K_MULT,
     ServeEloConfig,
 )
+from mvp.atptour.elo.composite import CompositeEloTracker
 from mvp.atptour.elo.mov import MovTracker, margin_is_valid
 from mvp.atptour.elo.ratings import (
     PlayerRating,
@@ -357,6 +358,7 @@ def compute_all_ratings(
     stamp: bool = False,
     mov_tracker: "MovTracker | None" = None,
     bsr_tracker: "BsrTracker | None" = None,
+    composite_tracker: "CompositeEloTracker | None" = None,
 ) -> pl.DataFrame:
     """Add all rating columns to matches DataFrame.
 
@@ -388,6 +390,9 @@ def compute_all_ratings(
             columns, `circuit`, `surface` and `indoor` — `_col` fills an absent
             column with None, which would silently put every row outside the
             filter's domain and emit 24 null columns without an error.
+        composite_tracker: optional coherent surface-indoor Elo state
+            (elo/composite.py). Same invariant as mov_tracker, and the same
+            games/`reason`/`result_type` requirement: melo_si reads the margin.
 
     Returns:
         DataFrame with additional rating columns.
@@ -458,11 +463,12 @@ def compute_all_ratings(
     col_opp_set_tb = [_col(f"opp_set{s}_tiebreak") for s in range(1, 6)]
 
     # MOV variant inputs — materialized only when a tracker is running.
-    if mov_tracker is not None:
+    need_games = mov_tracker is not None or composite_tracker is not None
+    if need_games:
         games_cols = [f"player_set{s}_games" for s in range(1, 6)]
         if not any(c in df_cols for c in games_cols):
             raise ValueError(
-                "mov_tracker passed but the frame carries no per-set games "
+                "mov_tracker or composite_tracker passed but the frame carries no per-set games "
                 "columns — every update would silently fall back to binary "
                 "and the variants would be degenerate copies of standard elo"
             )
@@ -471,7 +477,7 @@ def compute_all_ratings(
         ]
         if missing_guard:
             raise ValueError(
-                f"mov_tracker passed but {missing_guard} absent — the "
+                f"mov_tracker or composite_tracker passed but {missing_guard} absent — the "
                 "incomplete guard would silently degrade to zero-games-only, "
                 "and a retirement's nonzero partial margin would feed the "
                 "update instead of falling back to binary"
@@ -513,6 +519,8 @@ def compute_all_ratings(
         cols = cols + mov_tracker.output_columns()
     if bsr_tracker is not None:
         cols = cols + bsr_tracker.output_columns()
+    if composite_tracker is not None:
+        cols = cols + composite_tracker.output_columns()
     # One float64 slab for every list-written column (ratings, mov, the shipped
     # bsr twelve, stamp counters); see _ColWriter. NaN until written.
     _slab = np.full((len(cols), n), np.nan, dtype=np.float64)
@@ -564,6 +572,9 @@ def compute_all_ratings(
             # divergence from elo is pure mechanism, never seeding.
             mov_tracker.ensure_player(player_id, elo_ratings[player_id].elo)
             mov_tracker.ensure_player(opp_id, elo_ratings[opp_id].elo)
+        if composite_tracker is not None:
+            composite_tracker.ensure_player(player_id, elo_ratings[player_id].elo)
+            composite_tracker.ensure_player(opp_id, elo_ratings[opp_id].elo)
 
         player_rating = elo_ratings[player_id]
         opp_rating = elo_ratings[opp_id]
@@ -581,6 +592,10 @@ def compute_all_ratings(
             if mov_tracker is not None:
                 mov_tracker.append_output(
                     output, p_cached["mov"], o_cached["mov"]
+                )
+            if composite_tracker is not None:
+                composite_tracker.append_output(
+                    output, p_cached["composite"], o_cached["composite"]
                 )
             if bsr_tracker is not None:
                 bsr_tracker.append_output(
@@ -620,6 +635,9 @@ def compute_all_ratings(
             if mov_tracker is not None:
                 mov_tracker.apply_inactivity(player_id, match_date)
                 mov_tracker.apply_inactivity(opp_id, match_date)
+            if composite_tracker is not None:
+                composite_tracker.apply_inactivity(player_id, match_date)
+                composite_tracker.apply_inactivity(opp_id, match_date)
             # Each surface/venue adjustment grows from its OWN clock too. A
             # player who has not been on grass for two years should show low
             # confidence in their grass adjustment however much they have played
@@ -668,6 +686,11 @@ def compute_all_ratings(
             mov_o_vals = mov_tracker.capture(opp_id)
             match_ratings_cache[match_uid][player_id]["mov"] = mov_p_vals
             match_ratings_cache[match_uid][opp_id]["mov"] = mov_o_vals
+        if composite_tracker is not None:
+            comp_p_vals = composite_tracker.capture(player_id, surface, indoor)
+            comp_o_vals = composite_tracker.capture(opp_id, surface, indoor)
+            match_ratings_cache[match_uid][player_id]["composite"] = comp_p_vals
+            match_ratings_cache[match_uid][opp_id]["composite"] = comp_o_vals
         if bsr_tracker is not None:
             # Seeds are the PRE-match base serve/return Elo from the capture
             # dicts, so this is independent of where the serve-Elo update
@@ -689,6 +712,8 @@ def compute_all_ratings(
         )
         if mov_tracker is not None:
             mov_tracker.append_output(output, mov_p_vals, mov_o_vals)
+        if composite_tracker is not None:
+            composite_tracker.append_output(output, comp_p_vals, comp_o_vals)
         if bsr_tracker is not None:
             bsr_tracker.append_output(output, bsr_cap.player, bsr_cap.opp)
             bsr_tracker.apply(bsr_cap)
@@ -715,19 +740,30 @@ def compute_all_ratings(
         # MOV variants: own bare state, own K schedule inputs, own reversion —
         # all inside the tracker. Games from THIS row's orientation; the
         # incomplete guard falls back to the binary update.
-        if mov_tracker is not None:
+        if need_games:
             p_games = sum(
                 g[i] for g in col_player_set_games if g[i] is not None
             )
             o_games = sum(
                 g[i] for g in col_opp_set_games if g[i] is not None
             )
+            margin_valid = margin_is_valid(
+                p_games + o_games, col_reason[i], col_result_type[i]
+            )
+        if mov_tracker is not None:
             mov_tracker.update_match(
                 player_id, opp_id, bool(won), round_name, tournament_level,
-                p_games, o_games,
-                margin_is_valid(
-                    p_games + o_games, col_reason[i], col_result_type[i]
-                ),
+                p_games, o_games, margin_valid,
+                match_date if isinstance(match_date, date) else None,
+            )
+        # Coherent surface-indoor Elo: one expectation from the full effective
+        # rating, per-axis clocks and gated reversion, all inside the tracker.
+        # A row with no result emits but does not update.
+        if composite_tracker is not None:
+            composite_tracker.update_match(
+                player_id, opp_id, None if won is None else bool(won),
+                round_name, tournament_level, surface, indoor,
+                p_games, o_games, margin_valid, col_result_type[i],
                 match_date if isinstance(match_date, date) else None,
             )
 

@@ -409,3 +409,37 @@ class TestRawEloFeatures:
         df = pl.DataFrame({"player_return_elo": [1550.0, 1650.0]})
         result = df.select(return_elo().alias("val"))
         assert result["val"].to_list() == [1550.0, 1650.0]
+
+
+class TestCompositeEloFeatures:
+    """celo_si / melo_si (plan 2026-09-28-surface-indoor-mov-elo)."""
+
+    def test_registered(self):
+        registry = get_registry()
+        for name, mirror in (
+            ("celo_si", True), ("melo_si", True),
+            ("celo_si_diff", False), ("melo_si_diff", False),
+        ):
+            feat = registry.get(name)
+            assert feat is not None, f"Feature {name} not registered"
+            assert feat.mirror is mirror, name
+
+    def test_values_and_diffs(self):
+        from mvp.model.features.elo import (
+            celo_si, celo_si_diff, melo_si, melo_si_diff,
+        )
+
+        df = pl.DataFrame({
+            "player_celo_si": [1600.0, 1450.0],
+            "opp_celo_si": [1500.0, 1520.0],
+            "player_melo_si": [1580.0, 1400.0],
+            "opp_melo_si": [1530.0, 1490.0],
+        })
+        out = df.select(
+            celo_si().alias("c"), melo_si().alias("m"),
+            celo_si_diff().alias("cd"), melo_si_diff().alias("md"),
+        )
+        assert out["c"].to_list() == [1600.0, 1450.0]
+        assert out["m"].to_list() == [1580.0, 1400.0]
+        assert out["cd"].to_list() == [100.0, -70.0]
+        assert out["md"].to_list() == [50.0, -90.0]
