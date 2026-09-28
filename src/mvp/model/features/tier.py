@@ -289,7 +289,8 @@ def tier_ordinal_avg(days: int | None = None) -> pl.Expr:
     """Avg tier ordinal across recent matches."""
     group_by = ["player_id"]
     if days is None:
-        # Cumulative mean: sum / count
+        # Cumulative mean over matches with a known tier: sum / count, nulls
+        # skipped in both, as rolling_mean does for the windowed variant.
         ordinal_sum = (
             _tier_ordinal_expr()
             .fill_null(0)
@@ -299,7 +300,7 @@ def tier_ordinal_avg(days: int | None = None) -> pl.Expr:
             .fill_null(0)
         )
         total = (
-            pl.col("effective_match_date")
+            _tier_ordinal_expr()
             .is_not_null()
             .cast(pl.Int64)
             .cum_sum()
@@ -333,6 +334,8 @@ def prize_money_log_avg(days: int | None = None) -> pl.Expr:
     )
     group_by = ["player_id"]
     if days is None:
+        # Cumulative mean over matches with a known prize: nulls skipped in
+        # both sum and count, as rolling_mean does for the windowed variant.
         prize_sum = (
             prize_log
             .fill_null(0)
@@ -342,7 +345,7 @@ def prize_money_log_avg(days: int | None = None) -> pl.Expr:
             .fill_null(0)
         )
         total = (
-            pl.col("effective_match_date")
+            prize_log
             .is_not_null()
             .cast(pl.Int64)
             .cum_sum()
@@ -393,7 +396,8 @@ def _tier_points_expr() -> pl.Expr:
 
 def _trailing_mean(value_expr: pl.Expr, days: int | None) -> pl.Expr:
     """Per-player trailing mean of value_expr over the past N days (None = all
-    priors), leakage-safe (shifted to exclude the current match)."""
+    priors), leakage-safe (shifted to exclude the current match). Null values
+    are skipped in both paths."""
     group_by = ["player_id"]
     order_by = [
         "effective_match_date", "tournament_start_date", "round_order", "match_uid",
@@ -404,7 +408,7 @@ def _trailing_mean(value_expr: pl.Expr, days: int | None) -> pl.Expr:
             .over(group_by, order_by=order_by).fill_null(0)
         )
         total = (
-            pl.col("effective_match_date").is_not_null().cast(pl.Int64)
+            value_expr.is_not_null().cast(pl.Int64)
             .cum_sum().shift(1).over(group_by, order_by=order_by).fill_null(0)
         )
         return pl.when(total > 0).then(value_sum / total).otherwise(None)
