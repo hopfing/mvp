@@ -557,13 +557,14 @@ def _empty_backtest_dict() -> dict:
 
 
 def _circuit_cons_cells(df: pl.DataFrame) -> dict:
-    """Per (circuit, consensus-bucket) backtest cell: open and formed, edge>=0.
+    """Per (circuit, consensus-bucket) backtest cell: open, formed and close, edge>=0.
 
     Same filter semantics as the pooled stats — model-side (model_prob>0.5),
     then each bet point on its OWN edge>=0 — but partitioned by circuit and
     consensus bucket (==1.0 vs <1.0) instead of the pooled consensus==1.0.
     ``roi_o``/``units_o`` are open after opening_edge>=0; ``roi_f``/``units_f``
-    are formed after formed_edge>=0 (its own bet set). Keyed by (circuit, cons_key).
+    are formed after formed_edge>=0 and ``roi_c``/``units_c`` close after
+    closing_edge>=0 (each its own bet set). Keyed by (circuit, cons_key).
     """
     cells: dict[tuple[str, str], dict] = {}
     cols = set(df.columns)
@@ -580,7 +581,8 @@ def _circuit_cons_cells(df: pl.DataFrame) -> dict:
             if "model_prob" in cols:
                 d = d.filter(pl.col("model_prob") > 0.5)
             cell = {"roi_o": None, "units_o": None,
-                    "roi_f": None, "units_f": None, "n": 0}
+                    "roi_f": None, "units_f": None,
+                    "roi_c": None, "units_c": None, "n": 0}
             # Open bet set: opening_edge>=0, settled at open. n counts placed bets.
             if "opening_edge" in cols and "pnl_open" in cols:
                 d_o = d.filter(pl.col("opening_edge") >= 0)
@@ -596,6 +598,13 @@ def _circuit_cons_cells(df: pl.DataFrame) -> dict:
                 if n_f > 0:
                     cell["units_f"] = d_f["pnl_formed"].sum()
                     cell["roi_f"] = cell["units_f"] / n_f
+            # Closing bet set: closing_edge>=0, settled at close (its own set).
+            if "closing_edge" in cols and "pnl_close" in cols:
+                d_c = d.filter(pl.col("closing_edge") >= 0)
+                n_c = len(d_c)
+                if n_c > 0:
+                    cell["units_c"] = d_c["pnl_close"].sum()
+                    cell["roi_c"] = cell["units_c"] / n_c
             cells[(circ, cons_key)] = cell
     return cells
 
