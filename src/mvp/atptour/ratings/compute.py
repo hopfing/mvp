@@ -421,7 +421,10 @@ def compute_all_ratings(
     col_match_uid = df["match_uid"].to_list()
     col_player_id = df["player_id"].to_list()
     col_opp_id = df["opp_id"].to_list()
-    col_surface = _col("surface", "Hard")
+    # No default: a null surface engages no surface axis anywhere in the pass
+    # (base Elo, serve axes, the composite tracker), as Carpet does and as the
+    # feature side reads it. It was rated as Hard until 2026-09-28.
+    col_surface = _col("surface")
     col_round = _col("round", "R32")
     col_tournament_level = _col("tournament_level", "250")
     col_match_date = df["effective_match_date"].to_list()

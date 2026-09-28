@@ -792,3 +792,19 @@ class TestFullPassWithFrameIndex:
         assert col.null_count() == 2
         full = combined.with_columns(series)
         assert full.height == combined.height
+
+
+def test_null_surface_rates_as_carpet():
+    """A null surface engages no surface axis: the pass rates it exactly as Carpet.
+
+    Until 2026-09-28 the pass filled a null surface with Hard. "Unchanged" is not
+    the property to test: the champion's adjustments revert on every match, with
+    or without a surface.
+    """
+    def run(middle):
+        df = _conditions_df([("Hard", False, 70), (middle, False, 70), ("Hard", False, 70)])
+        return compute_all_ratings(df).sort("match_uid", "player_id").select(ALL_RATING_COLUMNS)
+
+    null, carpet, hard = run(None), run("Carpet"), run("Hard")
+    assert null.equals(carpet)
+    assert null["player_hard_adj"][-1] != hard["player_hard_adj"][-1]

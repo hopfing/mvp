@@ -40,15 +40,16 @@ VARIANTS = ("melo", "kmov", "kflat")
 
 # Keep S off exact 0/1: a 12-0 sweep is dominant, not infinite evidence.
 SHARE_CLIP = 0.02
-# melo K rescale (diagnostic-derived, 2026-09-01): the binary-tuned K schedule
-# assumed |out-E|-scale movement; melo's |S-E| runs ~3.79x smaller (pooled
-# |out-E|/|S-E| over 701,515 margin-valid matches). Bins orthogonal to margin
-# (favorite-strength terciles 3.44-4.00, circuit 3.62-4.31) are flat within
-# ~10%, so one constant; the total-games gradient (2.1-6.5) is the margin
-# signal itself and must NOT be flattened. Applied to margin-valid updates
-# only — the binary fallback stays at unscaled K, preserving its exact
-# equivalence to standard elo.
-MELO_K_SCALE = 3.79
+# melo K rescale. First set (2026-09-01) to 3.79, a diagnostic ratio, not a
+# predictive fit: the binary-tuned K schedule assumed |out-E|-scale movement
+# and melo's |S-E| runs ~3.79x smaller (pooled |out-E|/|S-E| over 701,515
+# margin-valid matches), so 3.79 matched the update sizes. Tuned 2026-09-28
+# (plan 2026-09-28-surface-indoor-mov-elo, tuning protocol): 1.5 is best on
+# 2010-2019 for bare melo and melo_si alike, the same in both halves, and holds
+# on every later span and 2026. One constant: bins orthogonal to margin were
+# flat in the diagnostic. Applied to margin-valid updates only — the binary
+# fallback stays at unscaled K, preserving its exact equivalence to standard elo.
+MELO_K_SCALE = 1.5
 # kmov multiplier: 1 + GAIN * (2*|share-0.5|), capped. A 50/50-games match
 # updates at K; a shutout at min(1+GAIN, CAP) * K.
 KMOV_GAIN = 1.0
