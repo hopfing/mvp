@@ -29,14 +29,10 @@ from mvp.atptour.elo.ratings import (
     initialize_player,
     k_factor_from,
     serve_surprise,
-    update_ace_resistance,
     update_elo,
-    update_first_serve_power,
     update_indoor_adj,
     update_rd,
-    update_return_clutch,
-    update_second_serve_reliability,
-    update_serve_clutch,
+    update_style,
     update_surface_adj,
     update_tb_clutch,
 )
@@ -449,6 +445,9 @@ def compute_all_ratings(
     col_ret_bp_converted = _col("ret_bp_converted")
     col_ret_bp_opportunities = _col("ret_bp_opportunities")
     col_indoor = _col("indoor", False)
+    # The style dimensions' baseline cell needs the circuit on every row (issue #141);
+    # the bsr block's own `col_circuit` exists only when a tracker is passed.
+    col_circuit_all = _col("circuit")
 
     # Opponent mirror stat columns
     col_opp_svc_first_serve_pts_won = _col("opp_svc_first_serve_pts_won")
@@ -920,68 +919,58 @@ def compute_all_ratings(
 
         # --- Player style updates ---
 
+        # Count-based style dimensions (issue #141): each takes this match's
+        # counts (k, n) on the same skip conditions as before; update_style
+        # applies the rating's own decay, weighting, prior and cell baseline.
+        circuit = col_circuit_all[i]
+
         # First serve power: aces / first_serve_pts_won
         svc_aces = col_svc_aces[i]
         svc_first_serve_pts_won = col_svc_first_serve_pts_won[i]
-        ace_rate = None
         if (svc_aces is not None
                 and svc_first_serve_pts_won
                 and svc_first_serve_pts_won > 0):
-            ace_rate = svc_aces / svc_first_serve_pts_won
-        player_rating.first_serve_power = update_first_serve_power(
-            player_rating.first_serve_power, ace_rate, surface
-        )
+            update_style(player_rating, "first_serve_power", svc_aces,
+                         svc_first_serve_pts_won, surface, circuit, indoor, match_date)
 
         # Second serve reliability: 1 - (DFs / second_serve_pts_played)
         svc_double_faults = col_svc_double_faults[i]
         svc_second_serve_pts_played = col_svc_second_serve_pts_played[i]
-        reliability = None
         if (svc_double_faults is not None
                 and svc_second_serve_pts_played
                 and svc_second_serve_pts_played > 0):
-            reliability = (
-                1 - svc_double_faults / svc_second_serve_pts_played
-            )
-        player_rating.second_serve_reliability = update_second_serve_reliability(
-            player_rating.second_serve_reliability, reliability, surface
-        )
+            update_style(player_rating, "second_serve_reliability",
+                         svc_second_serve_pts_played - svc_double_faults,
+                         svc_second_serve_pts_played,
+                         surface, circuit, indoor, match_date)
 
         # Ace resistance: 1 - (opp_svc_aces / ret_first_serve_pts_lost)
         opp_svc_aces = col_opp_svc_aces[i]
         ret_first_serve_pts_played = col_ret_first_serve_pts_played[i]
         ret_first_serve_pts_won = col_ret_first_serve_pts_won[i]
-        ace_resistance_val = None
         if (opp_svc_aces is not None and
             ret_first_serve_pts_played is not None and
             ret_first_serve_pts_won is not None):
             ret_lost = ret_first_serve_pts_played - ret_first_serve_pts_won
             if ret_lost > 0:
-                ace_resistance_val = 1 - (opp_svc_aces / ret_lost)
-        player_rating.ace_resistance = update_ace_resistance(
-            player_rating.ace_resistance, ace_resistance_val, surface
-        )
+                update_style(player_rating, "ace_resistance", ret_lost - opp_svc_aces,
+                             ret_lost, surface, circuit, indoor, match_date)
 
         # Serve clutch: bp_saved / bp_faced
         svc_bp_saved = col_svc_bp_saved[i]
         svc_bp_faced = col_svc_bp_faced[i]
-        save_rate = None
         if svc_bp_saved is not None and svc_bp_faced and svc_bp_faced > 0:
-            save_rate = svc_bp_saved / svc_bp_faced
-        player_rating.serve_clutch = update_serve_clutch(
-            player_rating.serve_clutch, save_rate, surface
-        )
+            update_style(player_rating, "serve_clutch", svc_bp_saved, svc_bp_faced,
+                         surface, circuit, indoor, match_date)
 
         # Return clutch: bp_converted / bp_opportunities
         ret_bp_converted = col_ret_bp_converted[i]
         ret_bp_opportunities = col_ret_bp_opportunities[i]
-        conversion_rate = None
         if (ret_bp_converted is not None
                 and ret_bp_opportunities
                 and ret_bp_opportunities > 0):
-            conversion_rate = ret_bp_converted / ret_bp_opportunities
-        player_rating.return_clutch = update_return_clutch(
-            player_rating.return_clutch, conversion_rate, surface
-        )
+            update_style(player_rating, "return_clutch", ret_bp_converted,
+                         ret_bp_opportunities, surface, circuit, indoor, match_date)
 
         # TB clutch: count won/played from set scores
         tb_won, tb_played = _count_tiebreaks(
@@ -1002,60 +991,46 @@ def compute_all_ratings(
         # --- Opponent style updates (mirror columns) ---
 
         opp_svc_first_serve_pts_won = col_opp_svc_first_serve_pts_won[i]
-        opp_ace_rate = None
         if (opp_svc_aces is not None
                 and opp_svc_first_serve_pts_won
                 and opp_svc_first_serve_pts_won > 0):
-            opp_ace_rate = opp_svc_aces / opp_svc_first_serve_pts_won
-        opp_rating.first_serve_power = update_first_serve_power(
-            opp_rating.first_serve_power, opp_ace_rate, surface
-        )
+            update_style(opp_rating, "first_serve_power", opp_svc_aces,
+                         opp_svc_first_serve_pts_won,
+                         surface, circuit, indoor, match_date)
 
         opp_svc_double_faults = col_opp_svc_double_faults[i]
         opp_svc_second_serve_pts_played = col_opp_svc_second_serve_pts_played[i]
-        opp_reliability = None
         if (opp_svc_double_faults is not None
                 and opp_svc_second_serve_pts_played
                 and opp_svc_second_serve_pts_played > 0):
-            opp_reliability = (
-                1 - opp_svc_double_faults / opp_svc_second_serve_pts_played
-            )
-        opp_rating.second_serve_reliability = update_second_serve_reliability(
-            opp_rating.second_serve_reliability, opp_reliability, surface
-        )
+            update_style(opp_rating, "second_serve_reliability",
+                         opp_svc_second_serve_pts_played - opp_svc_double_faults,
+                         opp_svc_second_serve_pts_played,
+                         surface, circuit, indoor, match_date)
 
         opp_ret_first_serve_pts_played = col_opp_ret_first_serve_pts_played[i]
         opp_ret_first_serve_pts_won = col_opp_ret_first_serve_pts_won[i]
-        opp_ace_resistance_val = None
         if (svc_aces is not None and
             opp_ret_first_serve_pts_played is not None and
             opp_ret_first_serve_pts_won is not None):
             opp_ret_lost = opp_ret_first_serve_pts_played - opp_ret_first_serve_pts_won
             if opp_ret_lost > 0:
-                opp_ace_resistance_val = 1 - (svc_aces / opp_ret_lost)
-        opp_rating.ace_resistance = update_ace_resistance(
-            opp_rating.ace_resistance, opp_ace_resistance_val, surface
-        )
+                update_style(opp_rating, "ace_resistance", opp_ret_lost - svc_aces,
+                             opp_ret_lost, surface, circuit, indoor, match_date)
 
         opp_svc_bp_saved = col_opp_svc_bp_saved[i]
         opp_svc_bp_faced = col_opp_svc_bp_faced[i]
-        opp_save_rate = None
         if opp_svc_bp_saved is not None and opp_svc_bp_faced and opp_svc_bp_faced > 0:
-            opp_save_rate = opp_svc_bp_saved / opp_svc_bp_faced
-        opp_rating.serve_clutch = update_serve_clutch(
-            opp_rating.serve_clutch, opp_save_rate, surface
-        )
+            update_style(opp_rating, "serve_clutch", opp_svc_bp_saved, opp_svc_bp_faced,
+                         surface, circuit, indoor, match_date)
 
         opp_ret_bp_converted = col_opp_ret_bp_converted[i]
         opp_ret_bp_opportunities = col_opp_ret_bp_opportunities[i]
-        opp_conversion_rate = None
         if (opp_ret_bp_converted is not None
                 and opp_ret_bp_opportunities
                 and opp_ret_bp_opportunities > 0):
-            opp_conversion_rate = opp_ret_bp_converted / opp_ret_bp_opportunities
-        opp_rating.return_clutch = update_return_clutch(
-            opp_rating.return_clutch, opp_conversion_rate, surface
-        )
+            update_style(opp_rating, "return_clutch", opp_ret_bp_converted,
+                         opp_ret_bp_opportunities, surface, circuit, indoor, match_date)
 
         opp_tb_won = tb_played - tb_won
         opp_rating.tb_clutch = update_tb_clutch(

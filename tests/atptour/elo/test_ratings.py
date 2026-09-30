@@ -678,106 +678,154 @@ class TestPlayerRatingStyleDimensions:
         assert rating.indoor_adj == 25.0
 
 
-class TestUpdateFirstServePower:
-    """Test first serve power update based on ace rate."""
+class TestUpdateStyle:
+    """Count-based style dimensions (issue #141): decayed average of the per-match
+    deviation from the cell baseline, with a prior weight toward the baseline."""
 
-    def test_above_baseline_increases(self):
-        from mvp.atptour.elo.ratings import update_first_serve_power
+    def _cfg(self, name):
+        from mvp.atptour.elo.constants import STYLE_CONFIGS
 
-        # 0.25 ace rate on Hard (baseline 0.176) should increase
-        new_elo = update_first_serve_power(1500.0, 0.25, "Hard")
-        assert new_elo > 1500.0
+        return STYLE_CONFIGS[name]
 
-    def test_below_baseline_decreases(self):
-        from mvp.atptour.elo.ratings import update_first_serve_power
+    def test_style_update_match_weighted(self):
+        from mvp.atptour.elo.ratings import update_style
 
-        # 0.10 ace rate on Hard (baseline 0.176) should decrease
-        new_elo = update_first_serve_power(1500.0, 0.10, "Hard")
-        assert new_elo < 1500.0
+        cfg = self._cfg("first_serve_power")
+        b = cfg.cells[0]  # Hard, tour, outdoor
+        r = PlayerRating()
+        update_style(
+            r, "first_serve_power", 5, 20, "Hard", "tour", False, date(2024, 1, 1)
+        )
+        se, sw = (0.25 - b), 1.0
+        assert r.style_acc["first_serve_power"].se == pytest.approx(se)
+        assert r.style_acc["first_serve_power"].sw == pytest.approx(sw)
+        assert r.first_serve_power == pytest.approx(
+            DEFAULT_ELO + 3000.0 * se / (sw + 3.0)
+        )
+        update_style(
+            r, "first_serve_power", 2, 20, "Hard", "tour", False, date(2024, 1, 8)
+        )
+        se, sw = 0.97 * se + (0.10 - b), 0.97 * sw + 1.0
+        assert r.style_acc["first_serve_power"].se == pytest.approx(se)
+        assert r.style_acc["first_serve_power"].sw == pytest.approx(sw)
+        assert r.first_serve_power == pytest.approx(
+            DEFAULT_ELO + 3000.0 * se / (sw + 3.0)
+        )
 
-    def test_missing_stats_unchanged(self):
-        from mvp.atptour.elo.ratings import update_first_serve_power
+    def test_style_update_count_weighted(self):
+        from mvp.atptour.elo.ratings import update_style
 
-        new_elo = update_first_serve_power(1500.0, None, "Hard")
-        assert new_elo == 1500.0
+        cfg = self._cfg("second_serve_reliability")
+        b = cfg.cells[0]
+        r = PlayerRating()
+        update_style(
+            r,
+            "second_serve_reliability",
+            27,
+            30,
+            "Hard",
+            "tour",
+            False,
+            date(2024, 1, 1),
+        )
+        update_style(
+            r,
+            "second_serve_reliability",
+            40,
+            50,
+            "Hard",
+            "tour",
+            False,
+            date(2024, 1, 8),
+        )
+        se = 0.93 * (27 - 30 * b) + (40 - 50 * b)
+        sw = 0.93 * 30 + 50
+        acc = r.style_acc["second_serve_reliability"]
+        assert acc.se == pytest.approx(se)
+        assert acc.sw == pytest.approx(sw)
+        assert r.second_serve_reliability == pytest.approx(
+            DEFAULT_ELO + 3000.0 * se / (sw + 104.0)
+        )
 
+    def test_style_update_day_decay(self):
+        from datetime import timedelta
 
-class TestUpdateSecondServeReliability:
-    """Test second serve reliability update."""
+        from mvp.atptour.elo.ratings import update_style
 
-    def test_above_baseline_increases(self):
-        from mvp.atptour.elo.ratings import update_second_serve_reliability
+        cfg = self._cfg("serve_clutch")
+        b = cfg.cells[0]
+        r = PlayerRating()
+        d0 = date(2020, 1, 1)
+        update_style(r, "serve_clutch", 6, 10, "Hard", "tour", False, d0)
+        update_style(
+            r, "serve_clutch", 4, 5, "Hard", "tour", False, d0 + timedelta(days=960)
+        )
+        acc = r.style_acc["serve_clutch"]
+        assert acc.se == pytest.approx(0.5 * (6 - 10 * b) + (4 - 5 * b))
+        assert acc.sw == pytest.approx(0.5 * 10 + 5)
+        assert acc.last_day == (d0 + timedelta(days=960)).toordinal()
 
-        # 0.95 reliability on Hard (baseline 0.893) should increase
-        new_elo = update_second_serve_reliability(1500.0, 0.95, "Hard")
-        assert new_elo > 1500.0
+    def test_style_prior_shrinks(self):
+        from mvp.atptour.elo.ratings import update_style
 
-    def test_below_baseline_decreases(self):
-        from mvp.atptour.elo.ratings import update_second_serve_reliability
+        cfg = self._cfg("serve_clutch")
+        b = cfg.cells[0]
+        r = PlayerRating()
+        update_style(r, "serve_clutch", 7, 10, "Hard", "tour", False, date(2024, 1, 1))
+        w = 10.0
+        assert r.serve_clutch == pytest.approx(
+            DEFAULT_ELO + 3000.0 * (0.7 - b) * w / (w + 28.0)
+        )
 
-        # 0.85 reliability on Hard (baseline 0.893) should decrease
-        new_elo = update_second_serve_reliability(1500.0, 0.85, "Hard")
-        assert new_elo < 1500.0
+    def test_ace_resistance_orientation(self):
+        from mvp.atptour.elo.ratings import update_style
 
+        cfg = self._cfg("ace_resistance")
+        conceded_baseline = 1 - cfg.cells[0]
+        r = PlayerRating()
+        lost = 20
+        conceded = (
+            round(lost * conceded_baseline) + 3
+        )  # more aces conceded than the baseline
+        update_style(
+            r,
+            "ace_resistance",
+            lost - conceded,
+            lost,
+            "Hard",
+            "tour",
+            False,
+            date(2024, 1, 1),
+        )
+        assert r.ace_resistance < DEFAULT_ELO
 
-class TestUpdateAceResistance:
-    """Test ace resistance update."""
+    def test_style_cell(self):
+        from mvp.atptour.elo.ratings import style_cell, update_style
 
-    def test_above_baseline_increases(self):
-        from mvp.atptour.elo.ratings import update_ace_resistance
+        assert style_cell("Clay", "chal", True) == 7
+        assert style_cell("Carpet", "tour", False) == 0
+        assert style_cell(None, "chal", None) == 2
+        assert style_cell("Hard", "itf", False) is None
+        cfg = self._cfg("first_serve_power")
+        r = PlayerRating()
+        update_style(
+            r, "first_serve_power", 5, 20, "Hard", "itf", False, date(2024, 1, 1)
+        )
+        assert r.style_acc["first_serve_power"].se == pytest.approx(0.25 - cfg.default)
 
-        # 0.90 resistance on Hard (baseline 0.824) should increase
-        new_elo = update_ace_resistance(1500.0, 0.90, "Hard")
-        assert new_elo > 1500.0
+    def test_style_day_skipped_without_date(self):
+        from mvp.atptour.elo.ratings import update_style
 
-    def test_below_baseline_decreases(self):
-        from mvp.atptour.elo.ratings import update_ace_resistance
-
-        # 0.75 resistance on Hard (baseline 0.824) should decrease
-        new_elo = update_ace_resistance(1500.0, 0.75, "Hard")
-        assert new_elo < 1500.0
-
-    def test_missing_stats_unchanged(self):
-        from mvp.atptour.elo.ratings import update_ace_resistance
-
-        new_elo = update_ace_resistance(1500.0, None, "Hard")
-        assert new_elo == 1500.0
-
-
-class TestUpdateServeClutch:
-    """Test serve clutch update based on break points saved."""
-
-    def test_above_baseline_increases(self):
-        from mvp.atptour.elo.ratings import update_serve_clutch
-
-        # 0.70 save rate on Hard (baseline 0.597) should increase
-        new_elo = update_serve_clutch(1500.0, 0.70, "Hard")
-        assert new_elo > 1500.0
-
-    def test_below_baseline_decreases(self):
-        from mvp.atptour.elo.ratings import update_serve_clutch
-
-        # 0.50 save rate on Hard (baseline 0.597) should decrease
-        new_elo = update_serve_clutch(1500.0, 0.50, "Hard")
-        assert new_elo < 1500.0
-
-
-class TestUpdateReturnClutch:
-    """Test return clutch update based on break points converted."""
-
-    def test_above_baseline_increases(self):
-        from mvp.atptour.elo.ratings import update_return_clutch
-
-        # 0.50 conversion rate on Hard (baseline 0.404) should increase
-        new_elo = update_return_clutch(1500.0, 0.50, "Hard")
-        assert new_elo > 1500.0
-
-    def test_below_baseline_decreases(self):
-        from mvp.atptour.elo.ratings import update_return_clutch
-
-        # 0.30 conversion rate on Hard (baseline 0.404) should decrease
-        new_elo = update_return_clutch(1500.0, 0.30, "Hard")
-        assert new_elo < 1500.0
+        cfg = self._cfg("serve_clutch")
+        b = cfg.cells[0]
+        r = PlayerRating()
+        update_style(r, "serve_clutch", 6, 10, "Hard", "tour", False, date(2024, 1, 1))
+        day = r.style_acc["serve_clutch"].last_day
+        update_style(r, "serve_clutch", 4, 5, "Hard", "tour", False, None)
+        acc = r.style_acc["serve_clutch"]
+        assert acc.last_day == day
+        assert acc.se == pytest.approx((6 - 10 * b) + (4 - 5 * b))
+        assert acc.sw == pytest.approx(15.0)
 
 
 class TestUpdateTbClutch:
@@ -803,6 +851,12 @@ class TestUpdateTbClutch:
         # No TBs played - unchanged
         new_elo = update_tb_clutch(1500.0, 0, 0)
         assert new_elo == 1500.0
+
+    def test_tb_clutch_alpha(self):
+        from mvp.atptour.elo.ratings import update_tb_clutch
+
+        # One TB won: target 1500 + 0.5 * 3000 = 3000; moves by 0.002 * 1500 = 3
+        assert update_tb_clutch(1500.0, 1, 1) == pytest.approx(1503.0)
 
 
 class TestUpdateIndoorAdj:
@@ -890,13 +944,18 @@ class TestEMAConvergence:
         assert abs(returner_elo - prev_returner) < 0.1
 
     def test_first_serve_power_converges(self):
-        from mvp.atptour.elo.ratings import update_first_serve_power
+        from mvp.atptour.elo.constants import STYLE_CONFIGS
+        from mvp.atptour.elo.ratings import update_style
 
-        elo = DEFAULT_ELO
+        r = PlayerRating()
         for _ in range(200):
-            elo = update_first_serve_power(elo, 0.25, "Hard")
-        # Target = 1500 + (0.25 - 0.176) * 3000 = 1722
-        assert abs(elo - 1722.0) < 0.01
+            update_style(
+                r, "first_serve_power", 5, 20, "Hard", "tour", False, date(2024, 1, 1)
+            )
+        b = STYLE_CONFIGS["first_serve_power"].cells[0]
+        s_w = (1 - 0.97 ** 200) / 0.03
+        expected = DEFAULT_ELO + 3000.0 * (0.25 - b) * s_w / (s_w + 3.0)
+        assert abs(r.first_serve_power - expected) < 0.01
 
     def test_tb_clutch_converges(self):
         from mvp.atptour.elo.ratings import update_tb_clutch
@@ -904,8 +963,8 @@ class TestEMAConvergence:
         elo = DEFAULT_ELO
         for _ in range(200):
             elo = update_tb_clutch(elo, 2, 3)
-        # Target = 1500 + (0.6667 - 0.50) * 3000 = 2000
-        assert abs(elo - 2000.0) < 1.0
+        # Target 2000 at alpha 0.002: 1500 + 500 * (1 - 0.998 ** 200) = 1664.974
+        assert abs(elo - (1500 + 500 * (1 - 0.998 ** 200))) < 0.01
 
     def test_different_match_counts_same_stats_converge(self):
         """Two players with identical stats but different match counts

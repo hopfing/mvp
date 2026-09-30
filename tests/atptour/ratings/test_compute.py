@@ -808,3 +808,198 @@ def test_null_surface_rates_as_carpet():
     null, carpet, hard = run(None), run("Carpet"), run("Hard")
     assert null.equals(carpet)
     assert null["player_hard_adj"][-1] != hard["player_hard_adj"][-1]
+
+
+def _style_df() -> pl.DataFrame:
+    """A vs B six times, 45 days apart, varying circuit, surface and indoor,
+    with serve counts on both sides. Both orientation rows per match; the pass
+    uses A's row. Every match is played two days after its tournament starts,
+    so the day clock must read effective_match_date. Match 5 (index 4) carries
+    skips: A faced no break points and B's aces are missing."""
+    spec = [  # (circuit, surface, indoor)
+        ("tour", "Hard", False),
+        ("chal", "Clay", True),
+        ("tour", "Hard", False),
+        ("chal", "Grass", False),
+        ("tour", "Clay", False),
+        ("tour", "Hard", True),
+    ]
+    # per match: A's serve (aces, fs_won, dfs, second_played, bp_saved, bp_faced),
+    # and B's serve in the same shape
+    a_srv = [
+        (6, 30, 3, 25, 4, 6),
+        (2, 25, 5, 30, 3, 7),
+        (9, 35, 1, 20, 1, 1),
+        (4, 28, 2, 26, 5, 9),
+        (5, 29, 2, 24, 0, 0),
+        (3, 27, 4, 28, 2, 4),
+    ]
+    b_srv = [
+        (3, 28, 4, 27, 5, 8),
+        (5, 31, 2, 22, 2, 2),
+        (1, 24, 6, 33, 6, 10),
+        (7, 33, 3, 24, 0, 3),
+        (None, 30, 3, 25, 3, 5),
+        (2, 26, 5, 29, 4, 6),
+    ]
+    b_fs_in = [
+        45,
+        44,
+        40,
+        46,
+        43,
+        41,
+    ]  # B's first serves in: A's first-serve return points played
+    a_fs_in = [42, 38, 47, 41, 40, 39]
+    rows = []
+    for n, (circ, surf, ind) in enumerate(spec):
+        d = date(2021, 1, 4) + timedelta(days=45 * n)
+        a, bb = a_srv[n], b_srv[n]
+        side_a = {
+            "svc_aces": a[0],
+            "svc_first_serve_pts_won": a[1],
+            "svc_double_faults": a[2],
+            "svc_second_serve_pts_played": a[3],
+            "svc_bp_saved": a[4],
+            "svc_bp_faced": a[5],
+            "ret_first_serve_pts_played": b_fs_in[n],
+            "ret_first_serve_pts_won": b_fs_in[n] - bb[1],
+            "ret_bp_converted": bb[5] - bb[4],
+            "ret_bp_opportunities": bb[5],
+        }
+        side_b = {
+            "svc_aces": bb[0],
+            "svc_first_serve_pts_won": bb[1],
+            "svc_double_faults": bb[2],
+            "svc_second_serve_pts_played": bb[3],
+            "svc_bp_saved": bb[4],
+            "svc_bp_faced": bb[5],
+            "ret_first_serve_pts_played": a_fs_in[n],
+            "ret_first_serve_pts_won": a_fs_in[n] - a[1],
+            "ret_bp_converted": a[5] - a[4],
+            "ret_bp_opportunities": a[5],
+        }
+        for pid, oid, w, mine, theirs in (
+            ("A", "B", True, side_a, side_b),
+            ("B", "A", False, side_b, side_a),
+        ):
+            row = {
+                "match_uid": f"s{n:02d}",
+                "player_id": pid,
+                "opp_id": oid,
+                "won": w,
+                "surface": surf,
+                "indoor": ind,
+                "circuit": circ,
+                "round": "R32",
+                "round_order": 7,
+                "tournament_start_date": d,
+                "tournament_level": "250",
+                "effective_match_date": d + timedelta(days=2),
+                "player_rank": 50,
+                "opp_rank": 60,
+                "pts_service_pts_won": None,
+                "pts_service_pts_played": None,
+                "opp_pts_service_pts_won": None,
+                "opp_pts_service_pts_played": None,
+                "pts_return_pts_won": None,
+                "pts_return_pts_played": None,
+            }
+            row.update(mine)
+            row.update({f"opp_{k}": v for k, v in theirs.items()})
+            rows.append(row)
+    return pl.DataFrame(rows, strict=False)
+
+
+def _ok(*vals) -> bool:
+    """The pass's skip rule: every count present and the denominator (last) positive."""
+    return all(v is not None for v in vals) and vals[-1] > 0
+
+
+class TestStyleDimensions:
+    """The pass feeds update_style each rating's counts, both sides (#141)."""
+
+    def test_style_ratings_follow_update_style(self):
+        from mvp.atptour.elo.ratings import PlayerRating, update_style
+
+        df = _style_df()
+        out = (
+            compute_all_ratings(df).filter(pl.col("player_id") == "A").sort("match_uid")
+        )
+        ra, rb = PlayerRating(), PlayerRating()
+        names = [
+            "first_serve_power",
+            "ace_resistance",
+            "second_serve_reliability",
+            "serve_clutch",
+            "return_clutch",
+        ]
+        for i, row in enumerate(
+            df.filter(pl.col("player_id") == "A")
+            .sort("match_uid")
+            .iter_rows(named=True)
+        ):
+            for side, rating in (("player", ra), ("opp", rb)):
+                for name in names:
+                    got = out[f"{side}_{name}"][i]
+                    assert got == pytest.approx(getattr(rating, name), abs=1e-9), (
+                        i,
+                        side,
+                        name,
+                    )
+            ctx = (
+                row["surface"],
+                row["circuit"],
+                row["indoor"],
+                row["effective_match_date"],
+            )
+            for rating, pre in ((ra, ""), (rb, "opp_")):
+                other = "opp_" if pre == "" else ""
+                aces, fsw = row[f"{pre}svc_aces"], row[f"{pre}svc_first_serve_pts_won"]
+                if _ok(aces, fsw):
+                    update_style(rating, "first_serve_power", aces, fsw, *ctx)
+                dfs, sp2 = (
+                    row[f"{pre}svc_double_faults"],
+                    row[f"{pre}svc_second_serve_pts_played"],
+                )
+                if _ok(dfs, sp2):
+                    update_style(
+                        rating, "second_serve_reliability", sp2 - dfs, sp2, *ctx
+                    )
+                conceded = row[f"{other}svc_aces"]
+                lost = (
+                    row[f"{pre}ret_first_serve_pts_played"]
+                    - row[f"{pre}ret_first_serve_pts_won"]
+                )
+                if _ok(conceded, lost):
+                    update_style(rating, "ace_resistance", lost - conceded, lost, *ctx)
+                saved, faced = row[f"{pre}svc_bp_saved"], row[f"{pre}svc_bp_faced"]
+                if _ok(saved, faced):
+                    update_style(rating, "serve_clutch", saved, faced, *ctx)
+                conv, opps = (
+                    row[f"{pre}ret_bp_converted"],
+                    row[f"{pre}ret_bp_opportunities"],
+                )
+                if _ok(conv, opps):
+                    update_style(rating, "return_clutch", conv, opps, *ctx)
+        # match 5 (index 4) skips: A faced no break points (A serve_clutch,
+        # B return_clutch), and B's aces are missing (A ace_resistance,
+        # B first_serve_power); the rest move
+        for col in (
+            "player_serve_clutch",
+            "opp_return_clutch",
+            "player_ace_resistance",
+            "opp_first_serve_power",
+        ):
+            assert out[col][5] == out[col][4], col
+        for col in (
+            "player_first_serve_power",
+            "opp_serve_clutch",
+            "player_return_clutch",
+            "opp_ace_resistance",
+        ):
+            assert out[col][5] != out[col][4], col
+        # the per-day clock reads effective_match_date, two days after the
+        # tournament start
+        last_date = row["effective_match_date"]
+        assert ra.style_acc["serve_clutch"].last_day == last_date.toordinal()

@@ -323,8 +323,11 @@ STREAMS: tuple[StreamConfig, ...] = (
         q_surf=0.0,
         q_indoor=0.0,
         v0=0.16027899978278223,
-        seed_s=0.46130496218091604,
-        seed_r=0.06533376970916327,
+        # Re-tuned on the rebuilt style ratings (issue #141): 200 TPE
+        # trials, 2016-2021, ll_mix per point, style-sourced seed weights
+        # only (style_study.py retune_seeds), 4 decimals. Was 0.4613 / 0.0653.
+        seed_s=0.4136,
+        seed_r=0.1598,
         tau2=0.11219239749351469,
         mu_cells=(
             -2.3941189281, -2.3806214492, -2.6418565238, -2.3962192438,
@@ -363,8 +366,11 @@ STREAMS: tuple[StreamConfig, ...] = (
         q_surf=0.0,
         q_indoor=0.0,
         v0=0.013747880700660917,
-        seed_s=0.015658448702932856,
-        seed_r=0.023120333579962394,
+        # Re-tuned on the rebuilt style ratings (issue #141): 200 TPE
+        # trials, 2016-2021, ll_mix per point, style-sourced seed weights
+        # only (style_study.py retune_seeds), 4 decimals. Was 0.0157 / 0.0231.
+        seed_s=0.0737,
+        seed_r=0.0116,
         tau2=0.026544910565251066,
         mu_cells=(
             0.4347063866, 0.4524177721, 0.3494444618, 0.4205363944,
@@ -402,8 +408,11 @@ STREAMS: tuple[StreamConfig, ...] = (
         q_surf=0.0,
         q_indoor=0.0,
         v0=0.037105521013273045,
-        seed_s=0.02437407562274649,
-        seed_r=0.010212651890891992,
+        # Re-tuned on the rebuilt style ratings (issue #141): 200 TPE
+        # trials, 2016-2021, ll_mix per point, style-sourced seed weights
+        # only (style_study.py retune_seeds), 4 decimals. Was 0.0244 / 0.0102.
+        seed_s=0.3233,
+        seed_r=0.3248,
         tau2=0.026544910565251066,
         mu_cells=(
             0.0000000000, 0.0000000000, 0.0000000000, 0.0000000000,
@@ -419,8 +428,11 @@ STREAMS: tuple[StreamConfig, ...] = (
         q_surf=0.0,
         q_indoor=0.0,
         v0=0.005433004232599732,
-        seed_s=0.0020071118460463847,
-        seed_r=0.007205619086305153,
+        # Re-tuned on the rebuilt style ratings (issue #141): 200 TPE
+        # trials, 2016-2021, ll_mix per point, style-sourced seed weights
+        # only (style_study.py retune_seeds), 4 decimals. Was 0.0020 / 0.0072.
+        seed_s=0.1165,
+        seed_r=0.1194,
         tau2=0.0006672829299535788,
         mu_cells=(
             0.0000000000, 0.0000000000, 0.0000000000, 0.0000000000,

@@ -1,15 +1,12 @@
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 
 from mvp.atptour.elo.constants import (
-    ACE_RESISTANCE_BASELINE,
     BASE_K,
     DEFAULT_ELO,
     DEFAULT_RD,
     DEFAULT_SERVE_ELO_CONFIG,
-    EMA_ALPHA,
-    FIRST_SERVE_POWER_BASELINE,
     HIGH_RD_K_MULT,
     HIGH_RD_THRESHOLD,
     MAX_RD,
@@ -18,17 +15,16 @@ from mvp.atptour.elo.constants import (
     NEW_PLAYER_THRESHOLD,
     RD_DECAY_FACTOR,
     RD_GROWTH_PER_DAY,
-    RETURN_CLUTCH_BASELINE,
     ROUND_IMPORTANCE,
-    SECOND_SERVE_RELIABILITY_BASELINE,
     SEED_ELO_MAX,
     SEED_ELO_MIN,
     SEED_RANK_COEFF,
     SEED_UNRANKED,
     SERVE_BASELINE,
-    SERVE_CLUTCH_BASELINE,
     INDOOR_SERVE_BOOST,
+    STYLE_CONFIGS,
     STYLE_SCALE,
+    TB_CLUTCH_ALPHA,
     TB_CLUTCH_BASELINE,
     TOURNAMENT_IMPORTANCE,
     ServeEloConfig,
@@ -52,6 +48,17 @@ def match_axes(surface: str | None, indoor: bool | None) -> tuple[str, ...]:
 
 
 @dataclass
+class StyleAccumulator:
+    """Decayed sums behind one count-based style dimension (issue #141): `se` of the
+    weighted per-match deviations from the cell baseline, `sw` of the weights, and the
+    ordinal day of the last update (per-day decay only)."""
+
+    se: float = 0.0
+    sw: float = 0.0
+    last_day: int | None = None
+
+
+@dataclass
 class PlayerRating:
     """Holds multi-dimensional Elo rating state for a player."""
 
@@ -72,6 +79,9 @@ class PlayerRating:
     return_clutch: float = DEFAULT_ELO
     tb_clutch: float = DEFAULT_ELO
     overall_clutch: float = DEFAULT_ELO
+    # Accumulators behind the five count-based style dimensions, keyed by name; the
+    # float fields above hold the current rating (update_style).
+    style_acc: dict[str, StyleAccumulator] = field(default_factory=dict)
     indoor_adj: float = 0.0
     match_count: int = 0
     last_match_date: date | None = None
@@ -453,94 +463,64 @@ def initialize_player(
     )
 
 
-def update_first_serve_power(
-    current_elo: float,
-    ace_rate: float | None,
-    surface: str,
-) -> float:
-    """Update first serve power based on ace rate.
+_STYLE_SURFACE = {"Hard": 0, "Clay": 1, "Grass": 2}
+_STYLE_CIRCUIT = {"tour": 0, "chal": 1}
 
-    ace_rate = aces / first_serve_pts_won
-    Uses EMA toward a target derived from observed ace rate.
+
+def style_cell(
+    surface: str | None, circuit: str | None, indoor: bool | None
+) -> int | None:
+    """Baseline cell of a match: surface*4 + circuit*2 + indoor.
+
+    Any surface other than Hard/Clay/Grass (Carpet, null) counts as Hard; a null indoor
+    counts as outdoor. Circuits other than tour/chal have no cell (None): the rating's
+    `default` baseline applies.
     """
-    if ace_rate is None:
-        return current_elo
-
-    baseline = FIRST_SERVE_POWER_BASELINE.get(surface, 0.176)
-    target = DEFAULT_ELO + (ace_rate - baseline) * STYLE_SCALE
-    return current_elo + EMA_ALPHA * (target - current_elo)
+    c = _STYLE_CIRCUIT.get(circuit) if circuit is not None else None
+    if c is None:
+        return None
+    return _STYLE_SURFACE.get(surface, 0) * 4 + c * 2 + (1 if indoor else 0)
 
 
-def update_second_serve_reliability(
-    current_elo: float,
-    reliability: float | None,
-    surface: str,
-) -> float:
-    """Update second serve reliability.
+def update_style(
+    rating: "PlayerRating",
+    name: str,
+    k: float,
+    n: float,
+    surface: str | None,
+    circuit: str | None,
+    indoor: bool | None,
+    match_date,
+) -> None:
+    """Update one count-based style dimension from a match's counts (issue #141).
 
-    reliability = 1 - (double_faults / second_serve_pts_played)
-    Uses EMA toward a target derived from observed reliability.
+    Rate x = k / n (caller guarantees n > 0), deviation from the cell baseline. The
+    accumulator decays (per match by `lam`, or per day by the half-life since this
+    rating's last update), then adds the deviation with weight 1 or n. The rating is
+    1500 + STYLE_SCALE * se / (sw + w0). A `match_date` that is not a date skips the
+    per-day decay and leaves the clock unchanged.
     """
-    if reliability is None:
-        return current_elo
-
-    baseline = SECOND_SERVE_RELIABILITY_BASELINE.get(surface, 0.893)
-    target = DEFAULT_ELO + (reliability - baseline) * STYLE_SCALE
-    return current_elo + EMA_ALPHA * (target - current_elo)
-
-
-def update_ace_resistance(
-    current_elo: float,
-    resistance: float | None,
-    surface: str,
-) -> float:
-    """Update ace resistance based on opponent's ace rate against us.
-
-    resistance = 1 - (opp_svc_aces / ret_first_serve_pts_lost)
-    Uses EMA toward a target derived from observed resistance.
-    """
-    if resistance is None:
-        return current_elo
-
-    baseline = ACE_RESISTANCE_BASELINE.get(surface, 0.824)
-    target = DEFAULT_ELO + (resistance - baseline) * STYLE_SCALE
-    return current_elo + EMA_ALPHA * (target - current_elo)
-
-
-def update_serve_clutch(
-    current_elo: float,
-    save_rate: float | None,
-    surface: str,
-) -> float:
-    """Update serve clutch based on break points saved.
-
-    save_rate = bp_saved / bp_faced
-    Uses EMA toward a target derived from observed save rate.
-    """
-    if save_rate is None:
-        return current_elo
-
-    baseline = SERVE_CLUTCH_BASELINE.get(surface, 0.597)
-    target = DEFAULT_ELO + (save_rate - baseline) * STYLE_SCALE
-    return current_elo + EMA_ALPHA * (target - current_elo)
-
-
-def update_return_clutch(
-    current_elo: float,
-    conversion_rate: float | None,
-    surface: str,
-) -> float:
-    """Update return clutch based on break points converted.
-
-    conversion_rate = bp_converted / bp_opportunities
-    Uses EMA toward a target derived from observed conversion rate.
-    """
-    if conversion_rate is None:
-        return current_elo
-
-    baseline = RETURN_CLUTCH_BASELINE.get(surface, 0.404)
-    target = DEFAULT_ELO + (conversion_rate - baseline) * STYLE_SCALE
-    return current_elo + EMA_ALPHA * (target - current_elo)
+    cfg = STYLE_CONFIGS[name]
+    acc = rating.style_acc.get(name)
+    if acc is None:
+        acc = StyleAccumulator()
+        rating.style_acc[name] = acc
+    cell = style_cell(surface, circuit, indoor)
+    b = cfg.default if cell is None else cfg.cells[cell]
+    if cfg.decay == "match":
+        acc.se *= cfg.lam
+        acc.sw *= cfg.lam
+    elif isinstance(match_date, date):
+        day = match_date.toordinal()
+        if acc.last_day is not None:
+            f = 0.5 ** ((day - acc.last_day) / cfg.half_life_days)
+            acc.se *= f
+            acc.sw *= f
+        acc.last_day = day
+    w = 1.0 if cfg.weighting == "match" else float(n)
+    acc.se += w * (k / n - b)
+    acc.sw += w
+    setattr(rating, name, DEFAULT_ELO + STYLE_SCALE * acc.se / (acc.sw + cfg.w0))
 
 
 def update_tb_clutch(
@@ -550,14 +530,15 @@ def update_tb_clutch(
 ) -> float:
     """Update tiebreak clutch based on TB win rate.
 
-    Uses EMA toward a target derived from observed TB win rate.
+    Moving average toward a target derived from the observed TB win rate, at
+    TB_CLUTCH_ALPHA (issue #141: effectively a heavily shrunk career record).
     """
     if tb_played == 0:
         return current_elo
 
     win_rate = tb_won / tb_played
     target = DEFAULT_ELO + (win_rate - TB_CLUTCH_BASELINE) * STYLE_SCALE
-    return current_elo + EMA_ALPHA * (target - current_elo)
+    return current_elo + TB_CLUTCH_ALPHA * (target - current_elo)
 
 
 def update_indoor_adj(

@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import Literal
 
 # Starting values
 DEFAULT_ELO = 1500.0
@@ -118,7 +119,10 @@ SEED_ELO_MIN = 1200.0
 SEED_UNRANKED = 1300.0
 SEED_RANK_COEFF = 40.0
 
-# Style dimension baselines (calculated from historical data)
+# Style dimension surface baselines of the original moving-average update. The
+# update no longer reads them (STYLE_CONFIGS below carries per-cell baselines,
+# issue #141); kept for scripts/style_ratings/style_study.py, which replays the
+# shipped update.
 # First serve power = aces / first_serve_pts_won
 FIRST_SERVE_POWER_BASELINE = {"Hard": 0.176, "Clay": 0.110, "Grass": 0.198}
 
@@ -141,8 +145,85 @@ TB_CLUTCH_BASELINE = 0.50
 STYLE_K_MULT = 0.3  # More conservative than serve/return (0.4)
 STYLE_SCALE = 3000.0  # Smaller scale than serve/return (4000)
 
-# EMA smoothing for serve/return Elo and style dimensions
-EMA_ALPHA = 0.10  # Half-life ~7 matches
+# The original style-dimension update: a 10% moving average (half-life ~7 matches),
+# introduced by 5a327af to stop an unbounded accumulator and never tuned. Nothing in
+# src/ reads it any more: serve/return Elo and indoor_adj stopped using it in 899c472,
+# 78bc985 and c6a5212, and the style dimensions now use STYLE_CONFIGS and
+# TB_CLUTCH_ALPHA below (issue #141). Kept for scripts/style_ratings/style_study.py,
+# which replays the shipped update.
+EMA_ALPHA = 0.10
+
+
+@dataclass(frozen=True)
+class StyleConfig:
+    """How one count-based style dimension updates (issue #141).
+
+    The rating is 1500 + STYLE_SCALE * se / (sw + w0), where se and sw are decayed
+    sums of the weighted per-match deviation from the match cell's baseline, and of
+    the weights. `cells` is indexed surface*4 + circuit*2 + indoor (Hard 0 / Clay 1 /
+    Grass 2, anything else Hard; tour 0 / chal 1; indoor 1); `default` serves any
+    other circuit.
+    """
+
+    weighting: Literal["match", "count"]
+    decay: Literal["match", "day"]
+    lam: float             # per-match decay factor; 1.0 when decay == "day"
+    half_life_days: float  # per-day half-life; 0.0 when decay == "match"
+    w0: float              # prior weight at the baseline
+    cells: tuple[float, ...]
+    default: float
+
+
+# Configurations chosen by the style-ratings study (mvp-docs discovery/
+# 2026-09-30-style-ratings-study.md, step 3, best on 2016-2021 at predicting the next
+# match's counts). Cell baselines fit on 2002-2014 tour/chal matches, rounded to 10
+# decimals; the rounded values are the definition. Cells without data (9, 11) carry the
+# global rate. ace_resistance is on the resistance scale, 1 - (conceded ace rate).
+STYLE_CONFIGS: dict[str, StyleConfig] = {
+    "first_serve_power": StyleConfig(
+        weighting="match", decay="match", lam=0.97, half_life_days=0.0, w0=3.0,
+        cells=(0.1791582164, 0.1993679072, 0.1509004959, 0.1967169019,
+               0.1203361208, 0.1221292422, 0.1071925729, 0.1376624513,
+               0.1986977635, 0.1532789388, 0.1892320097, 0.1532789388),
+        default=0.1532789388,
+    ),
+    "ace_resistance": StyleConfig(
+        weighting="match", decay="match", lam=0.97, half_life_days=0.0, w0=3.0,
+        # 1 - the conceded-ace-rate cells (0.1791526725, 0.1993679072, 0.1509004959,
+        # 0.1967169019, 0.1211481087, 0.1221292422, 0.1071925729, 0.1378192491,
+        # 0.1986977635, 0.1534356360, 0.1892320097, 0.1534356360), as exact
+        # float literals
+        cells=(0.8208473275, 0.8006320928, 0.8490995041, 0.8032830981,
+               0.8788518913, 0.8778707578, 0.8928074270999999, 0.8621807509,
+               0.8013022365, 0.846564364, 0.8107679903, 0.846564364),
+        default=0.846564364,
+    ),
+    "second_serve_reliability": StyleConfig(
+        weighting="count", decay="match", lam=0.93, half_life_days=0.0, w0=104.0,
+        cells=(0.8985275734, 0.9093149600, 0.8786956798, 0.8884769594,
+               0.9081677512, 0.9062437910, 0.8847845214, 0.9009446816,
+               0.9000819178, 0.8935013434, 0.8765137081, 0.8935013434),
+        default=0.8935013434,
+    ),
+    "serve_clutch": StyleConfig(
+        weighting="count", decay="day", lam=1.0, half_life_days=960.0, w0=28.0,
+        cells=(0.5987030726, 0.6069855112, 0.5759835299, 0.6020323599,
+               0.5825023472, 0.5830399356, 0.5635767536, 0.5833176780,
+               0.6251545505, 0.5849978802, 0.6161688004, 0.5849978802),
+        default=0.5849978802,
+    ),
+    "return_clutch": StyleConfig(
+        weighting="count", decay="day", lam=1.0, half_life_days=960.0, w0=28.0,
+        cells=(0.4012969274, 0.3930144888, 0.4240321460, 0.3979676401,
+               0.4174824449, 0.4169600644, 0.4364232464, 0.4181852339,
+               0.3748454495, 0.4150085400, 0.3838311996, 0.4150085400),
+        default=0.4150085400,
+    ),
+}
+
+# tb_clutch keeps the moving-average form. The study's curve is flat below alpha 0.003
+# (0.0005 and 0.001 tie on 2016-2021); 0.002 is a judgment on that flat curve.
+TB_CLUTCH_ALPHA = 0.002
 
 # Score normalization for serve/return Elo — logistic slope, in serve-percentage
 # points, on the deviation from the surface baseline.
