@@ -1,0 +1,78 @@
+# xgb_union_260930 -- production lead promoted 2026-09-30.
+# Source trial: ew1208_21_log_union__h01_t136 (study ew1208_21_log_union, trial 136,
+#   rank 1 of 300 on holdout_cal_log_loss 0.59533). Content identical to
+#   models/ew1208_21_log_union__h01_t136.yaml; only the file name differs.
+# Model: one XGBoost model on the union of three FS draws' feature sets (landscape
+#   plan row G4), 2021 start, 12/8 expanding validation. Replaces the lead
+#   ew1206_23_log_os_22__h19_t238 and its stage ew1206_log_os_2LF__h24_t233.
+# Why: 2026 backtest on the 2026-09-28 frozen snapshot, all bets with edge, against
+#   production's stage output: log loss -0.00335 (SE 0.00100), units at open +90.6
+#   (block SE 35.4), gain over the opening market +0.00511 vs +0.00295. All 20 swept
+#   trials beat production (log loss -0.0028 to -0.0035).
+# production.yaml train range 2021-01-01..2026-08-31: this config's own latest
+#   backtest fold cutoff, so the deployed model is the one the backtest scored.
+data:
+  date_range:
+    end: 2025-12-31
+    start: 2021-01-01
+  filters:
+    circuit:
+    - tour
+    - chal
+    draw_type: singles
+features:
+  include:
+  - player_elo_surface_indoor_diff
+  - player_glicko_rd_diff
+  - player_bsr_pserve_logit_diff
+  - player_vs_opp_style_resid_flat_diff
+  - player_days_since_surface_diff
+  - player_vs_opp_style_resid_flat_diff(days=365)
+  - opp_pct_matches_on_surface
+  - player_svc_ace_pct_diff(days=30)
+  - player_melo_diff
+  - player_pct_matches_on_surface
+  - player_age
+  - player_height_diff
+  - player_match_count_diff(days=30)
+  - player_opp_elo_faced_avg_diff
+  - player_tourn_pts_service_lost_per_set
+  - player_surface_ace_pct_diff(days=30)
+  - player_pct_matches_on_surface(days=365)
+  - player_opp_elo_faced_avg
+  - opp_tourn_pts_total_lost_per_game
+  - opp_venue_win_pct(days=30)
+  - opp_tourn_pts_service_lost_per_set
+  - opp_age
+  - player_style_ace_rate(days=30)
+  - opp_surface_games_margin_per_set_lost(days=365)
+  - opp_surface_net_points_won(days=365)
+metrics:
+  objective:
+  - log_loss
+model:
+  params:
+    colsample_bylevel: 0.5503227645701593
+    colsample_bynode: 0.7088361880718954
+    colsample_bytree: 0.8537259139870736
+    gamma: 3.1960370517179273
+    grow_policy: lossguide
+    learning_rate: 0.012544448886673693
+    max_bin: 256
+    max_delta_step: 5
+    max_depth: 6
+    max_leaves: 192
+    min_child_weight: 16
+    n_estimators: 950
+    n_jobs: 10
+    random_state: 42
+    reg_alpha: 0.0871504277909404
+    reg_lambda: 0.43147938911735145
+    scale_pos_weight: 0.9599952035146758
+    subsample: 0.537567066917437
+    tree_method: hist
+  type: xgboost
+validation:
+  initial_train_months: 12
+  test_months: 8
+  type: date_expanding
