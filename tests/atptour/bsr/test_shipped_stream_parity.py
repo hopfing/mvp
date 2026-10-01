@@ -33,24 +33,36 @@ import pytest
 
 from mvp.atptour.bsr.constants import N_STREAMS, STREAM_INDEX, BsrConfig
 from mvp.atptour.bsr.filter import BSR_VALUE_NAMES, BsrTracker
+from tests.atptour.bsr._configs import (
+    SHIPPED_SERVE_SCALARS,
+    neutral_newcomer,
+    shipped_serve,
+)
 
 SHIPPED_REV = "26e4bbf"
 REPO = Path(__file__).resolve().parents[3]
 
 
+def _shipped_model() -> BsrConfig:
+    """The default config with the `serve` stream at its shipped literals and
+    every stream's newcomer terms neutral: the 2026-09-30 re-tune and the
+    newcomer terms are deliberate model changes the shipped filter does not
+    have, so the comparisons below hold them off."""
+    return shipped_serve(neutral_newcomer(BsrConfig()))
+
+
 def _serve_outdoor_config() -> BsrConfig:
-    """The default config with the `serve` stream's indoor axis switched off.
+    """`_shipped_model()` with the `serve` stream's indoor axis switched off.
 
     Built here rather than changing the default: the axis is shipped ON, and
     the point of this file is to compare the two filters where they are the
-    same model. Nothing else about the stream is touched.
+    same model.
     """
     from dataclasses import replace
 
-    from mvp.atptour.bsr.constants import STREAMS
-
-    return BsrConfig(
-        streams=(replace(STREAMS[0], has_indoor=False),) + STREAMS[1:]
+    cfg = _shipped_model()
+    return replace(
+        cfg, streams=(replace(cfg.streams[0], has_indoor=False),) + cfg.streams[1:]
     )
 
 
@@ -217,17 +229,19 @@ def test_other_streams_do_not_reach_the_shipped_stream():
 
 
 def test_default_config_matches_outdoors_and_only_diverges_indoors():
-    """The `serve` indoor axis is the ONE thing the default config changes.
+    """With the shipped serve literals and neutral newcomer terms, the `serve`
+    indoor axis is the ONE thing the default config changes.
 
     The three tests above run with the axis off, which is what makes their
-    "identical" claim meaningful. This one runs the DEFAULT config against the
+    "identical" claim meaningful. This one runs the default stream table
+    (re-tune and newcomer terms held off, see `_shipped_model`) against the
     shipped filter and pins the divergence to exactly the rows it is supposed
     to touch: every outdoor row still agrees to the bit, and at least one
     indoor row does not.
     """
     shipped = _load_shipped()
     old = shipped.BsrTracker(shipped.BsrConfig())
-    new = BsrTracker(BsrConfig())
+    new = BsrTracker(_shipped_model())
     j = 0
     indoor_diffs = 0
     for m in _matches(n=160, seed=23, circuits=("tour", "chal")):
@@ -360,6 +374,9 @@ def test_importlib_is_not_needed_but_the_module_loads():
     # later (the pooled stream's indoor residuals) have no shipped counterpart.
     assert shipped.BSR_VALUE_NAMES == BSR_VALUE_NAMES[:len(shipped.BSR_VALUE_NAMES)]
     assert importlib.util is not None
+    # The pinned serve literals are the shipped filter's own.
+    sc = shipped.BsrConfig()
+    assert {k: getattr(sc, k) for k in SHIPPED_SERVE_SCALARS} == SHIPPED_SERVE_SCALARS
     # The shipped state object is the pre-multi-stream one: scalar slots.
     st = shipped._PlayerState(0.0, 0.0, 0.1, 0.01)
     assert isinstance(st.sm, float) and isinstance(st.ssm, list)

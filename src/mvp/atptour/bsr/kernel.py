@@ -14,6 +14,16 @@ Layout (S streams, C player slots):
                       last_ss, last_rs              int32 (S, 3, C)
   counters            n_s, n_r                      int32 (S, C)
   seeded              uint8 (S, C): the stream's cold-start seed committed
+  newc                uint8 (S, C): the stream committed while the player
+                      was a newcomer (no earlier serve-stat match)
+
+Newcomer terms (`nc`, float64 (S, 4): c_s, c_r, dr_s, dr_r per stream; see
+`StreamConfig.nc_c_s`): for a newcomer, the prior means carry the offset c
+until the stream commits, which stores it; and every prediction adds the drift
+dr * exp(-n / tau_d) to each axis's mean (n = that axis's observations so far),
+which `_commit` stores only for the axes an observation touches, exactly like
+the variance drift. All-zero `nc` rows take no arithmetic at all, so a neutral
+stream is bit-identical to the filter without these terms.
 
 Work buffer W: float64 (2, NF, S), side 0 = the row player, side 1 = the
 opponent; fields below. It is filled by `predict_side` (the state drifted to
@@ -45,7 +55,12 @@ F_SSM, F_SSV, F_RSM, F_RSV = 4, 5, 6, 7
 F_ISM, F_ISV, F_IRM, F_IRV = 8, 9, 10, 11
 F_ETA, F_V = 12, 13
 F_SEED_S, F_SEED_R = 14, 15
-NF = 16
+# Newcomer terms: the drift added to each mean in this prediction, whether the
+# player counts as a newcomer in the stream on this row (1.0 / 0.0), and the
+# means before the drift (what a seed commit stores). Not emitted.
+F_DR_S, F_DR_R, F_NEW = 16, 17, 18
+F_BASE_SM, F_BASE_RM = 19, 20
+NF = 21
 
 OVERALL_VAR_FLOOR = 1e-6
 SURFACE_VAR_FLOOR = 1e-7
@@ -65,7 +80,7 @@ def _sigmoid(x):
 def init_player(i, elo8, W_unused,
                 sm, sv, rm, rv, ssm, ssv, rsm, rsv, ism, isv, irm, irv,
                 last_s, last_r, last_ss, last_rs, last_is, last_ir,
-                n_s, n_r, seeded, v0, q_surf, q_indoor,
+                n_s, n_r, seeded, newc, v0, q_surf, q_indoor,
                 seed_src_s, seed_src_r, seed_scale_s, seed_scale_r):
     """A fresh state for player slot `i`, seeded from this row's Elo capture
     (`elo8`: the eight 1500-centred components, NaN when absent)."""
@@ -93,6 +108,7 @@ def init_player(i, elo8, W_unused,
         n_s[j, i] = 0
         n_r[j, i] = 0
         seeded[j, i] = 0
+        newc[j, i] = 0
 
 
 @njit(cache=True)
@@ -112,14 +128,21 @@ def predict_side(side, i, s, day, is_indoor, elo8, reseed, W,
                  last_s, last_r, last_ss, last_rs, last_is, last_ir, seeded,
                  q_s, q_r, q_surf, q_indoor, cap_days, phi,
                  has_surf, has_ind, seed_src_s, seed_src_r,
-                 seed_scale_s, seed_scale_r, seedable):
+                 seed_scale_s, seed_scale_r, seedable,
+                 n_s, n_r, newc, nc_now, nc, tau_d):
     """The state of slot `i` drifted to `day` for surface `s`, into W[side].
 
     Mirrors the reference `_predict`: overall variances grow with the capped
     elapsed days since that axis's last observation; this surface's residual
     axes take one AR(1) step if ever observed; the indoor axes drift only on
     an indoor match; an uncommitted seedable stream re-reads its seed from
-    this row's Elo (when `reseed`, i.e. the row is in domain)."""
+    this row's Elo (when `reseed`, i.e. the row is in domain).
+
+    Then the newcomer terms: the player is a newcomer in stream j if the
+    stream committed while they were one, or, before it commits, if they are
+    one now (`nc_now`: no earlier serve-stat match). A newcomer's uncommitted
+    means take the offset; every newcomer's means take the drift for the
+    observations made so far on each axis."""
     S = sm.shape[0]
     phi2 = phi * phi
     for j in range(S):
@@ -191,6 +214,31 @@ def predict_side(side, i, s, day, is_indoor, elo8, reseed, W,
             if seeded[j, i] == 0:
                 W[side, F_SM, j] = NAN
                 W[side, F_RM, j] = NAN
+    for j in range(S):
+        if seeded[j, i] == 1:
+            isnew = newc[j, i] == 1
+        else:
+            isnew = nc_now
+        W[side, F_NEW, j] = 1.0 if isnew else 0.0
+        W[side, F_DR_S, j] = 0.0
+        W[side, F_DR_R, j] = 0.0
+        if (isnew and W[side, F_SM, j] == W[side, F_SM, j]
+                and (nc[j, 0] != 0.0 or nc[j, 1] != 0.0
+                     or nc[j, 2] != 0.0 or nc[j, 3] != 0.0)):
+            if seeded[j, i] == 0:
+                W[side, F_SM, j] = W[side, F_SM, j] + nc[j, 0]
+                W[side, F_RM, j] = W[side, F_RM, j] + nc[j, 1]
+            W[side, F_BASE_SM, j] = W[side, F_SM, j]
+            W[side, F_BASE_RM, j] = W[side, F_RM, j]
+            ds = nc[j, 2] * math.exp(-n_s[j, i] / tau_d)
+            dr = nc[j, 3] * math.exp(-n_r[j, i] / tau_d)
+            W[side, F_SM, j] = W[side, F_SM, j] + ds
+            W[side, F_RM, j] = W[side, F_RM, j] + dr
+            W[side, F_DR_S, j] = ds
+            W[side, F_DR_R, j] = dr
+        else:
+            W[side, F_BASE_SM, j] = W[side, F_SM, j]
+            W[side, F_BASE_RM, j] = W[side, F_RM, j]
 
 
 @njit(cache=True)
@@ -337,28 +385,36 @@ def apply_match(ia, ib, s, day, is_indoor, W,
                 k_a, n_a, k_b, n_b, mask_a, mask_b,
                 sm, sv, rm, rv, ssm, ssv, rsm, rsv, ism, isv, irm, irv,
                 last_s, last_r, last_ss, last_rs, last_is, last_ir,
-                n_s, n_r, seeded, tau2, newton, has_ret, has_surf, has_ind):
+                n_s, n_r, seeded, newc, tau2, newton, has_ret, has_surf, has_ind):
     """Commit the seeds, the drift and the clocks for the axes the two
     observations touch, then the Newton/Laplace updates, exactly as the
     reference `apply`/`_commit`/`_update`. W holds both sides' predictions
     (the pre-match state) and their eta/v; `mask_*` the valid observations."""
     S = sm.shape[0]
     # Seeds of every stream this match observes, for BOTH players and both
-    # axes, before any update moves them.
+    # axes, before any update moves them: the means before the newcomer
+    # drift (the offset included), with the newcomer status they carry. The
+    # drift is committed per observed axis in `_commit`. On a stream without
+    # a returner the opponent is committed by the server's observation alone;
+    # on the aggregate no player's first commit in any stream came without
+    # their own observation (measured 2026-09-30), so the newcomer status and
+    # offset land where the research filter put them.
     for j in range(S):
         if mask_a[j] == 1 or mask_b[j] == 1:
             if seeded[j, ia] == 0:
-                sm[j, ia] = W[0, F_SM, j]
-                rm[j, ia] = W[0, F_RM, j]
+                sm[j, ia] = W[0, F_BASE_SM, j]
+                rm[j, ia] = W[0, F_BASE_RM, j]
+                newc[j, ia] = 1 if W[0, F_NEW, j] == 1.0 else 0
                 seeded[j, ia] = 1
             if seeded[j, ib] == 0:
-                sm[j, ib] = W[1, F_SM, j]
-                rm[j, ib] = W[1, F_RM, j]
+                sm[j, ib] = W[1, F_BASE_SM, j]
+                rm[j, ib] = W[1, F_BASE_RM, j]
+                newc[j, ib] = 1 if W[1, F_NEW, j] == 1.0 else 0
                 seeded[j, ib] = 1
     # a serves, b returns
     if _any(mask_a):
         _commit(ia, ib, 0, 1, s, day, is_indoor, W, mask_a,
-                sv, rv, ssm, ssv, rsm, rsv, ism, isv, irm, irv,
+                sm, sv, rm, rv, ssm, ssv, rsm, rsv, ism, isv, irm, irv,
                 last_s, last_r, last_ss, last_rs, last_is, last_ir, n_s, n_r,
                 has_ret, has_surf, has_ind)
         for j in range(S):
@@ -370,7 +426,7 @@ def apply_match(ia, ib, s, day, is_indoor, W,
     # b serves, a returns
     if _any(mask_b):
         _commit(ib, ia, 1, 0, s, day, is_indoor, W, mask_b,
-                sv, rv, ssm, ssv, rsm, rsv, ism, isv, irm, irv,
+                sm, sv, rm, rv, ssm, ssv, rsm, rsv, ism, isv, irm, irv,
                 last_s, last_r, last_ss, last_rs, last_is, last_ir, n_s, n_r,
                 has_ret, has_surf, has_ind)
         for j in range(S):
@@ -391,13 +447,18 @@ def _any(mask):
 
 @njit(cache=True)
 def _commit(isrv, iret, wsrv, wret, s, day, is_indoor, W, mask,
-            sv, rv, ssm, ssv, rsm, rsv, ism, isv, irm, irv,
+            sm, sv, rm, rv, ssm, ssv, rsm, rsv, ism, isv, irm, irv,
             last_s, last_r, last_ss, last_rs, last_is, last_ir, n_s, n_r,
             has_ret, has_surf, has_ind):
+    """The drift of the axes this observation touches into stored state: the
+    variances, the residual axes, and a newcomer's mean drift (the predicted
+    mean, which is the stored mean plus that drift)."""
     S = sv.shape[0]
     for j in range(S):
         if mask[j] != 1:
             continue
+        if W[wsrv, F_DR_S, j] != 0.0:
+            sm[j, isrv] = W[wsrv, F_SM, j]
         sv[j, isrv] = W[wsrv, F_SV, j]
         last_s[j, isrv] = day
         n_s[j, isrv] += 1
@@ -410,6 +471,8 @@ def _commit(isrv, iret, wsrv, wret, s, day, is_indoor, W, mask,
             isv[j, isrv] = W[wsrv, F_ISV, j]
             last_is[j, isrv] = day
         if has_ret[j]:
+            if W[wret, F_DR_R, j] != 0.0:
+                rm[j, iret] = W[wret, F_RM, j]
             rv[j, iret] = W[wret, F_RV, j]
             last_r[j, iret] = day
             n_r[j, iret] += 1
@@ -488,7 +551,8 @@ def capture_all(ia, ib, s, cell, day, is_indoor, in_domain,
                 last_s, last_r, last_ss, last_rs, last_is, last_ir, n_s, seeded,
                 q_s, q_r, q_surf, q_indoor, cap_days, phi, tau2, mu,
                 has_ret, has_surf, has_ind, emit_cnt, emit_rsd,
-                seed_src_s, seed_src_r, seed_scale_s, seed_scale_r, seedable):
+                seed_src_s, seed_src_r, seed_scale_s, seed_scale_r, seedable,
+                n_r, newc, nc_now, nc, tau_d):
     """One match's whole capture in a single compiled call: observation
     masks, both sides' predictions, both matchups, and both sides' shipped
     and new-stream emissions. One call instead of eight, because the
@@ -508,14 +572,16 @@ def capture_all(ia, ib, s, cell, day, is_indoor, in_domain,
                      last_s, last_r, last_ss, last_rs, last_is, last_ir, seeded,
                      q_s, q_r, q_surf, q_indoor, cap_days, phi,
                      has_surf, has_ind, seed_src_s, seed_src_r,
-                     seed_scale_s, seed_scale_r, seedable)
+                     seed_scale_s, seed_scale_r, seedable,
+                     n_s, n_r, newc, nc_now[0] == 1, nc, tau_d)
     if have_b:
         predict_side(1, ib, s, day, is_indoor, elo8[1], in_domain, W,
                      sm, sv, rm, rv, ssm, ssv, rsm, rsv, ism, isv, irm, irv,
                      last_s, last_r, last_ss, last_rs, last_is, last_ir, seeded,
                      q_s, q_r, q_surf, q_indoor, cap_days, phi,
                      has_surf, has_ind, seed_src_s, seed_src_r,
-                     seed_scale_s, seed_scale_r, seedable)
+                     seed_scale_s, seed_scale_r, seedable,
+                     n_s, n_r, newc, nc_now[1] == 1, nc, tau_d)
     have_eta = in_domain and have_a and have_b
     if have_eta:
         matchup(W, 0, 1, cell, is_indoor, mu, has_ret, has_surf, has_ind)

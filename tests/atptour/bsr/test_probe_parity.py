@@ -27,6 +27,7 @@ from mvp.atptour.bsr.constants import (
 )
 from mvp.atptour.bsr.filter import BsrTracker
 from mvp.atptour.ratings.compute import compute_all_ratings
+from tests.atptour.bsr._configs import neutral_newcomer
 
 PROBE = Path(__file__).resolve().parents[3] / "scripts" / "bsr" / "probe_bsr.py"
 
@@ -37,14 +38,15 @@ def _serve_outdoor_config() -> BsrConfig:
     `run_filter` has no indoor residual, so the probe and the tracker are the
     same model only with that axis off. Under the default config the shipped
     stream carries one and its twelve columns differ from the probe's on
-    indoor rows by design; everything else here is the shipped tune.
+    indoor rows by design. The newcomer terms are held off too: `run_filter`
+    has none. The serve knobs are the current ones, which `P` below reads
+    from the same config's scalar fields.
     """
     from dataclasses import replace
 
-    from mvp.atptour.bsr.constants import STREAMS
-
-    return BsrConfig(
-        streams=(replace(STREAMS[0], has_indoor=False),) + STREAMS[1:]
+    cfg = neutral_newcomer(BsrConfig())
+    return replace(
+        cfg, streams=(replace(cfg.streams[0], has_indoor=False),) + cfg.streams[1:]
     )
 
 
@@ -165,7 +167,8 @@ def test_tracker_matches_probe_filter():
     assert set(res["state"]) == set(tracker._state)
 
 
-def test_every_stream_matches_the_probe():
+@pytest.mark.parametrize("newcomer_terms", [False, True], ids=["neutral", "default"])
+def test_every_stream_matches_the_probe(newcomer_terms):
     """Skeleton for the probe's multi-stream extension (build row 0).
 
     The shipped stream is pinned above against `run_filter` as it stands. When
@@ -186,7 +189,9 @@ def test_every_stream_matches_the_probe():
             "probe has no multi-stream entry point yet "
             "(expected run_filter_streams / run_filter_multi / stream_results)"
         )
-    cfg = BsrConfig()
+    # With the default config the newcomer terms are on, and the research
+    # kernel's flags come from the same frame's earlier serve-stat matches.
+    cfg = BsrConfig() if newcomer_terms else neutral_newcomer(BsrConfig())
     df = _synthetic_frame()
     tracker = BsrTracker(cfg)
     out = compute_all_ratings(df, bsr_tracker=tracker)
@@ -226,6 +231,8 @@ def _probe_streams(pb, hook: str, out, cfg):
             q_s=st.q_s, q_r=st.q_r, q_surf=st.q_surf, q_indoor=st.q_indoor,
             v0=st.v0, seed_s=st.seed_s, seed_r=st.seed_r, tau2=st.tau2,
             cap_days=cfg.cap_days, phi_surf=cfg.phi_surf, newton=cfg.newton,
+            nc_c_s=st.nc_c_s, nc_c_r=st.nc_c_r, nc_dr_s=st.nc_dr_s, nc_dr_r=st.nc_dr_r,
+            newcomer_tau_d=cfg.newcomer_tau_d,
         )
         mus[st.name] = np.asarray(st.mu_cells, dtype=float)
     res = obj(out, params, mus)

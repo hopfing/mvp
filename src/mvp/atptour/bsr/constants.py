@@ -1,12 +1,12 @@
 """Hyperparameters and fixed effects of the serve/return skill filter.
 
-Every number for the shipped `serve` stream was produced by
-`scripts/bsr/write_bsr_constants.py` from the probe's tune
+The `serve` stream's mu cells, `cap_days`, `q_surf` and `phi_surf` were produced
+by `scripts/bsr/write_bsr_constants.py` from the probe's tune
 (`scripts/bsr/probe_bsr.py --stage tune --seed-mode elo --disp-mode re`, 150
 trials, objective = prequential binomial log-likelihood on 2016-2021
-observations) and its fixed-effect fit on the 2015-2021 span. Nothing here is
-read from B:/ at runtime; re-tuning means re-running the script and pasting its
-output.
+observations) and its fixed-effect fit on the 2015-2021 span. Its q, v0, seed
+weights and tau2 were re-tuned jointly with the newcomer terms on 2026-09-30
+(see `StreamConfig.nc_c_s`). Nothing here is read from B:/ at runtime.
 
 Bundled as a frozen dataclass for the reason `ServeEloConfig` gives: the
 ratings pass binds names at import time, so the only override that cannot
@@ -54,18 +54,24 @@ MU_CELLS: tuple[float, ...] = (
     0.6426384918, 0.6426384918, 0.6188961169, 0.6188961169,
 )
 
-# The shipped stream's tuned knobs, named once so `BsrConfig`'s scalar fields
-# (which the probe-parity test and the verify script read) and the `serve`
-# StreamConfig cannot drift apart.
-_Q_S = 2.1859571733982455e-05
-_Q_R = 2.0316890516025758e-05
+# The `serve` stream's knobs, named once so `BsrConfig`'s scalar fields (which
+# the probe-parity test and the verify script read) and the `serve`
+# StreamConfig cannot drift apart. q_s, q_r, v0, the seed weights and tau2 are
+# the 2026-09-30 joint fit with the newcomer terms (3 significant figures, as
+# that run printed them). The values shipped before it, which the parity tests
+# pin, were q_s 2.1859571733982455e-05, q_r 2.0316890516025758e-05,
+# v0 0.062307747202284006, seeds 0.3279483258118909 / 0.2539311419400611 and
+# tau2 0.026544910565251066. No other stream inherits these five: every other
+# entry passes its own values.
+_Q_S = 1.59e-05
+_Q_R = 9.56e-06
 _CAP_DAYS = 304.2028723074866
 _Q_SURF = 0.0004286173606103864
 _PHI_SURF = 0.8354292615504447
-_V0 = 0.062307747202284006
-_SEED_ES = 0.3279483258118909
-_SEED_ER = 0.2539311419400611
-_TAU2 = 0.026544910565251066
+_V0 = 0.0381
+_SEED_ES = 0.204
+_SEED_ER = 0.186
+_TAU2 = 0.0266
 
 _ZERO_CELLS: tuple[float, ...] = (0.0,) * 12
 
@@ -131,6 +137,18 @@ class StreamConfig:
     # and the streams sharing a box score share it to four decimals.
     emit_counts: bool = True
     emit_residual_sd: bool = True
+    # Newcomer terms. A player is a newcomer in this stream when, at the match
+    # where the stream first commits for them, they have no earlier singles
+    # match with serve statistics (any circuit, any date). For a newcomer the
+    # stream adds `nc_c_s` / `nc_c_r` to the prior means at that first commit,
+    # and before each later observation on an axis adds
+    # `nc_dr * exp(-n / BsrConfig.newcomer_tau_d)` to that axis's mean, n being
+    # the player's observations so far on it (expected improvement). Zero is
+    # neutral: the filter is then exactly what it was without these terms.
+    nc_c_s: float = 0.0
+    nc_c_r: float = 0.0
+    nc_dr_s: float = 0.0
+    nc_dr_r: float = 0.0
 
     def input_columns(self) -> tuple[str, ...]:
         """Player-side columns this stream reads, in no particular order."""
@@ -161,6 +179,10 @@ def _stream(
     seed_r: float = 0.0,
     tau2: float = _TAU2,
     mu_cells: tuple[float, ...] = _ZERO_CELLS,
+    nc_c_s: float = 0.0,
+    nc_c_r: float = 0.0,
+    nc_dr_s: float = 0.0,
+    nc_dr_r: float = 0.0,
 ) -> StreamConfig:
     return StreamConfig(
         name=name, k_terms=k_terms, n_terms=n_terms,
@@ -171,6 +193,7 @@ def _stream(
         derived=derived,
         emit_counts=emit_counts,
         emit_residual_sd=emit_residual_sd,
+        nc_c_s=nc_c_s, nc_c_r=nc_c_r, nc_dr_s=nc_dr_s, nc_dr_r=nc_dr_r,
     )
 
 
@@ -225,8 +248,15 @@ def _rally(name: str, col: str, **knobs) -> StreamConfig:
 # `newton` are shared across every stream and stay at the shipped values; the
 # indoor residual axis reuses `phi_surf`. A stream whose median n < 10 has its
 # tau2 tied to the shipped pooled value and was excluded from that study.
-# The `serve` entry is the one exception: it keeps its SHIPPED literals (see
-# the comment on it below), taking only `q_indoor` from the multi-stream tune.
+# The `serve` entry is the one exception: it keeps its shipped mu cells and
+# `q_surf`, takes `q_indoor` from the multi-stream tune, and its q, v0, seeds
+# and tau2 come from the 2026-09-30 joint fit (see the literals above).
+#
+# Later re-tunes are hand-set and noted on each entry: the tb/tbpts re-tune,
+# the #141 seed re-tunes, and the 2026-09-30 joint fit with the newcomer terms
+# (serve, w1, w2, hold, df, easyhold re-tuned with them; bp, fsi, ace,
+# hardhold newcomer terms only). Re-running write_bsr_constants.py --multi
+# would revert them.
 # ---------------------------------------------------------------------------
 STREAMS: tuple[StreamConfig, ...] = (
     # -- the shipped stream; every value below is the tuned/fitted one --
@@ -236,11 +266,11 @@ STREAMS: tuple[StreamConfig, ...] = (
     # the axis is worth about -0.00003 LL/pt on the tune span, i.e. nothing,
     # and the cost is that the shipped columns move; both were accepted
     # because the three serve FS runs are being redone with the new columns
-    # anyway. `has_indoor=False` here plus the shipped literals reproduces the
-    # old filter exactly, which is what the port's regression tests assert.
-    # Its seven shipped knobs and mu cells are unchanged, so the twelve
-    # columns stay byte-identical on every OUTDOOR row; `q_indoor` is the one
-    # value the new axis needs and comes from the probe's with-indoor tune.
+    # anyway. `has_indoor=False` here plus the shipped literals and neutral
+    # newcomer terms reproduces the old filter exactly, which is what the
+    # port's regression tests assert (they pin the shipped literals).
+    # `q_indoor` is the one value the new axis needs and comes from the
+    # probe's with-indoor tune.
     _stream(
         "serve",
         ((1, "pts_service_pts_won"),),
@@ -249,6 +279,10 @@ STREAMS: tuple[StreamConfig, ...] = (
         seed_src_s="serve_elo", seed_src_r="return_elo",
         seed_s=_SEED_ES, seed_r=_SEED_ER, mu_cells=MU_CELLS,
         q_indoor=0.0018988169886704125,
+        # Newcomer terms (and, where the stream's q/v0/seed/tau2 changed, the
+        # re-tune) from the joint fit of 2026-09-30
+        # (mvp-docs discovery/2026-09-30-bsr-newcomer-dynamics.md, joint run 2).
+        nc_c_s=-0.216, nc_c_r=-0.117, nc_dr_s=0.0843, nc_dr_r=0.0609,
     ),
     # -- the three chain components the two-level model actually fits on --
     _stream(
@@ -264,6 +298,10 @@ STREAMS: tuple[StreamConfig, ...] = (
         seed_s=0.0,
         seed_r=0.0,
         tau2=0.014547784437498663,
+        # Newcomer terms (and, where the stream's q/v0/seed/tau2 changed, the
+        # re-tune) from the joint fit of 2026-09-30
+        # (mvp-docs discovery/2026-09-30-bsr-newcomer-dynamics.md, joint run 2).
+        nc_c_s=-0.154, nc_dr_s=0.0321,
         mu_cells=(
             0.4248812282, 0.4466880599, 0.4175514520, 0.4540349151,
             0.4870012934, 0.4585991826, 0.4376382250, 0.4563000229,
@@ -276,14 +314,20 @@ STREAMS: tuple[StreamConfig, ...] = (
         ((1, "svc_first_serve_in"),),
         has_returner=True, has_surface=True, has_indoor=True,
         seed_src_s="serve_elo", seed_src_r="return_elo",
-        q_s=3.7854156159318875e-05,
-        q_r=1.366527163746324e-05,
+        # Joint fit 2026-09-30. Was q_s 3.79e-05, q_r 1.37e-05, v0 0.0589,
+        # seeds 0.2746 / 0.1931, tau2 0.0368.
+        q_s=2.49e-05,
+        q_r=1.31e-05,
         q_surf=0.0003564072209689272,
         q_indoor=0.002802686473262052,
-        v0=0.05892387152690654,
-        seed_s=0.2746012409900017,
-        seed_r=0.19308872896072046,
-        tau2=0.036776185540241084,
+        v0=0.0456,
+        seed_s=0.211,
+        seed_r=0.221,
+        tau2=0.0387,
+        # Newcomer terms (and, where the stream's q/v0/seed/tau2 changed, the
+        # re-tune) from the joint fit of 2026-09-30
+        # (mvp-docs discovery/2026-09-30-bsr-newcomer-dynamics.md, joint run 2).
+        nc_c_s=-0.248, nc_c_r=-0.101, nc_dr_s=0.0939, nc_dr_r=0.0689,
         mu_cells=(
             0.9394974989, 0.9668052097, 0.8253451796, 0.9391223869,
             0.7752339057, 0.8592145853, 0.6878592319, 0.6756401175,
@@ -296,14 +340,20 @@ STREAMS: tuple[StreamConfig, ...] = (
         ((1, "svc_second_serve_pts_played"),),
         has_returner=True, has_surface=True, has_indoor=True,
         seed_src_s="second_serve_reliability", seed_src_r="return_elo",
-        q_s=1.0272663878337509e-05,
-        q_r=4.94943007410232e-06,
+        # Joint fit 2026-09-30. Was q_s 1.03e-05, q_r 4.95e-06, v0 0.0522,
+        # seeds 0.1963 / 0.0829, tau2 0.0166.
+        q_s=8.59e-06,
+        q_r=4.51e-06,
         q_surf=0.00023202368649506184,
         q_indoor=4.605044877398204e-05,
-        v0=0.05216413960792168,
-        seed_s=0.19631229790522525,
-        seed_r=0.08285450948524471,
-        tau2=0.016598103427368612,
+        v0=0.0279,
+        seed_s=0.189,
+        seed_r=0.141,
+        tau2=0.0204,
+        # Newcomer terms (and, where the stream's q/v0/seed/tau2 changed, the
+        # re-tune) from the joint fit of 2026-09-30
+        # (mvp-docs discovery/2026-09-30-bsr-newcomer-dynamics.md, joint run 2).
+        nc_c_s=-0.502, nc_c_r=-0.118, nc_dr_s=0.0866, nc_dr_r=0.0628,
         mu_cells=(
             0.0232711273, 0.0170298857, -0.0162023940, -0.0025617059,
             0.0089180217, 0.0123197913, -0.0523116769, -0.0473882696,
@@ -329,6 +379,10 @@ STREAMS: tuple[StreamConfig, ...] = (
         seed_s=0.4136,
         seed_r=0.1598,
         tau2=0.11219239749351469,
+        # Newcomer terms (and, where the stream's q/v0/seed/tau2 changed, the
+        # re-tune) from the joint fit of 2026-09-30
+        # (mvp-docs discovery/2026-09-30-bsr-newcomer-dynamics.md, joint run 2).
+        nc_c_s=-0.775, nc_c_r=-0.126, nc_dr_s=0.0675, nc_dr_r=0.059,
         mu_cells=(
             -2.3941189281, -2.3806214492, -2.6418565238, -2.3962192438,
             -2.8937738523, -2.7335393924, -3.1015352109, -3.0827119644,
@@ -341,14 +395,20 @@ STREAMS: tuple[StreamConfig, ...] = (
         ((1, "svc_second_serve_pts_played"), (-1, "svc_double_faults")),
         ((1, "svc_second_serve_pts_played"),),
         seed_src_s="second_serve_reliability",
-        q_s=9.146896723470498e-05,
+        # Joint fit 2026-09-30. Was q_s 9.15e-05, v0 0.1451, seed 0.3205,
+        # tau2 0.0590.
+        q_s=0.000103,
         q_r=0.0,
         q_surf=0.0,
         q_indoor=0.0,
-        v0=0.145143719424173,
-        seed_s=0.32047872148818474,
+        v0=0.0922,
+        seed_s=0.32,
         seed_r=0.0,
-        tau2=0.058991383806085554,
+        tau2=0.0583,
+        # Newcomer terms (and, where the stream's q/v0/seed/tau2 changed, the
+        # re-tune) from the joint fit of 2026-09-30
+        # (mvp-docs discovery/2026-09-30-bsr-newcomer-dynamics.md, joint run 2).
+        nc_c_s=-0.406, nc_dr_s=0.101,
         mu_cells=(
             2.1300790496, 2.2786770081, 2.0244205202, 2.1237339409,
             2.2829004681, 2.2470555890, 2.0896365751, 2.3177332956,
@@ -372,6 +432,10 @@ STREAMS: tuple[StreamConfig, ...] = (
         seed_s=0.0737,
         seed_r=0.0116,
         tau2=0.026544910565251066,
+        # Newcomer terms (and, where the stream's q/v0/seed/tau2 changed, the
+        # re-tune) from the joint fit of 2026-09-30
+        # (mvp-docs discovery/2026-09-30-bsr-newcomer-dynamics.md, joint run 2).
+        nc_c_s=-0.538, nc_c_r=-0.364, nc_dr_s=0.118, nc_dr_r=0.0776,
         mu_cells=(
             0.4347063866, 0.4524177721, 0.3494444618, 0.4205363944,
             0.3848348547, 0.3953314424, 0.2852518299, 0.3174586071,
@@ -386,14 +450,20 @@ STREAMS: tuple[StreamConfig, ...] = (
         ((1, "svc_games_played"),),
         has_returner=True, has_surface=True, has_indoor=True,
         seed_src_s="serve_elo", seed_src_r="return_elo",
-        q_s=8.600170290402003e-05,
-        q_r=5.261764120009311e-05,
+        # Joint fit 2026-09-30. Was q_s 8.60e-05, q_r 5.26e-05, v0 0.3571,
+        # seeds 0.5302 / 0.3397, tau2 0.1271.
+        q_s=9.1e-05,
+        q_r=5.18e-05,
         q_surf=0.009300599177403923,
         q_indoor=0.00017063965637928124,
-        v0=0.3571097114247016,
-        seed_s=0.5302371102001939,
-        seed_r=0.33968753003009167,
-        tau2=0.12711552977973659,
+        v0=0.242,
+        seed_s=0.504,
+        seed_r=0.519,
+        tau2=0.13,
+        # Newcomer terms (and, where the stream's q/v0/seed/tau2 changed, the
+        # re-tune) from the joint fit of 2026-09-30
+        # (mvp-docs discovery/2026-09-30-bsr-newcomer-dynamics.md, joint run 2).
+        nc_c_s=-0.602, nc_c_r=-0.271, nc_dr_s=0.236, nc_dr_r=0.149,
         mu_cells=(
             1.3135163053, 1.3594020065, 1.1184244027, 1.3029260439,
             1.1178320168, 1.2152744193, 0.9119046237, 0.9247884407,
@@ -471,14 +541,20 @@ STREAMS: tuple[StreamConfig, ...] = (
         ((1, "mb_player_easy_holds"),),
         ((1, "mb_player_service_games"),),
         seed_src_s="serve_elo",
-        q_s=2.8329960261154117e-05,
+        # Joint fit 2026-09-30. Was q_s 2.83e-05, v0 0.0249, seed 0.1747,
+        # tau2 0.1375.
+        q_s=2.15e-05,
         q_r=0.0,
         q_surf=0.0,
         q_indoor=0.0,
-        v0=0.02492206926962594,
-        seed_s=0.17466618550572802,
+        v0=0.0253,
+        seed_s=0.146,
         seed_r=0.0,
-        tau2=0.13752772725804352,
+        tau2=0.133,
+        # Newcomer terms (and, where the stream's q/v0/seed/tau2 changed, the
+        # re-tune) from the joint fit of 2026-09-30
+        # (mvp-docs discovery/2026-09-30-bsr-newcomer-dynamics.md, joint run 2).
+        nc_c_s=-0.532, nc_dr_s=0.149,
         mu_cells=(
             -0.3306376849, -0.2741193350, -0.4690888185, -0.3605678253,
             -0.5051155362, -0.4893638479, -0.6511755321, -0.5822464845,
@@ -498,6 +574,10 @@ STREAMS: tuple[StreamConfig, ...] = (
         seed_s=0.0,
         seed_r=0.0,
         tau2=0.004086583220733103,
+        # Newcomer terms (and, where the stream's q/v0/seed/tau2 changed, the
+        # re-tune) from the joint fit of 2026-09-30
+        # (mvp-docs discovery/2026-09-30-bsr-newcomer-dynamics.md, joint run 2).
+        nc_c_s=-0.249, nc_dr_s=0.0652,
         mu_cells=(
             -2.1351049097, -2.1645787915, -2.1081979460, -2.1077411271,
             -2.0909609592, -2.1008336030, -2.0767006487, -2.0642163341,
@@ -710,9 +790,10 @@ def bsr_input_columns() -> list[str]:
 class BsrConfig:
     """The filter's knobs. Field defaults are the tuned values.
 
-    The scalar fields below are the SHIPPED `serve` stream's; they stay because
-    the probe-parity test and `scripts/bsr/verify_ratings_pass.py` read them by
-    name to rebuild the probe's parameter dict. Per-stream knobs live in
+    The scalar fields below are the `serve` stream's (they are the same module
+    literals); they stay because the probe-parity test and
+    `scripts/bsr/verify_ratings_pass.py` read them by name to rebuild the
+    probe's parameter dict. Per-stream knobs live in
     `streams`; `cap_days`, `phi_surf` and `newton` are global and shared by
     every stream, as the plan's tuning protocol fixed them.
     """
@@ -731,9 +812,10 @@ class BsrConfig:
     # Cold start: prior mean = seed * (pre-match serve/return Elo - 1500) / 100.
     seed_es: float = _SEED_ES
     seed_er: float = _SEED_ER
-    # Per-observation random effect on eta (match-day form). Tuned per circuit
-    # (0.0265 tour, 0.0369 chal); shipped tied to the tour value, which the
-    # selection span measured as no loss.
+    # Per-observation random effect on eta (match-day form), one value for
+    # both circuits. The original tune found 0.0265 tour / 0.0369 chal and
+    # shipped the tour value (no loss on the selection span); the 2026-09-30
+    # joint fit re-tuned it.
     tau2: float = _TAU2
     newton: int = 2
     # Observations before this date are outside the tuning domain and are not
@@ -741,6 +823,11 @@ class BsrConfig:
     start_date: date = date(2015, 1, 1)
     mu_cells: tuple[float, ...] = MU_CELLS
     streams: tuple[StreamConfig, ...] = STREAMS
+    # Decay, in observations on an axis, of a newcomer's mean drift (see
+    # StreamConfig.nc_dr_s). One value for every stream: the 2026-09-30 study
+    # found a per-stream value better in none of the 12 streams that carried
+    # newcomer terms.
+    newcomer_tau_d: float = 4.0
 
     def stamp(self) -> dict[str, float]:
         return {

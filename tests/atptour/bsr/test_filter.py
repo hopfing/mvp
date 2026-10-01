@@ -16,8 +16,15 @@ from mvp.atptour.bsr.filter import (
     BSR_VALUE_NAMES,
     BsrTracker,
 )
+from tests.atptour.bsr._configs import neutral_newcomer
 
 D0 = date(2020, 1, 10)
+
+
+def _neutral() -> BsrConfig:
+    """The default config with the newcomer terms off: these tests pin the
+    filter's mechanics (test_newcomer.py covers the newcomer terms)."""
+    return neutral_newcomer(BsrConfig())
 
 # Every stream's seed source, defaulted to 1500 so a test that does not care
 # about a component gets a zero seed from it.
@@ -61,13 +68,13 @@ def _cap(tracker, a="A", b="B", y_p=50, n_p=80, y_o=40, n_o=80, surface="Hard",
 
 class TestSeedAndShape:
     def test_output_columns(self):
-        cols = BsrTracker().output_columns()
+        cols = BsrTracker(_neutral()).output_columns()
         assert len(cols) == 32  # 16 shipped-stream value names x 2 sides
         assert cols[0] == "player_bsr_serve_mu" and cols[1] == "opp_bsr_serve_mu"
         assert set(c.split("_", 1)[1] for c in cols) == set(BSR_VALUE_NAMES)
 
     def test_new_output_columns_are_two_sides_of_every_new_value(self):
-        t = BsrTracker()
+        t = BsrTracker(_neutral())
         cols = t.new_output_columns()
         assert len(cols) == 2 * len(BSR_NEW_VALUE_NAMES)
         assert cols[: len(BSR_NEW_VALUE_NAMES)] == [
@@ -78,7 +85,7 @@ class TestSeedAndShape:
         assert not set(cols) & set(t.output_columns())
 
     def test_first_sight_emits_the_elo_seed(self):
-        cfg = BsrConfig()
+        cfg = _neutral()
         t = BsrTracker(cfg)
         cap = _cap(t)
         exp_sm = cfg.seed_es * (1600.0 - 1500.0) / 100.0
@@ -98,7 +105,7 @@ class TestSeedAndShape:
     def test_unseen_player_without_counts_emits_the_seed_in_domain(self):
         """A debutant's pending (count-less) row emits the same seed values
         its settled row will carry; nothing is stored until an observation."""
-        cfg = BsrConfig()
+        cfg = _neutral()
         t = BsrTracker(cfg)
         cap = _cap(t, y_p=None, n_p=None, y_o=None, n_o=None)
         assert cap.player["bsr_serve_mu"] == cfg.seed_es * (1600.0 - 1500.0) / 100.0
@@ -113,21 +120,21 @@ class TestSeedAndShape:
         assert np.array_equal(cap2.player_new, cap.player_new, equal_nan=True)
 
     def test_unseen_player_out_of_domain_is_null(self):
-        t = BsrTracker()
+        t = BsrTracker(_neutral())
         cap = _cap(t, circuit="itf", y_p=None, n_p=None, y_o=None, n_o=None)
         assert all(v is None for v in cap.player.values())
         assert all(v is None for v in cap.opp.values())
         assert cap.pending is None
 
     def test_out_of_domain_creates_no_state(self):
-        t = BsrTracker()
+        t = BsrTracker(_neutral())
         assert _cap(t, circuit="itf").pending is None
         assert _cap(t, d=date(2014, 6, 1)).pending is None
         assert _cap(t, circuit=None).pending is None
         assert t._state == {}
 
     def test_invalid_counts_are_skipped(self):
-        t = BsrTracker()
+        t = BsrTracker(_neutral())
         assert _cap(t, y_p=50, n_p=0, y_o=None, n_o=None).pending is None
         assert _cap(t, y_p=90, n_p=80, y_o=None, n_o=None).pending is None
         assert _cap(t, y_p=None, n_p=80, y_o=None, n_o=None).pending is None
@@ -136,7 +143,7 @@ class TestSeedAndShape:
         assert cap.pending[4] is None and cap.pending[5] is not None
 
     def test_carpet_and_null_surface_map_to_hard(self):
-        t1, t2, t3 = BsrTracker(), BsrTracker(), BsrTracker()
+        t1, t2, t3 = BsrTracker(_neutral()), BsrTracker(_neutral()), BsrTracker(_neutral())
         a = _cap(t1, surface="Hard").player["bsr_pserve_logit"]
         b = _cap(t2, surface="Carpet").player["bsr_pserve_logit"]
         c = _cap(t3, surface=None).player["bsr_pserve_logit"]
@@ -145,7 +152,7 @@ class TestSeedAndShape:
 
 class TestUpdate:
     def test_update_moves_toward_the_observation(self):
-        cfg = BsrConfig()
+        cfg = _neutral()
         t = BsrTracker(cfg)
         cap = _cap(t, y_p=70, n_p=80, y_o=40, n_o=80)  # A serves far above expectation
         t.apply(cap)
@@ -158,7 +165,7 @@ class TestUpdate:
         assert a.last_s[0] == D0 and a.last_ss[0][0] == D0
 
     def test_variance_share_split(self):
-        cfg = BsrConfig()
+        cfg = _neutral()
         t = BsrTracker(cfg)
         cap = _cap(t, y_p=70, n_p=80, y_o=None, n_o=None)
         t.apply(cap)
@@ -172,7 +179,7 @@ class TestUpdate:
         assert math.isclose(d_rm, d_sm, rel_tol=1e-9)  # same prior var, opposite sign
 
     def test_only_touched_axes_change(self):
-        cfg = BsrConfig()
+        cfg = _neutral()
         t = BsrTracker(cfg)
         t.apply(_cap(t, y_p=70, n_p=80, y_o=None, n_o=None))
         a, b = t._state["A"], t._state["B"]
@@ -185,9 +192,9 @@ class TestUpdate:
         """Batched (one capture, two observations) equals two sequential
         single-observation matches at the same date — the disjoint-slot
         property the plan relies on."""
-        t_batch = BsrTracker()
+        t_batch = BsrTracker(_neutral())
         t_batch.apply(_cap(t_batch, y_p=60, n_p=80, y_o=45, n_o=80))
-        t_seq = BsrTracker()
+        t_seq = BsrTracker(_neutral())
         t_seq.apply(_cap(t_seq, y_p=60, n_p=80, y_o=None, n_o=None))
         t_seq.apply(_cap(t_seq, y_p=None, n_p=None, y_o=45, n_o=80))
         for pid in ("A", "B"):
@@ -201,7 +208,7 @@ class TestStreams:
     """The 20 streams the multi-stream build adds."""
 
     def test_every_stream_updates_its_own_axes_only(self):
-        cfg = BsrConfig()
+        cfg = _neutral()
         t = BsrTracker(cfg)
         j = STREAM_INDEX["bp"]
         cap = _cap(t, y_p=None, n_p=None, y_o=None, n_o=None,
@@ -226,7 +233,7 @@ class TestStreams:
     def test_zero_n_skips_that_stream_only(self):
         """No break points faced is not an observation of break-point skill,
         and must not stop the other streams observing this match."""
-        cfg = BsrConfig()
+        cfg = _neutral()
         t = BsrTracker(cfg)
         cap = _cap(t, y_p=50, n_p=80, extra_p={"bp": (0, 0), "ace": (7, 80)})
         t.apply(cap)
@@ -238,13 +245,13 @@ class TestStreams:
         assert a.n_s[STREAM_INDEX["serve"]] == 1
 
     def test_missing_marker_and_out_of_range_k_are_skipped(self):
-        t = BsrTracker()
+        t = BsrTracker(_neutral())
         cap = _cap(t, y_p=None, n_p=None, y_o=None, n_o=None,
                    extra_p={"ace": (None, None), "df": (90, 80)})
         assert cap.pending is None
 
     def test_a_stream_without_a_returner_leaves_the_returner_untouched(self):
-        cfg = BsrConfig()
+        cfg = _neutral()
         t = BsrTracker(cfg)
         j = STREAM_INDEX["fsi"]
         assert not t.streams[j].has_returner
@@ -256,7 +263,7 @@ class TestStreams:
         assert b.n_r[j] == 0 and b.rv[j] == v0 and b.rm[j] == 0.0
 
     def test_auxiliary_streams_have_no_surface_axes(self):
-        t = BsrTracker()
+        t = BsrTracker(_neutral())
         surface_streams = {
             s.name for s in t.streams if s.has_surface
         }
@@ -268,9 +275,9 @@ class TestStreams:
         assert st.ssm[STREAM_INDEX["serve"]] is not None
 
     def test_indoor_axis_only_moves_on_indoor_matches(self):
-        cfg = BsrConfig()
+        cfg = _neutral()
         j = STREAM_INDEX["w1"]
-        assert BsrTracker().streams[j].has_indoor
+        assert BsrTracker(_neutral()).streams[j].has_indoor
         out_t = BsrTracker(cfg)
         out_t.apply(_cap(out_t, indoor=False, extra_p={"w1": (40, 50)}))
         assert out_t._state["A"].ism[j] == 0.0
@@ -284,7 +291,7 @@ class TestStreams:
         # indoor row — that is what makes the twelve shipped columns differ
         # from the pre-multi-stream filter on indoor rows and only there.
         s = STREAM_INDEX["serve"]
-        assert BsrTracker().streams[s].has_indoor
+        assert BsrTracker(_neutral()).streams[s].has_indoor
         assert in_t._state["A"].ism[s] != 0.0
         assert out_t._state["A"].ism[s] == 0.0
 
@@ -292,7 +299,7 @@ class TestStreams:
         """k is the server- or player-favourable event wherever an Elo seed
         signs the prior, so a high seed means a high rate. The two streams
         whose k is unfavourable carry no seed."""
-        t = BsrTracker()
+        t = BsrTracker(_neutral())
         for st in t.streams:
             if st.name in ("hardhold", "deuce"):
                 assert st.seed_src_s is None and st.seed_src_r is None, st.name
@@ -306,12 +313,12 @@ class TestStreams:
         )
 
     def test_df_orientation_moves_up_when_no_double_faults(self):
-        t = BsrTracker()
+        t = BsrTracker(_neutral())
         j = STREAM_INDEX["df"]
         t.apply(_cap(t, y_p=None, n_p=None, y_o=None, n_o=None,
                      extra_p={"df": (30, 30)}))
         assert t._state["A"].sm[j] > 0.0
-        t2 = BsrTracker()
+        t2 = BsrTracker(_neutral())
         t2.apply(_cap(t2, y_p=None, n_p=None, y_o=None, n_o=None,
                       extra_p={"df": (0, 30)}))
         assert t2._state["A"].sm[j] < 0.0
@@ -333,7 +340,7 @@ class TestNameVectorLockstep:
         streams = tuple(
             replace(s, **flips.get(s.name, {})) for s in STREAMS
         )
-        return BsrConfig(streams=streams)
+        return neutral_newcomer(BsrConfig(streams=streams))
 
     def test_vector_length_matches_name_count_for_every_flag_mix(self):
         from mvp.atptour.bsr.filter import new_value_names
@@ -365,7 +372,7 @@ class TestNameVectorLockstep:
     def test_a_flag_flip_changes_both_sides_together(self):
         from mvp.atptour.bsr.filter import new_value_names
 
-        base = BsrConfig()
+        base = _neutral()
         # ace carries a returner, so a surface axis is two MEANS, the
         # server's and the returner's (its spreads are not emitted: only the
         # pooled stream's residual spreads are, see StreamConfig).
@@ -398,7 +405,7 @@ class TestPerStreamEmission:
     def test_days_since_is_per_stream_and_nan_before_the_first_obs(self):
         # Clocks are emitted on one stream per feed (bp keeps its own; ace's
         # is a copy of the pooled stream's and is not emitted).
-        t = BsrTracker()
+        t = BsrTracker(_neutral())
         cap0 = _cap(t, extra_p={"bp": (3, 5)})
         # nothing observed yet on either stream
         assert math.isnan(self._val(cap0, "bsr_bp_days_since"))
@@ -416,7 +423,7 @@ class TestPerStreamEmission:
     def test_returner_surface_and_indoor_residuals_are_emitted(self):
         """`bsr_w1_r_surface_mu` is the player's own return-side residual for
         this match's surface, the way `bsr_return_surface_mu` is."""
-        cfg = BsrConfig()
+        cfg = _neutral()
         t = BsrTracker(cfg)
         j = STREAM_INDEX["w1"]
         # A serves, so B's return axes move on w1.
@@ -448,7 +455,7 @@ class TestPerStreamEmission:
 
 class TestArrayOutput:
     def test_vector_carries_nan_where_the_dict_carries_none(self):
-        t = BsrTracker()
+        t = BsrTracker(_neutral())
         t.begin(1)
         cap = _cap(t, circuit="itf", y_p=None, n_p=None, y_o=None, n_o=None,
                    row=0)
@@ -458,7 +465,7 @@ class TestArrayOutput:
         assert all(x.null_count() == 1 for x in s)
 
     def test_out_of_domain_logit_is_nan_while_state_is_not(self):
-        t = BsrTracker()
+        t = BsrTracker(_neutral())
         t.begin(2)
         t.apply(_cap(t, row=0, extra_p={"ace": (7, 80)}))
         cap = _cap(t, circuit="itf", d=date(2020, 2, 1), row=1,
@@ -469,7 +476,7 @@ class TestArrayOutput:
         assert "bsr_ace_n_obs" not in names  # ace's count copies the pooled one
 
     def test_second_row_replay_swaps_the_two_sides(self):
-        t = BsrTracker()
+        t = BsrTracker(_neutral())
         t.begin(2)
         cap = _cap(t, y_p=70, n_p=80, y_o=40, n_o=80, row=0)
         t.replay_row(1, cap, "B")
@@ -479,7 +486,7 @@ class TestArrayOutput:
         np.testing.assert_array_equal(out[h:, 1], out[:h, 0])
 
     def test_scatter_series_places_rows_and_nulls_the_rest(self):
-        t = BsrTracker()
+        t = BsrTracker(_neutral())
         t.begin(2)
         _cap(t, row=0, extra_p={"ace": (7, 80)})
         _cap(t, a="C", b="D", row=1)
@@ -495,7 +502,7 @@ class TestArrayOutput:
 
 class TestPredictiveState:
     def test_countless_row_emits_the_drifted_state(self):
-        cfg = BsrConfig()
+        cfg = _neutral()
         t = BsrTracker(cfg)
         t.apply(_cap(t, y_p=60, n_p=80, y_o=45, n_o=80))
         sv_after = t._state["A"].sv[0]
@@ -520,7 +527,7 @@ class TestPredictiveState:
         assert t._state["A"].n_s[0] == 2
 
     def test_cap_on_elapsed_days(self):
-        cfg = BsrConfig()
+        cfg = _neutral()
         t = BsrTracker(cfg)
         t.apply(_cap(t, y_p=60, n_p=80, y_o=45, n_o=80))
         sv_after = t._state["A"].sv[0]
@@ -530,19 +537,19 @@ class TestPredictiveState:
         assert math.isclose(sd * sd, sv_after + cfg.q_s * cfg.cap_days, rel_tol=1e-12)
 
     def test_both_rows_of_a_match_read_one_capture(self):
-        t = BsrTracker()
+        t = BsrTracker(_neutral())
         cap = _cap(t)
         assert set(cap.player) == set(BSR_VALUE_NAMES) == set(cap.opp)
         # The opponent's values are the same dict the driver will replay on
         # the second row, so nothing depends on row order.
-        assert cap.opp["bsr_serve_mu"] == BsrConfig().seed_es * 0.0
+        assert cap.opp["bsr_serve_mu"] == _neutral().seed_es * 0.0
 
     def test_deterministic(self):
         seq = [dict(y_p=60, n_p=80, y_o=45, n_o=80),
                dict(y_p=50, n_p=70, y_o=48, n_o=70, d=date(2020, 2, 1))]
         outs = []
         for _ in range(2):
-            t = BsrTracker()
+            t = BsrTracker(_neutral())
             vals = []
             for kw in seq:
                 cap = _cap(t, **kw)
@@ -558,7 +565,7 @@ class TestDatetimeInput:
         clocks are day-grained and must not raise on the comparison."""
         from datetime import datetime
 
-        t_date, t_dt = BsrTracker(), BsrTracker()
+        t_date, t_dt = BsrTracker(_neutral()), BsrTracker(_neutral())
         t_date.apply(_cap(t_date, d=D0))
         t_dt.apply(_cap(t_dt, d=datetime(D0.year, D0.month, D0.day)))
         later = date(2020, 3, 1)
@@ -601,7 +608,7 @@ class TestInputColumns:
 
 class TestOutOfDomainEmission:
     def test_state_emitted_but_matchup_null_outside_domain(self):
-        t = BsrTracker()
+        t = BsrTracker(_neutral())
         t.apply(_cap(t, y_p=60, n_p=80, y_o=45, n_o=80))
         cap = _cap(t, circuit="itf", y_p=55, n_p=80, y_o=40, n_o=80,
                    d=date(2020, 2, 1))

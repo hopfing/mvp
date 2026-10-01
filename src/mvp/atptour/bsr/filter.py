@@ -20,12 +20,20 @@ stream; a stream whose n is 0 or missing is skipped for that observation only,
 and every other stream still updates.
 
 The stream table, its fixed order and what each stream observes live in
-`constants.py`. Stream 0 is the shipped pooled `serve` stream: its seven
-shipped knobs, its mu cells and the twelve `bsr_*` column names it emits are
-unchanged, and it has GAINED an indoor residual axis it emits no column for,
-so its twelve values move on indoor rows and only there. The probe-parity and
-shipped-parity tests hold it to the shipped filter with that axis switched
-off, which is the config under which the two are the same model.
+`constants.py`. Stream 0 is the shipped pooled `serve` stream: its mu cells
+and the twelve `bsr_*` column names it emits are unchanged; it has GAINED an
+indoor residual axis it emits no column for, and on 2026-09-30 its q, v0, seed
+weights and tau2 were re-tuned jointly with the newcomer terms below. The
+probe-parity and shipped-parity tests hold it to the shipped filter with the
+indoor axis off, the shipped literals and neutral newcomer terms, which is the
+config under which the two are the same model.
+
+Newcomer terms (`StreamConfig.nc_*`, `BsrConfig.newcomer_tau_d`): a player
+with no earlier singles match carrying serve statistics starts a stream with
+an offset on its prior means and, on every later observation, gains a decaying
+mean drift (expected improvement). The tracker counts each player's
+serve-stat matches on every row it is given, in or out of domain, because
+the definition reaches back before the domain's start; see `kernel.py`.
 
 Seams mirror `MovTracker` (elo/mov.py): the ratings driver captures BEFORE
 it updates, both rows of a match read one cached capture, and the update runs
@@ -37,6 +45,8 @@ once per match. Four things are deliberate and load-bearing:
   drift were applied only when an observation arrives, the live columns would
   understate the skill sd by 20-30% at the cap and carry an undecayed surface
   mean relative to what the same row shows once it is settled and trained on.
+  A newcomer's mean drift follows the same rule: in every prediction, stored
+  only for the axes an observation touches.
   The drift is committed to stored state only by `apply`, and only for the
   axes an observation actually touches, so parity with a filter that only ever
   sees observed rows is exact.
@@ -67,7 +77,8 @@ once per match. Four things are deliberate and load-bearing:
   which is the one place this filter and the shipped one differ: a player
   another stream has given state to now emits it on an ITF row where the
   shipped filter emitted null. No non-null value changes for that reason;
-  the indoor axis above is the only thing that moves one.
+  what moves values against the shipped filter is the indoor axis, the
+  2026-09-30 serve re-tune and the newcomer terms.
 """
 
 from __future__ import annotations
@@ -265,6 +276,9 @@ class BsrCapture:
     row: int | None
     player_id: str
     pending: tuple | None
+    # The ids of the sides whose count inputs carried serve statistics.
+    stats: tuple[str | None, str | None] = (None, None)
+    opp_id: str | None = None
 
 
 class BsrTracker:
@@ -316,6 +330,42 @@ class BsrTracker:
         self._cap_days = float(self.cfg.cap_days)
         self._phi = float(self.cfg.phi_surf)
         self._newton = int(self.cfg.newton)
+        # Newcomer terms, one row per stream: c_s, c_r, dr_s, dr_r.
+        self._nc = np.array(
+            [[x.nc_c_s, x.nc_c_r, x.nc_dr_s, x.nc_dr_r] for x in st],
+            dtype=np.float64).reshape(S, 4)
+        self._tau_d = float(self.cfg.newcomer_tau_d)
+        if not self._tau_d > 0.0:
+            raise ValueError(f"newcomer_tau_d must be positive, got {self._tau_d}")
+        # A row carries serve statistics for a side when its serve-stream n or
+        # its ace-stream k is present (-1 / None = null in the count inputs):
+        # the research definition, `pts_service_pts_played` or `svc_aces`
+        # non-null. Looked up by name in THIS config.
+        names = [x.name for x in st]
+        self._stat_srv_j = names.index("serve") if "serve" in names else -1
+        self._stat_ace_j = names.index("ace") if "ace" in names else -1
+        if self._nc.any():
+            if self._stat_srv_j < 0 and self._stat_ace_j < 0:
+                raise ValueError(
+                    "newcomer terms need a 'serve' or 'ace' stream to detect "
+                    "serve statistics"
+                )
+            srv_ok = self._stat_srv_j < 0 or (
+                st[self._stat_srv_j].n_terms == ((1, "pts_service_pts_played"),))
+            ace_ok = self._stat_ace_j < 0 or (
+                st[self._stat_ace_j].k_terms == ((1, "svc_aces"),))
+            if not (srv_ok and ace_ok):
+                raise ValueError(
+                    "newcomer stat streams no longer read "
+                    "pts_service_pts_played / svc_aces"
+                )
+        # Earlier serve-stat matches per player id, over every row this
+        # tracker has been given (a player has no slot before the domain).
+        self._prior_stats: dict[str, int] = {}
+        self._nc_now = np.zeros(2, dtype=np.uint8)
+        # Diagnostics: when a list, `apply` appends (player_id, stream index,
+        # newcomer flag) for every stream that commits for a player.
+        self.commit_log: list[tuple[str, int, bool]] | None = None
         # Player table and state arrays (see kernel.py for the layout).
         self._index: dict[str, int] = {}
         self._n_used = 0
@@ -371,6 +421,7 @@ class BsrTracker:
         self._n_s = np.zeros((S, cap), dtype=np.int32)
         self._n_r = np.zeros((S, cap), dtype=np.int32)
         self._seeded = np.zeros((S, cap), dtype=np.uint8)
+        self._newc = np.zeros((S, cap), dtype=np.uint8)
         self._cap = cap
 
     def _grow(self) -> None:
@@ -399,7 +450,7 @@ class BsrTracker:
         self._n_used += 1
         kernel.init_player(
             i, self._elo8[side], self._W,
-            *self._kernel_state(), self._n_s, self._n_r, self._seeded,
+            *self._kernel_state(), self._n_s, self._n_r, self._seeded, self._newc,
             self._v0, self._q_surf, self._q_indoor,
             self._seed_src_s, self._seed_src_r,
             self._seed_scale_s, self._seed_scale_r,
@@ -551,6 +602,20 @@ class BsrTracker:
             kk[j] = -1 if kj is None else int(kj)
             nn[j] = -1 if nj is None else int(nj)
 
+    def _has_stats(self, k: Any, n: Any) -> bool:
+        """Whether one side's count inputs carry serve statistics."""
+        j = self._stat_srv_j
+        if j >= 0 and n is not None:
+            v = n[j]
+            if v is not None and v >= 0:
+                return True
+        j = self._stat_ace_j
+        if j >= 0 and k is not None:
+            v = k[j]
+            if v is not None and v >= 0:
+                return True
+        return False
+
     def capture_match(
         self,
         player_id: str,
@@ -595,6 +660,14 @@ class BsrTracker:
 
         self._fill_elo8(0, elo_player)
         self._fill_elo8(1, elo_opp)
+        # Serve statistics on this row, in or out of domain (counted by
+        # `apply`), and whether each side is a newcomer before this match.
+        stats = (
+            player_id if self._has_stats(k_p, n_p) else None,
+            opp_id if self._has_stats(k_o, n_o) else None,
+        )
+        self._nc_now[0] = self._prior_stats.get(player_id, 0) == 0
+        self._nc_now[1] = self._prior_stats.get(opp_id, 0) == 0
         if in_domain:
             self._fill_counts(0, k_p, n_p)
             self._fill_counts(1, k_o, n_o)
@@ -623,6 +696,7 @@ class BsrTracker:
             self._emit_cnt, self._emit_rsd,
             self._seed_src_s, self._seed_src_r,
             self._seed_scale_s, self._seed_scale_r, self._seedable,
+            self._n_r, self._newc, self._nc_now, self._nc, self._tau_d,
         )
         vals_a = _dict16(out16[0])
         vals_b = _dict16(out16[1])
@@ -648,7 +722,8 @@ class BsrTracker:
             self._n_used = used_before
         return BsrCapture(
             player=vals_a, opp=vals_b, player_new=vec[0].copy(), opp_new=vec[1].copy(),
-            row=row, player_id=player_id, pending=pending,
+            row=row, player_id=player_id, pending=pending, stats=stats,
+            opp_id=opp_id,
         )
 
     def apply(self, cap: BsrCapture) -> None:
@@ -656,6 +731,10 @@ class BsrTracker:
         update, per stream, from the capture's pre-match state. Both
         observations of a match are taken from that state; today they touch
         disjoint slots, so this equals applying them one after the other."""
+        # Every row counts toward the newcomer definition, pending or not.
+        for pid in cap.stats:
+            if pid is not None:
+                self._prior_stats[pid] = self._prior_stats.get(pid, 0) + 1
         if cap.pending is None:
             return
         ia, ib, s, day, obs1, obs2, is_indoor, W, new = cap.pending
@@ -665,18 +744,27 @@ class BsrTracker:
         zm = np.zeros(S, dtype=np.uint8)
         k_a, n_a, m_a = obs1 if obs1 is not None else (zk, zk, zm)
         k_b, n_b, m_b = obs2 if obs2 is not None else (zk, zk, zm)
+        log = self.commit_log
+        if log is not None:
+            before = self._seeded[:, [ia, ib]].copy()
         kernel.apply_match(
             ia, ib, s, day, is_indoor, W, k_a, n_a, k_b, n_b, m_a, m_b,
-            *self._kernel_state(), self._n_s, self._n_r, self._seeded,
+            *self._kernel_state(), self._n_s, self._n_r, self._seeded, self._newc,
             self._tau2, self._newton, self._has_ret, self._has_surf, self._has_ind,
         )
+        if log is not None:
+            sides = ((ia, cap.player_id), (ib, cap.opp_id))
+            for col, (slot, pid) in enumerate(sides):
+                committed = (before[:, col] == 0) & (self._seeded[:, slot] == 1)
+                for j in np.flatnonzero(committed):
+                    log.append((pid, int(j), bool(self._newc[j, slot])))
 
 
 _STATE_ARRAYS = (
     "_sm", "_sv", "_rm", "_rv", "_ssm", "_ssv", "_rsm", "_rsv",
     "_ism", "_isv", "_irm", "_irv",
     "_last_s", "_last_r", "_last_ss", "_last_rs", "_last_is", "_last_ir",
-    "_n_s", "_n_r", "_seeded",
+    "_n_s", "_n_r", "_seeded", "_newc",
 )
 
 # The Elo capture components a stream may seed from, in the order the kernel
@@ -749,6 +837,7 @@ class _StateView:
     n_s = property(lambda self: self._col("_n_s"))
     n_r = property(lambda self: self._col("_n_r"))
     seeded = property(lambda self: [bool(x) for x in self._col("_seeded")])
+    newc = property(lambda self: [bool(x) for x in self._col("_newc")])
     last_s = property(lambda self: self._dates("_last_s"))
     last_r = property(lambda self: self._dates("_last_r"))
     last_is = property(lambda self: self._dates("_last_is"))
