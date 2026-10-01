@@ -403,16 +403,27 @@ STREAMS: tuple[StreamConfig, ...] = (
     _stream(
         "tb", has_returner=True, derived="tb",
         seed_src_s="tb_clutch", seed_src_r="tb_clutch",
-        q_s=5.927775151296177e-06,
-        q_r=1.193093562112232e-05,
+        # q, v0 and seeds re-tuned on the rebuilt style ratings: 200 TPE trials,
+        # 2016-2021, ll_mix per point (style_study.py retune_stream). Against the
+        # pre-#141 stream (old ratings; seeds 0.0244 / 0.0102, q/v0 as below):
+        # ll_mix +9.8e-4/pt (+3.4 SE) 2016-2021, +2.5e-4 (+0.8 SE) 2022-2023,
+        # +4.3e-4 (+1.6 SE) 2024-2025. On 2016-2021 most of it is the rebuilt
+        # tb_clutch seed; on 2024-2025 nearly all is this q/v0/seed re-tune,
+        # which gives back 1.4e-4 (-0.5 SE) on 2022-2023 against the seed-only
+        # version. The emitted logit's slope moves toward 1 (0.64 -> 0.88,
+        # 0.76 -> 1.00, 0.56 -> 0.74). tau2 stays tied to
+        # the pooled value: freeing it bought nothing (the objective is flat in
+        # tau2 at median n 1) and only widened bsr_tb_logit_sd. A wider search
+        # (v0 >= 5e-4, q >= 1e-8) found no better point. Was (68af018) q_s
+        # 5.93e-6, q_r 1.19e-5, v0 0.0371, seeds 0.3233 / 0.3248. Hand-set: re-running
+        # write_bsr_constants.py --multi would revert these.
+        q_s=2.45988e-06,
+        q_r=1.25735e-06,
         q_surf=0.0,
         q_indoor=0.0,
-        v0=0.037105521013273045,
-        # Re-tuned on the rebuilt style ratings (issue #141): 200 TPE
-        # trials, 2016-2021, ll_mix per point, style-sourced seed weights
-        # only (style_study.py retune_seeds), 4 decimals. Was 0.0244 / 0.0102.
-        seed_s=0.3233,
-        seed_r=0.3248,
+        v0=0.0228811,
+        seed_s=0.290347,
+        seed_r=0.268502,
         tau2=0.026544910565251066,
         mu_cells=(
             0.0000000000, 0.0000000000, 0.0000000000, 0.0000000000,
@@ -423,17 +434,28 @@ STREAMS: tuple[StreamConfig, ...] = (
     _stream(
         "tbpts", has_returner=True, derived="tbpts",
         seed_src_s="tb_clutch", seed_src_r="tb_clutch",
-        q_s=1.8787467288586225e-06,
-        q_r=1.3945872582756077e-06,
+        # Jointly re-tuned on the rebuilt style ratings over widened ranges
+        # (v0 >= 5e-4, q >= 1e-8; the shipped floors v0 0.005 and q 1e-6 had
+        # bound both the original tune and a first re-tune): 200 TPE trials,
+        # 2016-2021, ll_mix per point (style_study.py retune_stream --ranges wide).
+        # Against the pre-#141 stream (old ratings; seeds 0.0020 / 0.0072, and
+        # the q/v0/tau2 in "Was" below): ll_mix +1.4e-4/pt
+        # (+4.3 SE) 2016-2021, +7.6e-5 (+1.8 SE) 2022-2023, +7.0e-5 (+1.7 SE)
+        # 2024-2025. The emitted logit's over-confidence mostly goes (slope 0.54
+        # -> 0.88, 0.60 -> 0.95, 0.59 -> 0.97): it came from the range floors.
+        # The objective is flat in q here (a re-run moved q_s/q_r/tau2 without
+        # changing ll_mix), so the exact q values carry no meaning. Was (68af018)
+        # q_s 1.88e-6, q_r 1.39e-6, v0 0.00543, seeds 0.1165 / 0.1194,
+        # tau2 0.000667. Hand-set: re-running write_bsr_constants.py --multi
+        # would revert these.
+        q_s=3.31527e-07,
+        q_r=7.71073e-08,
         q_surf=0.0,
         q_indoor=0.0,
-        v0=0.005433004232599732,
-        # Re-tuned on the rebuilt style ratings (issue #141): 200 TPE
-        # trials, 2016-2021, ll_mix per point, style-sourced seed weights
-        # only (style_study.py retune_seeds), 4 decimals. Was 0.0020 / 0.0072.
-        seed_s=0.1165,
-        seed_r=0.1194,
-        tau2=0.0006672829299535788,
+        v0=0.00219838,
+        seed_s=0.0769219,
+        seed_r=0.0930132,
+        tau2=0.00536143,
         mu_cells=(
             0.0000000000, 0.0000000000, 0.0000000000, 0.0000000000,
             0.0000000000, 0.0000000000, 0.0000000000, 0.0000000000,
