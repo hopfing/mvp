@@ -10,7 +10,7 @@ winner:
     train_date_range:
       end: '2026-08-31'
       start: '2021-01-01'
-    trained_at: '2026-09-30T19:29:21.439282+00:00'
+    trained_at: '2026-10-01T02:29:26.704800+00:00'
   history:
   - artifact: data/models/ew1206_23_log_os_22__h19_t238.joblib
     config: models/production/archive/ew1206_23_log_os_22__h19_t238.yaml
