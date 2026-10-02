@@ -279,6 +279,25 @@ def run_stability_selection(
 
     pending = [b for b in range(config.n_resamples) if b not in results_by_index]
 
+    # Each resample is a full forward selection, so it gets the same checkpointing
+    # every FS run has: the selector's checkpoint, written mid-round every
+    # `checkpoint_interval` candidate evaluations and at each round boundary. Without
+    # it a stop loses every in-flight resample's progress. One file per resample
+    # (they run concurrently), plus its fs_history_r<idx>.jsonl, the durable
+    # per-draw record of what it picked, in what order, by what margin. The folder
+    # is keyed by the settings fingerprint so a changed config can never resume a
+    # stale resample. A resample's checkpoint is removed once its record is in the
+    # stability checkpoint; its history is kept.
+    rounds_dir: Path | None = None
+    if checkpoint_path is not None:
+        rounds_dir = (
+            checkpoint_path.with_name(f"{checkpoint_path.stem}_rounds") / fingerprint
+        )
+        rounds_dir.mkdir(parents=True, exist_ok=True)
+
+    def _round_checkpoint(b: int) -> Path | None:
+        return None if rounds_dir is None else rounds_dir / f"discovery_checkpoint_r{b:03d}.json"
+
     # Resample-level parallelism. Resamples are independent (each seeded by its
     # index, aggregated below in index order), so a thread pool changes only
     # throughput, never the selected set. The heavy per-resample work is XGBoost
@@ -326,7 +345,7 @@ def run_stability_selection(
             # oversubscribe — keep inner selection serial.
             forward_max_workers=1,
         )
-        result = selector.run(verbose=False)
+        result = selector.run(verbose=False, checkpoint_path=_round_checkpoint(b))
         return {
             "index": b,
             "selected": result.selected_features,
@@ -343,6 +362,10 @@ def run_stability_selection(
         results_by_index[b] = record
         if checkpoint_path is not None:
             _save_resample_checkpoint(checkpoint_path, fingerprint, results_by_index)
+        # The record is durable now, so the resample's round checkpoint is spent.
+        round_cp = _round_checkpoint(b)
+        if round_cp is not None and round_cp.exists():
+            round_cp.unlink()
         if record.get("degenerate"):
             logger.warning(
                 "Resample %d/%d: every fold degenerate (< %d rows); skipping.",

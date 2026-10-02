@@ -55,15 +55,21 @@ class _ScriptedSelector:
 
     scripted: list[list[str]] = []
     calls = 0
+    checkpoint_paths: list = []
     _lock = threading.Lock()
 
     def __init__(self, **kwargs):
         pass
 
-    def run(self, verbose=False):
+    def run(self, verbose=False, checkpoint_path=None):
         with _ScriptedSelector._lock:
             sel = _ScriptedSelector.scripted[_ScriptedSelector.calls]
             _ScriptedSelector.calls += 1
+            _ScriptedSelector.checkpoint_paths.append(checkpoint_path)
+        # Mimic the real selector writing its round checkpoint, so tests can see
+        # the stability layer remove it once the resample's record is durable.
+        if checkpoint_path is not None:
+            checkpoint_path.write_text("{}")
         # A scripted "RAISE" entry injects a per-resample failure, so tests can
         # exercise the parallel tear-down / salvage path.
         if sel == "RAISE":
@@ -76,6 +82,7 @@ class _ScriptedSelector:
 @pytest.fixture
 def patched(monkeypatch):
     _ScriptedSelector.calls = 0
+    _ScriptedSelector.checkpoint_paths = []
     monkeypatch.setattr(stab, "FeatureSelector", _ScriptedSelector)
     # Scorer is irrelevant to the stub selector; make it a no-op.
     monkeypatch.setattr(
@@ -415,3 +422,56 @@ def test_xgboost_run_has_no_blas_cap(patched, no_n_jobs_override, monkeypatch):
     fast.config.model.params = {"n_jobs": 4}
     _run(fast, [["a"], ["a", "b"]], max_workers=2)
     assert calls == [("xgboost", None)]
+
+
+# --- mid-round checkpointing inside each resample -----------------------------
+
+
+def test_each_resample_checkpoints_to_its_own_file(patched, tmp_path):
+    """Every resample's forward selection gets its own selector checkpoint under a
+    folder keyed by the settings fingerprint, and the file is removed once the
+    resample's record is in the stability checkpoint."""
+    cp = tmp_path / "discovery_stability_checkpoint_x.json"
+    _ScriptedSelector.scripted = [["a"], ["a", "b"], ["b"]]
+    config = StabilitySelectionConfig(
+        n_resamples=3, subsample_fraction=1.0, min_fold_rows=1, selection_threshold=0.6,
+    )
+    stab.run_stability_selection(
+        _fast(), config, metric="log_loss", direction="minimize",
+        all_features=["a", "b", "c"], min_features=1, max_features=3,
+        checkpoint_path=cp,
+    )
+    paths = _ScriptedSelector.checkpoint_paths
+    assert len(paths) == 3 and len(set(paths)) == 3
+    rounds_root = tmp_path / "discovery_stability_checkpoint_x_rounds"
+    assert {p.name for p in paths} == {f"discovery_checkpoint_r{b:03d}.json" for b in range(3)}
+    assert all(p.parent.parent == rounds_root for p in paths)
+    assert len({p.parent for p in paths}) == 1           # one fingerprint folder
+    assert not any(p.exists() for p in paths)            # spent checkpoints removed
+
+
+def test_resample_checkpoint_folder_changes_with_fingerprint(patched, tmp_path):
+    """A different setting (here the subsample fraction) puts the per-resample
+    checkpoints in a different fingerprint folder, so stale ones are never resumed."""
+    cp = tmp_path / "discovery_stability_checkpoint_x.json"
+
+    def _folder(fraction):
+        _ScriptedSelector.calls = 0
+        _ScriptedSelector.checkpoint_paths = []
+        _ScriptedSelector.scripted = [["a"]]
+        stab.run_stability_selection(
+            _fast(),
+            StabilitySelectionConfig(n_resamples=1, subsample_fraction=fraction,
+                                     min_fold_rows=1, selection_threshold=0.6),
+            metric="log_loss", direction="minimize",
+            all_features=["a", "b", "c"], min_features=1, max_features=3,
+            checkpoint_path=cp,
+        )
+        return _ScriptedSelector.checkpoint_paths[0].parent
+
+    assert _folder(1.0) != _folder(0.99)
+
+
+def test_no_stability_checkpoint_means_no_resample_checkpoints(patched):
+    _run(_fast(), [["a"], ["a"]])
+    assert _ScriptedSelector.checkpoint_paths == [None, None]
