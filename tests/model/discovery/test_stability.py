@@ -348,3 +348,70 @@ def test_run_branches_into_stability_workflow(tmp_path, monkeypatch):
     assert result.selected_features == ["a"]
     assert result.stability_result is canned
     assert result.final_metric == 0.12
+
+
+# --- resample parallelism: thread budget split and BLAS cap -------------------
+
+
+@pytest.fixture
+def no_n_jobs_override(monkeypatch):
+    monkeypatch.setattr(stab, "get_n_jobs_override", lambda: None)
+
+
+@pytest.mark.parametrize(
+    "model_type, n_jobs, max_workers, expected",
+    [
+        # logistic: the n_jobs budget becomes resample workers at 1 BLAS thread each
+        ("logistic", 10, None, (10, 1)),
+        # explicit max_workers splits the budget into per-fit BLAS threads
+        ("logistic", 10, 5, (5, 2)),
+        # no n_jobs and no override: budget = cpu - 2
+        ("logistic", None, None, (12, 1)),
+        # budget capped at cpu
+        ("logistic", 20, None, (14, 1)),
+        # xgboost keeps the original rule and gets no BLAS cap
+        ("xgboost", 10, None, (1, None)),
+        ("xgboost", 4, None, (3, None)),
+        ("xgboost", 4, 2, (2, None)),
+        ("xgboost", None, None, (1, None)),
+    ],
+)
+def test_resolve_resample_parallelism(no_n_jobs_override, model_type, n_jobs, max_workers, expected):
+    assert stab._resolve_resample_parallelism(model_type, n_jobs, max_workers, cpu=14) == expected
+
+
+def _record_blas_cap(monkeypatch):
+    """Replace the BLAS cap with a recorder; returns the list of (model_type, n) calls."""
+    import contextlib
+
+    calls = []
+
+    def _cap(model_type, n_jobs):
+        calls.append((model_type, n_jobs))
+        return contextlib.nullcontext()
+
+    monkeypatch.setattr(stab, "blas_thread_cap", _cap)
+    return calls
+
+
+def test_logistic_run_applies_blas_cap_per_fit_share(patched, no_n_jobs_override, monkeypatch):
+    """A logistic stability run caps BLAS at budget // workers around the loop and
+    still aggregates exactly as before."""
+    calls = _record_blas_cap(monkeypatch)
+    fast = _fast()
+    fast.config.model.type = "logistic"
+    fast.config.model.params = {"n_jobs": 4}
+    res = _run(fast, [["a", "b"], ["a"], ["a", "c"], ["a"]], max_workers=2)
+    assert calls == [("logistic", 2)]
+    assert res.selection_frequency["a"] == pytest.approx(1.0)
+    assert res.selection_frequency["b"] == pytest.approx(0.25)
+    assert res.selected_features == ["a"]
+
+
+def test_xgboost_run_has_no_blas_cap(patched, no_n_jobs_override, monkeypatch):
+    calls = _record_blas_cap(monkeypatch)
+    fast = _fast()
+    fast.config.model.type = "xgboost"
+    fast.config.model.params = {"n_jobs": 4}
+    _run(fast, [["a"], ["a", "b"]], max_workers=2)
+    assert calls == [("xgboost", None)]

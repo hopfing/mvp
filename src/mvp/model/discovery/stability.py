@@ -42,8 +42,44 @@ from mvp.model.discovery.config import DiscoveryConfig, StabilitySelectionConfig
 from mvp.model.discovery.fast_selection import FastForwardSelector
 from mvp.model.discovery.selection import FeatureSelector
 from mvp.model.models import get_n_jobs_override
+from mvp.model.parallelism import BLAS_THREADED_MODEL_TYPES, blas_thread_cap
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_resample_parallelism(
+    model_type: str,
+    params_n_jobs: int | None,
+    max_workers: int | None,
+    *,
+    cpu: int | None = None,
+) -> tuple[int, int | None]:
+    """``(resample workers, BLAS threads per fit)`` for the resample thread pool.
+
+    BLAS-threaded models (logistic: the fit ignores ``n_jobs``) split the run's
+    thread budget the way the forward-FS candidate loop does: budget =
+    ``model.params.n_jobs``, else the ``--n-jobs`` override, else ``cpu - 2``,
+    capped at ``cpu``; workers = ``max_workers`` if set, else the whole budget (one
+    thread per fit); BLAS threads per fit = ``budget // workers``, applied by the
+    caller as a process-wide cap. Without that cap each concurrent fit would take
+    every core.
+
+    Other models (XGB: threads via its own ``n_jobs``) keep the original rule:
+    ``max_workers`` if set, else ``cpu // n_jobs`` when ``n_jobs`` is explicit, else
+    1 (an uncapped fit uses ~all cores). No BLAS cap (returns ``None``).
+    """
+    cpu = cpu or os.cpu_count() or 4
+    explicit_n_jobs = int(params_n_jobs) if params_n_jobs else get_n_jobs_override()
+    if model_type in BLAS_THREADED_MODEL_TYPES:
+        budget = explicit_n_jobs or max(1, cpu - 2)
+        budget = max(1, min(int(budget), cpu))
+        workers = max(1, max_workers) if max_workers is not None else budget
+        return workers, max(1, budget // workers)
+    if max_workers is not None:
+        return max(1, max_workers), None
+    if explicit_n_jobs:
+        return max(1, cpu // max(1, explicit_n_jobs)), None
+    return 1, None
 
 
 def _resample_fingerprint(
@@ -251,20 +287,14 @@ def run_stability_selection(
     # per-worker matrix copies). create_scorer / resample_folds only read frozen
     # state, and the scorer's per-fold np.ix_ gather returns a private copy before
     # imputing, so X_wide is never mutated across threads.
-    # Resolve the per-fit thread cap the way the model layer does: config
-    # model.params n_jobs, else the --n-jobs override. When neither is set the
-    # fit falls back to ~all cores (cpu-2), so concurrent fits would
-    # oversubscribe — stay sequential there and let an explicit n_jobs cap free
-    # cores for resample-level parallelism.
+    # Workers and the per-fit thread share: see _resolve_resample_parallelism.
+    # BLAS-threaded models get a process-wide BLAS cap around the whole loop
+    # (applied once, not per fit: threadpoolctl's limit is process-global).
+    model_type = fast.config.model.type
     params_n_jobs = (fast.config.model.params or {}).get("n_jobs")
-    explicit_n_jobs = int(params_n_jobs) if params_n_jobs else get_n_jobs_override()
-    cpu_count = os.cpu_count() or 4
-    if config.max_workers is not None:
-        workers = max(1, config.max_workers)
-    elif explicit_n_jobs:
-        workers = max(1, cpu_count // max(1, explicit_n_jobs))
-    else:
-        workers = 1
+    workers, blas_per_fit = _resolve_resample_parallelism(
+        model_type, params_n_jobs, config.max_workers,
+    )
     workers = min(workers, len(pending)) if pending else 1
 
     loop_t0 = time.perf_counter()
@@ -334,45 +364,50 @@ def run_stability_selection(
             record["match_count"], record["fold_skips"], avg, eta_min,
         )
 
-    if workers == 1:
-        for b in pending:
-            _finalize(_run_one(b))
-    elif pending:
+    if pending:
         logger.info(
-            "Stability: %d resamples across %d worker threads (n_jobs=%s per fit).",
-            len(pending), workers, explicit_n_jobs if explicit_n_jobs else "default",
+            "Stability: %d resamples across %d worker thread(s)%s.",
+            len(pending), workers,
+            f", BLAS cap {blas_per_fit} thread(s)/fit (model '{model_type}')"
+            if blas_per_fit is not None else "",
         )
-        lock = threading.Lock()
-        executor = ThreadPoolExecutor(max_workers=workers)
-        futures = [executor.submit(_run_one, b) for b in pending]
-        try:
-            for fut in as_completed(futures):
-                record = fut.result()
-                with lock:
-                    _finalize(record)
-        finally:
-            # Tear-down doubles as crash recovery. cancel_futures drops resamples
-            # that never started (so a doomed batch doesn't burn the rest of the
-            # pool), and wait=True joins the in-flight threads. We then checkpoint
-            # every resample that DID finish — including any that completed after
-            # the failing one and so never reached _finalize in the loop above.
-            # On a clean run this is a no-op (all already recorded); on a failure
-            # or Ctrl-C it means resuming re-runs only what didn't finish. Threads
-            # are joined here, so no lock is needed.
-            executor.shutdown(wait=True, cancel_futures=True)
-            salvaged = 0
-            for fut in futures:
-                if fut.cancelled() or fut.exception() is not None:
-                    continue
-                record = fut.result()
-                if record["index"] not in results_by_index:
-                    _finalize(record)
-                    salvaged += 1
-            if salvaged:
-                logger.info(
-                    "Stability: salvaged %d completed resample(s) to the "
-                    "checkpoint before aborting.", salvaged,
-                )
+    with blas_thread_cap(model_type, blas_per_fit):
+        if workers == 1:
+            for b in pending:
+                _finalize(_run_one(b))
+        elif pending:
+            lock = threading.Lock()
+            executor = ThreadPoolExecutor(max_workers=workers)
+            futures = [executor.submit(_run_one, b) for b in pending]
+            try:
+                for fut in as_completed(futures):
+                    record = fut.result()
+                    with lock:
+                        _finalize(record)
+            finally:
+                # Tear-down doubles as crash recovery. cancel_futures drops
+                # resamples that never started (so a doomed batch doesn't burn the
+                # rest of the pool), and wait=True joins the in-flight threads. We
+                # then checkpoint every resample that DID finish — including any
+                # that completed after the failing one and so never reached
+                # _finalize in the loop above. On a clean run this is a no-op (all
+                # already recorded); on a failure or Ctrl-C it means resuming
+                # re-runs only what didn't finish. Threads are joined here, so no
+                # lock is needed.
+                executor.shutdown(wait=True, cancel_futures=True)
+                salvaged = 0
+                for fut in futures:
+                    if fut.cancelled() or fut.exception() is not None:
+                        continue
+                    record = fut.result()
+                    if record["index"] not in results_by_index:
+                        _finalize(record)
+                        salvaged += 1
+                if salvaged:
+                    logger.info(
+                        "Stability: salvaged %d completed resample(s) to the "
+                        "checkpoint before aborting.", salvaged,
+                    )
 
     # Aggregate over effective (non-degenerate) resamples, in index order.
     effective_records = [
