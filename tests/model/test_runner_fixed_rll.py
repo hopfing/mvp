@@ -331,6 +331,35 @@ class TestRunnerEndToEnd:
         r = self._run(tmp_path, matches, _CONFIG, score_mask=junk)
         assert all(p["score_mask"] is not None for p in r["all_predictions"])
 
+    def test_offset_with_early_stopping_fits_on_the_margin(
+        self, matches, tmp_path, monkeypatch
+    ):
+        """Offset + early stopping: the offset is fit first and its train
+        margins go to two_stage_fit, which slices them with the watch split."""
+        import mvp.model.runner as runner_mod
+
+        seen: list[tuple[int, np.ndarray | None]] = []
+        real = runner_mod.two_stage_fit
+
+        def _spy(factory, X, *args, **kwargs):
+            seen.append((len(X), kwargs.get("base_margin")))
+            return real(factory, X, *args, **kwargs)
+
+        monkeypatch.setattr(runner_mod, "two_stage_fit", _spy)
+        cfg = (
+            _CONFIG.replace("- restricted_logloss", "- log_loss")
+            .replace("min_train_size: 100", "min_train_size: 600")
+            .replace("test_size: 50", "test_size: 200")
+            + "early_stopping:\n  enabled: true\n  min_watch_tail: 1\n"
+            "  patience: 3\n  ceiling: 20\n"
+        )
+        r = self._run(tmp_path, matches, cfg)
+        assert len(seen) == len(r["all_predictions"]) == 2
+        for n_train, margin in seen:
+            assert margin is not None and len(margin) == n_train
+        for p in r["all_predictions"]:
+            assert np.all((p["y_prob"] > 0) & (p["y_prob"] < 1))
+
     def test_rll_objective_with_early_stopping_is_refused_at_load(
         self, matches, tmp_path
     ):

@@ -327,9 +327,7 @@ class _FoldScorer:
             )
         self.fast = fast
         params = dict(fast.config.model.params or {})
-        self.metric_fn = _make_metric_fn(
-            metric, lambda_over=params.get("lambda_over"),
-        )
+        self.metric_fn = _make_metric_fn(metric)
         # Same fixed population as the candidate scorer: when the selector
         # carries a per-round incumbent mask, null replicates are scored on
         # it too (read at call time — the mask changes each round).

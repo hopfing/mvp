@@ -41,6 +41,23 @@ class TestSuggestParams:
         trial.suggest_int.assert_called_once_with("n_estimators", 100, 800, step=50)
         assert result == {"n_estimators": 200}
 
+    def test_int_log_suggest(self):
+        """An int spec with log=True is suggested on a log scale."""
+        trial = optuna.create_study().ask()
+        space = {"min_child_weight": {"type": "int", "low": 1, "high": 100, "log": True}}
+
+        result = suggest_params(trial, space)
+
+        assert 1 <= result["min_child_weight"] <= 100
+        assert trial.distributions["min_child_weight"].log is True
+
+    def test_int_log_with_step_raises(self):
+        trial = MagicMock()
+        space = {"n": {"type": "int", "low": 1, "high": 100, "log": True, "step": 2}}
+
+        with pytest.raises(ValueError, match="n: log and step cannot be combined"):
+            suggest_params(trial, space)
+
     def test_suggest_float(self):
         """suggest_params calls trial.suggest_float for float-typed params."""
         trial = MagicMock()
@@ -236,8 +253,9 @@ class TestDefaultSearchSpaces:
         for param_name, spec in DEFAULT_SEARCH_SPACES[model_type].items():
             if spec["type"] == "categorical":
                 assert "choices" in spec, f"{model_type}.{param_name} missing 'choices'"
-                assert len(spec["choices"]) >= 2, (
-                    f"{model_type}.{param_name} needs at least 2 choices"
+                # One choice is a fixed entry: recorded in trial params, not searched.
+                assert len(spec["choices"]) >= 1, (
+                    f"{model_type}.{param_name} needs at least 1 choice"
                 )
 
 
@@ -727,13 +745,18 @@ validation:
     # --- Forward-aligned objective (v2) ---------------------------------------
 
     def test_outer_folds_validation(self, sample_config, tmp_path):
-        """outer_folds < 1 is rejected at construction."""
-        with pytest.raises(ValueError, match="outer_folds must be >= 1"):
+        """outer_folds < 0 is rejected at construction; 0 is the default."""
+        with pytest.raises(ValueError, match="outer_folds must be >= 0"):
             HyperparamTuner(
                 config_path=sample_config,
                 state_dir=tmp_path / "tuning",
-                outer_folds=0,
+                outer_folds=-1,
             )
+        tuner = HyperparamTuner(
+            config_path=sample_config, state_dir=tmp_path / "tuning"
+        )
+        assert tuner.outer_folds == 0
+        assert tuner.study.user_attrs.get("outer_folds") == 0
 
     def test_outer_folds_and_seed_stored(self, sample_config, tmp_path):
         """New knobs are stored and a fresh study is stamped with the frame."""

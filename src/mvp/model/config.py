@@ -511,7 +511,9 @@ class ExperimentConfig(_StrictModel):
         """Offset training is wired for the plain XGBoost path only, and the
         offset feature must reach the feature matrix.
 
-        Rejected combinations mirror the discovery-side validator. The two
+        Rejected combinations mirror the discovery-side validator, except
+        early stopping: two_stage_fit slices the base_margin with its watch
+        split, so training takes offset + early stopping. The two
         structural checks exist because `compute_only` features are pulled for
         filter evaluation but never added to `feature_cols` (predictor.py
         389-396, 1326-1330), so an offset feature listed there would be absent
@@ -531,12 +533,6 @@ class ExperimentConfig(_StrictModel):
             raise ValueError(
                 "offset is not supported with MTL (vector-leaf / custom "
                 "objective takes a different fit signature). Run one or the other."
-            )
-        if self.early_stopping is not None and self.early_stopping.enabled:
-            raise ValueError(
-                "offset is not supported with early_stopping: two_stage_fit "
-                "carves its own sub/watch split inside the fold and takes no "
-                "base_margin, so margins would go unsliced."
             )
         feats = self.features
         if off.prior is not None and feats is not None:

@@ -112,15 +112,6 @@ offset:
                 )
             )
 
-    def test_early_stopping_rejected(self):
-        with pytest.raises(ValueError, match="not supported with early_stopping"):
-            ExperimentConfig.from_yaml(
-                _yaml(
-                    "offset:\n  feature: player_elo_surface_indoor_diff\n"
-                    "early_stopping:\n  enabled: true\n"
-                )
-            )
-
     def test_mtl_rejected(self):
         with pytest.raises(ValueError, match="not supported with MTL"):
             ExperimentConfig.from_yaml(

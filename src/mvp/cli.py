@@ -979,16 +979,18 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
             "thread budget T into T//K threads per trial (xgb scales sub-linearly "
             "past a knee, so more in-flight trials beats idle threads). The first "
             "trial runs serially to warm the feature cache before fan-out. Capped "
-            "at 2 (K>=3 needs constant_liar, which conflicts with the TPE "
-            "group sampler). K=1 = serial (default)."
+            "at 2 (K>=3 needs constant_liar on the TPE sampler, which is not "
+            "enabled). K=1 = serial (default)."
         ),
     )
     tune_parser.add_argument(
         "--outer-folds", type=int, default=None,
         help=(
             "[bayesian, classification] Number of trailing forward folds held "
-            "search-blind for selection (the honest outer block). The search runs "
-            "on the remaining inner folds. Default 4 (one surface-rotation year). "
+            "out of the search and used to rank trials. Default 0: every forward "
+            "fold is searched, and trials rank on the calibrated all-folds score; "
+            "the honest check is the evaluation after the config's end date. "
+            "Values of 1 or more restore a held-out ranking block. "
             "Leaving <5 inner folds warns (thin tune, proceeds); <2 refuses to "
             "start (the calibrated objective can't be computed). Lower this to free "
             "inner folds on fold-poor configs. Rejected for IID/projection configs, "

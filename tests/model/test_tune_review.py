@@ -685,6 +685,80 @@ class TestDefaultSort:
         assert picked == shown
 
 
+class TestAllFoldsRanking:
+    """outer_folds=0: no held-out block, so trials rank on the calibrated
+    all-folds score (`cal_*`) and there is no 1-SE pick."""
+
+    @staticmethod
+    def _study(tmp_path, name, rows):
+        """rows: (C, cal_log_loss, cal_roc_auc)."""
+        storage = f"sqlite:///{tmp_path / f'{name}.db'}"
+        study = optuna.create_study(
+            study_name=name, storage=storage, direction="minimize"
+        )
+        study.set_user_attr("objective_metrics", ["log_loss"])
+        study.set_user_attr("objective_frame", _OBJECTIVE_FRAME_CAL)
+        study.set_user_attr("outer_folds", 0)
+        for c, cal_ll, cal_auc in rows:
+            study.add_trial(
+                optuna.trial.create_trial(
+                    params={"C": c},
+                    distributions={
+                        "C": optuna.distributions.FloatDistribution(0.01, 100.0, log=True)
+                    },
+                    values=[cal_ll],
+                    user_attrs={
+                        "_tuning_mode": "calibrated",
+                        "duration_s": 5.0,
+                        "log_loss": cal_ll + 0.01,
+                        "brier_score": 0.22, "roc_auc": cal_auc,
+                        "accuracy": 0.67, "calibration_error": 0.03,
+                        "calibration_error_max": 0.06,
+                        "overconfidence_max": 0.05,
+                        "signed_calibration": 0.01,
+                        "error_rate_80plus": 0.12,
+                        "cal_log_loss": cal_ll, "cal_brier_score": 0.21,
+                        "cal_roc_auc": cal_auc, "cal_accuracy": 0.68,
+                        "cal_calibration_error": 0.012,
+                        "cal_calibration_error_max": 0.03,
+                        "cal_overconfidence_max": 0.02,
+                        "cal_signed_calibration": -0.004,
+                        "cal_error_rate_80plus": 0.10,
+                    },
+                )
+            )
+        return study
+
+    # LL and AUC disagree: C=1.0 wins LL (lowest), C=0.1 wins AUC (highest).
+    _ROWS = [(0.1, 0.62, 0.75), (1.0, 0.60, 0.72), (10.0, 0.61, 0.73)]
+
+    def test_ranks_on_calibrated_log_loss_ascending(self, tmp_path):
+        study = self._study(tmp_path, "all_ll", self._ROWS)
+        keys = resolve_sort_keys(study, study.trials)
+        assert keys == ["cal_log_loss"]
+        ranked = [t.params["C"] for t in sort_trials(study.trials, keys)]
+        assert ranked == [1.0, 10.0, 0.1]
+
+    def test_maximize_metric_sorts_descending(self, tmp_path):
+        study = self._study(tmp_path, "all_auc", self._ROWS)
+        keys = resolve_sort_keys(study, study.trials, ["cal_roc_auc"])
+        assert keys == ["cal_roc_auc"]
+        ranked = [t.params["C"] for t in sort_trials(study.trials, keys)]
+        assert ranked == [0.1, 10.0, 1.0]
+
+    def test_leaderboard_shows_calibrated_all_folds_and_no_1se_pick(self, tmp_path):
+        study = self._study(tmp_path, "all_lb", self._ROWS)
+        lines = format_leaderboard(study, top_n=3)
+        output = "\n".join(lines)
+        assert "sorted by cal_log_loss" in lines[0]
+        first = _first_row(lines)
+        assert "LL=0.60000" in first and "AUC=0.72000" in first
+        assert "raw LL=0.6100 (cal Δ-0.0100)" in output
+        assert "1-SE pick: needs a held-out block (outer_folds=0)" in output
+        assert "◆ 1-SE robust pick" not in output
+        assert "nan" not in output
+
+
 class TestObjectiveKey:
     """Naming the value Optuna optimized, so the tuner's `best=` reconciles with
     the leaderboard (which ranks a different fold set)."""

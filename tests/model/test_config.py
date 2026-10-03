@@ -226,6 +226,31 @@ model:
         assert config.data.train_filters == {"circuit": ["chal", "tour", "itf"]}
         assert config.data.eval_filters == {"circuit": ["chal", "tour"]}
 
+    def test_offset_with_early_stopping_validates(self):
+        """two_stage_fit slices base_margin with its watch split, so an offset
+        and early stopping now combine."""
+        yaml_str = """
+data:
+  date_range:
+    start: "2020-01-01"
+    end: "2024-12-31"
+features:
+  include:
+    - player_elo_surface_indoor_diff
+    - win_rate(days=30)
+model:
+  type: xgboost
+metrics:
+  objective: [log_loss]
+early_stopping:
+  enabled: true
+offset:
+  feature: player_elo_surface_indoor_diff
+"""
+        config = ExperimentConfig.from_yaml(yaml_str)
+        assert config.offset.feature == "player_elo_surface_indoor_diff"
+        assert config.early_stopping.enabled
+
 
 class TestDateValidationSplitterParams:
     """Cross-type validators for date_sliding / date_expanding params."""

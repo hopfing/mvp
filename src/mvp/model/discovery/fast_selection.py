@@ -137,16 +137,11 @@ def _masked_log_loss(y_true: np.ndarray, y_prob: np.ndarray) -> float:
 
 def _make_metric_fn(
     metric: str,
-    lambda_over: float | None = None,
 ) -> Callable[[np.ndarray, np.ndarray], float]:
     """Return a function that computes a single metric.
 
     Avoids the overhead of compute_metrics() which calculates all 6 metrics
     when only one is needed per iteration.
-
-    `lambda_over` mirrors `model.params.lambda_over` from the YAML so that
-    `asymmetric_logloss` evaluates the same loss surface used at training.
-    None falls back to compute_asymmetric_logloss's default.
     """
     from sklearn.metrics import (
         accuracy_score,
@@ -157,7 +152,6 @@ def _make_metric_fn(
 
     from mvp.model.metrics import (
         OPTIMIZABLE_METRICS,
-        compute_asymmetric_logloss,
         compute_beta_tail_score,
         compute_calibration_error,
         compute_calibration_error_max,
@@ -167,8 +161,6 @@ def _make_metric_fn(
         compute_threshold_weighted_brier,
         compute_weighted_concordance,
     )
-
-    asym_kwargs = {"lambda_over": lambda_over} if lambda_over is not None else {}
 
     metric_fns: dict[str, Callable[[np.ndarray, np.ndarray], float]] = {
         "log_loss": lambda yt, yp: float(
@@ -182,7 +174,6 @@ def _make_metric_fn(
         "calibration_error": lambda yt, yp: compute_calibration_error(yt, yp),
         "calibration_error_max": lambda yt, yp: compute_calibration_error_max(yt, yp),
         "error_rate_80plus": lambda yt, yp: compute_error_rate_80plus(yt, yp),
-        "asymmetric_logloss": lambda yt, yp: compute_asymmetric_logloss(yt, yp, **asym_kwargs),
         # Tail-sensitive objectives. beta_tail_score_sharp reuses the a=b=0.25
         # variant; pass it through compute_beta_tail_score with the sharper shape.
         "beta_tail_score": lambda yt, yp: compute_beta_tail_score(yt, yp),
@@ -200,7 +191,7 @@ def _make_metric_fn(
     )
     if metric not in metric_fns:
         # Fall back to full compute_metrics for unknown metrics
-        return lambda yt, yp: compute_metrics(yt, yp, lambda_over=lambda_over)[metric]
+        return lambda yt, yp: compute_metrics(yt, yp)[metric]
     return metric_fns[metric]
 
 
@@ -920,9 +911,8 @@ class FastForwardSelector:
             lr_params.pop("n_jobs", None)
 
         # Build a single-metric function to avoid computing all 6 metrics
-        # when we only need one. Pass lambda_over from model params so
-        # asymmetric_logloss mirrors the training-side objective.
-        metric_fn = _make_metric_fn(metric, lambda_over=model_params.get("lambda_over"))
+        # when we only need one.
+        metric_fn = _make_metric_fn(metric)
         # restricted_logloss under a FIXED population: when self.score_masks is
         # set (per-round incumbent mask, see set_incumbent_masks), a fold's
         # scored rows come from the mask and the metric is plain log loss on
@@ -1115,7 +1105,6 @@ class FastForwardSelector:
                         _es_factory, X_train, y_train, sw,
                         dates_train, es_test_start, es_cfg,
                         metric=metric,
-                        lambda_over=model_params.get("lambda_over"),
                         log_result=False,
                     )
                     es_best_iters.append(best_it)

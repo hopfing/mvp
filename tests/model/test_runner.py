@@ -198,7 +198,7 @@ class TestReportingCalibratedHoldout:
             {"y_true": np.array([0, 1, 0, 1]), "y_prob": np.array([0.3, 0.7, 0.4, 0.6])}
         ]
         overall, per_fold = _reporting_calibrated_holdout(
-            oof_y_true, oof_y_prob, holdout, None
+            oof_y_true, oof_y_prob, holdout
         )
         assert overall is None
         assert per_fold is None
@@ -216,7 +216,7 @@ class TestReportingCalibratedHoldout:
             for _ in range(2)
         ]
         overall, per_fold = _reporting_calibrated_holdout(
-            oof_y_true, oof_y_prob, holdout, None
+            oof_y_true, oof_y_prob, holdout
         )
         assert overall is not None and "log_loss" in overall
         assert per_fold is not None and len(per_fold) == 2
@@ -237,14 +237,14 @@ class TestCalibratedObjectiveMetrics:
         rng = np.random.default_rng(0)
         folds = [self._fold(rng, 60) for _ in range(3)]
         y_true = np.concatenate([f["y_true"] for f in folds])
-        out = _calibrated_objective_metrics(folds, y_true, None)
+        out = _calibrated_objective_metrics(folds, y_true)
         assert out is not None and "log_loss" in out
 
     def test_single_fold_returns_none(self):
         """One fold can't be nested (no complement to fit on) → None, not crash."""
         rng = np.random.default_rng(0)
         folds = [self._fold(rng, 60)]
-        assert _calibrated_objective_metrics(folds, folds[0]["y_true"], None) is None
+        assert _calibrated_objective_metrics(folds, folds[0]["y_true"]) is None
 
     def test_single_class_complement_returns_none(self):
         """If a fold's complement is single-class the nested Platt can't fit; the
@@ -254,4 +254,4 @@ class TestCalibratedObjectiveMetrics:
             {"y_true": np.ones(50, dtype=int), "y_prob": np.linspace(0.1, 0.9, 50)},
         ]
         y_true = np.concatenate([f["y_true"] for f in folds])
-        assert _calibrated_objective_metrics(folds, y_true, None) is None
+        assert _calibrated_objective_metrics(folds, y_true) is None

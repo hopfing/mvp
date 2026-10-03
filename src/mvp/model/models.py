@@ -105,32 +105,6 @@ def _sigmoid(z: np.ndarray) -> np.ndarray:
     return 1.0 / (1.0 + np.exp(-z))
 
 
-def _asymmetric_logloss(
-    y_true: np.ndarray, y_pred: np.ndarray, lambda_over: float
-) -> tuple[np.ndarray, np.ndarray]:
-    """XGB custom objective: log-loss with the overconfident side weighted
-    by `lambda_over` (>=1). y_pred arrives as raw margin (logit) under
-    XGB's custom-objective contract; we apply sigmoid here.
-
-    Overconfident = sigmoid(pred) > y (predicting high when actual is low).
-
-    Module-level (not a closure) so functools.partial wrapping is picklable —
-    XGBClassifier stores the objective on the booster and joblib must
-    serialize it when we save the trained model artifact.
-    """
-    p = _sigmoid(y_pred)
-    weight = np.where(p > y_true, lambda_over, 1.0)
-    grad = (p - y_true) * weight
-    hess = p * (1.0 - p) * weight
-    return grad, hess
-
-
-def _asymmetric_logloss_factory(lambda_over: float):
-    """Return a picklable callable bound to lambda_over for XGB's `objective=`."""
-    import functools
-    return functools.partial(_asymmetric_logloss, lambda_over=lambda_over)
-
-
 def _center_weighted_logloss(
     y_true: np.ndarray, y_pred: np.ndarray, center_k: float, floor: float
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -249,18 +223,16 @@ class XGBoostModel(BaseModel):
         feature_names: list[str] | None = None,
     ) -> None:
         resolved = _resolve_monotone_constraints(params, feature_names)
-        # Custom objective: keep "objective": "asymmetric_logloss" as a string
-        # in self.params so the config snapshot can yaml-dump it. Stash
-        # lambda_over separately; we materialize the callable only at fit
-        # time when building XGBClassifier kwargs.
-        self._lambda_over: float | None = None
         if resolved.get("objective") == "asymmetric_logloss":
-            # dict(resolved) so we don't mutate the caller's params
-            resolved = dict(resolved)
-            self._lambda_over = float(resolved.pop("lambda_over", 2.0))
-        # center_weighted_logloss: same string-in-snapshot / callable-at-fit
-        # pattern. center_k=0 -> plain log loss; center_floor keeps the
-        # confident tails learning.
+            raise ValueError(
+                "objective 'asymmetric_logloss' was removed: it weighted every y=0 row "
+                "by lambda_over (a class weight), not overconfident predictions. "
+                "Use binary:logistic."
+            )
+        # center_weighted_logloss: custom objective. Keep the string in
+        # self.params so the config snapshot can yaml-dump it; the callable is
+        # materialized only at fit time. center_k=0 -> plain log loss;
+        # center_floor keeps the confident tails learning.
         self._center_k: float | None = None
         self._center_floor: float = 0.1
         if resolved.get("objective") == "center_weighted_logloss":
@@ -298,6 +270,7 @@ class XGBoostModel(BaseModel):
         early_stopping_rounds: int | None = 10,
         eval_metric: Any | None = None,
         base_margin: np.ndarray | None = None,
+        base_margin_eval_set: list[np.ndarray] | None = None,
     ) -> None:
         import xgboost as xgb
 
@@ -306,8 +279,6 @@ class XGBoostModel(BaseModel):
         # with it via functools.partial, which IS picklable since it wraps
         # a module-level function).
         xgb_params = dict(self.params)
-        if self._lambda_over is not None:
-            xgb_params["objective"] = _asymmetric_logloss_factory(self._lambda_over)
         if self._center_k is not None:
             xgb_params["objective"] = _center_weighted_logloss_factory(
                 self._center_k, self._center_floor
@@ -336,6 +307,10 @@ class XGBoostModel(BaseModel):
         self._fit_with_base_margin = base_margin is not None
         if eval_set is not None:
             fit_kwargs["eval_set"] = eval_set
+            # The eval rows' offsets, one array per eval_set entry; the
+            # early-stop metric is otherwise scored without the offset.
+            if base_margin_eval_set is not None:
+                fit_kwargs["base_margin_eval_set"] = base_margin_eval_set
             fit_kwargs["verbose"] = False
             if early_stopping_rounds is not None:
                 self._model.set_params(early_stopping_rounds=early_stopping_rounds)
@@ -375,12 +350,11 @@ class XGBoostModel(BaseModel):
         # With a custom objective, XGBClassifier's predict_proba returns raw
         # margin (logits) rather than probabilities, because XGB no longer
         # knows the output space. Apply sigmoid ourselves in that case.
-        # getattr fallback handles artifacts pickled before commit 77a69b3
-        # added _lambda_over to __init__ — old joblibs deserialize without
-        # the attribute and must default to the standard-logistic path.
-        lambda_over = getattr(self, "_lambda_over", None)
+        # getattr fallback handles artifacts pickled before _center_k existed —
+        # old joblibs deserialize without the attribute and must default to
+        # the standard-logistic path.
         center_k = getattr(self, "_center_k", None)
-        if lambda_over is not None or center_k is not None:
+        if center_k is not None:
             raw = self._model.predict(X, output_margin=True, **margin_kw)
             return _sigmoid(raw)
         return self._model.predict_proba(X, **margin_kw)[:, 1]

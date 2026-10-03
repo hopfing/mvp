@@ -57,7 +57,7 @@ def metric_direction(name: str) -> str:
 # Kept in sync with _make_metric_fn by an assertion there.
 OPTIMIZABLE_METRICS = frozenset({
     "log_loss", "accuracy", "brier_score", "roc_auc", "calibration_error",
-    "calibration_error_max", "error_rate_80plus", "asymmetric_logloss",
+    "calibration_error_max", "error_rate_80plus",
     "beta_tail_score", "beta_tail_score_sharp", "threshold_weighted_brier",
     "restricted_logloss", "weighted_concordance", "partial_auc_tail",
 })
@@ -75,7 +75,6 @@ OPTIMIZABLE_METRICS = frozenset({
 # None (the default) resolves to the value here via DiscoveryOptions.resolved_min_delta.
 METRIC_MIN_DELTA: dict[str, float] = {
     "log_loss": 1e-4,                  # ~0.60   anchor (observed)
-    "asymmetric_logloss": 1e-4,        # ~0.6-0.8 penalized log_loss
     "restricted_logloss": 5e-5,        # ~0.3-0.6 log_loss on the confident subset
     "accuracy": 1e-4,                  # ~0.66   (observed; maximize)
     "roc_auc": 1e-4,                   # ~0.73   (observed; maximize)
@@ -249,24 +248,6 @@ def compute_error_rate_80plus(y_true: np.ndarray, y_prob: np.ndarray) -> float:
         return 0.0
     tier_errors = int((tier_mask & is_error).sum())
     return tier_errors / tier_total
-
-
-def compute_asymmetric_logloss(
-    y_true: np.ndarray, y_prob: np.ndarray, lambda_over: float = 2.0
-) -> float:
-    """Asymmetric log-loss with overconfident-side penalty weighted by lambda_over.
-
-    Mirrors the training objective in `XGBoostModel._asymmetric_logloss` so
-    HP tuning can target the same loss surface the model is trained against.
-    Overconfident = predicted prob > actual outcome.
-    """
-    # Cast to float64 before clipping: in float32 the upper bound 1 - 1e-15
-    # rounds to exactly 1.0, so a prediction at 1.0 survives the clip and
-    # log(1 - p) = log(0) (divide-by-zero RuntimeWarning + inf in the mean).
-    p = np.clip(np.asarray(y_prob, dtype=np.float64), 1e-15, 1 - 1e-15)
-    base = -(y_true * np.log(p) + (1 - y_true) * np.log(1 - p))
-    weight = np.where(p > y_true, lambda_over, 1.0)
-    return float(np.mean(base * weight))
 
 
 def compute_beta_tail_score(
@@ -448,7 +429,6 @@ def compute_metrics(
     y_true: np.ndarray,
     y_prob: np.ndarray,
     threshold: float = 0.5,
-    lambda_over: float | None = None,
     full_range: bool = False,
 ) -> dict[str, float]:
     """Compute classification metrics.
@@ -457,16 +437,12 @@ def compute_metrics(
         y_true: True binary labels.
         y_prob: Predicted probabilities for positive class.
         threshold: Classification threshold for accuracy.
-        lambda_over: Override for asymmetric_logloss's overconfidence penalty.
         full_range: Score calibration over [0, 1] instead of masking to
             p >= 0.50. Forwarded to ALL FOUR bucket-derived metrics below,
             since each calls `_bucket_errors` itself rather than routing
             through `compute_calibration_error` — passing it to one would
             leave the other three truncated. Set by callers whose rows carry
             no mirrored orientation; see `_bucket_errors`.
-            When None, uses compute_asymmetric_logloss's default (2.0). Callers
-            with a YAML-configured `model.params.lambda_over` should pass it
-            through so the tune metric mirrors the training objective.
 
     Returns:
         Dictionary of metric name -> value.
@@ -475,8 +451,6 @@ def compute_metrics(
 
     # Clip probabilities to avoid log(0)
     y_prob_clipped = np.clip(y_prob, 1e-15, 1 - 1e-15)
-
-    asym_kwargs = {"lambda_over": lambda_over} if lambda_over is not None else {}
 
     return {
         "accuracy": float(accuracy_score(y_true, y_pred)),
@@ -492,7 +466,6 @@ def compute_metrics(
         "signed_calibration": compute_signed_calibration(
             y_true, y_prob, full_range=full_range),
         "error_rate_80plus": compute_error_rate_80plus(y_true, y_prob),
-        "asymmetric_logloss": compute_asymmetric_logloss(y_true, y_prob, **asym_kwargs),
         # Tail-sensitive objectives (see each compute_* docstring).
         # Lower = better: beta_tail_score, threshold_weighted_brier,
         # restricted_logloss. Higher = better: weighted_concordance,

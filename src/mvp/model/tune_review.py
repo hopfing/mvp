@@ -52,7 +52,25 @@ def _is_new_pipeline_study(trials: list[optuna.trial.FrozenTrial]) -> bool:
     )
 
 
-def _to_ranked(metric: str, use_cal: bool) -> str:
+def _frame_prefixes(study: optuna.Study) -> tuple[str, str]:
+    """(calibrated, raw) user-attr prefixes the study's trials rank on.
+
+    With a held-out block (``outer_folds >= 1``) trials rank on it:
+    ``holdout_cal_*`` / ``holdout_*``. With ``outer_folds == 0`` every forward
+    fold was searched, so they rank on the calibrated all-folds score
+    (``cal_*``) and the bare raw metrics. Studies predating the attr had a
+    held-out block.
+    """
+    if study.user_attrs.get("outer_folds", 4) >= 1:
+        return "holdout_cal_", "holdout_"
+    return "cal_", ""
+
+
+def _to_ranked(
+    metric: str,
+    use_cal: bool,
+    prefixes: tuple[str, str] = ("holdout_cal_", "holdout_"),
+) -> str:
     """Map a bare metric name to the user-attr key tune-review ranks on.
 
     Classification studies from the Phase-2 tuner carry deployment-frame
@@ -60,14 +78,17 @@ def _to_ranked(metric: str, use_cal: bool) -> str:
     the held-out block). When ``use_cal`` is set, probability-scale metrics rank
     on those so the ordering reflects what deployment actually scores.
     Calibration-invariant ranking metrics — and IID/projection studies, which
-    never fit Platt — rank on the raw ``holdout_*`` key. Already-prefixed names
-    (``holdout_`` or ``holdout_cal_``) pass through unchanged.
+    never fit Platt — rank on the raw ``holdout_*`` key. ``prefixes`` is the
+    study's (calibrated, raw) pair from `_frame_prefixes`: an all-folds study
+    ranks on ``cal_*`` and bare keys instead. Already-prefixed names pass
+    through unchanged.
     """
-    if metric.startswith(("holdout_cal_", "holdout_")):
+    cal_prefix, raw_prefix = prefixes
+    if metric.startswith(("holdout_cal_", "holdout_", cal_prefix)):
         return metric
     if use_cal and metric not in CALIBRATION_INVARIANT_METRICS:
-        return f"holdout_cal_{metric}"
-    return f"holdout_{metric}"
+        return f"{cal_prefix}{metric}"
+    return f"{raw_prefix}{metric}"
 
 
 def _objective_key(
@@ -118,13 +139,16 @@ def _objective_key(
 
 
 def _study_frame(
+    study: optuna.Study,
     trials: list[optuna.trial.FrozenTrial],
 ) -> tuple[bool, bool, bool, bool, int]:
     """(is_iid, is_projection, use_cal, cal_mixed, n_cal) for a set of trials.
 
     Deployment-frame reporting: classification studies from the Phase-2 tuner
     carry `holdout_cal_*` metrics (raw search objective, calibrated held-out
-    block). We switch to the calibrated view only when EVERY trial has them.
+    block), or `cal_*` all-folds metrics when the study has no held-out block
+    (`_frame_prefixes`). We switch to the calibrated view only when EVERY trial
+    has them.
     Mixing calibrated and raw rows in one ranking would sort raw-only trials
     (pre-Phase-2 in a resumed study, or a trial whose OOF was single-class so
     the reporting calibrator couldn't fit) to ±inf and truncate them out of the
@@ -135,8 +159,9 @@ def _study_frame(
     is_iid = "iid_crps_total_games" in first_ua
     is_projection = "mae" in first_ua and "log_loss" not in first_ua
     is_classification = not is_iid and not is_projection
+    cal_prefix, _ = _frame_prefixes(study)
     n_cal = sum(
-        any(k.startswith("holdout_cal_") for k in t.user_attrs) for t in trials
+        any(k.startswith(cal_prefix) for k in t.user_attrs) for t in trials
     )
     use_cal = is_classification and n_cal == len(trials) and n_cal > 0
     cal_mixed = is_classification and 0 < n_cal < len(trials)
@@ -173,8 +198,8 @@ def _objective_sort_metrics(
 
 
 def _direction_key(metric: str) -> str:
-    """The bare metric a (possibly holdout-prefixed) key inherits direction from."""
-    for prefix in ("holdout_cal_", "holdout_"):
+    """The bare metric a (possibly prefixed) key inherits direction from."""
+    for prefix in ("holdout_cal_", "holdout_", "cal_"):
         if metric.startswith(prefix):
             return metric[len(prefix):]
     return metric
@@ -189,14 +214,15 @@ def resolve_sort_keys(
 
     Bare names are auto-prefixed to the holdout key — Optuna optimizes in-fold
     per trial, but ranking ACROSS trials uses the held-out measurement
-    (calibrated for classification when available, raw otherwise). IID studies
-    have no holdout block (the tuner never passes outer_folds to
-    IIDProjectionRunner), so their keys stay bare.
+    (calibrated for classification when available, raw otherwise). A study with
+    no held-out block (outer_folds=0) ranks on the calibrated all-folds key
+    instead (`_frame_prefixes`). IID studies have no holdout block (the tuner
+    never passes outer_folds to IIDProjectionRunner), so their keys stay bare.
 
     Shared with the frozen backtest sweep so `--select topn` and `tune-review`
     cannot drift into different orderings.
     """
-    is_iid, is_projection, use_cal, _, _ = _study_frame(trials)
+    is_iid, is_projection, use_cal, _, _ = _study_frame(study, trials)
     if sort_by is None:
         fallback = (
             "iid_crps_total_games" if is_iid
@@ -206,7 +232,8 @@ def resolve_sort_keys(
         sort_by = _objective_sort_metrics(study, trials, fallback)
     if is_iid:
         return list(sort_by)
-    return [_to_ranked(m, use_cal) for m in sort_by]
+    prefixes = _frame_prefixes(study)
+    return [_to_ranked(m, use_cal, prefixes) for m in sort_by]
 
 
 def sort_trials(
@@ -390,13 +417,14 @@ def format_leaderboard(
             "  poetry run py -m mvp tune <config>",
         ]
 
-    is_iid, is_projection, use_cal, cal_mixed, n_cal = _study_frame(trials)
+    is_iid, is_projection, use_cal, cal_mixed, n_cal = _study_frame(study, trials)
+    cal_prefix, raw_prefix = _frame_prefixes(study)
     # Defaults to the study's own objective; `--sort` overrides.
     sort_by = resolve_sort_keys(study, trials, sort_by)
 
     # Confirm holdout metrics exist for the requested sort metric(s). Studies
-    # tuned with holdout_folds=0 won't have them; the tuner sets holdout_folds to
-    # `outer_folds` (>=1), so this catches misconfigured studies only.
+    # tuned with outer_folds=0 have none, but rank on `cal_*` / bare keys
+    # (`_frame_prefixes`); this only fires for `holdout_` keys.
     has_any_holdout = any(
         any(k.startswith("holdout_") for k in t.user_attrs) for t in trials
     )
@@ -409,11 +437,18 @@ def format_leaderboard(
 
     trials = sort_trials(trials, sort_by)
     # 1-SE robust pick (single-metric sorts): identify it over the full sorted set
-    # before truncation, so it isn't lost to top_n.
-    robust_number, robust_band, robust_note = (
-        _robust_pick(trials, sort_by[0], study.user_attrs.get("outer_folds"))
-        if len(sort_by) == 1 else (None, 0, "")
-    )
+    # before truncation, so it isn't lost to top_n. It needs per-fold held-out
+    # metrics, which an all-folds study (outer_folds=0) doesn't have.
+    if study.user_attrs.get("outer_folds") == 0:
+        robust_number, robust_band, robust_note = (
+            None, 0, "1-SE pick: needs a held-out block (outer_folds=0)"
+        )
+    elif len(sort_by) == 1:
+        robust_number, robust_band, robust_note = _robust_pick(
+            trials, sort_by[0], study.user_attrs.get("outer_folds")
+        )
+    else:
+        robust_number, robust_band, robust_note = None, 0, ""
     # Captured before truncation: the mixed-vintage note counts trials in the
     # STUDY, not the ones that survived top_n.
     n_complete = len(trials)
@@ -514,17 +549,17 @@ def format_leaderboard(
             # come from the calibrated held-out block; AUC stays raw (invariant).
             # A second line shows the raw→calibrated gap for the ranked metric (the
             # "looks better in tuning than it deploys" delta) and its outer spread.
-            ll = ua.get("holdout_cal_log_loss", float("nan"))
-            brier = ua.get("holdout_cal_brier_score", float("nan"))
-            auc = ua.get("holdout_roc_auc", float("nan"))
-            acc = ua.get("holdout_cal_accuracy", float("nan"))
-            cal = ua.get("holdout_cal_calibration_error", float("nan"))
-            cal_max = ua.get("holdout_cal_calibration_error_max", float("nan"))
-            oc_max = ua.get("holdout_cal_overconfidence_max", float("nan"))
-            scal = ua.get("holdout_cal_signed_calibration", float("nan"))
-            err80 = ua.get("holdout_cal_error_rate_80plus", float("nan"))
-            raw_key = f"holdout_{ref_metric}"
-            cal_key = _to_ranked(ref_metric, use_cal)
+            ll = ua.get(f"{cal_prefix}log_loss", float("nan"))
+            brier = ua.get(f"{cal_prefix}brier_score", float("nan"))
+            auc = ua.get(f"{raw_prefix}roc_auc", float("nan"))
+            acc = ua.get(f"{cal_prefix}accuracy", float("nan"))
+            cal = ua.get(f"{cal_prefix}calibration_error", float("nan"))
+            cal_max = ua.get(f"{cal_prefix}calibration_error_max", float("nan"))
+            oc_max = ua.get(f"{cal_prefix}overconfidence_max", float("nan"))
+            scal = ua.get(f"{cal_prefix}signed_calibration", float("nan"))
+            err80 = ua.get(f"{cal_prefix}error_rate_80plus", float("nan"))
+            raw_key = f"{raw_prefix}{ref_metric}"
+            cal_key = _to_ranked(ref_metric, use_cal, (cal_prefix, raw_prefix))
             # The ranked metric leads the row when it isn't one of the fixed
             # columns (e.g. restricted_logloss): otherwise the sort key only
             # appears as a raw value plus delta on the second line.
@@ -551,11 +586,13 @@ def format_leaderboard(
             if ref_parts:
                 lines.append("      " + "  ·  ".join(ref_parts))
             shown = {
-                "holdout_cal_log_loss", "holdout_cal_brier_score",
-                "holdout_roc_auc", "holdout_cal_accuracy",
-                "holdout_cal_calibration_error", "holdout_cal_calibration_error_max",
-                "holdout_cal_overconfidence_max", "holdout_cal_signed_calibration",
-                "holdout_cal_error_rate_80plus", raw_key, cal_key,
+                f"{cal_prefix}log_loss", f"{cal_prefix}brier_score",
+                f"{raw_prefix}roc_auc", f"{cal_prefix}accuracy",
+                f"{cal_prefix}calibration_error",
+                f"{cal_prefix}calibration_error_max",
+                f"{cal_prefix}overconfidence_max",
+                f"{cal_prefix}signed_calibration",
+                f"{cal_prefix}error_rate_80plus", raw_key, cal_key,
             }
         else:
             # Classification, raw view (pre-Phase-2 studies with no calibrated
@@ -563,16 +600,16 @@ def format_leaderboard(
             # metric. The user picks a metric NAME — they don't pick in-fold vs
             # holdout. In-fold is Optuna's internal signal during a trial;
             # holdout is the ranking signal across trials.
-            ll = ua.get("holdout_log_loss", float("nan"))
-            brier = ua.get("holdout_brier_score", float("nan"))
-            auc = ua.get("holdout_roc_auc", float("nan"))
-            acc = ua.get("holdout_accuracy", float("nan"))
-            cal = ua.get("holdout_calibration_error", float("nan"))
-            cal_max = ua.get("holdout_calibration_error_max", float("nan"))
-            oc_max = ua.get("holdout_overconfidence_max", float("nan"))
-            scal = ua.get("holdout_signed_calibration", float("nan"))
-            err80 = ua.get("holdout_error_rate_80plus", float("nan"))
-            raw_ranked = f"holdout_{ref_metric}"
+            ll = ua.get(f"{raw_prefix}log_loss", float("nan"))
+            brier = ua.get(f"{raw_prefix}brier_score", float("nan"))
+            auc = ua.get(f"{raw_prefix}roc_auc", float("nan"))
+            acc = ua.get(f"{raw_prefix}accuracy", float("nan"))
+            cal = ua.get(f"{raw_prefix}calibration_error", float("nan"))
+            cal_max = ua.get(f"{raw_prefix}calibration_error_max", float("nan"))
+            oc_max = ua.get(f"{raw_prefix}overconfidence_max", float("nan"))
+            scal = ua.get(f"{raw_prefix}signed_calibration", float("nan"))
+            err80 = ua.get(f"{raw_prefix}error_rate_80plus", float("nan"))
+            raw_ranked = f"{raw_prefix}{ref_metric}"
             lead = (
                 f"{ref_label}={ua[raw_ranked]:.5f}  "
                 if ref_metric not in _HEADLINE_METRICS and raw_ranked in ua else ""
@@ -585,10 +622,12 @@ def format_leaderboard(
                 f"({duration:.0f}s · {trial_id})"
             )
             shown = {
-                "holdout_log_loss", "holdout_brier_score", "holdout_roc_auc",
-                "holdout_accuracy", "holdout_calibration_error",
-                "holdout_calibration_error_max", "holdout_overconfidence_max",
-                "holdout_signed_calibration", "holdout_error_rate_80plus",
+                f"{raw_prefix}{m}" for m in (
+                    "log_loss", "brier_score", "roc_auc", "accuracy",
+                    "calibration_error", "calibration_error_max",
+                    "overconfidence_max", "signed_calibration",
+                    "error_rate_80plus",
+                )
             }
 
         if trial.number == robust_number and robust_band > 1:

@@ -1175,7 +1175,7 @@ class TestEarlyStopping:
                 return np.full(len(X), 0.5)
 
         def _stub(factory, X, y, sw, dates, test_start, cfg, metric,
-                  lambda_over=None, is_mtl=False, log_result=True):
+                  is_mtl=False, log_result=True):
             captured["test_start"] = test_start
             return _StubModel(), 5
 

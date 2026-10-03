@@ -221,6 +221,92 @@ class TestTrainProductionModel:
         assert artifact_path.parent.exists()
 
 
+class TestTrainEarlyStopping:
+    def test_deploys_at_best_iteration(
+        self, production_config, sample_matches, tmp_path, caplog
+    ):
+        """With early stopping on, the deployed model has best_iteration + 1
+        rounds, not the config's n_estimators."""
+        from mvp.model.predictor import ProductionPredictor
+
+        model_config_path = tmp_path / "model.yaml"
+        model_config = yaml.safe_load(model_config_path.read_text())
+        model_config["model"] = {
+            "type": "xgboost", "params": {"n_estimators": 500, "max_depth": 2},
+        }
+        model_config["metrics"] = {"objective": ["log_loss"]}
+        # The fixture's 28 days of matches all sit in the watch window; a tail
+        # floor of 1 keeps the guard from falling back to fixed rounds.
+        model_config["early_stopping"] = {
+            "enabled": True, "min_watch_tail": 1, "patience": 5, "ceiling": 40,
+        }
+        model_config_path.write_text(yaml.dump(model_config))
+
+        predictor = ProductionPredictor(
+            production_config_path=production_config,
+            matches_path=sample_matches,
+            cache_dir=tmp_path / "cache",
+        )
+        with caplog.at_level(logging.INFO, logger="mvp.model.predictor"):
+            predictor.train()
+
+        booster = predictor.load()["model"]._model.get_booster()
+        record = next(
+            r for r in caplog.records
+            if r.name == "mvp.model.predictor"
+            and "early-stop deploy fit" in r.getMessage()
+        )
+        best_it = record.args[0]
+        assert booster.num_boosted_rounds() == best_it + 1
+        assert booster.num_boosted_rounds() != 500
+
+    def test_calibration_folds_are_early_stopped(
+        self, production_config, sample_matches, tmp_path, monkeypatch
+    ):
+        """The temporal-CV fold models the calibrator is fit on early-stop too:
+        each has best_iteration + 1 rounds, not the config's n_estimators."""
+        import mvp.model.predictor as predictor_mod
+        from mvp.model.predictor import ProductionPredictor
+
+        model_config_path = tmp_path / "model.yaml"
+        model_config = yaml.safe_load(model_config_path.read_text())
+        model_config["model"] = {
+            "type": "xgboost", "params": {"n_estimators": 500, "max_depth": 2},
+        }
+        model_config["metrics"] = {"objective": ["log_loss"]}
+        model_config["early_stopping"] = {
+            "enabled": True, "min_watch_tail": 1, "patience": 5, "ceiling": 40,
+        }
+        # A temporal splitter, so the calibrator's OOF comes from the fold loop.
+        model_config["validation"] = {
+            "type": "expanding_window", "initial_train_size": 80, "step_size": 40,
+        }
+        model_config_path.write_text(yaml.dump(model_config))
+
+        fits: list[tuple] = []  # (n_train_rows, model, best_iteration)
+        real = predictor_mod.two_stage_fit
+
+        def _spy(factory, X, *args, **kwargs):
+            model, best = real(factory, X, *args, **kwargs)
+            fits.append((len(X), model, best))
+            return model, best
+
+        monkeypatch.setattr(predictor_mod, "two_stage_fit", _spy)
+        ProductionPredictor(
+            production_config_path=production_config,
+            matches_path=sample_matches,
+            cache_dir=tmp_path / "cache",
+        ).train()
+
+        deploy_rows = max(n for n, _, _ in fits)
+        fold_fits = [(m, b) for n, m, b in fits if n < deploy_rows]
+        assert len(fold_fits) >= 2
+        for model, best in fold_fits:
+            rounds = model._model.get_booster().num_boosted_rounds()
+            assert best is not None and rounds == best + 1
+            assert rounds != 500
+
+
 class TestLoadProductionModel:
     def test_load_after_train(self, production_config, sample_matches, tmp_path):
         from mvp.model.predictor import ProductionPredictor

@@ -177,7 +177,6 @@ def _reporting_calibrated_holdout(
     oof_y_true: np.ndarray,
     oof_y_prob: np.ndarray,
     holdout_predictions: list[dict],
-    lambda_over: float | None,
 ) -> tuple[dict[str, float] | None, list[dict[str, float]] | None]:
     """Deployment-frame (global-Platt) metrics for the held-out outer block.
 
@@ -206,14 +205,14 @@ def _reporting_calibrated_holdout(
     holdout_y_prob = np.concatenate([p["y_prob"] for p in holdout_predictions])
     holdout_cal = reporting_cal.transform(holdout_y_prob)
     overall = _with_fixed_rll(
-        compute_metrics(holdout_y_true, holdout_cal, lambda_over=lambda_over),
+        compute_metrics(holdout_y_true, holdout_cal),
         holdout_y_true, holdout_cal, _pooled_score_mask(holdout_predictions),
     )
     per_fold = []
     for p in holdout_predictions:
         p_cal = reporting_cal.transform(p["y_prob"])
         per_fold.append(_with_fixed_rll(
-            compute_metrics(p["y_true"], p_cal, lambda_over=lambda_over),
+            compute_metrics(p["y_true"], p_cal),
             p["y_true"], p_cal, p.get("score_mask"),
         ))
     return overall, per_fold
@@ -222,7 +221,6 @@ def _reporting_calibrated_holdout(
 def _calibrated_objective_metrics(
     tuning_predictions: list[dict],
     y_true_oof: np.ndarray,
-    lambda_over: float | None,
 ) -> dict[str, float] | None:
     """Calibrated-frame tuning objective: pooled OOF metrics with each fold
     calibrated OUT-OF-FOLD.
@@ -258,7 +256,7 @@ def _calibrated_objective_metrics(
         cal_probs.append(cal.transform(tuning_predictions[i]["y_prob"]))
     pooled = np.concatenate(cal_probs)
     return _with_fixed_rll(
-        compute_metrics(y_true_oof, pooled, lambda_over=lambda_over),
+        compute_metrics(y_true_oof, pooled),
         y_true_oof, pooled, _pooled_score_mask(tuning_predictions),
     )
 
@@ -324,13 +322,14 @@ class ExperimentRunner:
                 calibrator fit, diagnostics, and headline `metrics`. The held-out
                 folds still get calibrated probabilities (using the
                 tuning-fold-only calibrator) and are reported separately as
-                `holdout_metrics` / `holdout_fold_metrics`. Tuning sets this to 1.
+                `holdout_metrics` / `holdout_fold_metrics`. Tuning sets this to
+                the study's outer_folds (default 0).
             inner_cv_folds: When > 0, each non-holdout outer fold replaces its
                 single outer-test prediction with k inner expanding-window CV
                 splits on the training portion. Optuna then sees the mean of
                 inner LL across outer folds (less noisy than a single per-fold
-                point estimate). Requires holdout_folds >= 1. Tuning sets this
-                to 4; normal model runs default to 0 (unchanged).
+                point estimate). Requires holdout_folds >= 1. Tuning passes 0;
+                normal model runs default to 0 (unchanged).
             calibrate: When True (default), fit a Platt calibrator on tuning
                 OOF and apply it to all fold predictions before computing
                 metrics. When False, skip Platt entirely — `avg_metrics` and
@@ -799,15 +798,6 @@ class ExperimentRunner:
                 "score mask. Use inner_cv_folds=0 (the tune default)."
             )
 
-        # When the model is trained with asymmetric_logloss, mirror its
-        # lambda_over into compute_metrics so the tune metric evaluates the
-        # same loss surface the model was fit against. Ensemble top-level
-        # params don't carry lambda_over directly; fall back to default.
-        lambda_over_eval: float | None = None
-        if not is_ensemble and self.config.model.params:
-            lo = self.config.model.params.get("lambda_over")
-            if lo is not None:
-                lambda_over_eval = float(lo)
         base_model_specs: list[dict[str, Any]] | None = None
         model_date_ranges: list | None = None
         model_filters: list[dict[str, Any] | None] | None = None
@@ -1459,10 +1449,34 @@ class ExperimentRunner:
                     )
                 else:
                     es = self.config.early_stopping
-                    if (
+                    use_es = (
                         es is not None and es.enabled
                         and self.config.model.type == "xgboost"
-                    ):
+                    )
+                    fold_margin_train: np.ndarray | None = None
+                    if offset_cfg is not None:
+                        # Offset: fit on this fold's TRAIN rows only, from the
+                        # same X_train the model is about to see (post-impute,
+                        # post-scale). Both predict_proba calls below must be
+                        # given their own margins -- omitting either now raises
+                        # rather than silently shifting probabilities. Fit
+                        # before the model either way: early stopping takes
+                        # the train margins too.
+                        offset_col = resolve_offset_col(
+                            feature_cols, offset_cfg.feature
+                        )
+                        offset_model = fit_offset(
+                            X_train, offset_col, y_train_for_fit, offset_cfg
+                        )
+                        fold_margin_train = offset_margin(
+                            offset_model, X_train, offset_col
+                        )
+                        fold_margin_test = offset_margin(
+                            offset_model, X_test, offset_col
+                        )
+                        if fixed_rll:
+                            fold_score_mask = _fixed_score_mask(fold_margin_test)
+                    if use_es:
                         # Two-stage early stopping (sklearn or MTL xgb.train path).
                         # Stops on metrics.objective[0] (the run's objective),
                         # refits on full train at best_iteration. Not the FS path.
@@ -1486,28 +1500,9 @@ class ExperimentRunner:
                             train_df["effective_match_date"].to_numpy(),
                             _ts.date() if hasattr(_ts, "date") else _ts,
                             es, metric=self.config.metrics.objective[0],
-                            lambda_over=params.get("lambda_over"), is_mtl=is_mtl,
+                            is_mtl=is_mtl, base_margin=fold_margin_train,
                         )
                     elif offset_cfg is not None:
-                        # Offset: fit on this fold's TRAIN rows only, from the
-                        # same X_train the model is about to see (post-impute,
-                        # post-scale). Both predict_proba calls below must be
-                        # given their own margins -- omitting either now raises
-                        # rather than silently shifting probabilities.
-                        offset_col = resolve_offset_col(
-                            feature_cols, offset_cfg.feature
-                        )
-                        offset_model = fit_offset(
-                            X_train, offset_col, y_train_for_fit, offset_cfg
-                        )
-                        fold_margin_train = offset_margin(
-                            offset_model, X_train, offset_col
-                        )
-                        fold_margin_test = offset_margin(
-                            offset_model, X_test, offset_col
-                        )
-                        if fixed_rll:
-                            fold_score_mask = _fixed_score_mask(fold_margin_test)
                         model.fit(
                             X_train, y_train_for_fit,
                             sample_weight=train_weights,
@@ -1546,13 +1541,13 @@ class ExperimentRunner:
                 y_prob = self._odd_project(y_prob, test_df)
                 y_prob_train = self._odd_project(y_prob_train, train_df)
                 metrics = _with_fixed_rll(
-                    compute_metrics(y_test, y_prob, lambda_over=lambda_over_eval),
+                    compute_metrics(y_test, y_prob),
                     y_test, y_prob, fold_score_mask,
                 )
                 all_metrics.append(metrics)
 
                 # Predict and evaluate on train (for overfitting detection)
-                train_metrics = compute_metrics(y_train, y_prob_train, lambda_over=lambda_over_eval)
+                train_metrics = compute_metrics(y_train, y_prob_train)
                 all_train_metrics.append(train_metrics)
 
                 # MTL: per-fold aux head R² on the test fold. H38 design uses
@@ -1670,9 +1665,7 @@ class ExperimentRunner:
                         # ES validator / single-objective pruning both guarantee it).
                         obj = self.config.metrics.objective
                         prune_metric = obj[0] if obj else "log_loss"
-                        fold_metrics = compute_metrics(
-                            outer_y_true, outer_y_prob, lambda_over=lambda_over_eval,
-                        )
+                        fold_metrics = compute_metrics(outer_y_true, outer_y_prob)
                         if self.report_calibrated_objective and not self.calibrate:
                             # Calibrated-frame study: the OOF-calibrated objective
                             # can't be computed mid-run (later folds aren't in yet),
@@ -1748,7 +1741,7 @@ class ExperimentRunner:
                         "y_prob_raw": c_y_prob_raw,
                         "df": c_df,
                     })
-                    regrouped_metrics.append(compute_metrics(c_y_true, c_y_prob, lambda_over=lambda_over_eval))
+                    regrouped_metrics.append(compute_metrics(c_y_true, c_y_prob))
 
                     train_keys = list(all_train_metrics[iter_idxs[0]].keys())
                     regrouped_train_metrics.append({
@@ -1850,7 +1843,7 @@ class ExperimentRunner:
             # become the holdout: they get calibrated probabilities using a
             # calibrator fit only on tuning preds, but they don't influence
             # the reported `metrics` / diagnostics / objective. Tuning sets
-            # holdout_folds=1; normal runs default to 0.
+            # holdout_folds to the study's outer_folds; normal runs default to 0.
             n_folds_total = len(all_predictions)
             if self.holdout_folds >= n_folds_total:
                 raise ValueError(
@@ -1985,7 +1978,6 @@ class ExperimentRunner:
                     np.concatenate(
                         [p["y_prob"] for p in all_predictions]
                     )[:n_tuning_samples],
-                    lambda_over=lambda_over_eval,
                 )
 
             # Concat tuning-fold OOF preds for calibrator fitting and/or
@@ -2012,10 +2004,7 @@ class ExperimentRunner:
                 # probability (the holdout's just hasn't seen its own labels).
                 # raw_metrics are computed pre-calibration for diagnostic visibility.
                 raw_metrics = _with_fixed_rll(
-                    compute_metrics(
-                        combined_y_true_oof, combined_y_prob_oof,
-                        lambda_over=lambda_over_eval,
-                    ),
+                    compute_metrics(combined_y_true_oof, combined_y_prob_oof),
                     combined_y_true_oof, combined_y_prob_oof,
                     _pooled_score_mask(tuning_predictions),
                 )
@@ -2146,9 +2135,7 @@ class ExperimentRunner:
                 # single calibrator that gets deployed).
                 all_metrics = [
                     _with_fixed_rll(
-                        compute_metrics(
-                            p["y_true"], p["y_prob"], lambda_over=lambda_over_eval
-                        ),
+                        compute_metrics(p["y_true"], p["y_prob"]),
                         p["y_true"], p["y_prob"], p.get("score_mask"),
                     )
                     for p in tuning_predictions
@@ -2157,10 +2144,7 @@ class ExperimentRunner:
                     [p["y_prob"] for p in tuning_predictions]
                 )
                 avg_metrics = _with_fixed_rll(
-                    compute_metrics(
-                        combined_y_true_oof, calibrated_y_prob,
-                        lambda_over=lambda_over_eval,
-                    ),
+                    compute_metrics(combined_y_true_oof, calibrated_y_prob),
                     combined_y_true_oof, calibrated_y_prob,
                     _pooled_score_mask(tuning_predictions),
                 )
@@ -2176,10 +2160,7 @@ class ExperimentRunner:
                 # honored by `mvp model` (ProductionPredictor) not by tuning.
                 run_logger.info("Calibration disabled (calibrate=False)")
                 avg_metrics = _with_fixed_rll(
-                    compute_metrics(
-                        combined_y_true_oof, combined_y_prob_oof,
-                        lambda_over=lambda_over_eval,
-                    ),
+                    compute_metrics(combined_y_true_oof, combined_y_prob_oof),
                     combined_y_true_oof, combined_y_prob_oof,
                     _pooled_score_mask(tuning_predictions),
                 )
@@ -2192,7 +2173,7 @@ class ExperimentRunner:
             metrics_calibrated: dict[str, float] | None = None
             if self.report_calibrated_objective and not self.calibrate:
                 metrics_calibrated = _calibrated_objective_metrics(
-                    tuning_predictions, combined_y_true_oof, lambda_over_eval
+                    tuning_predictions, combined_y_true_oof
                 )
 
             holdout_metrics: dict[str, float] | None = None
@@ -2205,17 +2186,13 @@ class ExperimentRunner:
                     [p["y_prob"] for p in holdout_predictions]
                 )
                 holdout_metrics = _with_fixed_rll(
-                    compute_metrics(
-                        holdout_y_true, holdout_y_prob, lambda_over=lambda_over_eval
-                    ),
+                    compute_metrics(holdout_y_true, holdout_y_prob),
                     holdout_y_true, holdout_y_prob,
                     _pooled_score_mask(holdout_predictions),
                 )
                 holdout_fold_metrics = [
                     _with_fixed_rll(
-                        compute_metrics(
-                            p["y_true"], p["y_prob"], lambda_over=lambda_over_eval
-                        ),
+                        compute_metrics(p["y_true"], p["y_prob"]),
                         p["y_true"], p["y_prob"], p.get("score_mask"),
                     )
                     for p in holdout_predictions
@@ -2232,7 +2209,6 @@ class ExperimentRunner:
                         combined_y_true_oof,
                         combined_y_prob_oof,
                         holdout_predictions,
-                        lambda_over_eval,
                     )
                 )
 

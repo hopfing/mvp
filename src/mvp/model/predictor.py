@@ -34,6 +34,7 @@ from mvp.model.config import (
     get_filter_feature_specs,
 )
 from mvp.model.diagnostics import Diagnostics
+from mvp.model.early_stopping import two_stage_fit
 from mvp.model.engine import FeatureEngine, get_feature_columns
 from mvp.model.features._score_helpers import (
     sets_lost as _sets_lost,
@@ -1154,13 +1155,44 @@ class ProductionPredictor:
         offset_cfg = config.offset
         offset_model = None
         offset_col = None
+        deploy_margin = None
         if offset_cfg is not None:
             offset_col = resolve_offset_col(feature_cols, offset_cfg.feature)
             offset_model = fit_offset(X, offset_col, y_for_fit, offset_cfg)
+            deploy_margin = offset_margin(offset_model, X, offset_col)
+        es = config.early_stopping
+        use_es = es is not None and es.enabled and config.model.type == "xgboost"
+        es_params = config.model.params or {}
+
+        def _es_factory(n_rounds: int):
+            p = {**es_params, "n_estimators": n_rounds}
+            if is_mtl:
+                assert config.mtl is not None
+                tn = [config.target] + list(config.mtl.auxiliary_targets)
+                return XGBoostMTLModel(
+                    params=p, target_names=tn, feature_names=feature_cols,
+                )
+            return get_model("xgboost", p, feature_names=feature_cols)
+
+        if use_es:
+            # Two-stage early stopping, as the runner fits each fold: the watch
+            # is the tail of the deploy window, ahead of a test boundary the
+            # day after its last match.
+            dates = df_deploy["effective_match_date"]
+            test_start = dates.max() + timedelta(days=1)
+            model, best_it = two_stage_fit(
+                _es_factory, X, y_for_fit, sample_weights,
+                dates.to_numpy(),
+                test_start.date() if hasattr(test_start, "date") else test_start,
+                es, metric=config.metrics.objective[0],
+                is_mtl=is_mtl, base_margin=deploy_margin,
+            )
+            logger.info("early-stop deploy fit: best_iteration=%s", best_it)
+        elif deploy_margin is not None:
             model.fit(
                 X, y_for_fit,
                 sample_weight=sample_weights,
-                base_margin=offset_margin(offset_model, X, offset_col),
+                base_margin=deploy_margin,
             )
         else:
             model.fit(X, y_for_fit, sample_weight=sample_weights)
@@ -1290,6 +1322,24 @@ class ProductionPredictor:
                     fold_margin_test = offset_margin(
                         fold_offset, X_test_fold, offset_col
                     )
+                if use_es:
+                    # Early-stopped like the deployed model, so the calibrator
+                    # is fit on predictions from the same kind of fit it ships
+                    # with. Stops ahead of this fold's test boundary.
+                    fold_ts = test_df["effective_match_date"].min()
+                    fold_model, fold_best_it = two_stage_fit(
+                        _es_factory, X_train_fold, y_train_fold_for_fit,
+                        fold_weights,
+                        train_df["effective_match_date"].to_numpy(),
+                        fold_ts.date() if hasattr(fold_ts, "date") else fold_ts,
+                        es, metric=config.metrics.objective[0],
+                        is_mtl=is_mtl, base_margin=fold_margin_train,
+                    )
+                    logger.info(
+                        "early-stop calibration fold %d: best_iteration=%s",
+                        fold_idx, fold_best_it,
+                    )
+                elif offset_cfg is not None:
                     fold_model.fit(
                         X_train_fold, y_train_fold_for_fit,
                         sample_weight=fold_weights,

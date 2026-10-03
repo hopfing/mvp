@@ -69,7 +69,9 @@ def _is_iid_config(raw: dict) -> bool:
 
 
 # Trailing forward folds held search-blind for selection (classification only).
-_DEFAULT_OUTER_FOLDS = 4
+# 0: every forward fold is searched and trials rank on the calibrated all-folds
+# score; the honest check is the evaluation after the config's end date.
+_DEFAULT_OUTER_FOLDS = 0
 
 # `serve_model` param blocks a study can search, mirroring the split
 # `ServeModelConfig` already makes. `params` drives the two win branches (one
@@ -348,6 +350,30 @@ DEFAULT_SEARCH_SPACES: dict[str, dict[str, dict[str, Any]]] = {
         "max_delta_step": {"type": "int", "low": 0, "high": 5},
     },
     "xgboost": {
+        # Grinsztajn et al. 2022 (arXiv 2207.08815) XGBoost space.
+        "max_depth": {"type": "int", "low": 1, "high": 11},
+        "n_estimators": {"type": "int", "low": 200, "high": 6000, "step": 200},
+        "learning_rate": {"type": "float", "low": 1e-5, "high": 0.7, "log": True},
+        "min_child_weight": {"type": "int", "low": 1, "high": 100, "log": True},
+        "subsample": {"type": "float", "low": 0.5, "high": 1.0},
+        "colsample_bytree": {"type": "float", "low": 0.5, "high": 1.0},
+        "colsample_bylevel": {"type": "float", "low": 0.5, "high": 1.0},
+        "gamma": {"type": "float", "low": 1e-8, "high": 7.0, "log": True},
+        "reg_lambda": {"type": "float", "low": 1.0, "high": 4.0, "log": True},
+        "reg_alpha": {"type": "float", "low": 1e-8, "high": 100.0, "log": True},
+        # Fixed, not searched. Single-value entries so the value is recorded in
+        # trial params and overrides the base config (_build_trial_config).
+        "scale_pos_weight": {"type": "float", "low": 1.0, "high": 1.0},
+        "max_delta_step": {"type": "int", "low": 0, "high": 0},
+        "colsample_bynode": {"type": "float", "low": 1.0, "high": 1.0},
+        "max_leaves": {"type": "int", "low": 0, "high": 0},
+        "tree_method": {"type": "categorical", "choices": ["hist"]},
+        "grow_policy": {"type": "categorical", "choices": ["depthwise"]},
+        "max_bin": {"type": "categorical", "choices": [256]},
+    },
+    # The IID serve-point models' space: the match-winner space as it stood
+    # before the Grinsztajn replacement, frozen so those models are unchanged.
+    "xgboost_iid": {
         "max_depth": {"type": "int", "low": 3, "high": 8},
         "learning_rate": {"type": "float", "low": 0.01, "high": 0.15, "log": True},
         "n_estimators": {"type": "int", "low": 100, "high": 1000, "step": 50},
@@ -539,6 +565,10 @@ def suggest_params(
         ptype = spec["type"]
         if ptype == "int":
             kwargs = {}
+            if spec.get("log"):
+                if "step" in spec:
+                    raise ValueError(f"{name}: log and step cannot be combined")
+                kwargs["log"] = True
             if "step" in spec:
                 kwargs["step"] = spec["step"]
             params[name] = trial.suggest_int(name, spec["low"], spec["high"], **kwargs)
@@ -641,8 +671,8 @@ class HyperparamTuner:
         outer_folds_explicit = outer_folds is not None
         if outer_folds is None:
             outer_folds = _DEFAULT_OUTER_FOLDS
-        if outer_folds < 1:
-            raise ValueError(f"outer_folds must be >= 1, got {outer_folds}")
+        if outer_folds < 0:
+            raise ValueError(f"outer_folds must be >= 0, got {outer_folds}")
         # Forward-aligned tuning: the objective is the metric over the inner
         # (tuning) folds' TRUE forward windows; `outer_folds` trailing folds are
         # held search-blind for selection. The legacy within-window inner-CV
@@ -810,7 +840,12 @@ class HyperparamTuner:
         if search_space is not None:
             self.search_space = dict(search_space)
         elif self.model_type in DEFAULT_SEARCH_SPACES:
-            base_space = DEFAULT_SEARCH_SPACES[self.model_type]
+            space_key = (
+                "xgboost_iid"
+                if self.is_iid and self.model_type == "xgboost"
+                else self.model_type
+            )
+            base_space = DEFAULT_SEARCH_SPACES[space_key]
             self.search_space = (
                 two_level_joint_space(base_space)
                 if self.joint_two_level
@@ -1627,7 +1662,7 @@ class HyperparamTuner:
         n_jobs, else the cpu-2 default), so the total thread budget is unchanged
         — this trades idle threads (xgb scales sub-linearly past a knee) for more
         in-flight trials. K is capped at 2 by the CLI (K>=3 would need
-        constant_liar, which conflicts with the group=True TPE sampler). K=1 =
+        constant_liar on the TPE sampler, which is not enabled). K=1 =
         serial (default, unchanged behavior).
         """
         completed = sum(

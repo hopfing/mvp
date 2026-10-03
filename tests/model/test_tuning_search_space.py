@@ -15,10 +15,11 @@ class TestMerge:
         )
         assert out["max_depth"] == {"type": "int", "low": 2, "high": 4}
         assert out["learning_rate"] == space["learning_rate"]  # untouched
-        assert space["max_depth"]["high"] == 8  # defaults not mutated
+        assert space["max_depth"]["high"] == 11  # defaults not mutated
 
     def test_categorical_fix_and_drop(self):
-        space = DEFAULT_SEARCH_SPACES["xgboost"]
+        # The IID space keeps the conditional entries this merge must preserve.
+        space = DEFAULT_SEARCH_SPACES["xgboost_iid"]
         out = apply_search_space_overrides(
             space, {"grow_policy": {"choices": ["depthwise"]}, "max_leaves": None}
         )
@@ -46,6 +47,30 @@ class TestMerge:
         space = DEFAULT_SEARCH_SPACES["xgboost"]
         assert apply_search_space_overrides(space, None) == space
         assert apply_search_space_overrides(space, {}) == space
+
+
+class TestDefaultSpaces:
+    def test_xgboost_iid_space_is_frozen(self):
+        """The IID serve-point models keep the pre-Grinsztajn space."""
+        space = DEFAULT_SEARCH_SPACES["xgboost_iid"]
+        assert space["max_depth"]["high"] == 8
+        assert space["scale_pos_weight"]["low"] < space["scale_pos_weight"]["high"]
+        assert space["max_delta_step"]["low"] < space["max_delta_step"]["high"]
+
+    def test_fixed_entries_reach_trial_params(self):
+        """Single-value entries are suggested like any other, so the value is
+        recorded in the trial's params."""
+        import optuna
+
+        from mvp.model.tuning import suggest_params
+
+        study = optuna.create_study()
+        trial = study.ask()
+        suggest_params(trial, DEFAULT_SEARCH_SPACES["xgboost"])
+        assert trial.params["scale_pos_weight"] == 1.0
+        assert trial.params["max_delta_step"] == 0
+        assert trial.params["max_leaves"] == 0
+        assert trial.params["grow_policy"] == "depthwise"
 
 
 class TestConfig:

@@ -167,6 +167,57 @@ class TestTwoStageFit:
         assert built[0].n_rounds == 300 and not built[0].got_eval_set   # fixed-rounds fallback
         assert model is built[0]
 
+    def test_base_margin_is_sliced_for_stage_1_and_full_for_stage_2(self):
+        ts = date(2025, 7, 1)
+        dates = _dates_with_watch(400, 600, ts)
+        X = np.zeros((1000, 2))
+        y = np.zeros(1000, dtype=int)
+        margin = np.arange(1000, dtype=float)
+        watch = carve_watch(dates, ts, 2.0, 7)
+
+        class _RecordingModel(_MockESModel):
+            def fit(self, X, y, sample_weight=None, eval_set=None,
+                    early_stopping_rounds=None, eval_metric=None, **kwargs):
+                super().fit(X, y, sample_weight, eval_set,
+                            early_stopping_rounds, eval_metric)
+                self.kwargs = kwargs
+
+        built: list[_RecordingModel] = []
+
+        def factory(n):
+            m = _RecordingModel(n)
+            built.append(m)
+            return m
+
+        two_stage_fit(
+            factory, X, y, None, dates, ts, EarlyStoppingConfig(), "log_loss",
+            base_margin=margin,
+        )
+
+        stage1, stage2 = built
+        np.testing.assert_array_equal(stage1.kwargs["base_margin"], margin[~watch])
+        (eval_margin,) = stage1.kwargs["base_margin_eval_set"]
+        np.testing.assert_array_equal(eval_margin, margin[watch])
+        np.testing.assert_array_equal(stage2.kwargs["base_margin"], margin)
+        assert "base_margin_eval_set" not in stage2.kwargs
+
+    def test_no_base_margin_passes_no_margin_kwargs(self):
+        """The MTL model's fit takes no margins, so None must add none."""
+        ts = date(2025, 7, 1)
+        dates = _dates_with_watch(400, 600, ts)
+        built: list[_MockESModel] = []
+
+        def factory(n):
+            m = _MockESModel(n)   # fit() would raise on an unexpected kwarg
+            built.append(m)
+            return m
+
+        two_stage_fit(
+            factory, np.zeros((1000, 2)), np.zeros(1000, dtype=int), None,
+            dates, ts, EarlyStoppingConfig(), "log_loss",
+        )
+        assert len(built) == 2
+
 
 class TestRealXGBEarlyStopFit:
     """Exercises the REAL XGBoostModel on the early-stopping path (eval_set +
@@ -213,3 +264,28 @@ class TestRealXGBEarlyStopFit:
         )
         assert best is not None                  # watch big enough -> ES ran
         assert model.predict_proba(X[:5]).shape == (5,)
+
+    def test_two_stage_fit_with_base_margin_real_xgb(self):
+        """The offset path: Stage 1's eval set carries the watch rows' margins,
+        and the refit model needs its margin at predict time."""
+        from mvp.model.models import XGBoostModel
+
+        rng = np.random.RandomState(2)
+        n_before, n_watch = 500, 600
+        n = n_before + n_watch
+        X = rng.randn(n, 4).astype(np.float64)
+        y = (X[:, 0] + 0.3 * rng.randn(n) > 0).astype(int)
+        margin = 0.5 * X[:, 0]
+        ts = date(2025, 7, 1)
+        dates = _dates_with_watch(n_before, n_watch, ts)
+
+        def factory(rounds):
+            return XGBoostModel({"n_estimators": rounds}, feature_names=list("abcd"))
+
+        model, best = two_stage_fit(
+            factory, X, y, None, dates, ts,
+            EarlyStoppingConfig(patience=5, ceiling=50), metric="brier_score",
+            base_margin=margin,
+        )
+        assert best is not None
+        assert model.predict_proba(X[:5], base_margin=margin[:5]).shape == (5,)

@@ -96,7 +96,7 @@ def watch_tail_ok(
 
 
 def make_xgb_feval(
-    metric: str, lambda_over: float | None = None,
+    metric: str,
 ) -> tuple[Callable[[np.ndarray, np.ndarray], float], bool]:
     """Adapt a prob-scoring metric to an XGBoost sklearn ``eval_metric`` callable.
 
@@ -112,7 +112,7 @@ def make_xgb_feval(
     """
     from mvp.model.discovery.fast_selection import _make_metric_fn
 
-    metric_fn = _make_metric_fn(metric, lambda_over)
+    metric_fn = _make_metric_fn(metric)
     maximize = metric_direction(metric) == "maximize"
 
     def feval(y_true: np.ndarray, y_pred: np.ndarray) -> float:
@@ -127,7 +127,7 @@ def make_xgb_feval(
 
 
 def make_xgb_feval_dtrain(
-    metric: str, lambda_over: float | None = None,
+    metric: str,
 ) -> Callable[[np.ndarray, object], tuple[str, float]]:
     """The ``xgb.train`` ``custom_metric`` form of `make_xgb_feval`, for the
     `XGBoostMTLModel` path.
@@ -141,7 +141,7 @@ def make_xgb_feval_dtrain(
     from mvp.model.discovery.fast_selection import _make_metric_fn
     from mvp.model.models import _sigmoid
 
-    metric_fn = _make_metric_fn(metric, lambda_over)
+    metric_fn = _make_metric_fn(metric)
     maximize = metric_direction(metric) == "maximize"
     name = f"es_{metric}"
 
@@ -169,9 +169,9 @@ def two_stage_fit(
     test_start: date,
     cfg: EarlyStoppingConfig,
     metric: str,
-    lambda_over: float | None = None,
     is_mtl: bool = False,
     log_result: bool = True,
+    base_margin: np.ndarray | None = None,
 ) -> tuple[Any, int | None]:
     """Leakage-safe two-stage early-stopping fit (spec §1-2). Returns
     ``(fitted_model, best_iteration)``.
@@ -185,7 +185,10 @@ def two_stage_fit(
     ``n_rounds`` boosting rounds. ``y`` / ``sample_weight`` are whatever the
     model's fit expects (1D for the single-task model, 2D ``y`` for MTL).
     ``dates`` are the per-row effective_match_date; ``test_start`` the fold's
-    test boundary.
+    test boundary. ``base_margin`` is the per-row offset log-odds (the offset
+    path): Stage 1 gets the sub rows' slice with the watch rows' slice on its
+    eval set, Stage 2 and the fallback the full array. None passes no margin
+    kwargs at all — the MTL model's fit takes none.
 
     Stage 1 fits on train-minus-watch with the watch as the early-stop monitor
     (on ``metric`` via the feval) to find ``best_iteration``; Stage 2 refits on
@@ -204,21 +207,31 @@ def two_stage_fit(
             cfg.fallback_rounds,
         )
         model = model_factory(cfg.fallback_rounds)
-        model.fit(X, y, sample_weight=sample_weight)
+        if base_margin is not None:
+            model.fit(X, y, sample_weight=sample_weight, base_margin=base_margin)
+        else:
+            model.fit(X, y, sample_weight=sample_weight)
         return model, None
 
     sub = ~watch
     feval = (
-        make_xgb_feval_dtrain(metric, lambda_over) if is_mtl
-        else make_xgb_feval(metric, lambda_over)[0]
+        make_xgb_feval_dtrain(metric) if is_mtl
+        else make_xgb_feval(metric)[0]
     )
     w_sub = None if sample_weight is None else sample_weight[sub]
+    margin_kw: dict[str, Any] = {}
+    if base_margin is not None:
+        margin_kw = {
+            "base_margin": base_margin[sub],
+            "base_margin_eval_set": [base_margin[watch]],
+        }
     m1 = model_factory(cfg.ceiling)
     m1.fit(
         X[sub], y[sub], sample_weight=w_sub,
         eval_set=[(X[watch], y[watch])],
         early_stopping_rounds=cfg.patience,
         eval_metric=feval,
+        **margin_kw,
     )
     best_it = m1.best_iteration
 
@@ -236,7 +249,10 @@ def two_stage_fit(
     # No eval_set here, intentionally and REQUIRED: it makes Stage 2 a plain
     # fixed-rounds fit. Passing one would reactivate the wrapper's default
     # eval_metric="logloss" as the stopping metric (MLE review finding 1).
-    m2.fit(X, y, sample_weight=sample_weight)
+    if base_margin is not None:
+        m2.fit(X, y, sample_weight=sample_weight, base_margin=base_margin)
+    else:
+        m2.fit(X, y, sample_weight=sample_weight)
     if log_result:
         logger.info(
             "early-stop: best_iteration=%d (watch %s..%s, %d rows) -> refit full train",

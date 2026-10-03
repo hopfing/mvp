@@ -169,7 +169,9 @@ class TestOuterFolds:
             _tuner(iid_config, tmp_path, outer_folds=4)
 
     def test_omitting_it_is_fine(self, iid_config, tmp_path):
-        assert _tuner(iid_config, tmp_path).outer_folds >= 1
+        from mvp.model.tuning import _DEFAULT_OUTER_FOLDS
+
+        assert _tuner(iid_config, tmp_path).outer_folds == _DEFAULT_OUTER_FOLDS
 
 
 class TestBaselineEnqueue:
