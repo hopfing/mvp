@@ -128,6 +128,20 @@ def _canonicalize_ensemble_base_models(
     return out
 
 
+def _canonical_date_range(date_range: dict | None) -> dict | None:
+    """The dumped ``date_range`` minus ``holdout_end`` when it is None.
+
+    ``DataConfig`` is shared by every schema, so every config dumps the key;
+    dropping the unset value keeps every pre-existing fingerprint unchanged.
+    """
+    if date_range is None:
+        return None
+    return {
+        k: v for k, v in date_range.items()
+        if not (k == "holdout_end" and v is None)
+    }
+
+
 def _hash_dict(d: dict) -> str:
     return hashlib.sha256(
         json.dumps(d, sort_keys=True, default=str).encode()
@@ -151,7 +165,7 @@ def _canonicalize_config(
     # data
     data = dump.get("data") or {}
     canon["data"] = {
-        "date_range": data.get("date_range"),
+        "date_range": _canonical_date_range(data.get("date_range")),
         "filters": _deep_sort(data.get("filters") or {}),
         "train_filters": _deep_sort(data.get("train_filters") or {}),
         "eval_filters": _deep_sort(data.get("eval_filters") or {}),
@@ -308,7 +322,7 @@ def _canonicalize_iid_config(
 
     data = dump.get("data") or {}
     canon["data"] = {
-        "date_range": data.get("date_range"),
+        "date_range": _canonical_date_range(data.get("date_range")),
         "filters": _deep_sort(data.get("filters") or {}),
         "train_filters": _deep_sort(data.get("train_filters") or {}),
         "eval_filters": _deep_sort(data.get("eval_filters") or {}),

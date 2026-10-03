@@ -347,3 +347,24 @@ def test_all_real_configs_under_models_hash_successfully():
         fp2 = compute_fingerprint(cfg, config_path=cfg_path)
         assert fp1 == fp2, f"Non-deterministic for {cfg_path.name}: {fp1} != {fp2}"
         assert len(fp1) == 12
+
+
+def test_holdout_end_absent_is_omitted_from_canonical_form():
+    """No holdout_end -> no key, so every pre-existing fingerprint is unchanged
+    (test_classification_fingerprint_is_frozen holds the stored value)."""
+    cfg = _from_dict(_make_base_config_dict())
+    assert "holdout_end" not in canonicalize_config(cfg)["data"]["date_range"]
+
+
+def test_holdout_end_is_not_the_same_as_a_later_end():
+    """end 2024 + holdout_end 2025 fits its calibrator on different folds from
+    end 2025, so the two never share an evaluation dir."""
+    held = _make_base_config_dict()
+    held["data"]["date_range"]["holdout_end"] = "2025-12-31"
+    later = _make_base_config_dict()
+    later["data"]["date_range"]["end"] = "2025-12-31"
+    plain = _make_base_config_dict()
+    fps = {
+        compute_fingerprint(_from_dict(d)) for d in (held, later, plain)
+    }
+    assert len(fps) == 3

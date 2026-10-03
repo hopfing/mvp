@@ -1,7 +1,8 @@
 """Experiment configuration schema."""
 
 
-from datetime import date
+import logging
+from datetime import date, timedelta
 from typing import Any, Literal
 
 import polars as pl
@@ -9,6 +10,8 @@ import yaml
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 from mvp.model.prior_naming import prior_column, prior_spec
+
+logger = logging.getLogger(__name__)
 
 
 class _StrictModel(BaseModel):
@@ -85,20 +88,67 @@ def apply_filters(df: pl.DataFrame, filters: dict[str, Any]) -> pl.DataFrame:
     return df
 
 
+def validate_holdout_end(end: date, holdout_end: date | None) -> None:
+    """Shared by this DateRange and discovery.config.DateRange: the held-out
+    read runs from ``end`` to ``holdout_end`` and must stop before the backtest's
+    betting period begins."""
+    if holdout_end is None:
+        return
+    # Imported here: backtest imports this module.
+    from mvp.model.backtest import BETTING_START_FLOOR
+
+    if holdout_end <= end:
+        raise ValueError("data.date_range.holdout_end must be after end")
+    if holdout_end >= BETTING_START_FLOOR:
+        raise ValueError(
+            f"holdout_end must be before the betting start {BETTING_START_FLOOR}: "
+            "the held-out read and the backtest would overlap and the prior "
+            "splice refuses (prior.py:1040-1046)"
+        )
+    if holdout_end + timedelta(days=1) < BETTING_START_FLOOR:
+        n = (BETTING_START_FLOOR - holdout_end).days - 1
+        logger.warning(
+            "holdout_end leaves %d days before the betting start that no "
+            "period reads", n,
+        )
+
+
+def reject_holdout_end(data: "DataConfig") -> None:
+    """For the projection, IID and lines config families, which never read the
+    field."""
+    if data.date_range.holdout_end is not None:
+        raise ValueError(
+            "holdout_end is not read by projection/IID/lines runs: their "
+            "held-out read is the forward fit through end"
+        )
+
+
 class DateRange(_StrictModel):
-    """Date range for data selection."""
+    """Date range for data selection.
+
+    ``end`` is the last date any selection step uses. ``holdout_end``
+    (optional) extends the held-out read past it: runs with
+    ``through_holdout`` evaluate the folds after ``end`` without fitting the
+    calibrator on them (runner.py).
+    """
 
     start: date
     end: date
+    holdout_end: date | None = None
 
-    @field_validator("start", "end", mode="before")
+    @field_validator("start", "end", "holdout_end", mode="before")
     @classmethod
-    def parse_date(cls, v: Any) -> date:
-        if isinstance(v, date):
+    def parse_date(cls, v: Any) -> date | None:
+        if v is None or isinstance(v, date):
             return v
         if isinstance(v, str):
             return date.fromisoformat(v)
         raise ValueError(f"Cannot parse date: {v}")
+
+    @model_validator(mode="after")
+    def _validate_holdout_end(self) -> "DateRange":
+        validate_holdout_end(self.end, self.holdout_end)
+        return self
 
 
 class DataConfig(_StrictModel):
@@ -557,6 +607,19 @@ class ExperimentConfig(_StrictModel):
                 f"offset.feature={off.feature!r} must not be in "
                 "features.compute_only: compute_only columns are loaded for "
                 "filter evaluation only and never reach feature_cols."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def validate_holdout_validation(self) -> "ExperimentConfig":
+        if (
+            self.data.date_range.holdout_end is not None
+            and self.validation.type not in ("date_expanding", "date_sliding")
+        ):
+            raise ValueError(
+                "holdout_end needs date_expanding or date_sliding validation: "
+                "other splitters size or place folds from the row count and "
+                "would move every fold"
             )
         return self
 

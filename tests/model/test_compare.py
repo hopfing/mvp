@@ -86,6 +86,18 @@ class TestLoadAndCollapse:
         with pytest.raises(ValueError, match="y_prob_cal"):
             compare.load_eval_predictions(d, "y_prob_cal")
 
+    def test_held_out_rows_are_excluded(self, root):
+        """A holdout_end evaluation's held-out folds are read only through the
+        diagnostics holdout block; compare shows the selection period."""
+        d = _write_eval(root, "a" * 12, [0.6, 0.7, 0.55, 0.8])
+        p = pl.read_parquet(d / "fold_predictions.parquet").with_columns(
+            pl.col("match_uid").is_in(["M2", "M3"]).alias("is_holdout")
+        )
+        p.write_parquet(d / "fold_predictions.parquet")
+        df, grain = compare.load_eval_predictions(d, "y_prob_cal")
+        assert grain == "match"
+        assert sorted(df["match_uid"].to_list()) == ["M0", "M1"]
+
 
 class TestPair:
     def test_identical_predictions_delta_zero_interval_zero(self, root):

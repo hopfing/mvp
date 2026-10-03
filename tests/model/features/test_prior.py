@@ -433,3 +433,221 @@ class TestSplice:
         s1 = src.salt()
         os.utime(src.fold_predictions, (1_700_000_000, 1_700_000_000))
         assert src.salt() != s1
+
+
+class TestPriorBaseEnds:
+    """A base model whose `end` is after the consumer's would carry later
+    labels into the consuming run's selection (E11's first attempt)."""
+
+    _REFUSAL = (
+        r"base model base ends 2025-12-31, after this run's end 2024-12-31; "
+        r"its predictions would carry later labels into this run"
+    )
+
+    def _base(self, tmp_path, monkeypatch, end: str) -> None:
+        models = tmp_path / "models"
+        models.mkdir(parents=True, exist_ok=True)
+        cfg = {**_CFG, "data": {"date_range": {"start": "2021-01-01", "end": end}}}
+        (models / "base.yaml").write_text(yaml.dump(cfg))
+        monkeypatch.setattr(prior, "CONFIG_DIRS", (models,))
+        monkeypatch.setattr(prior, "PROJECTION_CONFIG_DIRS", (tmp_path / "proj",))
+        monkeypatch.setattr(prior, "EVALUATIONS_ROOT", tmp_path / "evals")
+
+    def test_later_base_raises(self, tmp_path, monkeypatch):
+        self._base(tmp_path, monkeypatch, "2025-12-31")
+        with pytest.raises(ValueError, match=self._REFUSAL):
+            prior.check_prior_base_ends(["base"], date(2024, 12, 31))
+
+    @pytest.mark.parametrize("end", ["2024-12-31", "2023-12-31"])
+    def test_same_or_earlier_base_passes(self, tmp_path, monkeypatch, end):
+        self._base(tmp_path, monkeypatch, end)
+        prior.check_prior_base_ends(["base"], date(2024, 12, 31))
+
+    def test_projection_base_reads_its_forward_train_end(self, monkeypatch):
+        src = prior.PriorSource(
+            model="proj", config_path=Path("proj.yaml"), fp="f" * 12,
+            eval_dir=Path("e"), kind="projection",
+            forward_train_end=date(2025, 6, 30),
+        )
+        monkeypatch.setattr(prior, "resolve_prior", lambda stem: src)
+        with pytest.raises(ValueError, match="base model proj ends 2025-06-30"):
+            prior.check_prior_base_ends(["proj"], date(2024, 12, 31))
+        prior.check_prior_base_ends(["proj"], date(2025, 6, 30))
+
+    def test_runner_refuses(self, tmp_path, monkeypatch):
+        from mvp.model.runner import ExperimentRunner
+
+        self._base(tmp_path, monkeypatch, "2025-12-31")
+        stage = tmp_path / "stage.yaml"
+        stage.write_text(yaml.dump({
+            **_CFG, "offset": {"prior": "base"},
+        }))
+        runner = ExperimentRunner(
+            config_path=stage, matches_path=tmp_path / "m.parquet",
+            cache_dir=tmp_path / "cache", log_to_mlflow=False,
+        )
+        with pytest.raises(ValueError, match=self._REFUSAL):
+            runner._resolve_prior_sources(list(runner.config.features.include))
+
+    def _discovery_config(self, tmp_path) -> Path:
+        p = tmp_path / "stage_fs.yaml"
+        p.write_text(yaml.dump({
+            "data": {"date_range": {"start": "2021-01-01", "end": "2024-12-31"}},
+            "model": {"type": "xgboost"},
+            "validation": {"type": "walk_forward", "n_splits": 2},
+            "discovery": {"features": {"base": []}},
+            "offset": {"prior": "base"},
+        }))
+        return p
+
+    def test_feature_discovery_refuses_before_regenerating(
+        self, tmp_path, monkeypatch
+    ):
+        from mvp.model.discovery.discover import FeatureDiscovery
+
+        self._base(tmp_path, monkeypatch, "2025-12-31")
+        regenerated: list[str] = []
+        monkeypatch.setattr(
+            prior, "ensure_prior_artifacts",
+            lambda source, regenerate: regenerated.append(source.model),
+        )
+        fd = FeatureDiscovery(config_path=self._discovery_config(tmp_path))
+        with pytest.raises(ValueError, match=self._REFUSAL):
+            fd._ensure_prior_sources()
+        assert regenerated == []
+
+    def test_stability_refuses_before_precompute(self, tmp_path, monkeypatch):
+        """Stability selection builds its own selector and never reaches
+        `_ensure_prior_sources`; it runs the refusal itself."""
+        import mvp.model.discovery.discover as discover_mod
+        from mvp.model.discovery.discover import FeatureDiscovery
+
+        self._base(tmp_path, monkeypatch, "2025-12-31")
+        p = tmp_path / "stage_stab.yaml"
+        p.write_text(yaml.dump({
+            "data": {"date_range": {"start": "2021-01-01", "end": "2024-12-31"}},
+            "model": {"type": "xgboost"},
+            "validation": {"type": "walk_forward", "n_splits": 2},
+            "discovery": {
+                "features": {"base": ["player_prior_logit(model=base)"]},
+                "stability_selection": {},
+            },
+        }))
+        precomputed: list[bool] = []
+        monkeypatch.setattr(
+            discover_mod.FastForwardSelector, "precompute",
+            lambda self: precomputed.append(True),
+        )
+        fd = FeatureDiscovery(config_path=p)
+        with pytest.raises(ValueError, match=self._REFUSAL):
+            fd.run_stability()
+        assert precomputed == []
+
+    def _nested(self, tmp_path, monkeypatch, base_end: str):
+        """A nested-calibration run stubbed past every compute step: the
+        outer precompute and the inner selection only record what they
+        were reached with."""
+        from types import SimpleNamespace
+
+        import mvp.model.discovery.nested_calibration as nc
+        from mvp.model.discovery.discover import FeatureDiscovery
+
+        self._base(tmp_path, monkeypatch, base_end)
+        cfg = tmp_path / "stage_nested.yaml"
+        cfg.write_text(yaml.dump({
+            "data": {"date_range": {"start": "2024-01-01", "end": "2024-12-31"}},
+            "model": {"type": "xgboost"},
+            "validation": {
+                "type": "date_expanding", "initial_train_months": 4,
+                "test_months": 2,
+            },
+            "discovery": {"features": {"base": []}},
+            "offset": {"prior": "base"},
+        }))
+        calls: list = []
+
+        def fake_scorer(self, pool, n_jobs=None):
+            calls.append("outer_precompute")
+            self._fast_selector = SimpleNamespace(
+                fold_windows=[(
+                    date(2024, 1, 1), date(2024, 5, 1),
+                    date(2024, 5, 1), date(2024, 7, 1),
+                )],
+                col_to_idx={"player_prior_logit(model=base)": 0},
+            )
+
+        class _Stop(Exception):
+            pass
+
+        def fake_selection(self, all_features=None, checkpoint_path=None):
+            self._check_prior_base_ends()
+            calls.append(("inner", self.config.data.date_range.end))
+            raise _Stop
+
+        monkeypatch.setattr(FeatureDiscovery, "_build_candidate_pool",
+                            lambda self, all_features=None: [])
+        monkeypatch.setattr(FeatureDiscovery, "_create_fast_scorer", fake_scorer)
+        monkeypatch.setattr(FeatureDiscovery, "run_selection", fake_selection)
+        monkeypatch.setattr(nc, "_FoldScorer", lambda fast, metric: None)
+        monkeypatch.setattr(nc, "get_feature_columns", lambda specs: list(specs))
+
+        def run():
+            nc.run_nested_calibration(
+                config_path=cfg, run_dir=tmp_path / "nested_run",
+                min_inner_folds=0,
+            )
+        return run, calls, _Stop
+
+    def test_nested_inner_runs_check_against_the_outer_end(
+        self, tmp_path, monkeypatch
+    ):
+        """The inner run's `end` is truncated to 2024-04-30; a base ending at
+        the outer end (2024-12-31) is still accepted there."""
+        run, calls, stop = self._nested(tmp_path, monkeypatch, "2024-12-31")
+        with pytest.raises(stop):
+            run()
+        assert calls == ["outer_precompute", ("inner", date(2024, 4, 30))]
+
+    def test_nested_later_base_refused_before_outer_precompute(
+        self, tmp_path, monkeypatch
+    ):
+        run, calls, _ = self._nested(tmp_path, monkeypatch, "2025-06-30")
+        with pytest.raises(
+            ValueError, match="base model base ends 2025-06-30, after this run's end 2024-12-31",
+        ):
+            run()
+        assert calls == []
+
+    def test_shap_ranker_refuses_before_precompute(self, tmp_path, monkeypatch):
+        from mvp.model.discovery.config import DiscoveryConfig
+        from mvp.model.discovery.shap_ranking import ShapRanker
+
+        self._base(tmp_path, monkeypatch, "2025-12-31")
+        config = DiscoveryConfig.from_file(self._discovery_config(tmp_path))
+        ranker = ShapRanker(
+            config=config, all_feature_specs=["player_elo_surface_diff"],
+            matches_path=tmp_path / "m.parquet", cache_dir=tmp_path / "cache",
+        )
+        called: list[bool] = []
+        monkeypatch.setattr(ranker.fast, "precompute", lambda: called.append(True))
+        with pytest.raises(ValueError, match=self._REFUSAL):
+            ranker.precompute()
+        assert called == []
+
+    def test_discovery_prior_stems(self):
+        from mvp.model.discovery.config import DiscoveryConfig
+        from mvp.model.discovery.discover import discovery_prior_stems
+
+        config = DiscoveryConfig.model_validate({
+            "data": {"date_range": {"start": "2021-01-01", "end": "2024-12-31"}},
+            "model": {"type": "xgboost"},
+            "validation": {"type": "walk_forward", "n_splits": 2},
+            "discovery": {"features": {"base": []}},
+            "offset": {"prior": "base"},
+        })
+        specs = [
+            "player_prior_logit(model=base)",
+            "player_chain_shape(model=proj_a)",
+            "player_elo_surface_diff",
+        ]
+        assert discovery_prior_stems(config, specs) == ["base", "proj_a"]

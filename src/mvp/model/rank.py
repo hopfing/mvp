@@ -219,6 +219,8 @@ class ModelSummary:
     cal_err: float | None = None  # n-weighted circuit-level unsigned calibration error (in-the-small)
     err80: float | None = None
     drift: float | None = None
+    # The diagnostics `holdout` block's log loss; None when absent.
+    holdout_log_loss: float | None = None
     severity: float = 0.0
     signed_cal: float = 0.0
     underc_pct: float = 0.0
@@ -495,6 +497,9 @@ def _summary_from_diagnostics(diag: dict) -> dict:
         "cal_err": head["cal_err"],
         "err80": head["err80"],
         "drift": drift,
+        "holdout_log_loss": (
+            (diag.get("holdout") or {}).get("metrics") or {}
+        ).get("log_loss"),
         **breakdown,
     }
 
@@ -1096,7 +1101,7 @@ def render_static_table(summaries: list[ModelSummary]) -> str:
         f"{'Model':<50} {'run_ts':<16} {'id':<12} "
         f"{'Acc':>6} {'LL':>7} "
         f"{'CalErr%':>7} {'AUC':>6} {'Brier':>7} {'SCal%':>6} "
-        f"{'Drift':>6} {'Err80%':>6}"
+        f"{'Drift':>6} {'Err80%':>6} {'HoldLL':>7}"
     )
     lines.append(header)
     lines.append("-" * len(header))
@@ -1112,7 +1117,8 @@ def render_static_table(summaries: list[ModelSummary]) -> str:
             f"{(s.cal_err*100 if s.cal_err is not None else 0):>7.2f} "
             f"{f(s.auc, 6)} {f(s.brier, 7)} {s.signed_cal*100:>+6.2f} "
             f"{(s.drift*100 if s.drift is not None else 0):>+6.2f} "
-            f"{(s.err80*100 if s.err80 is not None else 0):>5.1f}%"
+            f"{(s.err80*100 if s.err80 is not None else 0):>5.1f}% "
+            f"{'' if s.holdout_log_loss is None else f'{s.holdout_log_loss:.4f}':>7}"
         )
     return "\n".join(lines)
 

@@ -339,3 +339,178 @@ validation:
 """
         with pytest.raises(ValueError, match="only valid with date_sliding"):
             ExperimentConfig.from_yaml(yaml_str)
+
+
+class TestHoldoutEnd:
+    """`data.date_range.holdout_end`: the held-out year selection never sees."""
+
+    _PREFIX = """
+data:
+  date_range:
+    start: "2021-01-01"
+    end: "2024-12-31"
+    holdout_end: {holdout_end}
+features:
+  include:
+    - win_rate(days=30)
+model:
+  type: logistic
+"""
+    _DATE_VALIDATION = """
+validation:
+  type: date_expanding
+  initial_train_months: 12
+  test_months: 12
+"""
+
+    def _yaml(self, holdout_end: str, validation: str | None = None) -> str:
+        return (
+            self._PREFIX.format(holdout_end=holdout_end)
+            + (self._DATE_VALIDATION if validation is None else validation)
+        )
+
+    def test_parsed_like_end(self):
+        config = ExperimentConfig.from_yaml(self._yaml('"2025-12-31"'))
+        assert config.data.date_range.holdout_end == date(2025, 12, 31)
+
+    def test_defaults_to_none(self):
+        config = ExperimentConfig.from_yaml(
+            self._PREFIX.replace("    holdout_end: {holdout_end}\n", "")
+        )
+        assert config.data.date_range.holdout_end is None
+
+    @pytest.mark.parametrize("value", ['"2024-12-31"', '"2024-06-30"'])
+    def test_not_after_end_raises(self, value):
+        with pytest.raises(ValueError, match="holdout_end must be after end"):
+            ExperimentConfig.from_yaml(self._yaml(value))
+
+    @pytest.mark.parametrize("value", ['"2026-01-01"', '"2026-06-30"'])
+    def test_on_or_after_betting_start_raises(self, value):
+        with pytest.raises(ValueError, match="holdout_end must be before the betting start 2026-01-01"):
+            ExperimentConfig.from_yaml(self._yaml(value))
+
+    def test_gap_before_betting_start_warns(self, caplog):
+        with caplog.at_level("WARNING", logger="mvp.model.config"):
+            ExperimentConfig.from_yaml(self._yaml('"2025-12-29"'))
+        assert (
+            "holdout_end leaves 2 days before the betting start that no period reads"
+            in caplog.text
+        )
+
+    def test_no_gap_does_not_warn(self, caplog):
+        with caplog.at_level("WARNING", logger="mvp.model.config"):
+            ExperimentConfig.from_yaml(self._yaml('"2025-12-31"'))
+        assert "no period reads" not in caplog.text
+
+    @pytest.mark.parametrize("validation", [
+        "",
+        "\nvalidation:\n  type: expanding_window\n  initial_train_size: 100\n  step_size: 100\n",
+        "\nvalidation:\n  type: date_window\n  test_start: 2024-01-01\n",
+    ])
+    def test_non_date_validation_raises(self, validation):
+        with pytest.raises(
+            ValueError,
+            match="holdout_end needs date_expanding or date_sliding validation",
+        ):
+            ExperimentConfig.from_yaml(self._yaml('"2025-12-31"', validation))
+
+    def test_date_sliding_accepted(self):
+        config = ExperimentConfig.from_yaml(self._yaml(
+            '"2025-12-31"',
+            "\nvalidation:\n  type: date_sliding\n  train_months: 12\n  test_months: 6\n",
+        ))
+        assert config.data.date_range.holdout_end == date(2025, 12, 31)
+
+
+def _holdout_data() -> dict:
+    return {"date_range": {
+        "start": "2021-01-01", "end": "2024-12-31", "holdout_end": "2025-12-31",
+    }}
+
+
+def _projection_family_cases() -> list:
+    from mvp.projection.config import ProjectionConfig, ProjectionDiscoveryConfig
+    from mvp.projection.iid.config import (
+        IIDDiscoveryConfig,
+        IIDProjectionConfig,
+        ServeDiscoveryConfig,
+    )
+    from mvp.projection.lines.config import LinesDiscoveryConfig
+
+    feats = {"include": ["win_rate(days=30)"]}
+    return [
+        pytest.param(ProjectionConfig, {"features": feats}, id="ProjectionConfig"),
+        pytest.param(ProjectionDiscoveryConfig, {}, id="ProjectionDiscoveryConfig"),
+        pytest.param(IIDProjectionConfig, {"features": feats}, id="IIDProjectionConfig"),
+        pytest.param(ServeDiscoveryConfig, {}, id="ServeDiscoveryConfig"),
+        pytest.param(IIDDiscoveryConfig, {}, id="IIDDiscoveryConfig"),
+        pytest.param(
+            LinesDiscoveryConfig, {"discovery": {"target": "total"}},
+            id="LinesDiscoveryConfig",
+        ),
+    ]
+
+
+class TestHoldoutEndRejectedOutsideClassification:
+    @pytest.mark.parametrize("cls, extra", _projection_family_cases())
+    def test_valid_without_the_field(self, cls, extra):
+        data = _holdout_data()
+        del data["date_range"]["holdout_end"]
+        cls.model_validate({"data": data, **extra})
+
+    @pytest.mark.parametrize("cls, extra", _projection_family_cases())
+    def test_rejects_the_field(self, cls, extra):
+        with pytest.raises(
+            ValueError,
+            match="holdout_end is not read by projection/IID/lines runs: their "
+            "held-out read is the forward fit through end",
+        ):
+            cls.model_validate({"data": _holdout_data(), **extra})
+
+
+class TestDiscoveryDateRangeHoldoutEnd:
+    _YAML = """
+data:
+  date_range:
+    start: "2021-01-01"
+    end: "2024-12-31"
+    holdout_end: "2025-12-31"
+validation:
+  type: date_expanding
+  initial_train_months: 12
+  test_months: 12
+"""
+
+    def test_carried_into_the_emitted_config(self):
+        from mvp.model.discovery.config import DiscoveryConfig
+
+        disc = DiscoveryConfig.from_yaml(self._YAML)
+        emitted = disc.to_experiment_config_dict(["win_rate(days=30)"])
+        assert emitted["data"]["date_range"]["holdout_end"] == date(2025, 12, 31)
+        cfg = ExperimentConfig.model_validate(emitted)
+        assert cfg.data.date_range.holdout_end == date(2025, 12, 31)
+
+    def test_absent_field_is_not_emitted(self):
+        from mvp.model.discovery.config import DiscoveryConfig
+
+        disc = DiscoveryConfig.from_yaml(
+            self._YAML.replace('    holdout_end: "2025-12-31"\n', "")
+        )
+        emitted = disc.to_experiment_config_dict(["win_rate(days=30)"])
+        assert "holdout_end" not in emitted["data"]["date_range"]
+
+    def test_unknown_keys_raise(self):
+        from mvp.model.discovery.config import DiscoveryConfig
+
+        with pytest.raises(ValueError, match="holdout_ned"):
+            DiscoveryConfig.from_yaml(
+                self._YAML.replace("holdout_end:", "holdout_ned:")
+            )
+
+    def test_same_validators(self):
+        from mvp.model.discovery.config import DiscoveryConfig
+
+        with pytest.raises(ValueError, match="holdout_end must be after end"):
+            DiscoveryConfig.from_yaml(self._YAML.replace("2025-12-31", "2024-12-31"))
+        with pytest.raises(ValueError, match="holdout_end must be before the betting start"):
+            DiscoveryConfig.from_yaml(self._YAML.replace("2025-12-31", "2026-01-01"))

@@ -195,6 +195,43 @@ def format_section_b(art: ModelArtifacts) -> str:
     return "\n".join(lines)
 
 
+def format_section_holdout(diag: dict) -> str | None:
+    """The held-out read (end+1 .. holdout_end) from the diagnostics
+    `holdout` block; None when the evaluation has none."""
+    block = diag.get("holdout")
+    if not block:
+        return None
+    first = _dt.date.fromisoformat(block["end"]) + _dt.timedelta(days=1)
+    m = block.get("metrics") or {}
+    folds = block.get("fold_meta") or []
+    n_rows = sum(f.get("n_rows") or 0 for f in folds)
+    lines = [
+        "=" * 80,
+        f"Held-out read ({first} .. {block.get('holdout_end') or '?'})",
+        "=" * 80,
+    ]
+
+    def num(key: str) -> str:
+        v = m.get(key)
+        return "--" if v is None else f"{v:.4f}"
+
+    cal = m.get("calibration_error")
+    lines.append(
+        f"  N={n_rows:,}  LL={num('log_loss')}  Brier={num('brier_score')}  "
+        f"CalErr={'--' if cal is None else f'{cal * 100:.2f}%'}"
+    )
+    lines.append("")
+    lines.append(f"  {'fold':<28}{'n':>8}{'LL':>9}")
+    for f in folds:
+        ll = f.get("log_loss")
+        lines.append(
+            f"  {f['test_start'] + ' .. ' + f['test_end']:<28}"
+            f"{_fmt_n(f.get('n_rows')):>8}"
+            f"{'--' if ll is None else f'{ll:.4f}':>9}"
+        )
+    return "\n".join(lines)
+
+
 _ROUND_ORDER = ("Q1", "Q2", "Q3", "R128", "R64", "R32", "R16", "QF", "SF", "F",
                 "BRONZE", "HCF", "RR")
 
@@ -520,10 +557,9 @@ def run_report(
         refresh_pipeline(config_path, skip_confidence=skip_confidence)
     art = load_artifacts(model_name, config_path, require_confidence=not skip_confidence)
     cfg = _load_config(config_path)
-    sections = [
-        format_section_a(art, cfg),
-        format_section_b(art),
-        format_section_c(art),
-        format_section_d(art, cfg),
-    ]
+    sections = [format_section_a(art, cfg), format_section_b(art)]
+    holdout = format_section_holdout(art.diagnostics)
+    if holdout is not None:
+        sections.append(holdout)
+    sections += [format_section_c(art), format_section_d(art, cfg)]
     return "\n\n".join(sections)

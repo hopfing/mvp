@@ -3,6 +3,7 @@
 import logging
 import time
 import warnings
+from datetime import date, timedelta
 from pathlib import Path
 
 warnings.filterwarnings("ignore", message="All-NaN slice encountered")
@@ -51,6 +52,7 @@ from mvp.model.metrics import (
 from mvp.model.mlflow_logger import ExperimentLogger
 from mvp.model.models import EnsembleModel, XGBoostMTLModel, get_model
 from mvp.model.offset import fit_offset, offset_margin, resolve_offset_col
+from mvp.model.prior_naming import prior_column, prior_model_of
 from mvp.model.registry import get_registry
 from mvp.model.splitters import BaseSplitter, make_splitter
 from mvp.model.symmetry import symmetrize, validate_pairing
@@ -300,6 +302,7 @@ class ExperimentRunner:
         report_calibrated_objective: bool = False,
         source: str | None = None,
         score_mask: "pl.DataFrame | None" = None,
+        through_holdout: bool = False,
     ) -> None:
         """Initialize runner.
 
@@ -351,7 +354,14 @@ class ExperimentRunner:
                 `metrics_calibrated`. The tuner optimizes it for probability-scale
                 objectives (calibrated-frame search); raw `metrics` is untouched.
                 See `_calibrated_objective_metrics`. Default False.
+            through_holdout: The held-out read of a config with
+                `data.date_range.holdout_end`: rows run to holdout_end and every
+                fold starting after `end` becomes a holdout fold (set here, so
+                `holdout_folds` must stay 0). The folds up to `end` are scored
+                exactly as without the flag. No effect without holdout_end.
         """
+        if through_holdout and holdout_folds > 0:
+            raise ValueError("through_holdout sets holdout_folds itself")
         if holdout_folds < 0:
             raise ValueError(f"holdout_folds must be >= 0, got {holdout_folds}")
         if inner_cv_folds < 0:
@@ -383,6 +393,7 @@ class ExperimentRunner:
         self.run_name = run_name or self.config_path.stem
         self.log_to_mlflow = log_to_mlflow
         self.holdout_folds = holdout_folds
+        self.through_holdout = through_holdout
         self.inner_cv_folds = inner_cv_folds
         self.calibrate = calibrate
         # Reporting-only: when set (raw-search tuning path, calibrate=False), also
@@ -719,9 +730,10 @@ class ExperimentRunner:
         command) and the discovery driver's regeneration; this catches the
         stem that resolves nowhere, which `features/prior.py` logs and raises.
         `all_specs` is the ensemble-aware union, so base configs' priors are
-        covered along with `features`, filter keys and the offset.
+        covered along with `features`, filter keys and the offset. Then refuses
+        any base that ends after this config's `end` (`check_prior_base_ends`).
         """
-        from mvp.model.features.prior import resolve_prior
+        from mvp.model.features.prior import check_prior_base_ends, resolve_prior
         from mvp.model.prior_promotion import declared_prior_specs, prior_stem_of
 
         stems = [
@@ -736,6 +748,73 @@ class ExperimentRunner:
                 "prior source %s: %s -> evaluation %s", stem, source.config_path,
                 source.fp,
             )
+        check_prior_base_ends(stems, self.config.data.date_range.end)
+
+    @property
+    def _reads_holdout(self) -> bool:
+        """This run is the held-out read of a config with holdout_end."""
+        return (
+            self.through_holdout
+            and self.config.data.date_range.holdout_end is not None
+        )
+
+    def _data_end(self) -> date:
+        """Last row date this run loads: holdout_end on the held-out read,
+        else end."""
+        dr = self.config.data.date_range
+        return dr.holdout_end if self._reads_holdout else dr.end
+
+    def _check_holdout_prior(self, df: pl.DataFrame) -> None:
+        """Refuse a held-out read whose offset prior has no value after `end`.
+
+        The prior's not_null filter would otherwise drop the whole held-out
+        year. Bounded at holdout_end: rows after it carry backtest-ledger
+        priors (features/prior.py). Partial nulls are allowed, since the base
+        and stage filters can differ.
+        """
+        if not self._reads_holdout or self.config.offset is None:
+            return
+        stem = prior_model_of(self.config.offset.feature or "")
+        if stem is None:
+            return
+        dr = self.config.data.date_range
+        window = df.filter(
+            (pl.col("effective_match_date") > dr.end)
+            & (pl.col("effective_match_date") <= dr.holdout_end)
+        )
+        col = prior_column(stem)
+        if window.height and window[col].null_count() == window.height:
+            raise ValueError(
+                f"prior {stem} has no predictions after {dr.end}; evaluate the "
+                "base model through its holdout first"
+            )
+
+    def _place_holdout_folds(
+        self, splitter: BaseSplitter, df: pl.DataFrame, n_outer: int,
+    ) -> int:
+        """Number of trailing folds that start after `end`, for the held-out
+        read. Refuses a fold that straddles `end` (its test rows would mix the
+        two periods) and a split with nothing on either side."""
+        end = self.config.data.date_range.end
+        windows = splitter.date_windows(df)  # type: ignore[attr-defined]
+        assert len(windows) == n_outer, (
+            f"{len(windows)} date windows vs {n_outer} outer splits"
+        )
+        for i, (_, _, test_start, test_end) in enumerate(windows):
+            # test_end is exclusive.
+            if test_start <= end < test_end - timedelta(days=1):
+                raise ValueError(
+                    f"fold {i + 1} ({test_start}..{test_end}) straddles end "
+                    f"{end}; align end with the fold boundaries"
+                )
+        n_held = sum(1 for w in windows if w[2] > end)
+        if n_held == 0:
+            raise ValueError(
+                "no fold starts after end; holdout_end adds no held-out fold"
+            )
+        if n_held == len(windows):
+            raise ValueError("no fold ends by end; nothing is left to select on")
+        return n_held
 
     def run(self, trial: Any = None) -> dict[str, Any]:
         """Execute the experiment.
@@ -908,6 +987,7 @@ class ExperimentRunner:
 
         self._resolve_prior_sources(all_specs)
         df = self.engine.compute(all_specs, extra_columns=runner_columns)
+        self._check_holdout_prior(df)
 
         # Apply additional filters (e.g., draw_type: "singles")
         # These are applied AFTER feature computation so workload features
@@ -942,7 +1022,7 @@ class ExperimentRunner:
             if earliest < self.config.data.date_range.start:
                 df_wide = df.filter(
                     (pl.col("effective_match_date") >= earliest)
-                    & (pl.col("effective_match_date") <= self.config.data.date_range.end)
+                    & (pl.col("effective_match_date") <= self._data_end())
                     & (pl.col(target_col).is_not_null())
                 )
 
@@ -955,10 +1035,11 @@ class ExperimentRunner:
                 pl.col("effective_match_date") < self.config.data.date_range.start
             )
 
-        # Filter by ensemble's date range (evaluation window)
+        # Filter by ensemble's date range (evaluation window); the held-out
+        # read runs on to holdout_end.
         df = df.filter(
             (pl.col("effective_match_date") >= self.config.data.date_range.start)
-            & (pl.col("effective_match_date") <= self.config.data.date_range.end)
+            & (pl.col("effective_match_date") <= self._data_end())
         )
 
         # Drop rows with no outcome (e.g., future/unfinished matches)
@@ -1081,6 +1162,12 @@ class ExperimentRunner:
                 "date_range_end": str(self.config.data.date_range.end),
                 "n_rows": len(df),
             })
+            if self.config.data.date_range.holdout_end is not None:
+                logger.log_params({
+                    "date_range_holdout_end": str(
+                        self.config.data.date_range.holdout_end
+                    ),
+                })
             if self.config.model.params:
                 for k, v in self.config.model.params.items():
                     if k == "base_models":
@@ -1115,6 +1202,14 @@ class ExperimentRunner:
         # — we regroup after the loop using `iteration_to_outer`.
         outer_splits = list(splitter.split(df))
         n_outer = len(outer_splits)
+        if self._reads_holdout:
+            # Date splitters anchor at the data's first date, so the rows past
+            # `end` only add trailing folds; those become the holdout.
+            self.holdout_folds = self._place_holdout_folds(splitter, df, n_outer)
+            run_logger.info(
+                "Held-out read: %d of %d folds start after end %s",
+                self.holdout_folds, n_outer, self.config.data.date_range.end,
+            )
         if self.holdout_folds > 0:
             n_tuning = n_outer - self.holdout_folds
         else:
@@ -1788,12 +1883,16 @@ class ExperimentRunner:
                 "effective_match_date", "circuit", "surface", "round",
             ]
             fold_pred_frames: list[pl.DataFrame] = []
+            n_selection_folds = len(all_predictions) - self.holdout_folds
             for fold_idx, pred in enumerate(all_predictions):
                 fold_df = pred["df"]
                 available = [c for c in _fold_pred_cols if c in fold_df.columns]
                 fold_pred_frames.append(
                     fold_df.select(available).with_columns(
                         pl.lit(fold_idx + 1).cast(pl.Int32).alias("fold_idx"),
+                        # Held-out folds: the readers that show the selection
+                        # period (compare, model-errors) drop these rows.
+                        pl.lit(fold_idx >= n_selection_folds).alias("is_holdout"),
                         pl.Series("y_test", pred["y_true"]).cast(pl.Int64),
                         pl.Series("y_prob", pred["y_prob"]).cast(pl.Float64),
                         # The unprojected twin of y_prob at this pipeline
@@ -1881,9 +1980,13 @@ class ExperimentRunner:
                 k: float(np.mean([m[k] for m in all_metrics]))
                 for k in all_metrics[0].keys()
             }
+            # Selection folds only.
+            selection_train_metrics = all_train_metrics[
+                :n_folds_total - self.holdout_folds
+            ]
             avg_train_metrics = {
-                k: float(np.mean([m[k] for m in all_train_metrics]))
-                for k in all_train_metrics[0].keys()
+                k: float(np.mean([m[k] for m in selection_train_metrics]))
+                for k in selection_train_metrics[0].keys()
             }
 
             # Fit stacking meta-model on concatenated OOF predictions.
@@ -2116,9 +2219,13 @@ class ExperimentRunner:
                         pred_dict["y_prob"], pred_dict["df"]
                     )
 
-                # Holdout: deployed calibrator (never saw holdout data)
+                # Holdout: deployed calibrator (never saw holdout data). None
+                # when the config has no calibration block; the tuning folds
+                # are then left uncalibrated too.
                 for pred_dict in holdout_predictions:
-                    if is_segmented:
+                    if calibrator is None:
+                        pass
+                    elif is_segmented:
                         pred_dict["y_prob"] = calibrator.transform(
                             pred_dict["y_prob"], pred_dict["df"]
                         )
@@ -2233,10 +2340,14 @@ class ExperimentRunner:
             # Persist per-feature gain importance (mean/std across folds, full
             # list sorted by mean gain) into the diagnostics JSON so it survives
             # past stdout — same aggregation as cli._print_feature_importance.
-            if all_fold_importances:
+            # Selection folds only: held-out fold models are excluded.
+            selection_importances = (all_fold_importances or [])[
+                :n_folds_total - self.holdout_folds
+            ]
+            if selection_importances:
                 importance_summary: list[dict[str, Any]] = []
                 for feat in feature_cols:
-                    vals = [fi.get(feat, 0.0) for fi in all_fold_importances]
+                    vals = [fi.get(feat, 0.0) for fi in selection_importances]
                     mean_val = sum(vals) / len(vals)
                     var = sum((v - mean_val) ** 2 for v in vals) / len(vals)
                     importance_summary.append({
@@ -2326,6 +2437,29 @@ class ExperimentRunner:
                 diagnostic_results.error_conditions = primary_diag._error_conditions(
                     combined_df, combined_y_true, per_model_preds[0]
                 )
+
+            if holdout_predictions:
+                dr = self.config.data.date_range
+                diagnostic_results.holdout = {
+                    "end": str(dr.end),
+                    "holdout_end": (
+                        str(dr.holdout_end) if dr.holdout_end is not None else None
+                    ),
+                    "n_folds": len(holdout_predictions),
+                    "fold_meta": [
+                        {
+                            "test_start": str(meta["test_start"]),
+                            "test_end": str(meta["test_end"]),
+                            "n_rows": len(pred["y_true"]),
+                            "log_loss": fm["log_loss"],
+                        }
+                        for meta, pred, fm in zip(
+                            holdout_fold_meta, holdout_predictions,
+                            holdout_fold_metrics or [],
+                        )
+                    ],
+                    "metrics": holdout_metrics,
+                }
 
             # Merge diagnostic metrics (calibration_error, etc.) into avg_metrics
             avg_metrics.update(diagnostic_results.metrics)
@@ -2431,38 +2565,49 @@ class ExperimentRunner:
                         )
 
                 # Mirror diagnostics + config snapshot to the fingerprint dir
-                # so evaluation artifacts can be looked up by content hash.
-                try:
-                    import shutil
+                # so evaluation artifacts can be looked up by content hash. A
+                # holdout_end config's evaluation is its held-out read, so a
+                # selection-period run of it writes nothing there.
+                if (
+                    self.config.data.date_range.holdout_end is not None
+                    and not self.through_holdout
+                ):
+                    run_logger.info(
+                        "not writing artifacts: this config has holdout_end; "
+                        "only held-out-read runs write its evaluation"
+                    )
+                else:
+                    try:
+                        import shutil
 
-                    from mvp.common.config_hash import (
-                        append_source,
-                        compute_fingerprint,
-                        fingerprint_dir,
-                        write_config_snapshot,
-                    )
-
-                    fp = compute_fingerprint(
-                        self.config, config_path=self.config_path
-                    )
-                    fp_dir = fingerprint_dir(fp)
-                    fp_dir.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(temp_path, fp_dir / "diagnostics.json")
-                    write_config_snapshot(
-                        self.config, fp, config_path=self.config_path
-                    )
-                    append_source(
-                        fp, self.source or self.config_path.stem, run_id
-                    )
-                    if fold_predictions_df is not None:
-                        fold_predictions_df.write_parquet(
-                            fp_dir / "fold_predictions.parquet"
+                        from mvp.common.config_hash import (
+                            append_source,
+                            compute_fingerprint,
+                            fingerprint_dir,
+                            write_config_snapshot,
                         )
-                except Exception:
-                    run_logger.exception(
-                        "Failed to write fingerprint artifacts; mlflow "
-                        "diagnostics already logged"
-                    )
+
+                        fp = compute_fingerprint(
+                            self.config, config_path=self.config_path
+                        )
+                        fp_dir = fingerprint_dir(fp)
+                        fp_dir.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(temp_path, fp_dir / "diagnostics.json")
+                        write_config_snapshot(
+                            self.config, fp, config_path=self.config_path
+                        )
+                        append_source(
+                            fp, self.source or self.config_path.stem, run_id
+                        )
+                        if fold_predictions_df is not None:
+                            fold_predictions_df.write_parquet(
+                                fp_dir / "fold_predictions.parquet"
+                            )
+                    except Exception:
+                        run_logger.exception(
+                            "Failed to write fingerprint artifacts; mlflow "
+                            "diagnostics already logged"
+                        )
 
         finally:
             if run_context:

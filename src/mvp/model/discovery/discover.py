@@ -6,6 +6,7 @@ import os
 import re
 import tempfile
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -54,6 +55,27 @@ logger = logging.getLogger(__name__)
 # via threadpoolctl, since ``n_jobs`` on the model is a no-op. XGB routes n_jobs
 # through OpenMP, not BLAS, so it is unaffected by the cap.
 _BLAS_THREADED_MODEL_TYPES = BLAS_THREADED_MODEL_TYPES  # shared source of truth
+
+
+def discovery_prior_stems(config: DiscoveryConfig, specs: list[str]) -> list[str]:
+    """Every prior / chain-shape stem a discovery run reads: `offset.prior`
+    plus each `model=<stem>` among `specs`, deduplicated in order.
+
+    Assumes model= is the spec's ONLY parenthesized param — true for every
+    model=-parameterized transform today (prior, chain_shape both register
+    params=["model"]). A future transform combining model= with a second param
+    in one spec would need this (and families.py's _MODEL_PARAM) generalized.
+    """
+    stems: list[str] = []
+    off = config.offset
+    if off is not None and off.prior is not None:
+        stems.append(off.prior)
+    stem_re = re.compile(r"\(model=([^)]+)\)")
+    for spec in specs:
+        m = stem_re.search(spec)
+        if m:
+            stems.append(m.group(1))
+    return list(dict.fromkeys(stems))
 
 
 @dataclass
@@ -285,6 +307,10 @@ class FeatureDiscovery:
         self.cache_dir = cache_dir
         self.mlflow_dir = mlflow_dir
         self.verbose = verbose
+        # The `end` prior bases are checked against; None = this config's end.
+        # Nested calibration's inner runs truncate `end` and check against
+        # the outer config's instead (nested_calibration.py).
+        self.prior_check_end: date | None = None
 
         self._experiment_count = 0
 
@@ -491,6 +517,19 @@ class FeatureDiscovery:
 
         return importance_fn
 
+    def _check_prior_base_ends(self) -> list[str]:
+        """Refuse any prior base that ends after this run's `end` (or
+        `prior_check_end`); returns the stems checked."""
+        feat_cfg = self.config.discovery.features
+        stems = discovery_prior_stems(self.config, [*feat_cfg.base, *feat_cfg.add])
+        if stems:
+            from mvp.model.features.prior import check_prior_base_ends
+
+            check_prior_base_ends(
+                stems, self.prior_check_end or self.config.data.date_range.end
+            )
+        return stems
+
     def _ensure_prior_sources(self) -> None:
         """Regenerate every prior/chain-shape evaluation this run references.
 
@@ -502,26 +541,12 @@ class FeatureDiscovery:
         source whose artifacts are missing (or predate the current columns)
         would otherwise crash at the transform's refusal mid-precompute.
         """
-        prior_stems: list[str] = []
-        off = self.config.offset
-        if off is not None and off.prior is not None:
-            prior_stems.append(off.prior)
-        feat_cfg = self.config.discovery.features
-        # Assumes model= is the spec's ONLY parenthesized param — true for
-        # every model=-parameterized transform today (prior, chain_shape both
-        # register params=["model"]). A future transform combining model= with
-        # a second param in one spec would need this (and families.py's
-        # _MODEL_PARAM) generalized.
-        stem_re = re.compile(r"\(model=([^)]+)\)")
-        for spec in [*feat_cfg.base, *feat_cfg.add]:
-            m = stem_re.search(spec)
-            if m:
-                prior_stems.append(m.group(1))
+        prior_stems = self._check_prior_base_ends()
         if not prior_stems:
             return
         from mvp.model.features.prior import ensure_prior_artifacts, resolve_prior
 
-        for stem in dict.fromkeys(prior_stems):
+        for stem in prior_stems:
             source = resolve_prior(stem)
             self._log(
                 f"prior source {stem}: {source.config_path} -> evaluation "
@@ -642,6 +667,9 @@ class FeatureDiscovery:
             checkpoint_path: The run's checkpoint path; completed resamples are
                 recorded there and in-flight ones beside it. None = no checkpoint.
         """
+        # Stability builds its own selector and never reaches
+        # _ensure_prior_sources, so the base-end refusal runs here.
+        self._check_prior_base_ends()
         stab_cfg = self.config.discovery.stability_selection
         assert stab_cfg is not None
         feat_cfg = self.config.discovery.features

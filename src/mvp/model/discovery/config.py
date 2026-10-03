@@ -7,9 +7,14 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
-from mvp.model.config import EarlyStoppingConfig, MTLConfig, SampleWeightConfig
+from mvp.model.config import (
+    EarlyStoppingConfig,
+    MTLConfig,
+    SampleWeightConfig,
+    validate_holdout_end,
+)
 from mvp.model.metrics import default_min_delta, metric_direction
 from mvp.model.prior_naming import prior_column, prior_spec
 
@@ -17,19 +22,31 @@ logger = logging.getLogger(__name__)
 
 
 class DateRange(BaseModel):
-    """Date range for data selection."""
+    """Date range for data selection. ``holdout_end`` is never read by
+    selection; it is carried into the emitted config (see
+    model.config.DateRange)."""
+
+    # Strict, unlike the rest of this module: the range is dumped verbatim
+    # into the emitted config, so a typo'd key must fail here, not there.
+    model_config = ConfigDict(extra="forbid")
 
     start: date
     end: date
+    holdout_end: date | None = None
 
-    @field_validator("start", "end", mode="before")
+    @field_validator("start", "end", "holdout_end", mode="before")
     @classmethod
-    def parse_date(cls, v: Any) -> date:
-        if isinstance(v, date):
+    def parse_date(cls, v: Any) -> date | None:
+        if v is None or isinstance(v, date):
             return v
         if isinstance(v, str):
             return date.fromisoformat(v)
         raise ValueError(f"Cannot parse date: {v}")
+
+    @model_validator(mode="after")
+    def _validate_holdout_end(self) -> "DateRange":
+        validate_holdout_end(self.end, self.holdout_end)
+        return self
 
 
 class DataConfig(BaseModel):

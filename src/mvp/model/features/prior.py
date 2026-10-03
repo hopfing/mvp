@@ -692,7 +692,11 @@ def ensure_prior_artifacts(source: PriorSource, regenerate: bool) -> None:
                 "written where the `model` command would write it)",
                 source.model, source.eval_dir, source.config_path,
             )
-            ExperimentRunner(config_path=source.config_path).run()
+            # Through holdout_end when the base has one: a stage's held-out
+            # rows need the base's held-out predictions.
+            ExperimentRunner(
+                config_path=source.config_path, through_holdout=True,
+            ).run()
             _cached_frame.cache_clear()
             if not _ready_possibly_relocated(source, prior_artifacts_ready):
                 raise RuntimeError(
@@ -756,6 +760,30 @@ def ensure_prior_artifacts(source: PriorSource, regenerate: bool) -> None:
             f"offset.prior {source.model}: the forward run completed but "
             f"{fwd} is still missing or incomplete"
         )
+
+
+def check_prior_base_ends(prior_stems: list[str], consumer_end: date) -> None:
+    """Refuse a base model that ends after the consuming run's `end`.
+
+    A base's out-of-sample predictions are calibrated on every one of its
+    folds, so a base evaluated past the consumer's `end` carries those later
+    labels into the consumer's selection. The base's `end` is its config's
+    `data.date_range.end` (models) or the forward fit's train end
+    (projections). Called on every run that consumes a prior, whatever its
+    `through_holdout`.
+    """
+    for stem in dict.fromkeys(prior_stems):
+        source = resolve_prior(stem)
+        if source.kind == "projection":
+            base_end = source.forward_train_end
+        else:
+            base_end = _load_config(source.config_path).data.date_range.end
+        if base_end is not None and base_end > consumer_end:
+            raise ValueError(
+                f"base model {stem} ends {base_end}, after this run's end "
+                f"{consumer_end}; its predictions would carry later labels into "
+                "this run"
+            )
 
 
 def _logit(p: np.ndarray) -> np.ndarray:

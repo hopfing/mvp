@@ -5,9 +5,14 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
-from mvp.model.config import DataConfig, FeaturesConfig, ValidationConfig
+from mvp.model.config import (
+    DataConfig,
+    FeaturesConfig,
+    ValidationConfig,
+    reject_holdout_end,
+)
 
 
 class ProjectionModelConfig(BaseModel):
@@ -34,6 +39,11 @@ class ProjectionConfig(BaseModel):
     model: ProjectionModelConfig = ProjectionModelConfig()
     validation: ValidationConfig = ValidationConfig()
     metrics: ProjectionMetricsConfig = ProjectionMetricsConfig()
+
+    @model_validator(mode="after")
+    def _reject_holdout_end(self) -> "ProjectionConfig":
+        reject_holdout_end(self.data)
+        return self
 
     @classmethod
     def from_yaml(cls, yaml_str: str) -> "ProjectionConfig":
@@ -77,6 +87,11 @@ class ProjectionDiscoveryConfig(BaseModel):
     discovery: ProjectionDiscoveryOptions = ProjectionDiscoveryOptions()
     model: ProjectionModelConfig = ProjectionModelConfig()
     validation: ValidationConfig = ValidationConfig()
+
+    @model_validator(mode="after")
+    def _reject_holdout_end(self) -> "ProjectionDiscoveryConfig":
+        reject_holdout_end(self.data)
+        return self
 
     @classmethod
     def from_yaml(cls, yaml_str: str) -> "ProjectionDiscoveryConfig":

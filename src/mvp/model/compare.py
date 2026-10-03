@@ -211,6 +211,10 @@ def load_eval_predictions(fp_dir: Path, column: str) -> tuple[pl.DataFrame, str]
     if not path.exists():
         raise FileNotFoundError(f"{fp_dir.name}: no fold_predictions.parquet")
     df = pl.read_parquet(path)
+    if "is_holdout" in df.columns:
+        # A holdout_end evaluation's held-out folds are read through the
+        # diagnostics holdout block, not compared here.
+        df = df.filter(~pl.col("is_holdout"))
     missing = [c for c in [*_REQUIRED, column] if c not in df.columns]
     if missing:
         raise ValueError(

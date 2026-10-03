@@ -259,3 +259,13 @@ class TestServeModelFieldCoverage:
         assert compute_iid_fingerprint(
             IIDProjectionConfig.model_validate(base)
         ) != compute_iid_fingerprint(IIDProjectionConfig.model_validate(drawn))
+
+
+def test_iid_fingerprint_is_frozen():
+    """`DataConfig` is shared with the classification schema, so its
+    `holdout_end` field (None here) must not reach the IID canonical form."""
+    assert _fp(_make_base_config_dict()) == "416f5c3ea717"
+    assert "holdout_end" not in (
+        _canonicalize_iid_config(_from_dict(_make_base_config_dict()))
+        ["data"]["date_range"]
+    )

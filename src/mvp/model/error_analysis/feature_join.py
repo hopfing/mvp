@@ -209,6 +209,10 @@ def _join_with_features(
 def _load_fold_predictions(path: Path) -> pl.DataFrame:
     """Load fold_predictions.parquet. Schema documented in runner.py:1188."""
     df = pl.read_parquet(path)
+    if "is_holdout" in df.columns:
+        # Selection folds only: a holdout_end evaluation's held-out folds are
+        # read through the diagnostics holdout block.
+        df = df.filter(~pl.col("is_holdout"))
     required = {"match_uid", "player_id", "y_test", "y_prob", "fold_idx"}
     missing = required - set(df.columns)
     if missing:

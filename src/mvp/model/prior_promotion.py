@@ -300,7 +300,7 @@ def regenerate_prior(source: PriorSource) -> None:
             "prior %s: regenerating evaluation from %s",
             source.model, source.config_path,
         )
-        ExperimentRunner(config_path=source.config_path).run()
+        ExperimentRunner(config_path=source.config_path, through_holdout=True).run()
         # The backtest keys its per-fold lead artifacts by stem and never
         # clears the dir, so `lead_<date>.joblib` files from an earlier
         # validation schedule accumulate, and `_backtest_cutoffs` would date

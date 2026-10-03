@@ -7,7 +7,12 @@ from typing import Annotated, Any, Literal
 import yaml
 from pydantic import BaseModel, BeforeValidator, model_validator
 
-from mvp.model.config import DataConfig, FeaturesConfig, ValidationConfig
+from mvp.model.config import (
+    DataConfig,
+    FeaturesConfig,
+    ValidationConfig,
+    reject_holdout_end,
+)
 from mvp.projection.iid.metric_registry import validate_metric_name
 
 MetricName = Annotated[str, BeforeValidator(validate_metric_name)]
@@ -221,6 +226,11 @@ class IIDProjectionConfig(BaseModel):
     serve_model: ServeModelConfig = ServeModelConfig()
     validation: ValidationConfig = ValidationConfig()
     metrics: IIDMetricsConfig = IIDMetricsConfig()
+
+    @model_validator(mode="after")
+    def _reject_holdout_end(self) -> "IIDProjectionConfig":
+        reject_holdout_end(self.data)
+        return self
 
     @model_validator(mode="after")
     def _pin_arm_offsets(self) -> "IIDProjectionConfig":
@@ -457,6 +467,11 @@ class ServeDiscoveryConfig(BaseModel):
         if self.min_delta is not None:
             return self.min_delta
         return default_serve_min_delta(self.metric)
+
+    @model_validator(mode="after")
+    def _reject_holdout_end(self) -> "ServeDiscoveryConfig":
+        reject_holdout_end(self.data)
+        return self
 
     @model_validator(mode="after")
     def _validate_joint_selection(self) -> "ServeDiscoveryConfig":
@@ -878,6 +893,11 @@ class IIDDiscoveryConfig(BaseModel):
         "iid_spread_cal",
     ] = "mae"
     selection_method: Literal["forward"] = "forward"
+
+    @model_validator(mode="after")
+    def _reject_holdout_end(self) -> "IIDDiscoveryConfig":
+        reject_holdout_end(self.data)
+        return self
 
     @classmethod
     def from_yaml(cls, yaml_str: str) -> "IIDDiscoveryConfig":

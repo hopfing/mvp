@@ -155,6 +155,9 @@ def run_nested_calibration(
         config_path=config_path, matches_path=matches_path,
         cache_dir=cache_dir, verbose=verbose,
     )
+    # Fail fast on a base that ends after the outer end, before the outer
+    # precompute. Inner runs check against the same outer end (below).
+    outer_fd._check_prior_base_ends()
     pool = outer_fd._build_candidate_pool(all_features)
     outer_fd._create_fast_scorer(pool)
     fast = outer_fd._fast_selector
@@ -202,6 +205,9 @@ def run_nested_calibration(
             cache_dir=cache_dir, verbose=verbose,
         )
         inner_fd.config.data.date_range.end = inner_end
+        # Bases are judged against the outer end: a base ending there is
+        # legitimate for the outer config, which is what is being calibrated.
+        inner_fd.prior_check_end = config.data.date_range.end
         if forward_max_workers is not None:
             inner_fd.config.discovery.forward_max_workers = forward_max_workers
         ckpt_dir = run_dir / f"fold{f}"

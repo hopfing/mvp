@@ -851,6 +851,14 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         "--test-months", type=int, nargs="+", required=True,
         help="List of test_months values to sweep (e.g. --test-months 12 6 3 1)",
     )
+    sweep_parser.add_argument(
+        "--no-holdout", action="store_true",
+        help=(
+            "Run on a config with no data.date_range.holdout_end. Without it "
+            "the command refuses such a config: selection would run with no "
+            "held-out year."
+        ),
+    )
 
     # experiment subcommand - discovery from experiments/ directory
     exp_parser = subparsers.add_parser(
@@ -903,6 +911,14 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         "--checkpoint", type=int, default=None, dest="checkpoint_interval",
         help="Override checkpoint write frequency (candidates per checkpoint)",
     )
+    exp_parser.add_argument(
+        "--no-holdout", action="store_true",
+        help=(
+            "Run on a config with no data.date_range.holdout_end. Without it "
+            "the command refuses such a config: selection would run with no "
+            "held-out year."
+        ),
+    )
 
     # shap-rank subcommand - one-shot SHAP-based feature ranking
     shap_parser = subparsers.add_parser(
@@ -917,6 +933,14 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
     shap_parser.add_argument(
         "--output", "-o", type=str, required=True,
         help="Output CSV stem (saved to <artifact root>/experiments/<stem>_shap_ranking.csv)",
+    )
+    shap_parser.add_argument(
+        "--no-holdout", action="store_true",
+        help=(
+            "Run on a config with no data.date_range.holdout_end. Without it "
+            "the command refuses such a config: selection would run with no "
+            "held-out year."
+        ),
     )
 
     # tune subcommand - hyperparameter optimization
@@ -1012,6 +1036,14 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
             "of the progress bar. Every trial is in the study DB either way — "
             "`tune-review` reads from there. Redirected output (no TTY) uses "
             "these lines regardless."
+        ),
+    )
+    tune_parser.add_argument(
+        "--no-holdout", action="store_true",
+        help=(
+            "Run on a config with no data.date_range.holdout_end. Without it "
+            "the command refuses such a config: selection would run with no "
+            "held-out year."
         ),
     )
 
@@ -1502,6 +1534,8 @@ def cmd_tune(args: argparse.Namespace) -> int:
             f"Got --metric {args.metric}."
         )
 
+    _require_holdout(config_path, args.no_holdout, "tune")
+
     tuner = HyperparamTuner(
         config_path=config_path,
         param_overrides=param_overrides or None,
@@ -1655,7 +1689,8 @@ def cmd_model(args: argparse.Namespace) -> int:
         MatchesAggregator().run()
         set_fs_cutoff(_date.today())
 
-    runner = ExperimentRunner(config_path=config_path)
+    # The held-out read: a config with holdout_end is evaluated through it.
+    runner = ExperimentRunner(config_path=config_path, through_holdout=True)
     results = runner.run()
 
     print_run_summary(results, name=runner.run_name)
@@ -1683,6 +1718,7 @@ def cmd_model_sweep(args: argparse.Namespace) -> int:
     config_path = resolve_config_path(args.config, MODEL_DIR)
     if not config_path.exists():
         raise FileNotFoundError(f"Config file not found: {args.config} (tried {config_path})")
+    _require_holdout(config_path, args.no_holdout, "model-sweep")
 
     run_cadence_sweep(config_path, args.test_months)
     return 0
@@ -2242,6 +2278,34 @@ def _is_serve_discovery(config_path: Path) -> bool:
     return False
 
 
+def _require_holdout(config_path: Path, no_holdout: bool, command: str) -> None:
+    """Refuse a selection command on a config with no held-out year.
+
+    IID, projection, lines and serve configs never read `holdout_end`; their
+    held-out read is the forward fit through `end`, so they are exempt.
+    """
+    if no_holdout:
+        return
+    if (
+        _is_iid_discovery(config_path)
+        or _is_projection_discovery(config_path)
+        or _is_lines_discovery(config_path)
+        or _is_serve_discovery(config_path)
+    ):
+        return
+    import yaml
+
+    with open(config_path) as f:
+        raw = yaml.safe_load(f) or {}
+    date_range = (raw.get("data") or {}).get("date_range") or {}
+    if date_range.get("holdout_end") is None:
+        raise SystemExit(
+            f"{command}: config has no data.date_range.holdout_end. Selection "
+            "would run with no held-out year. Add holdout_end, or pass "
+            "--no-holdout to run without one."
+        )
+
+
 def cmd_shap_rank(args: argparse.Namespace) -> int:
     """Run SHAP-based one-shot feature ranking on the full feature pool."""
     from mvp.model.discovery.config import DiscoveryConfig
@@ -2253,6 +2317,7 @@ def cmd_shap_rank(args: argparse.Namespace) -> int:
         raise FileNotFoundError(
             f"Config file not found: {args.config} (tried {config_path})"
         )
+    _require_holdout(config_path, args.no_holdout, "shap-rank")
 
     config = DiscoveryConfig.from_file(config_path)
     feat_cfg = config.discovery.features
@@ -2494,6 +2559,8 @@ def cmd_experiment(args: argparse.Namespace) -> int:
     config_path = _resolve_run_config(args, run_dir)
     if config_path is None:
         return 1
+    # Judged on the config the run loads, so --resume reads the snapshot.
+    _require_holdout(config_path, args.no_holdout, "experiment")
 
     if _is_lines_discovery(config_path):
         return _cmd_experiment_lines(args, config_path, checkpoint_path)

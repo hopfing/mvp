@@ -41,7 +41,16 @@ class ShapRanker:
         )
 
     def precompute(self) -> None:
-        """Load data, compute features, build folds (reuses FS precompute)."""
+        """Load data, compute features, build folds (reuses FS precompute).
+
+        First refuses any prior base that ends after this config's `end`.
+        """
+        from mvp.model.discovery.discover import discovery_prior_stems
+        from mvp.model.features.prior import check_prior_base_ends
+
+        stems = discovery_prior_stems(self.config, self.all_feature_specs)
+        if stems:
+            check_prior_base_ends(stems, self.config.data.date_range.end)
         self.fast.precompute()
 
     def rank(self) -> pl.DataFrame:

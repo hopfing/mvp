@@ -386,7 +386,9 @@ def refresh_pipeline(config_path: Path, *, skip_confidence: bool = False) -> Non
     from mvp.model.runner import ExperimentRunner
 
     logger.info("[refresh 1/3] training model: %s", config_path.stem)
-    runner = ExperimentRunner(config_path=config_path)
+    # The held-out read (holdout_end); the confidence stage below stays on
+    # the selection folds.
+    runner = ExperimentRunner(config_path=config_path, through_holdout=True)
     runner.run()
 
     if skip_confidence:

@@ -9,9 +9,9 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
-from mvp.model.config import DataConfig, ValidationConfig
+from mvp.model.config import DataConfig, ValidationConfig, reject_holdout_end
 
 
 Target = Literal["total", "spread", "player_games"]
@@ -67,6 +67,11 @@ class LinesDiscoveryConfig(BaseModel):
     discovery: LinesDiscoveryOptions
     model: LinesModelConfig = LinesModelConfig()
     validation: ValidationConfig = ValidationConfig()
+
+    @model_validator(mode="after")
+    def _reject_holdout_end(self) -> "LinesDiscoveryConfig":
+        reject_holdout_end(self.data)
+        return self
 
     @classmethod
     def from_yaml(cls, yaml_str: str) -> "LinesDiscoveryConfig":

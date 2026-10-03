@@ -715,6 +715,7 @@ class TestExperimentStabilityCheckpointGate:
     def _args(self, resume=False, fresh=False):
         return SimpleNamespace(
             refresh=False, output="run1", resume=resume, fresh=fresh, config=None,
+            no_holdout=True,
         )
 
     def test_no_flag_describes_stability_checkpoint(self, tmp_path, monkeypatch, capsys):
@@ -808,3 +809,194 @@ class TestIidPin:
         out = capsys.readouterr().out
         assert "player_prior_logit(model=parent__d01_t12)" in out
         assert "iid-backtest parent__d01_t12" in out
+
+
+_HOLDOUT_FS_CONFIG = _FS_CONFIG.replace(
+    '    end: "2025-12-31"\n',
+    '    end: "2024-12-31"\n    holdout_end: "2025-12-31"\n',
+)
+
+
+class TestRequireHoldout:
+    """Selection commands refuse a config with no held-out year unless the
+    run says --no-holdout."""
+
+    _REFUSAL = (
+        "tune: config has no data.date_range.holdout_end. Selection would run "
+        "with no held-out year. Add holdout_end, or pass --no-holdout to run "
+        "without one."
+    )
+
+    def _write(self, tmp_path, name, body):
+        p = tmp_path / name
+        p.write_text(body, encoding="utf-8")
+        return p
+
+    def test_refuses_without_holdout_end(self, tmp_path):
+        from mvp.cli import _require_holdout
+
+        cfg = self._write(tmp_path, "fs.yaml", _FS_CONFIG)
+        with pytest.raises(SystemExit) as exc:
+            _require_holdout(cfg, False, "tune")
+        assert str(exc.value) == self._REFUSAL
+
+    def test_passes_with_holdout_end(self, tmp_path):
+        from mvp.cli import _require_holdout
+
+        _require_holdout(self._write(tmp_path, "fs.yaml", _HOLDOUT_FS_CONFIG), False, "tune")
+
+    def test_no_holdout_bypasses(self, tmp_path):
+        from mvp.cli import _require_holdout
+
+        _require_holdout(self._write(tmp_path, "fs.yaml", _FS_CONFIG), True, "tune")
+
+    @pytest.mark.parametrize("body", [
+        pytest.param(
+            "data:\n  date_range: {start: 2021-01-01, end: 2024-12-31}\n"
+            "serve_model:\n  type: score_state\n  model_type: xgboost\n",
+            id="iid",
+        ),
+        pytest.param(
+            "data:\n  date_range: {start: 2021-01-01, end: 2024-12-31}\n"
+            "model:\n  type: xgb_regressor\n",
+            id="projection",
+        ),
+        pytest.param(
+            "data:\n  date_range: {start: 2021-01-01, end: 2024-12-31}\n"
+            "discovery:\n  target: total\n",
+            id="lines",
+        ),
+        pytest.param(
+            "data:\n  date_range: {start: 2021-01-01, end: 2024-12-31}\n"
+            "scoring_model:\n  type: logistic\n",
+            id="serve",
+        ),
+    ])
+    def test_exempt_families(self, tmp_path, body):
+        from mvp.cli import _require_holdout
+
+        _require_holdout(self._write(tmp_path, "c.yaml", body), False, "tune")
+
+    @pytest.mark.parametrize("command", ["tune", "experiment", "shap-rank", "model-sweep"])
+    def test_no_holdout_flag_parses(self, command):
+        from mvp.cli import parse_args
+
+        extra = {
+            "tune": ["--limit", "1"], "experiment": ["-o", "run1"],
+            "shap-rank": ["-o", "x"], "model-sweep": ["--test-months", "6"],
+        }[command]
+        assert parse_args([command, "cfg", *extra]).no_holdout is False
+        assert parse_args([command, "cfg", *extra, "--no-holdout"]).no_holdout is True
+
+
+class TestRequireHoldoutCallSites:
+    def _cfg(self, tmp_path, body=_FS_CONFIG):
+        p = tmp_path / "cfg.yaml"
+        p.write_text(body, encoding="utf-8")
+        return p
+
+    def test_tune_refuses_before_building_the_tuner(self, tmp_path, monkeypatch):
+        from mvp.cli import main
+
+        cfg = self._cfg(tmp_path)
+        with patch("mvp.model.tuning.HyperparamTuner") as tuner:
+            with pytest.raises(SystemExit, match="^tune: config has no"):
+                main(["tune", str(cfg), "--limit", "1"])
+        tuner.assert_not_called()
+
+    def test_tune_no_holdout_reaches_the_tuner(self, tmp_path):
+        from mvp.cli import main
+
+        cfg = self._cfg(tmp_path)
+        with patch("mvp.model.tuning.HyperparamTuner", side_effect=RuntimeError("built")):
+            with pytest.raises(RuntimeError, match="built"):
+                main(["tune", str(cfg), "--limit", "1", "--no-holdout"])
+
+    def test_shap_rank_refuses(self, tmp_path):
+        from mvp.cli import main
+
+        cfg = self._cfg(tmp_path)
+        with patch("mvp.model.discovery.shap_ranking.ShapRanker") as ranker:
+            with pytest.raises(SystemExit, match="^shap-rank: config has no"):
+                main(["shap-rank", str(cfg), "-o", "x"])
+        ranker.assert_not_called()
+
+    def test_model_sweep_refuses(self, tmp_path):
+        from mvp.cli import main
+
+        cfg = self._cfg(tmp_path)
+        with patch("mvp.model.cadence_sweep.run_cadence_sweep") as sweep:
+            with pytest.raises(SystemExit, match="^model-sweep: config has no"):
+                main(["model-sweep", str(cfg), "--test-months", "6"])
+        sweep.assert_not_called()
+
+    def test_model_sweep_with_holdout_end_runs(self, tmp_path):
+        from mvp.cli import main
+
+        cfg = self._cfg(tmp_path, _HOLDOUT_FS_CONFIG)
+        with patch("mvp.model.cadence_sweep.run_cadence_sweep") as sweep:
+            assert main(["model-sweep", str(cfg), "--test-months", "6"]) == 0
+        sweep.assert_called_once()
+
+
+class TestExperimentRequiresHoldout:
+    """`experiment` judges the config it loads: the run-dir snapshot."""
+
+    def _setup(self, tmp_path, monkeypatch, snapshot_text):
+        import mvp.cli as cli
+
+        monkeypatch.chdir(tmp_path)
+        run_dir = tmp_path / "fs_runs" / "run1"
+        run_dir.mkdir(parents=True)
+        (run_dir / "discovery_checkpoint_run1.json").write_text("{}")
+        (run_dir / "run1_experiment.yaml").write_text(snapshot_text)
+        calls = []
+        monkeypatch.setattr(
+            cli, "_cmd_experiment_classification",
+            lambda args, config_path, checkpoint_path: calls.append(config_path) or 0,
+        )
+        return calls
+
+    def _args(self, config, resume=False, no_holdout=False):
+        return SimpleNamespace(
+            refresh=False, output="run1", resume=resume, fresh=not resume,
+            config=config, no_holdout=no_holdout,
+        )
+
+    def test_fresh_run_refuses(self, tmp_path, monkeypatch):
+        from mvp.cli import cmd_experiment
+
+        calls = self._setup(tmp_path, monkeypatch, _FS_CONFIG)
+        src = tmp_path / "fs.yaml"
+        src.write_text(_FS_CONFIG)
+        with pytest.raises(SystemExit, match="^experiment: config has no"):
+            cmd_experiment(self._args(str(src)))
+        assert calls == []
+
+    def test_fresh_run_no_holdout_runs(self, tmp_path, monkeypatch):
+        from mvp.cli import cmd_experiment
+
+        calls = self._setup(tmp_path, monkeypatch, _FS_CONFIG)
+        src = tmp_path / "fs.yaml"
+        src.write_text(_FS_CONFIG)
+        assert cmd_experiment(self._args(str(src), no_holdout=True)) == 0
+        assert len(calls) == 1
+
+    def test_resume_is_judged_on_the_snapshot(self, tmp_path, monkeypatch):
+        from mvp.cli import cmd_experiment
+
+        calls = self._setup(tmp_path, monkeypatch, _FS_CONFIG)
+        passed = tmp_path / "fs.yaml"
+        passed.write_text(_HOLDOUT_FS_CONFIG)
+        with pytest.raises(SystemExit, match="^experiment: config has no"):
+            cmd_experiment(self._args(str(passed), resume=True))
+        assert calls == []
+
+    def test_resume_of_a_holdout_snapshot_runs(self, tmp_path, monkeypatch):
+        from mvp.cli import cmd_experiment
+
+        calls = self._setup(tmp_path, monkeypatch, _HOLDOUT_FS_CONFIG)
+        passed = tmp_path / "fs.yaml"
+        passed.write_text(_FS_CONFIG)
+        assert cmd_experiment(self._args(str(passed), resume=True)) == 0
+        assert calls == [Path("fs_runs") / "run1" / "run1_experiment.yaml"]

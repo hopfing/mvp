@@ -649,7 +649,14 @@ class TestEnsurePriorSources:
             ],
             offset_prior="stem_a",
         )
+        # The base-end refusal has its own tests (features/test_prior.py).
+        checked: list = []
+        monkeypatch.setattr(
+            prior_mod, "check_prior_base_ends",
+            lambda stems, end: checked.append((stems, str(end))),
+        )
         disc._ensure_prior_sources()
+        assert checked == [(["stem_a", "stem_b"], "2025-12-31")]
         assert ensured == [("stem_a", True), ("stem_b", True)]
 
     def test_no_sources_is_a_noop(self, tmp_path, monkeypatch):

@@ -238,6 +238,7 @@ def _ensure_inputs_present(
         runner = ExperimentRunner(
             config_path=config_path,
             matches_path=Path(matches_path) if matches_path else None,
+            through_holdout=True,
         )
         runner.run()
         if not fold_path.exists():

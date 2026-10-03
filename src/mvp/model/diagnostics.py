@@ -1119,6 +1119,9 @@ class DiagnosticResults:
     error_conditions: dict[str, Any] | None = None
     ensemble: dict[str, Any] | None = None
     feature_importance: list[dict[str, Any]] | None = None
+    # The held-out folds' read (runner.py), kept out of every block above:
+    # {end, holdout_end, n_folds, fold_meta, metrics}.
+    holdout: dict[str, Any] | None = None
 
     @property
     def metrics(self) -> dict[str, float]:
@@ -1202,4 +1205,6 @@ class DiagnosticResults:
             data["ensemble"] = self.ensemble
         if self.feature_importance is not None:
             data["feature_importance"] = self.feature_importance
+        if self.holdout is not None:
+            data["holdout"] = self.holdout
         return json.dumps(data, indent=2, default=str)
