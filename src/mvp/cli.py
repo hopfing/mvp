@@ -2449,12 +2449,24 @@ def cmd_experiment(args: argparse.Namespace) -> int:
                 logger.info("Migrated '%s' run state into %s/", output_stem, run_dir)
                 break
 
+    # A stability run keeps the same checkpoint path, in its own format, with
+    # in-flight resamples' state in a folder beside it.
+    from mvp.model.discovery.stability import (
+        resample_rounds_root,
+        stability_checkpoint_info,
+    )
+
     if checkpoint_path.exists() and not args.resume and not args.fresh:
         from mvp.model.discovery.checkpoint import (
             format_checkpoint_info,
             load_checkpoint,
         )
 
+        stab_info = stability_checkpoint_info(checkpoint_path)
+        if stab_info is not None:
+            print(stab_info)
+            print("Use --resume to continue or --fresh to start over.")
+            return 1
         cp = load_checkpoint(checkpoint_path)
         if cp is not None:
             print(format_checkpoint_info(cp))
@@ -2464,6 +2476,10 @@ def cmd_experiment(args: argparse.Namespace) -> int:
     if args.fresh and checkpoint_path.exists():
         checkpoint_path.unlink()
         logger.info("Deleted existing checkpoint: %s", checkpoint_path)
+    rounds_root = resample_rounds_root(checkpoint_path)
+    if args.fresh and rounds_root.is_dir():
+        shutil.rmtree(rounds_root)
+        logger.info("Deleted in-flight stability resamples: %s", rounds_root)
 
     if args.resume and not checkpoint_path.exists():
         print(

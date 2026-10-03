@@ -475,3 +475,63 @@ def test_resample_checkpoint_folder_changes_with_fingerprint(patched, tmp_path):
 def test_no_stability_checkpoint_means_no_resample_checkpoints(patched):
     _run(_fast(), [["a"], ["a"]])
     assert _ScriptedSelector.checkpoint_paths == [None, None]
+
+
+# --- checkpoint description for the CLI gate ----------------------------------
+
+
+def test_stability_checkpoint_info_counts_completed_and_in_progress(tmp_path):
+    cp = tmp_path / "discovery_checkpoint_run1.json"
+    cp.write_text(json.dumps({
+        "fingerprint": "abc",
+        "completed": [{"index": 0, "selected": ["a"]}, {"index": 1, "degenerate": True}],
+    }))
+    live = stab.resample_rounds_root(cp) / "abc"
+    live.mkdir(parents=True)
+    (live / "discovery_checkpoint_r002.json").write_text("{}")
+    (live / "discovery_checkpoint_r003.json").write_text("{}")
+    (live / "fs_history_r000.jsonl").write_text("")
+    # A stale fingerprint folder is not this run's progress.
+    stale = stab.resample_rounds_root(cp) / "old"
+    stale.mkdir()
+    (stale / "discovery_checkpoint_r009.json").write_text("{}")
+
+    assert stab.stability_checkpoint_info(cp) == (
+        "Stability checkpoint: 2 resamples completed, 2 in progress."
+    )
+
+
+def test_stability_checkpoint_info_is_none_for_a_selection_checkpoint(tmp_path):
+    cp = tmp_path / "discovery_checkpoint_run1.json"
+    cp.write_text(json.dumps({"run_name": "run1", "completed_rounds": []}))
+
+    assert stab.stability_checkpoint_info(cp) is None
+
+
+def test_resample_rounds_root_sits_beside_the_checkpoint(tmp_path):
+    cp = tmp_path / "discovery_checkpoint_run1.json"
+    assert stab.resample_rounds_root(cp) == tmp_path / "discovery_checkpoint_run1_rounds"
+
+
+def test_stability_checkpoint_exists_before_any_resample_completes(patched, tmp_path, monkeypatch):
+    """The run's checkpoint is on disk while the first resample is still running,
+    so a stop at that point is resumable."""
+    cp = tmp_path / "discovery_checkpoint_run1.json"
+    seen = []
+
+    class _Peek(_ScriptedSelector):
+        def run(self, verbose=False, checkpoint_path=None):
+            seen.append(json.loads(cp.read_text())["completed"] if cp.exists() else None)
+            return super().run(verbose=verbose, checkpoint_path=checkpoint_path)
+
+    monkeypatch.setattr(stab, "FeatureSelector", _Peek)
+    _ScriptedSelector.scripted = [["a"]]
+    stab.run_stability_selection(
+        _fast(),
+        StabilitySelectionConfig(n_resamples=1, subsample_fraction=1.0,
+                                 min_fold_rows=1, selection_threshold=0.6),
+        metric="log_loss", direction="minimize",
+        all_features=["a", "b"], min_features=1, max_features=2,
+        checkpoint_path=cp,
+    )
+    assert seen == [[]]

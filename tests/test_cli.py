@@ -679,6 +679,75 @@ class TestResolveRunConfig:
         assert "No config snapshot" in capsys.readouterr().out
 
 
+class TestExperimentStabilityCheckpointGate:
+    """The --resume / --fresh gate recognises a stability run's checkpoint."""
+
+    def _setup(self, tmp_path: Path, monkeypatch):
+        import mvp.cli as cli
+
+        monkeypatch.chdir(tmp_path)
+        run_dir = tmp_path / "fs_runs" / "run1"
+        run_dir.mkdir(parents=True)
+        cp = run_dir / "discovery_checkpoint_run1.json"
+        cp.write_text(json.dumps({
+            "fingerprint": "abc",
+            "completed": [{"index": 0, "selected": ["a"]}],
+        }))
+        rounds = run_dir / "discovery_checkpoint_run1_rounds" / "abc"
+        rounds.mkdir(parents=True)
+        (rounds / "discovery_checkpoint_r001.json").write_text("{}")
+
+        snapshot = run_dir / "run1_experiment.yaml"
+        snapshot.write_text(_FS_CONFIG)
+        monkeypatch.setattr(cli, "_resolve_run_config", lambda args, rd: snapshot)
+        for name in (
+            "_is_lines_discovery", "_is_iid_discovery",
+            "_is_serve_discovery", "_is_projection_discovery",
+        ):
+            monkeypatch.setattr(cli, name, lambda p: False)
+        calls = []
+        monkeypatch.setattr(
+            cli, "_cmd_experiment_classification",
+            lambda args, config_path, checkpoint_path: calls.append(checkpoint_path) or 0,
+        )
+        return cp, rounds.parent, calls
+
+    def _args(self, resume=False, fresh=False):
+        return SimpleNamespace(
+            refresh=False, output="run1", resume=resume, fresh=fresh, config=None,
+        )
+
+    def test_no_flag_describes_stability_checkpoint(self, tmp_path, monkeypatch, capsys):
+        from mvp.cli import cmd_experiment
+
+        _, _, calls = self._setup(tmp_path, monkeypatch)
+
+        assert cmd_experiment(self._args()) == 1
+        out = capsys.readouterr().out
+        assert "Stability checkpoint: 1 resamples completed, 1 in progress." in out
+        assert "Use --resume to continue or --fresh to start over." in out
+        assert calls == []
+
+    def test_resume_accepts_stability_checkpoint(self, tmp_path, monkeypatch):
+        from mvp.cli import cmd_experiment
+
+        cp, rounds_root, calls = self._setup(tmp_path, monkeypatch)
+
+        assert cmd_experiment(self._args(resume=True)) == 0
+        assert calls == [Path("fs_runs") / "run1" / "discovery_checkpoint_run1.json"]
+        assert cp.exists() and rounds_root.exists()
+
+    def test_fresh_removes_checkpoint_and_resample_rounds(self, tmp_path, monkeypatch):
+        from mvp.cli import cmd_experiment
+
+        cp, rounds_root, calls = self._setup(tmp_path, monkeypatch)
+
+        assert cmd_experiment(self._args(fresh=True)) == 0
+        assert not cp.exists()
+        assert not rounds_root.exists()
+        assert len(calls) == 1
+
+
 class TestConfigDrift:
     def test_identical_configs_no_drift(self, tmp_path: Path):
         from mvp.cli import _config_drift

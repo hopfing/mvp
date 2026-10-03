@@ -152,6 +152,29 @@ def _load_resample_checkpoint(
     return {int(r["index"]): r for r in data.get("completed", [])}
 
 
+def resample_rounds_root(checkpoint_path: Path) -> Path:
+    """Folder beside the stability checkpoint holding in-flight resamples' state,
+    one subfolder per settings fingerprint."""
+    return checkpoint_path.with_name(f"{checkpoint_path.stem}_rounds")
+
+
+def stability_checkpoint_info(path: Path) -> str | None:
+    """One-line summary of a stability checkpoint for the CLI gate; None if
+    ``path`` is not one (e.g. a forward-selection checkpoint)."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    if not isinstance(data, dict) or "fingerprint" not in data or "completed" not in data:
+        return None
+    live = resample_rounds_root(path) / data["fingerprint"]
+    n_running = len(list(live.glob("discovery_checkpoint_r*.json"))) if live.is_dir() else 0
+    return (
+        f"Stability checkpoint: {len(data['completed'])} resamples completed, "
+        f"{n_running} in progress."
+    )
+
+
 def _save_resample_checkpoint(
     path: Path, fingerprint: str, results_by_index: dict[int, dict]
 ) -> None:
@@ -271,6 +294,9 @@ def run_stability_selection(
     results_by_index: dict[int, dict] = {}
     if checkpoint_path is not None:
         results_by_index = _load_resample_checkpoint(checkpoint_path, fingerprint)
+        # Written up front, not only when the first resample completes, so a run
+        # stopped before then still has the checkpoint the CLI resume gate finds.
+        _save_resample_checkpoint(checkpoint_path, fingerprint, results_by_index)
         if results_by_index:
             logger.info(
                 "Stability: resuming from checkpoint — %d/%d resamples already done.",
@@ -290,9 +316,7 @@ def run_stability_selection(
     # stability checkpoint; its history is kept.
     rounds_dir: Path | None = None
     if checkpoint_path is not None:
-        rounds_dir = (
-            checkpoint_path.with_name(f"{checkpoint_path.stem}_rounds") / fingerprint
-        )
+        rounds_dir = resample_rounds_root(checkpoint_path) / fingerprint
         rounds_dir.mkdir(parents=True, exist_ok=True)
 
     def _round_checkpoint(b: int) -> Path | None:

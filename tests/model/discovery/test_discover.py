@@ -685,3 +685,59 @@ class TestResolvedMinDelta:
 
     def test_default_is_none(self):
         assert DiscoveryOptions().min_delta is None
+
+
+class TestStabilityCheckpointPath:
+    """Stability state lives at the run's checkpoint path, not a fixed fs_runs/ file."""
+
+    def _discovery(self, tmp_path, monkeypatch):
+        from mvp.model.discovery import discover as disc
+        from mvp.model.discovery.fast_selection import FastForwardSelector
+        from mvp.model.discovery.stability import StabilityResult
+
+        cfg_path = tmp_path / "c.yaml"
+        cfg_path.write_text(
+            "data:\n  date_range:\n    start: 2020-01-01\n    end: 2024-12-31\n"
+            "discovery:\n  metric: log_loss\n"
+            "  stability_selection:\n    n_resamples: 2\n"
+            "validation:\n  type: date_sliding\n  train_months: 24\n  test_months: 12\n"
+        )
+        discovery = disc.FeatureDiscovery(cfg_path)
+        monkeypatch.setattr(discovery, "_build_candidate_pool", lambda *a: ["a", "b"])
+        monkeypatch.setattr(FastForwardSelector, "precompute", lambda self, **k: None)
+        captured = {}
+
+        def fake_stability(fast, config, **kw):
+            captured.update(kw)
+            return StabilityResult(
+                selection_frequency={"a": 0.0}, selected_features=[], threshold=0.6,
+                n_resamples_effective=2, n_resamples_requested=2,
+            )
+
+        monkeypatch.setattr(disc, "run_stability_selection", fake_stability)
+        return discovery, captured
+
+    def test_run_stability_checkpoints_at_given_path(self, tmp_path, monkeypatch):
+        discovery, captured = self._discovery(tmp_path, monkeypatch)
+        cp = tmp_path / "fs_runs" / "run1" / "discovery_checkpoint_run1.json"
+
+        discovery.run_stability(checkpoint_path=cp)
+
+        assert captured["checkpoint_path"] == cp
+
+    def test_run_stability_without_path_does_not_checkpoint(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        discovery, captured = self._discovery(tmp_path, monkeypatch)
+
+        discovery.run_stability()
+
+        assert captured["checkpoint_path"] is None
+        assert not (tmp_path / "fs_runs").exists()
+
+    def test_run_passes_checkpoint_path_to_stability(self, tmp_path, monkeypatch):
+        discovery, captured = self._discovery(tmp_path, monkeypatch)
+        cp = tmp_path / "fs_runs" / "run1" / "discovery_checkpoint_run1.json"
+
+        discovery.run(checkpoint_path=cp)
+
+        assert captured["checkpoint_path"] == cp

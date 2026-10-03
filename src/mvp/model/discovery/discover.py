@@ -630,13 +630,17 @@ class FeatureDiscovery:
 
         return all_features
 
-    def run_stability(self) -> StabilityResult:
+    def run_stability(self, checkpoint_path: Path | None = None) -> StabilityResult:
         """Run stability selection over the candidate pool.
 
         Precomputes the feature matrix once on the full (unmasked) frame, freezing
         fold geometry and per-fold medians, then runs forward selection over
         ``n_resamples`` tournament-level subsamples and aggregates per-spec
         selection frequency.
+
+        Args:
+            checkpoint_path: The run's checkpoint path; completed resamples are
+                recorded there and in-flight ones beside it. None = no checkpoint.
         """
         stab_cfg = self.config.discovery.stability_selection
         assert stab_cfg is not None
@@ -685,11 +689,8 @@ class FeatureDiscovery:
             f"(fraction={stab_cfg.subsample_fraction})"
         )
 
-        stab_checkpoint = (
-            Path("fs_runs")
-            / f"discovery_stability_checkpoint_{self.config_path.stem}.json"
-        )
-        stab_checkpoint.parent.mkdir(parents=True, exist_ok=True)
+        if checkpoint_path is not None:
+            checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
         result = run_stability_selection(
             fast,
             stab_cfg,
@@ -700,7 +701,7 @@ class FeatureDiscovery:
             max_features=feat_cfg.max,
             min_delta=self.config.discovery.resolved_min_delta(),
             base_features=feat_cfg.base or None,
-            checkpoint_path=stab_checkpoint,
+            checkpoint_path=checkpoint_path,
         )
 
         self._log_stability_report(result)
@@ -1134,9 +1135,11 @@ class FeatureDiscovery:
         finally:
             temp_path.unlink(missing_ok=True)
 
-    def _run_stability_workflow(self) -> DiscoveryResult:
+    def _run_stability_workflow(
+        self, checkpoint_path: Path | None = None,
+    ) -> DiscoveryResult:
         """Run the stability-selection workflow and assemble a DiscoveryResult."""
-        stability_result = self.run_stability()
+        stability_result = self.run_stability(checkpoint_path=checkpoint_path)
         ni_result = getattr(self, "_null_importance_result", None)
         selected = stability_result.selected_features
 
@@ -1195,7 +1198,7 @@ class FeatureDiscovery:
         # Stability selection is a distinct Phase 1 that supersedes the single
         # forward-selection pass; it returns its own feature set and profile.
         if self.config.discovery.stability_selection is not None:
-            return self._run_stability_workflow()
+            return self._run_stability_workflow(checkpoint_path=checkpoint_path)
 
         # Phase 1: Selection
         selection_result = self.run_selection(
